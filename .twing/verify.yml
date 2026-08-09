@@ -1,0 +1,15 @@
+require_human_review:
+  - path: "hook/**"
+    reason: "capture edge — must stay a trivial socket client with no decision logic (design doc §4)"
+
+constraints:
+  - text: "use the shared length-prefixed frame codec in packages/core; don't invent a second wire format"
+    scope: "packages/**"
+  - text: "twing-hook must never touch PreToolUse and must never exit non-zero — advisory only, never blocking (§4)"
+    scope: "hook/**"
+
+triggers:
+  - id: "new-socket-protocol"
+    pattern: "(?i)socket|protocol|frame"
+    match: "new-symbol-name"
+    reason: "possible duplicate of packages/core's socket protocol (protocol.ts, framing.ts) — check before building another"
