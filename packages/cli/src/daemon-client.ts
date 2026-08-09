@@ -1,5 +1,5 @@
 /**
- * `review-design`'s "ask the daemon for the live claim set" path (§6 step 1).
+ * `align`'s "ask the daemon for the live claim set" path (§6 step 1).
  * A short-lived client connection, not the persistent hook protocol.
  */
 
@@ -65,8 +65,8 @@ export function queryDaemonClaims(cwd: string): Promise<DaemonClaims | null> {
 
 /**
  * The daemon's own background sync (§5) may already have discovered a
- * cross-session finding by the time `review-design` runs -- its polling
- * loop feeds the hook's cache-check, but `review-design`'s own POST won't
+ * cross-session finding by the time `align` runs -- its polling
+ * loop feeds the hook's cache-check, but `align`'s own POST won't
  * re-surface it if the claim it's resubmitting is unchanged from what the
  * daemon already pushed (the server correctly treats that as a no-op, not
  * a new finding). Reusing get_notices here, keyed by a sessionId the

@@ -2,7 +2,7 @@
 import { startDaemon } from "@twing/daemon";
 import { defaultSocketPath } from "@twing/core";
 import { runInit } from "./init.js";
-import { runReviewDesign } from "./review-design.js";
+import { runAlign } from "./align.js";
 
 function parseFlags(args: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
@@ -23,7 +23,7 @@ function parseFlags(args: string[]): Record<string, string> {
 }
 
 function printUsage(): void {
-  console.error("Usage:\n  twing init --server <url>\n  twing daemon\n  twing review-design [--intent \"...\"]");
+  console.error("Usage:\n  twing init --server <url>\n  twing daemon\n  twing align [--intent \"...\"]");
 }
 
 async function runDaemonForeground(): Promise<void> {
@@ -48,8 +48,8 @@ async function main(): Promise<void> {
     case "daemon":
       await runDaemonForeground();
       return;
-    case "review-design":
-      await runReviewDesign({ intent: flags.intent, cwd: process.cwd() });
+    case "align":
+      await runAlign({ intent: flags.intent, cwd: process.cwd() });
       return;
     default:
       printUsage();

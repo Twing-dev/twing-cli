@@ -1,6 +1,6 @@
 /**
  * Daemon socket wire protocol -- twing-hook <-> twing daemon (§4/§5), and
- * (from §6) the `twing` CLI <-> daemon for `review-design`/`review-code`'s
+ * (from §6) the `twing` CLI <-> daemon for `align`/`review`'s
  * "ask the daemon for the live claim set" path. Length-prefixed JSON frames
  * over a Unix domain socket. The Go hook client never parses `toolInput` —
  * it forwards tool fields verbatim; the daemon (which owns Tree-sitter, §5)

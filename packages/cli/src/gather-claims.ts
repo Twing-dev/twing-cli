@@ -1,7 +1,7 @@
 /**
  * §6 step 1: ask the daemon for the live claim set if it has data for this
  * repo; otherwise fall back to computing directly from git diff. This
- * fallback is what makes `review-design`/`review-code` work with zero
+ * fallback is what makes `align`/`review` work with zero
  * daemon and zero hooks installed.
  */
 

@@ -41,7 +41,7 @@ export interface Notice {
 /**
  * §12's v0 divergence checks. Structured — unlike Notice, which is already
  * reduced to a flat message string for the hook's additionalContext — so
- * `review-design`/`review-code` (§6) can print "the symbol, the other party
+ * `align`/`review` (§6) can print "the symbol, the other party
  * involved, and why it was flagged" from a POST /v1/claims response (§7).
  */
 export type FindingKind = "textual_overlap" | "contract_divergence" | "trigger_duplication";

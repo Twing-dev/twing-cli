@@ -1,6 +1,6 @@
 /**
- * `twing review-design` (§6): design/coordination check -- constraint and
- * trigger matches (local), cross-session divergence (server round-trip).
+ * `twing align` (§6): design/coordination check -- constraint and trigger
+ * matches (local), cross-session divergence (server round-trip).
  */
 
 import * as path from "node:path";
@@ -9,12 +9,12 @@ import { gatherClaims } from "./gather-claims.js";
 import { queryDaemonNotices } from "./daemon-client.js";
 import { printReport } from "./report.js";
 
-export interface ReviewDesignOptions {
+export interface AlignOptions {
   intent?: string;
   cwd: string;
 }
 
-export async function runReviewDesign(options: ReviewDesignOptions): Promise<void> {
+export async function runAlign(options: AlignOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
   const manifest = loadManifestFromFile(path.join(repoRoot, ".twing", "verify.yml"));
   const projectId = computeProjectId(repoRoot);

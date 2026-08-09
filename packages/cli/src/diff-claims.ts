@@ -1,5 +1,5 @@
 /**
- * `review-design`'s no-daemon fallback (§6 step 1): "git diff against the
+ * `align`'s no-daemon fallback (§6 step 1): "git diff against the
  * branch's merge-base with the default branch, parsed the same way the
  * daemon would (§5 steps 2-7), run synchronously in the CLI process." This
  * is a one-shot batch equivalent of claims.ts's incremental pipeline --
@@ -41,7 +41,7 @@ import type { Node } from "web-tree-sitter";
  * other too -- see §8).
  */
 function cliSessionId(developerId: string): string {
-  return `cli-review-design:${developerId}`;
+  return `cli-align:${developerId}`;
 }
 
 function git(args: string[], cwd: string): string {

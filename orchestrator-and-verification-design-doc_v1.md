@@ -1,12 +1,12 @@
 # Orchestrator + Verification Layer — Design Doc
 
-### `twing review-design` / `twing review-code` — v1, August 2026 — implementation handoff
+### `twing align` / `twing review` — v1, August 2026 — implementation handoff
 
 **Scope.** This implements Point 1 (task-time coordination, "the orchestrator") and the
 design-check plus test-delta portions of Point 2 (change-time evidence, "the
 verification layer") from *The Judgment Layer* (`verification-layer-strategy-memo_6.md`,
-v0.4), delivered as two on-request commands: `twing review-design` and
-`twing review-code`. **Point 3 (production-time memory) is not covered by this doc** —
+v0.4), delivered as two on-request commands: `twing align` and
+`twing review`. **Point 3 (production-time memory) is not covered by this doc** —
 no rework mining, no incident learning, no LLM input-coverage tracking; that's a separate
 design pass. Capture stays automatic and hook-driven; *review* is something a developer
 or agent invokes deliberately — see memo §0 item 3 for why that split exists and what it
@@ -29,12 +29,12 @@ writing — confirm against current docs before implementing, hook schemas evolv
 | Command | What it does | Who/what runs it | Needs daemon? | Needs network? |
 |---|---|---|---|---|
 | `twing init --server <url>` | One-shot onboarding: stores the server URL, ensures the `twing-hook` binary is installed, merges hook entries into `.claude/settings.json`, and starts the daemon as a persistent background service. See §6. | Developer, once per machine (not per clone — see §6) | Starts it | No — just stores config; the daemon connects afterward |
-| `twing review-design [--intent "..."]` | Design/coordination check: constraint and trigger matches, cross-session divergence. | Developer or agent, on request, any time | Optional — richer if running | Yes |
-| `twing review-code` | Everything `review-design` does, plus test-delta integrity analysis over the diff. Run after code exists. | Developer or agent, on request, typically pre-commit | Optional | Yes |
+| `twing align [--intent "..."]` | Design/coordination check: constraint and trigger matches, cross-session divergence. | Developer or agent, on request, any time | Optional — richer if running | Yes |
+| `twing review` | Everything `align` does, plus test-delta integrity analysis over the diff. Run after code exists. | Developer or agent, on request, typically pre-commit | Optional | Yes |
 | `twing daemon` | Long-running local process, started by `init`. Rarely invoked directly. | Auto (started by `init`) | — | Yes (async) |
 | `twing-hook <event>` | Not a human-facing command, and not a process that "starts" — spawned fresh per event by Claude Code, exits immediately. `init` only ensures the binary is present. | Claude Code | Yes (fails silently if absent) | No |
 
-`review-design` and `review-code` work with **zero daemon and zero hooks installed** —
+`align` and `review` work with **zero daemon and zero hooks installed** —
 they fall back to computing claims from the current git diff directly (§6). The daemon
 and hooks are a strict enhancement (continuous ambient capture, proactive nudges), never
 a hard dependency. This is deliberate: every piece must be useful standing alone.
@@ -62,7 +62,7 @@ twing-cli/
   packages/
     core/            # shared: Claim/CallEdge/Notice types, symbol-id algorithm,
                       # Tree-sitter wrapper, wire-message schemas, manifest parser
-    cli/              # `twing` — init, review-design, review-code
+    cli/              # `twing` — init, align, review
     daemon/           # `twing daemon`
     server/           # `twing serve` — Hono app
   hook/                # Go module — `twing-hook`
@@ -122,7 +122,7 @@ schema:
 {
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "twing: session on branch payments-retry touched RetryPolicy.backoff 20m ago. Run `twing review-design` before extending it."
+    "additionalContext": "twing: session on branch payments-retry touched RetryPolicy.backoff 20m ago. Run `twing align` before extending it."
   }
 }
 
@@ -243,12 +243,12 @@ already-running daemon):
 4. **Start the daemon.** See §5 — installed as a persistent service where possible, a
    detached background process otherwise. Once running, it immediately begins syncing
    with `twing serve` using the URL from step 1 — there's no separate step where capture
-   happens locally-only before "going live"; since `review-design` needs the server
+   happens locally-only before "going live"; since `align` needs the server
    anyway, there's nothing to gain by delaying that connection.
 
 No `.twing/config.yml` or project-registration step — see §8 for why none is needed.
 
-### `twing review-design [--intent "..."]`
+### `twing align [--intent "..."]`
 
 1. **Gather current claims.** If the daemon is running and has data for this
    repo/session, ask it for the live claim set (richer — reflects everything touched
@@ -272,9 +272,9 @@ only to narrow which trigger rules get surfaced when there's not yet a diff to i
 (e.g., run before writing any code). It is never treated as evidence and never
 suppresses a finding the diff-based checks would otherwise surface.
 
-### `twing review-code`
+### `twing review`
 
-Runs everything `review-design` does, then adds:
+Runs everything `align` does, then adds:
 
 5. **Test-delta integrity** (§13), entirely local, over the same diff.
 6. Merges both result sets into one ranked human-review surface and emits the evidence
@@ -288,7 +288,7 @@ Runs everything `review-design` does, then adds:
 
 | Endpoint | Called by | Does |
 |---|---|---|
-| `POST /v1/claims` | daemon (periodic background sync) and CLI (`review-design`/`review-code`, synchronous) | Upserts claims + call-graph edges for `projectId`/`developerId`. Runs the divergence checks (§12) against everything currently active in the project. Returns findings involving the just-submitted claims in the response body. |
+| `POST /v1/claims` | daemon (periodic background sync) and CLI (`align`/`review`, synchronous) | Upserts claims + call-graph edges for `projectId`/`developerId`. Runs the divergence checks (§12) against everything currently active in the project. Returns findings involving the just-submitted claims in the response body. |
 | `GET /v1/notices?developerId=&since=` | daemon (poll, every few seconds) | Returns findings generated *after* the daemon's last push, including ones triggered by another developer's later activity. This is how developer A learns about a conflict that only became visible when developer B pushed later. |
 
 One endpoint (`/v1/claims`) serves both the daemon's silent background sync and the
@@ -358,7 +358,7 @@ case has no cross-developer coordination need by construction.
    shared out of band (Slack, a README, however a team already shares this). One
    command: config stored, hooks wired, daemon started and already syncing (§6). No
    account, no credentials.
-3. Done. The next `PostToolUse` (hooks are already wired) or the next `twing review-design`
+3. Done. The next `PostToolUse` (hooks are already wired) or the next `twing align`
    computes `projectId` from the same remote URL every other developer on this repo is
    using, and immediately participates in the same claim graph.
 
@@ -454,7 +454,7 @@ triggers:
     reason: "possible duplicate of net/retry.ts — check before building another"
 ```
 
-- **`require_human_review`** — always flagged in `review-code`'s output, regardless of
+- **`require_human_review`** — always flagged in `review`'s output, regardless of
   what the automated checks conclude. Path glob or exact symbol.
 - **`constraints`** — ratified, durable facts (memo §5's fast-loop output lands here).
   `scope` is a path glob; a claim touching a matching path is flagged with the
@@ -547,11 +547,11 @@ on new claim c where c.signatureChanged:
 
 ---
 
-## 13. `twing review-code`: test-delta integrity
+## 13. `twing review`: test-delta integrity
 
-Runs entirely locally, over the same diff `review-design` computed (no server call for
+Runs entirely locally, over the same diff `align` computed (no server call for
 this part — it's pure git + AST, matching the original P1/`twingcheck` design, now folded
-in as `review-code`'s second stage rather than a separate command).
+in as `review`'s second stage rather than a separate command).
 
 **Detects, via AST diff of test files in the changeset:**
 - Assertions removed or weakened (specific value → truthy → not-null → gone)
@@ -561,12 +561,12 @@ in as `review-code`'s second stage rather than a separate command).
 - Tolerances/timeouts widened
 - Snapshots regenerated wholesale
 
-**Output — combined with `review-design`'s findings into one ranked report and an
+**Output — combined with `align`'s findings into one ranked report and an
 evidence record:**
 
 ```
 change_id
-review_design   → constraint hits, trigger-duplication, contract-divergence findings
+align   → constraint hits, trigger-duplication, contract-divergence findings
 test_integrity  → assertion deltas, deletions, skips, mock substitutions,
                   tolerance/timeout widening, snapshot regeneration
 review_surface  → ranked list: what a human should look at, and why
@@ -586,7 +586,7 @@ For whoever implements this without the full prior discussion:
 | `PostToolUse` enqueue | Waits for subprocess exit (unavoidable — Claude Code mechanic), but not for any real work | Sub-few-ms | Hook only writes to a socket and exits; all parsing happens in the daemon afterward |
 | `SessionStart`/`UserPromptSubmit` cache-check | Same | Sub-few-ms | Daemon answers from an already-computed local cache, never live computation |
 | `PreToolUse` | N/A — not used | — | Deliberately unused; it's the one event that can deny an action, out of scope by policy |
-| `review-design`/`review-code` | N/A — separate process, not a hook | None | Deliberate, on-request invocation; a human or agent is already waiting for it |
+| `align`/`review` | N/A — separate process, not a hook | None | Deliberate, on-request invocation; a human or agent is already waiting for it |
 | Daemon → server sync | N/A | None | Fully async, debounced, decoupled from any session |
 
 Go for `twing-hook` specifically because it's spawned fresh on every qualifying tool
@@ -611,10 +611,10 @@ boot once and run for hours.
    `projectId` derivation, developer-identity derivation (§8), daemon sync (push claims,
    poll notices), the `SessionStart`/`UserPromptSubmit` nudge working end to end through
    a real Claude Code session.
-5. **`twing review-design`.** Local constraint/trigger checks + the server round-trip +
+5. **`twing align`.** Local constraint/trigger checks + the server round-trip +
    report printing. **This is the dogfood-ready milestone** — it's what produces the
    memo §14 signal (does knowing what another session touched change what you build).
-6. **`twing review-code`.** Add the local test-delta AST analysis, merge into the ranked
+6. **`twing review`.** Add the local test-delta AST analysis, merge into the ranked
    review surface and evidence record.
 
 ---
@@ -634,7 +634,7 @@ boot once and run for hours.
   is the cheapest upgrade path if restarts turn out to lose meaningful in-flight state in
   practice. Not worth building until it's an actual problem.
 - **Trigger precision** (memo §13 Q2) — still the single highest-risk unknown in the
-  whole product. `review-design`'s local trigger-matching is deterministic pattern
+  whole product. `align`'s local trigger-matching is deterministic pattern
   matching against a human-authored file, which sidesteps precision risk on the
   detection side, but doesn't resolve whether the *patterns people write* end up firing
   usefully often vs. constantly vs. never. Only real usage will show this.

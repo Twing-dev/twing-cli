@@ -161,7 +161,7 @@ function handleMessage(
     // §6: "the live claim set -- reflects everything touched this session,
     // including files since reverted." Scoped by projectId (every claim
     // this daemon has extracted already carries one) rather than by
-    // sessionId, since `review-design` wants the whole repo's recent
+    // sessionId, since `align` wants the whole repo's recent
     // activity, not just one Claude Code session.
     const now = Date.now();
     let projectId: string | undefined;

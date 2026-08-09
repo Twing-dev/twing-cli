@@ -50,7 +50,7 @@ function claimSourceLine(gathered: GatheredClaims): string {
 export function printReport(input: ReportInput): void {
   const { gathered, manifest, intentHits, findings, serverUrl, serverError, daemonNotices } = input;
 
-  console.log("twing review-design");
+  console.log("twing align");
   console.log(claimSourceLine(gathered));
   console.log("");
 

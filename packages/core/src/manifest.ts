@@ -118,9 +118,9 @@ export function matchTriggers(manifest: Manifest, newSymbolName: string): Trigge
   return hits;
 }
 
-/** §10: "always flagged in review-code's output, regardless of what the
+/** §10: "always flagged in review's output, regardless of what the
  * automated checks conclude." Not wired into the daemon's capture pipeline —
- * this is consumed later by `review-code` directly against a diff. */
+ * this is consumed later by `review` directly against a diff. */
 export function matchRequireHumanReview(manifest: Manifest, relPath: string, symbolId: string): string[] {
   const reasons: string[] = [];
   for (const rule of manifest.requireHumanReview) {
