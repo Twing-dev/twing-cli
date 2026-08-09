@@ -14,8 +14,8 @@ replaced.
 
 **Explicit non-goals for v0.** Opposite-direction design detection (row 4 of the
 divergence table in §7); embedding/similarity-based duplicate detection; a blocking CI
-gate; multi-tenant self-serve signup. All are named again where relevant so nobody
-accidentally builds toward them.
+gate; multi-tenant self-serve signup; **authentication of any kind** (§7). All are named
+again where relevant so nobody accidentally builds toward them.
 
 **This doc is written to be implemented from directly.** Concrete schemas, protocols,
 file layout, and an ordered build sequence are below. Where a detail depends on Claude
@@ -28,11 +28,10 @@ writing — confirm against current docs before implementing, hook schemas evolv
 
 | Command | What it does | Who/what runs it | Needs daemon? | Needs network? |
 |---|---|---|---|---|
-| `twing init [--token <token>] [--server <url>]` | One-shot onboarding: merges hook entries into `.claude/settings.json`, ensures the `twing-hook` binary is installed, stores credentials, and starts the daemon as a persistent background service. See §6. | Developer, once per machine (not per clone — see §6) | Starts it | Yes, unless self-hosted with no auth |
+| `twing init --server <url>` | One-shot onboarding: stores the server URL, ensures the `twing-hook` binary is installed, merges hook entries into `.claude/settings.json`, and starts the daemon as a persistent background service. See §6. | Developer, once per machine (not per clone — see §6) | Starts it | No — just stores config; the daemon connects afterward |
 | `twing review-design [--intent "..."]` | Design/coordination check: constraint and trigger matches, cross-session divergence. | Developer or agent, on request, any time | Optional — richer if running | Yes |
 | `twing review-code` | Everything `review-design` does, plus test-delta integrity analysis over the diff. Run after code exists. | Developer or agent, on request, typically pre-commit | Optional | Yes |
 | `twing daemon` | Long-running local process, started by `init`. Rarely invoked directly. | Auto (started by `init`) | — | Yes (async) |
-| `twing login [--token <token>]` | Convenience command: rotate credentials or switch servers without a full re-init. Not part of the required onboarding path. | Developer, occasionally | No | Yes |
 | `twing-hook <event>` | Not a human-facing command, and not a process that "starts" — spawned fresh per event by Claude Code, exits immediately. `init` only ensures the binary is present. | Claude Code | Yes (fails silently if absent) | No |
 
 `review-design` and `review-code` work with **zero daemon and zero hooks installed** —
@@ -49,7 +48,7 @@ a hard dependency. This is deliberate: every piece must be useful standing alone
 | `twing-hook` | Go | Dev machine, spawned per hook event | Milliseconds | `twing daemon` (Unix socket) only |
 | `twing daemon` | TypeScript (Node) | Dev machine, one per user | Long-running | `twing-hook` (socket), `twing serve` (HTTPS), local filesystem |
 | `twing` CLI | TypeScript (Node) | Dev machine, invoked on request | Seconds | `twing daemon` (optional), `twing serve` (HTTPS), local filesystem/git |
-| `twing serve` | TypeScript (Hono) | Hosted VM | Long-running | Postgres, all of the above over HTTPS |
+| `twing serve` | TypeScript (Hono) | Wherever the operator runs it — no specific hosting prescribed for v0 | Long-running | All of the above, over HTTP(S) |
 
 Rationale for the language split is covered in prior discussion — recapped in §14 for
 whoever implements this without that context.
@@ -63,7 +62,7 @@ twing-cli/
   packages/
     core/            # shared: Claim/CallEdge/Notice types, symbol-id algorithm,
                       # Tree-sitter wrapper, wire-message schemas, manifest parser
-    cli/              # `twing` — init, login, review-design, review-code
+    cli/              # `twing` — init, review-design, review-code
     daemon/           # `twing daemon`
     server/           # `twing serve` — Hono app
   hook/                # Go module — `twing-hook`
@@ -76,7 +75,8 @@ twing-cli/
     orchestrator-and-verification-design-doc_v1.md
 ```
 
-`packages/*` as npm workspaces, matching the layout already used in `twing-dev/TwingMail`.
+`packages/*` as npm workspaces — a standard monorepo layout, nothing project-specific
+about it.
 
 ---
 
@@ -221,15 +221,16 @@ from the memo. `twing daemon stop`/`start` for manual control during development
 ### `twing init`
 
 The single onboarding step. Runs once per machine (hooks are written per-repo the first
-time `init` runs there, but the daemon and credentials are machine-wide, so re-running
+time `init` runs there, but the daemon and the server URL are machine-wide, so re-running
 `init` in a second repo on the same machine just adds hook entries and reuses the
 already-running daemon):
 
-1. **Credentials.** `--token`, or the `TWING_TOKEN` env var, or an interactive prompt —
-   *unless* `--server` resolves to `localhost`/self-hosted with no auth configured, in
-   which case this step is skipped entirely. This is the same flag a future paid/hosted
-   tier gates on; for v0/self-hosted it's optional, not absent from the interface.
-   Stores `{ token, serverUrl }` in `~/.twing/credentials` (0600 permissions).
+1. **Store the server URL.** `--server <url>`, or the `TWING_SERVER` env var. No token, no
+   credentials — v0 has no authentication at all (§7); the URL is the only thing gating
+   who can reach the server, an accepted, deliberate limitation for a small trusted
+   OSS/dogfood setting, not an oversight. Stored in `~/.twing/config.json`. Re-running
+   `twing init --server <new-url>` re-points an existing install — there's no separate
+   command for this, and no reason for one.
 2. **Install `twing-hook`.** Ensure the Go binary is present — fetch a prebuilt release
    for the platform, or build from source if a Go toolchain is available. This is a
    preflight install step, not starting a process: `twing-hook` has no lifecycle of its
@@ -241,18 +242,11 @@ already-running daemon):
    write back.
 4. **Start the daemon.** See §5 — installed as a persistent service where possible, a
    detached background process otherwise. Once running, it immediately begins syncing
-   with `twing serve` using the credentials from step 1 — there's no separate step where
-   capture happens locally-only before "going live"; since `review-design` needs the
-   server anyway, there's nothing to gain by delaying that connection.
+   with `twing serve` using the URL from step 1 — there's no separate step where capture
+   happens locally-only before "going live"; since `review-design` needs the server
+   anyway, there's nothing to gain by delaying that connection.
 
 No `.twing/config.yml` or project-registration step — see §8 for why none is needed.
-
-### `twing login`
-
-Retained only as a convenience for rotating a token or switching servers without
-repeating the whole `init` sequence: `twing login --token <token>`. Updates
-`~/.twing/credentials` and nudges the running daemon to reconnect with the new
-credentials. Not required before `init` works, and not part of the onboarding path.
 
 ### `twing review-design [--intent "..."]`
 
@@ -296,39 +290,42 @@ Runs everything `review-design` does, then adds:
 |---|---|---|
 | `POST /v1/claims` | daemon (periodic background sync) and CLI (`review-design`/`review-code`, synchronous) | Upserts claims + call-graph edges for `projectId`/`developerId`. Runs the divergence checks (§12) against everything currently active in the project. Returns findings involving the just-submitted claims in the response body. |
 | `GET /v1/notices?developerId=&since=` | daemon (poll, every few seconds) | Returns findings generated *after* the daemon's last push, including ones triggered by another developer's later activity. This is how developer A learns about a conflict that only became visible when developer B pushed later. |
-| Auth admin (v0: direct DB insert or a small local script, not a public endpoint) | operator | Issues a token per developer |
 
 One endpoint (`/v1/claims`) serves both the daemon's silent background sync and the
 CLI's on-request review — same upsert-and-compute logic either way. The difference is
 purely in how the caller uses the response: the daemon caches it for the next
 cache-check; the CLI prints it directly.
 
-### Data model (Postgres via Drizzle, matching TwingMail's setup)
+### Data model — in-memory, no database
 
+Sized for what this actually is: an open-source developer tool for roughly a couple dozen
+concurrent sessions, not a multi-tenant platform. A database is more machinery than that
+warrants. Everything lives in memory, as plain maps:
+
+```ts
+const claims = new Map<string, Claim>();          // keyed by a generated claim id
+const callEdges = new Map<string, CallEdge[]>();   // keyed by projectId
+const notices = new Map<string, Notice[]>();       // keyed by developerId
 ```
-developers        (id, name, token_hash, created_at)
-claims            (id, project_id, developer_id, session_id, branch, symbol_id, kind,
-                    stage, signature_changed, old_signature, new_signature,
-                    trigger_matches text[], constraint_ids text[], created_at, expires_at)
-call_edges        (project_id, caller_symbol_id, callee_symbol_id)
-notices           (id, developer_id, session_id, kind, message, related_symbol_id,
-                    other_developer_id, created_at, delivered boolean)
-```
 
-`claims.expires_at`: session-scoped lifetime per the memo's active-claims table — set on
-insert (e.g., now + 6h), refreshed on any new activity for the same `session_id`. Expired
-claims are excluded from divergence queries, not necessarily deleted immediately (cheap
-to garbage-collect on a slower cycle).
+Claims are already session-scoped and short-lived (`ttlMs`, §11) — a periodic sweep
+evicts expired entries. A server restart clears everything, and that's fine: every daemon
+keeps its own local claim history and re-reports on its next debounce cycle (§5), so the
+shared view rebuilds itself within seconds — not worth building persistence for at this
+scale. If restart-durability becomes a real annoyance later, the cheapest fix is a
+periodic snapshot of these three maps to a single JSON file, not a database migration.
 
-No `projects` table is strictly required — `project_id` is just a column value derived
-client-side (§8); a table is only useful later if you want per-project settings. Skip it
-for v0.
+No `projects` table, no `developers` table. `projectId` is a derived value (§8), not a
+row anyone creates.
 
-### Auth
+### Security model for v0
 
-Bearer token in `Authorization` header, checked against `token_hash` in `developers`.
-Store a hash, not the raw token — instant revocation by deleting/rotating the row,
-same reasoning TwingMail's CLAUDE.md gives for choosing sessions over JWTs.
+**There is none, deliberately.** No tokens, no accounts, no per-developer
+authentication. The server URL is the only thing gating access — whoever has it can push
+claims and read notices. Fine for a small trusted team or open-source dogfooding;
+unacceptable the moment this needs to serve people who shouldn't see each other's claims.
+Authentication, per-developer tokens, and revocation are planned for a later
+managed/enterprise phase and are explicitly **not designed here** — see §16.
 
 ---
 
@@ -357,17 +354,32 @@ case has no cross-developer coordination need by construction.
 
 **Connecting a new developer, end to end:**
 1. Clone the repo. `.twing/verify.yml` comes along with it if the team has one.
-2. `twing init --token <token>` — token issued out-of-band by whoever runs `twing serve`
-   (v0: a teammate, an admin script; not a public signup flow). One command: credentials
-   stored, hooks wired, daemon started and already syncing (§6).
+2. `twing init --server <url>` — the URL is whatever the operator running `twing serve`
+   shared out of band (Slack, a README, however a team already shares this). One
+   command: config stored, hooks wired, daemon started and already syncing (§6). No
+   account, no credentials.
 3. Done. The next `PostToolUse` (hooks are already wired) or the next `twing review-design`
    computes `projectId` from the same remote URL every other developer on this repo is
    using, and immediately participates in the same claim graph.
 
+### Developer identity — self-asserted, not authenticated
+
+With no login (§6, §7), `developerId` has to come from somewhere that isn't a token.
+Default: `git config user.email` — already present on any machine doing development,
+human-readable, and already means roughly what "developer" needs to mean here. If git has
+no email configured, fall back to a random id generated once and stored at
+`~/.twing/id`.
+
+This is a label, not a credential — the server never verifies it, because there's nothing
+to verify against (§7). Someone could claim to be someone else. At the trust level this
+is built for — a small team, or open-source contributors with no reason to spoof each
+other — that's an accepted tradeoff, the same one the no-auth decision above already
+made explicitly, not a separate oversight.
+
 **Scoping:** every claim, edge, and notice carries `{ projectId, developerId, sessionId,
 branch }`. The server's divergence queries always filter by `projectId` first — a
-developer on one repo never sees claims from an unrelated one, and the `developerId` on
-a token can be reused across repos without any cross-project leakage.
+developer on one repo never sees claims from an unrelated one, and a `developerId` can be
+reused across repos without any cross-project leakage.
 
 ### Sessions vs. machines — what needs to be distinguished, and by what
 
@@ -375,7 +387,7 @@ The server never needs to know which physical machine a claim came from, and doe
 track it anywhere in the schema (§7). Its divergence checks (§12) key off exactly two
 identifiers, both already on every claim: `sessionId` (Claude Code's own globally-unique
 session identifier — present in every hook payload, confirmed against the hooks
-reference) and `developerId` (from the auth token). Two sessions either conflict or don't
+reference) and `developerId` (self-asserted, above). Two sessions either conflict or don't
 based on what symbols they touch; whether they happen to share a laptop is irrelevant to
 whether the divergence is real. A developer running two Claude Code sessions in two
 terminal tabs against two worktrees of the same repo is exactly as capable of a genuine
@@ -394,35 +406,29 @@ in the system.
 
 ---
 
-## 9. Deployment — how the server is created
+## 9. Deployment
 
-Reuse TwingMail's infrastructure pattern directly rather than inventing a new one — same
-Caddy + Docker Compose + Postgres shape already proven at `twing-dev/TwingMail`.
+`twing serve` is a single process. There's no database to provision and no reverse proxy
+required — run it wherever it can be reached by the developers who need it:
 
-**Concrete steps:**
-1. **Where it runs:** add a `twing-serve` service to the existing VM's `docker-compose.yml`
-   (or a sibling VM if capacity/isolation later requires it — not needed at dogfood
-   scale). Add one block to the `Caddyfile`:
-   ```
-   orchestrator.twing.dev {
-       tls internal
-       reverse_proxy twing-serve:PORT
-   }
-   ```
-2. **Database:** a separate Postgres database (not schema-shared with TwingMail's
-   tables) — either a second DB on the same Postgres instance or its own. Drizzle +
-   the same migration-linter discipline TwingMail already enforces (block `DROP COLUMN`
-   etc. on live columns).
-3. **Service shape:** copy TwingMail's `packages/api` structure — a Hono app,
-   `serve({ fetch: app.fetch, port })`, `/health` endpoint, the same structured JSON
-   `logger.ts` (copy verbatim, it has no dependencies).
-4. **Deploy:** extend the existing `scripts/deploy.sh` blue/green sequence (warm
-   container → health check → swap the Caddy-facing alias → drain old) to also build and
-   swap `twing-serve`, or clone the script for this service if keeping deploys
-   independent is preferred.
-5. **Secrets:** `.env` / `.env.example` convention, same as TwingMail. Needed: `DATABASE_URL`,
-   nothing else for v0 (no third-party API keys — this service has no outbound
-   dependencies).
+1. **Run it.** `twing serve --port <port>` (or a `PORT` env var). A plain Node process —
+   `npm install && npm start`, no Docker, no build step beyond what TypeScript already
+   needs. It prints the URL it's listening on at startup.
+2. **Reachability.** Whatever the operator already prefers: a small VPS with the port
+   open, a spare machine on the same network, or a tunnel (ngrok, a Cloudflare Tunnel,
+   Tailscale Funnel) if there's no public IP available. None of this is prescribed —
+   use whatever's already familiar.
+3. **TLS or a custom domain** are the operator's call, not something this doc mandates.
+   Put a reverse proxy in front if wanted; run it plain over HTTP on a trusted network if
+   not. Since there's no auth yet (§7), TLS mainly protects claim data in transit rather
+   than gating access either way.
+4. **Handing out the URL.** Whatever `twing serve` printed on startup is what goes into
+   every developer's `twing init --server <url>` (§6, §8) — however the team already
+   shares this kind of thing.
+
+Deliberately minimal, sized for open-source/dogfood scale (§7). A managed,
+horizontally-scaled, authenticated deployment is a separate, later effort — not designed
+here.
 
 ---
 
@@ -599,12 +605,12 @@ boot once and run for hours.
    grammar only for v0 (this repo's own stack; self-hosting for dogfood requires it,
    other languages are memo §13 Q7, later). `path::symbol` computation, signature
    diffing, local call graph.
-3. **`twing serve` skeleton.** Hono + Postgres/Drizzle, `POST /v1/claims`,
-   `GET /v1/notices`, bearer auth. Deployed per §9.
-4. **Wire it together.** `twing init` (credentials, hooks, daemon start in one step),
-   `projectId` derivation, daemon sync (push claims, poll notices), the
-   `SessionStart`/`UserPromptSubmit` nudge working end to end through a real Claude Code
-   session.
+3. **`twing serve` skeleton.** Hono, the in-memory store (§7), `POST /v1/claims`,
+   `GET /v1/notices`. No auth, no database. Deployed per §9.
+4. **Wire it together.** `twing init` (server URL, hooks, daemon start in one step),
+   `projectId` derivation, developer-identity derivation (§8), daemon sync (push claims,
+   poll notices), the `SessionStart`/`UserPromptSubmit` nudge working end to end through
+   a real Claude Code session.
 5. **`twing review-design`.** Local constraint/trigger checks + the server round-trip +
    report printing. **This is the dogfood-ready milestone** — it's what produces the
    memo §14 signal (does knowing what another session touched change what you build).
@@ -620,8 +626,13 @@ boot once and run for hours.
   small team. Pick at implementation time; not load-bearing for the design.
 - **Opposite-direction design detection** (memo §13 Q5) — no method proposed here,
   deliberately. Needs its own design pass if it's still wanted after v0 ships.
-- **Multi-tenant auth beyond admin-issued tokens** — fine for a small dogfooding team;
-  revisit before any external team uses this.
+- **Auth is out of scope by design, not by omission.** No tokens, no accounts, no
+  per-developer verification — the server URL is the only access control (§7). Fine for
+  open-source/dogfood use; explicitly deferred to a later managed/enterprise phase, not
+  something to design speculatively now.
+- **Persistence across restarts** — in-memory only for v0 (§7). A periodic JSON snapshot
+  is the cheapest upgrade path if restarts turn out to lose meaningful in-flight state in
+  practice. Not worth building until it's an actual problem.
 - **Trigger precision** (memo §13 Q2) — still the single highest-risk unknown in the
   whole product. `review-design`'s local trigger-matching is deterministic pattern
   matching against a human-authored file, which sidesteps precision risk on the
