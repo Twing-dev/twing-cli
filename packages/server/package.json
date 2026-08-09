@@ -1,0 +1,17 @@
+{
+  "name": "@twing/server",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@twing/core": "*",
+    "hono": "^4.13.1",
+    "@hono/node-server": "^2.1.0"
+  }
+}
