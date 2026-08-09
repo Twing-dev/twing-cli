@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.twing/daemon.sock
+.twing/state.json
+/hook/twing-hook
+/hook/hook
