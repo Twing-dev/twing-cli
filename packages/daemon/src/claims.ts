@@ -11,6 +11,7 @@ import {
   findEnclosingSymbol,
   findAllDeclaredSymbols,
   computeSymbolId,
+  leafName,
   loadManifestFromFile,
   matchConstraints,
   matchTriggers,
@@ -19,6 +20,7 @@ import {
   computeProjectId,
   computeDeveloperId,
   computeBranch,
+  DEFAULT_CLAIM_TTL_MS,
   type Claim,
   type CallEdge,
   type Manifest,
@@ -26,8 +28,6 @@ import {
   type HookToolName,
 } from "@twing/core";
 import { updateCallGraph } from "./call-graph.js";
-
-const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000; // 6h, refreshed on session activity (§11)
 
 interface RepoState {
   repoRoot: string;
@@ -67,11 +67,6 @@ function getRepoState(repoRoot: string): RepoState {
     repos.set(repoRoot, state);
   }
   return state;
-}
-
-function leafName(scopePath: string): string {
-  const dot = scopePath.lastIndexOf(".");
-  return dot === -1 ? scopePath : scopePath.slice(dot + 1);
 }
 
 function reindexFile(state: RepoState, relPath: string, previous: EnclosingSymbol[], current: EnclosingSymbol[]): void {
@@ -200,7 +195,7 @@ export async function extractClaim(input: ExtractionInput): Promise<ExtractionRe
     ...(triggerHits.length > 0 ? { triggerMatches: triggerHits.map((t) => t.triggerId) } : {}),
     ...(constraintHits.length > 0 ? { constraintIds: constraintHits.map((c) => c.constraintId) } : {}),
     ts: Date.now(),
-    ttlMs: DEFAULT_TTL_MS,
+    ttlMs: DEFAULT_CLAIM_TTL_MS,
   };
 
   return { claim, newCallEdges };

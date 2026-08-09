@@ -143,6 +143,14 @@ export function computeSymbolId(relPath: string, scopePath: string | null): stri
   return scopePath ? `${relPath}::${scopePath}` : relPath;
 }
 
+/** "RetryPolicy.backoff" -> "backoff" -- the name-index key for call-graph
+ * resolution (§5 step 6), shared by the daemon's incremental pipeline and
+ * the CLI's one-shot diff fallback. */
+export function leafName(scopePath: string): string {
+  const dot = scopePath.lastIndexOf(".");
+  return dot === -1 ? scopePath : scopePath.slice(dot + 1);
+}
+
 export interface CallSite {
   /** Simple callee name only — `retryPolicy.backoff()` yields "backoff",
    * the object is discarded. Resolving this against a symbolId happens in

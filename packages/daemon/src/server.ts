@@ -1,7 +1,17 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import { dirname } from "node:path";
-import { FrameDecoder, encodeFrame, type EnqueueMessage, type GetNoticesMessage, type Claim, type CallEdge } from "@twing/core";
+import {
+  FrameDecoder,
+  encodeFrame,
+  findRepoRoot,
+  computeProjectId,
+  type EnqueueMessage,
+  type GetNoticesMessage,
+  type GetClaimsMessage,
+  type Claim,
+  type CallEdge,
+} from "@twing/core";
 import { extractClaim } from "./claims.js";
 import { Syncer } from "./sync.js";
 
@@ -143,6 +153,26 @@ function handleMessage(
     // notices for -- an honest empty answer, not a lookup failure.
     const items = developerId ? syncer.noticesFor(developerId) : [];
     conn.write(encodeFrame({ type: "notices", items }));
+    return;
+  }
+
+  if (message.type === "get_claims") {
+    const req = raw as GetClaimsMessage;
+    // §6: "the live claim set -- reflects everything touched this session,
+    // including files since reverted." Scoped by projectId (every claim
+    // this daemon has extracted already carries one) rather than by
+    // sessionId, since `review-design` wants the whole repo's recent
+    // activity, not just one Claude Code session.
+    const now = Date.now();
+    let projectId: string | undefined;
+    try {
+      projectId = computeProjectId(findRepoRoot(req.cwd));
+    } catch {
+      // cwd doesn't resolve to a usable repo -- fall through to empty
+    }
+    const scopedClaims = projectId ? claims.filter((c) => c.projectId === projectId && c.ts + c.ttlMs > now) : [];
+    const scopedEdges = projectId ? callEdges.filter((e) => e.projectId === projectId) : [];
+    conn.write(encodeFrame({ type: "claims", claims: scopedClaims, callEdges: scopedEdges }));
     return;
   }
 

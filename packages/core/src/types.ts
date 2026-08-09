@@ -4,6 +4,10 @@
  * note in §11 and §4a of the memo.
  */
 
+/** Shared by the daemon's hook-driven extraction and the CLI's git-diff
+ * fallback, so a claim's lifetime doesn't depend on which path produced it. */
+export const DEFAULT_CLAIM_TTL_MS = 6 * 60 * 60 * 1000;
+
 export interface Claim {
   projectId: string;
   developerId: string;
