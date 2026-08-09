@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/core" },
     { "path": "packages/daemon" },
-    { "path": "packages/server" }
+    { "path": "packages/server" },
+    { "path": "packages/cli" }
   ]
 }

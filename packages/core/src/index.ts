@@ -6,3 +6,5 @@ export * from "./symbol-id.js";
 export * from "./manifest.js";
 export * from "./repo-root.js";
 export * from "./identity.js";
+export * from "./config.js";
+export * from "./socket-path.js";

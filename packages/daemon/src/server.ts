@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { dirname } from "node:path";
 import { FrameDecoder, encodeFrame, type EnqueueMessage, type GetNoticesMessage, type Claim, type CallEdge } from "@twing/core";
 import { extractClaim } from "./claims.js";
+import { Syncer } from "./sync.js";
 
 export interface DaemonHandle {
   socketPath: string;
@@ -39,6 +40,11 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
 
   const claims: Claim[] = [];
   const callEdges: CallEdge[] = [];
+  const syncer = new Syncer();
+  // A session only ever belongs to one developerId (§8), learned the first
+  // time it produces a claim -- needed because get_notices only carries
+  // sessionId (§4), not developerId.
+  const developerBySession = new Map<string, string>();
 
   const server = net.createServer((conn) => {
     const decoder = new FrameDecoder();
@@ -54,7 +60,7 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
       }
 
       for (const raw of messages) {
-        handleMessage(raw, conn, claims, callEdges);
+        handleMessage(raw, conn, claims, callEdges, syncer, developerBySession);
       }
     });
 
@@ -78,6 +84,7 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
     callEdges,
     close: () =>
       new Promise<void>((resolve) => {
+        syncer.stop();
         server.close(() => {
           if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
           resolve();
@@ -86,7 +93,14 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
   };
 }
 
-function handleMessage(raw: unknown, conn: net.Socket, claims: Claim[], callEdges: CallEdge[]): void {
+function handleMessage(
+  raw: unknown,
+  conn: net.Socket,
+  claims: Claim[],
+  callEdges: CallEdge[],
+  syncer: Syncer,
+  developerBySession: Map<string, string>,
+): void {
   const message = raw as { type?: string };
 
   if (message.type === "enqueue") {
@@ -106,6 +120,8 @@ function handleMessage(raw: unknown, conn: net.Socket, claims: Claim[], callEdge
         if (!result) return;
         claims.push(result.claim);
         callEdges.push(...result.newCallEdges);
+        developerBySession.set(result.claim.sessionId, result.claim.developerId);
+        syncer.enqueue(result.claim, result.newCallEdges);
         console.log(
           `twing daemon: ${result.claim.stage} claim on ${result.claim.symbolId}` +
             (result.claim.signatureChanged ? " (signature changed)" : "") +
@@ -121,10 +137,12 @@ function handleMessage(raw: unknown, conn: net.Socket, claims: Claim[], callEdge
   }
 
   if (message.type === "get_notices") {
-    const _req = raw as GetNoticesMessage;
-    // No notice computation yet (needs the server round-trip, §7) — an
-    // empty list is a correct, honest answer at this stage.
-    conn.write(encodeFrame({ type: "notices", items: [] }));
+    const req = raw as GetNoticesMessage;
+    const developerId = developerBySession.get(req.sessionId);
+    // No claims from this session yet, so no developerId to look up
+    // notices for -- an honest empty answer, not a lookup failure.
+    const items = developerId ? syncer.noticesFor(developerId) : [];
+    conn.write(encodeFrame({ type: "notices", items }));
     return;
   }
 

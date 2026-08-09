@@ -32,6 +32,10 @@ const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000; // 6h, refreshed on session activity 
 interface RepoState {
   repoRoot: string;
   projectId: string;
+  /** Stable for the daemon's lifetime, unlike branch (which can genuinely
+   * change mid-session on checkout) -- cached like projectId rather than
+   * re-shelling to git on every claim. */
+  developerId: string;
   manifest: Manifest;
   /** relPath -> last-known post-edit content, used as the "old" version for
    * signature diffing (§5 step 5's second option: "use the daemon's
@@ -53,6 +57,7 @@ function getRepoState(repoRoot: string): RepoState {
     state = {
       repoRoot,
       projectId: computeProjectId(repoRoot),
+      developerId: computeDeveloperId(repoRoot),
       manifest: loadManifestFromFile(path.join(repoRoot, ".twing", "verify.yml")),
       fileContent: new Map(),
       fileSymbols: new Map(),
@@ -183,7 +188,7 @@ export async function extractClaim(input: ExtractionInput): Promise<ExtractionRe
 
   const claim: Claim = {
     projectId: state.projectId,
-    developerId: computeDeveloperId(repoRoot),
+    developerId: state.developerId,
     sessionId: input.sessionId,
     branch: computeBranch(repoRoot),
     symbolId,
