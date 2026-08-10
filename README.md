@@ -45,6 +45,12 @@ PORT=9000 npm run start --workspace packages/server
 It prints the URL it's listening on at startup -- that's what you hand to
 `twing init --server <url>` below.
 
+**Running it on a shared machine** (e.g. one that also hosts other
+services) as a plain foreground command means it dies when your SSH session
+ends and its logs go nowhere. `deploy/` has scripts for running it as a
+systemd service under an isolated, unprivileged user instead -- see
+`deploy/README.md`.
+
 ## `twing init` on your own project
 
 `twing` isn't installed globally by default. Run it directly from this
