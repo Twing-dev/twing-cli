@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Pulls latest, rebuilds, restarts the running service. Run this as the
-# service user (twingcli) -- the restart itself uses the narrow sudo grant
-# from install-service.sh, not general privileges.
+# Pulls latest, rebuilds, restarts the running server. No sudo needed.
 #
-# Usage: ./redeploy.sh [repo-dir]
+# Usage: ./redeploy.sh [repo-dir] [port]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${1:-$(dirname "$SCRIPT_DIR")}"
+PORT="${2:-8787}"
 
 cd "$REPO_DIR"
 git pull
 npm install
 npm run build
-sudo systemctl restart twing-serve
-sudo systemctl status twing-serve --no-pager
+
+"$SCRIPT_DIR/stop-server.sh" "$REPO_DIR" || true
+"$SCRIPT_DIR/start-server.sh" "$REPO_DIR" "$PORT"
