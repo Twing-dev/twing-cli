@@ -1,0 +1,19 @@
+{
+  "name": "@twing/simulator",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "bin": {
+    "twing-simulator": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@twing/core": "*",
+    "@twing/cli": "*",
+    "@twing/server": "*"
+  }
+}

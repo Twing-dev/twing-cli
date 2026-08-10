@@ -1,0 +1,9 @@
+constraints:
+  - text: "retry/backoff logic belongs in src/net/retry.ts if it exists -- check there before adding another implementation"
+    scope: "src/**"
+
+triggers:
+  - id: "new-retry-abstraction"
+    pattern: "(?i)retry|backoff|delay|jitter"
+    match: "new-symbol-name"
+    reason: "possible duplicate retry/backoff logic -- another session may be building the same thing, check before continuing"

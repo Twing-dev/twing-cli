@@ -4,6 +4,7 @@
     { "path": "packages/core" },
     { "path": "packages/daemon" },
     { "path": "packages/server" },
-    { "path": "packages/cli" }
+    { "path": "packages/cli" },
+    { "path": "simulator" }
   ]
 }

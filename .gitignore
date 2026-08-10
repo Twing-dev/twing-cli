@@ -5,3 +5,5 @@ dist/
 .twing/state.json
 /hook/twing-hook
 /hook/hook
+openrouter_key.txt
+simulator/.workspaces/

@@ -6,6 +6,7 @@ import {
   encodeFrame,
   findRepoRoot,
   computeProjectId,
+  computeDeveloperId,
   type EnqueueMessage,
   type GetNoticesMessage,
   type GetClaimsMessage,
@@ -158,19 +159,30 @@ function handleMessage(
 
   if (message.type === "get_claims") {
     const req = raw as GetClaimsMessage;
-    // §6: "the live claim set -- reflects everything touched this session,
-    // including files since reverted." Scoped by projectId (every claim
-    // this daemon has extracted already carries one) rather than by
-    // sessionId, since `align` wants the whole repo's recent
-    // activity, not just one Claude Code session.
+    // §6: "the live claim set -- reflects everything touched this session."
+    // Scoped by projectId AND developerId, not sessionId -- align wants the
+    // requesting developer's whole recent activity in this repo (multiple
+    // Claude Code sessions, files touched then reverted, etc.), not just
+    // one session, but it must NOT include other developers' claims. One
+    // daemon normally serves one developer, so this was long invisible, but
+    // it's a real gap whenever a single daemon sees multiple developerIds
+    // for the same project -- e.g. two git worktrees sharing one origin
+    // remote (same projectId) on one machine (one daemon), each with its
+    // own local `user.email`. Without this filter, both sides would see
+    // each other's work labeled as their own "local checks" instead of
+    // "cross-session findings", which is exactly backwards.
     const now = Date.now();
     let projectId: string | undefined;
+    let developerId: string | undefined;
     try {
-      projectId = computeProjectId(findRepoRoot(req.cwd));
+      const repoRoot = findRepoRoot(req.cwd);
+      projectId = computeProjectId(repoRoot);
+      developerId = computeDeveloperId(repoRoot);
     } catch {
       // cwd doesn't resolve to a usable repo -- fall through to empty
     }
-    const scopedClaims = projectId ? claims.filter((c) => c.projectId === projectId && c.ts + c.ttlMs > now) : [];
+    const scopedClaims =
+      projectId && developerId ? claims.filter((c) => c.projectId === projectId && c.developerId === developerId && c.ts + c.ttlMs > now) : [];
     const scopedEdges = projectId ? callEdges.filter((e) => e.projectId === projectId) : [];
     conn.write(encodeFrame({ type: "claims", claims: scopedClaims, callEdges: scopedEdges }));
     return;

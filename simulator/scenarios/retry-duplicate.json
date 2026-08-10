@@ -1,0 +1,16 @@
+{
+  "name": "retry-duplicate",
+  "description": "Two sessions independently add retry/backoff logic to different files in the same project -- the kind of duplicate construction that align's trigger-duplication check exists to catch.",
+  "fixture": "sample-service",
+  "maxTurns": 3,
+  "sessions": {
+    "a": {
+      "label": "A",
+      "goal": "In src/net/http-client.ts, make requestJson retry a failed request a few times with an increasing delay between attempts (exponential backoff) before giving up. Write a small helper for computing the delay if that's useful. Keep the change small and focused. When you're done, briefly summarize what you changed."
+    },
+    "b": {
+      "label": "B",
+      "goal": "In src/queue/worker.ts, make processJob retry a failed job a few times with a backoff delay between attempts before giving up and logging the failure. Write a small helper for computing the delay if that's useful. Keep the change small and focused. When you're done, briefly summarize what you changed."
+    }
+  }
+}

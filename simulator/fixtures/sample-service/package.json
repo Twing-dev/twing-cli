@@ -1,0 +1,7 @@
+{
+  "name": "sample-service",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Simulator fixture -- a small, realistic-looking service for two agents to work on concurrently. Not a real project; never run `npm install` here for anything but letting an agent poke at it.",
+  "type": "module"
+}
