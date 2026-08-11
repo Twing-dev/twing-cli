@@ -1,6 +1,8 @@
 /**
- * Machine-wide config (§6): `~/.twing/config.json`. Just the server URL —
- * no token, no credentials, v0 has no authentication at all (§7).
+ * Machine-wide config (§6): `~/.twing/config.json`. Server URL, plus
+ * (§17.10) an optional auth token obtained once via `twing init`'s login
+ * prompt and never asked for again -- not per-developer credentials, one
+ * shared secret per server.
  */
 
 import * as fs from "node:fs";
@@ -9,6 +11,10 @@ import * as os from "node:os";
 
 export interface TwingConfig {
   serverUrl?: string;
+  /** sha256(password) obtained from POST /v1/auth/login (§17.10). Absent
+   * either because the server has no password configured, or because
+   * `init` hasn't logged in yet. */
+  authToken?: string;
 }
 
 export function configPath(): string {

@@ -3,6 +3,8 @@ require_human_review:
     reason: "capture edge — must stay a trivial socket client with no decision logic (design doc §4)"
   - path: "packages/server/src/design-*.ts"
     reason: "coordinator's core verdict logic — a bug here blocks real Edit/Write calls across every gated session (design doc §17)"
+  - path: "packages/server/**"
+    reason: "the hosted coordinator itself — do not remove or fundamentally restructure (e.g. moving it into the daemon/local-only) without human sign-off (design doc §17). Added 2026-08-11 after a live test showed exactly this change going unblocked."
 
 constraints:
   - text: "use the shared length-prefixed frame codec in packages/core; don't invent a second wire format"

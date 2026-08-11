@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runDesignChecks } from "./design-checks.js";
+import { runDesignChecks, matchConstraintsForPaths } from "./design-checks.js";
 import type { DesignStatement, DesignConstraint } from "@twing/core";
 
 function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
@@ -88,4 +88,56 @@ test("tier 4 does not fire below the similarity threshold", () => {
   const other = design({ id: "b", sessionId: "s2", summary: "renames a css variable" });
   const outcome = runDesignChecks(candidate, [other], []);
   assert.equal(outcome.verdict, "clean");
+});
+
+// §17.9: the ground-truth per-path check, independent of any DesignStatement
+// -- this is what backstops a review_required rule (e.g. packages/server/**)
+// against a session whose registered design never mentions the path it's
+// about to edit.
+test("matchConstraintsForPaths: matches a bare path against a constraint's scope glob", () => {
+  const constraint: DesignConstraint = {
+    id: "c1",
+    projectId: "p1",
+    type: "review_required",
+    statement: "the hosted coordinator -- do not remove without sign-off",
+    scope: ["packages/server/**"],
+    source: "seeded",
+    createdAt: Date.now(),
+  };
+  const hit = matchConstraintsForPaths(["packages/server/src/app.ts"], [constraint]);
+  assert.equal(hit?.statement, constraint.statement);
+  assert.equal(hit?.type, "review_required");
+});
+
+test("matchConstraintsForPaths: no match returns undefined", () => {
+  const constraint: DesignConstraint = {
+    id: "c1",
+    projectId: "p1",
+    type: "review_required",
+    statement: "n/a",
+    scope: ["packages/server/**"],
+    source: "seeded",
+    createdAt: Date.now(),
+  };
+  const hit = matchConstraintsForPaths(["packages/core/src/identity.ts"], [constraint]);
+  assert.equal(hit, undefined);
+});
+
+test("matchConstraintsForPaths: fires even when the path was never declared by any design", () => {
+  // The scenario that slipped through in production: a session registers a
+  // design about something else entirely, then edits a protected file. This
+  // check takes the literal edited path directly -- it never sees or needs
+  // a DesignStatement at all.
+  const constraint: DesignConstraint = {
+    id: "c1",
+    projectId: "p1",
+    type: "review_required",
+    statement: "protected",
+    scope: ["packages/server/**"],
+    source: "seeded",
+    createdAt: Date.now(),
+  };
+  const editedFilePath = "packages/server/src/design-checks.ts";
+  const hit = matchConstraintsForPaths([editedFilePath], [constraint]);
+  assert.notEqual(hit, undefined);
 });

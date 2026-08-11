@@ -65,11 +65,16 @@ node /path/to/twing-cli/packages/cli/dist/index.js init --server http://localhos
 That one command:
 
 1. Stores the server URL in `~/.twing/config.json`.
-2. Builds `twing-hook` from source and installs it to `~/.twing/bin/twing-hook`
+2. **If the server has a password set** (`TWING_SERVE_PASSWORD`, see
+   `deploy/README.md`), prompts for it once, right there in the terminal
+   (masked input), and stores the resulting token alongside the URL --
+   never asks again for that server. A server with no password configured
+   skips this entirely.
+3. Builds `twing-hook` from source and installs it to `~/.twing/bin/twing-hook`
    (needs Go the first time; reused after that).
-3. Merges hook entries into `<that-repo>/.claude/settings.json` -- merges
+4. Merges hook entries into `<that-repo>/.claude/settings.json` -- merges
    into whatever's already there, never overwrites the file.
-4. Starts the daemon (`~/.twing/daemon.sock`), or reuses one that's already
+5. Starts the daemon (`~/.twing/daemon.sock`), or reuses one that's already
    running -- one daemon per machine, shared across every repo you `init`.
 
 Re-running `twing init --server <url>` is safe -- it re-points an existing

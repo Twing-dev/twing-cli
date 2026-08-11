@@ -5,16 +5,21 @@
  * or unwire the PreToolUse hook entries (`wire-hooks.ts`).
  */
 
-import { readConfig, findRepoRoot, computeProjectId, computeDeveloperId } from "@twing/core";
+import { readConfig, findRepoRoot, computeProjectId, computeDeveloperId, authFetch } from "@twing/core";
 import { hookBinaryPath } from "./install-hook.js";
 import { wireDesignGate, unwireDesignGate } from "./wire-hooks.js";
 
-function requireServerUrl(): string {
-  const serverUrl = readConfig().serverUrl;
-  if (!serverUrl) {
+interface RequiredConfig {
+  serverUrl: string;
+  authToken?: string;
+}
+
+function requireConfig(): RequiredConfig {
+  const config = readConfig();
+  if (!config.serverUrl) {
     throw new Error("twing design: no server configured -- run `twing init --server <url>` first");
   }
-  return serverUrl;
+  return { serverUrl: config.serverUrl, authToken: config.authToken };
 }
 
 function splitList(value?: string): string[] {
@@ -24,6 +29,8 @@ function splitList(value?: string): string[] {
     .map((s) => s.trim())
     .filter(Boolean);
 }
+
+const UNAUTHORIZED_HINT = "unauthorized -- run `twing init` again to re-authenticate";
 
 interface DesignConflictJSON {
   conflictingDesignId: string;
@@ -38,6 +45,11 @@ interface DesignCheckResponseJSON {
   designId?: string;
   conflicts?: DesignConflictJSON[];
   constraint?: { statement: string; type: string };
+}
+
+async function parseJsonOrUnauthorized<T>(res: Response): Promise<T | { error: string }> {
+  if (res.status === 401) return { error: UNAUTHORIZED_HINT };
+  return (await res.json()) as T;
 }
 
 function printDesignVerdict(result: DesignCheckResponseJSON): void {
@@ -79,7 +91,7 @@ export interface RegisterOptions {
  * just resolved for the common case here).
  */
 export async function runDesignRegister(options: RegisterOptions): Promise<void> {
-  const serverUrl = requireServerUrl();
+  const { serverUrl, authToken } = requireConfig();
   const session = options.session ?? process.env.CLAUDE_CODE_SESSION_ID;
   if (!session) {
     throw new Error(
@@ -93,21 +105,25 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
   const projectId = computeProjectId(repoRoot);
   const developerId = computeDeveloperId(repoRoot);
 
-  const res = await fetch(`${serverUrl}/v1/designs/check`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      projectId,
-      developerId,
-      sessionId: session,
-      agentLabel: options.label,
-      summary: options.summary ?? "",
-      creates: splitList(options.creates),
-      touches: splitList(options.touches),
-      dependsOn: splitList(options.dependsOn),
-    }),
-  });
-  printDesignVerdict((await res.json()) as DesignCheckResponseJSON);
+  const res = await authFetch(
+    `${serverUrl}/v1/designs/check`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId,
+        developerId,
+        sessionId: session,
+        agentLabel: options.label,
+        summary: options.summary ?? "",
+        creates: splitList(options.creates),
+        touches: splitList(options.touches),
+        dependsOn: splitList(options.dependsOn),
+      }),
+    },
+    authToken,
+  );
+  printDesignVerdict(await parseJsonOrUnauthorized<DesignCheckResponseJSON>(res));
 }
 
 export interface ResolveOptions {
@@ -117,7 +133,7 @@ export interface ResolveOptions {
 }
 
 export async function runDesignResolve(options: ResolveOptions): Promise<void> {
-  const serverUrl = requireServerUrl();
+  const { serverUrl, authToken } = requireConfig();
   if (!options.id) {
     throw new Error("twing design resolve: --id <designId> is required");
   }
@@ -129,12 +145,16 @@ export async function runDesignResolve(options: ResolveOptions): Promise<void> {
     ? { resolution: "adopted", adoptedDesignId: options.adopt }
     : { resolution: "justified_divergence", justification: options.justify };
 
-  const res = await fetch(`${serverUrl}/v1/designs/${options.id}/resolve`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  console.log(JSON.stringify(await res.json(), null, 2));
+  const res = await authFetch(
+    `${serverUrl}/v1/designs/${options.id}/resolve`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    authToken,
+  );
+  console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
 }
 
 export interface ListOptions {
@@ -143,14 +163,18 @@ export interface ListOptions {
 }
 
 export async function runDesignList(options: ListOptions): Promise<void> {
-  const serverUrl = requireServerUrl();
+  const { serverUrl, authToken } = requireConfig();
   const repoRoot = findRepoRoot(options.cwd);
   const projectId = computeProjectId(repoRoot);
 
   const params = new URLSearchParams({ projectId });
   if (options.status) params.set("status", options.status);
 
-  const res = await fetch(`${serverUrl}/v1/designs?${params}`);
+  const res = await authFetch(`${serverUrl}/v1/designs?${params}`, {}, authToken);
+  if (res.status === 401) {
+    console.error(`twing design list: ${UNAUTHORIZED_HINT}`);
+    return;
+  }
   const body = (await res.json()) as { items?: { id: string; status: string; summary: string; creates: string[]; touches: string[] }[] };
   for (const d of body.items ?? []) {
     console.log(`${d.id}  [${d.status}]  ${d.summary || "(no summary)"}  creates=${d.creates.join(",")}  touches=${d.touches.join(",")}`);
@@ -166,7 +190,7 @@ export interface ReviewsOptions {
 /** The one human-facing command in this set (§17.5): list pending
  * justified-divergence reviews, or decide one. */
 export async function runDesignReviews(options: ReviewsOptions): Promise<void> {
-  const serverUrl = requireServerUrl();
+  const { serverUrl, authToken } = requireConfig();
   const repoRoot = findRepoRoot(options.cwd);
   const projectId = computeProjectId(repoRoot);
 
@@ -174,16 +198,24 @@ export async function runDesignReviews(options: ReviewsOptions): Promise<void> {
     if (options.decision !== "approve" && options.decision !== "reject") {
       throw new Error("twing design reviews: --decide <reviewId> requires --decision approve|reject");
     }
-    const res = await fetch(`${serverUrl}/v1/reviews/${options.decide}/decide`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ decision: options.decision }),
-    });
-    console.log(JSON.stringify(await res.json(), null, 2));
+    const res = await authFetch(
+      `${serverUrl}/v1/reviews/${options.decide}/decide`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: options.decision }),
+      },
+      authToken,
+    );
+    console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
     return;
   }
 
-  const res = await fetch(`${serverUrl}/v1/reviews?projectId=${encodeURIComponent(projectId)}`);
+  const res = await authFetch(`${serverUrl}/v1/reviews?projectId=${encodeURIComponent(projectId)}`, {}, authToken);
+  if (res.status === 401) {
+    console.error(`twing design reviews: ${UNAUTHORIZED_HINT}`);
+    return;
+  }
   const body = (await res.json()) as { items?: { id: string; designId: string; justification: string }[] };
   const items = body.items ?? [];
   if (items.length === 0) {

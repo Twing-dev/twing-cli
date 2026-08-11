@@ -57,12 +57,22 @@ function dependencyCollision(candidate: DesignStatement, other: DesignStatement)
   };
 }
 
-/** Tier 3: `creates`/`touches` against a constraint's scope globs. */
-function constraintMatch(
-  candidate: DesignStatement,
-  constraints: DesignConstraint[],
-): { statement: string; type: DesignConstraintType } | undefined {
-  const targets = [...candidate.creates, ...candidate.touches];
+export interface ConstraintHit {
+  statement: string;
+  type: DesignConstraintType;
+}
+
+/**
+ * The ground-truth version of tier 3: checks bare paths/symbols against
+ * constraint scope globs, independent of any DesignStatement. Extracted
+ * (2026-08-11, after a live test showed a `review_required` rule on
+ * `packages/server/**` never fired because the session's registered design
+ * simply never mentioned that path) so the same matching logic can run
+ * against the *actual* file a hook is about to edit -- not just whatever a
+ * session's self-reported `creates`/`touches` claimed at registration time.
+ * See §17.9.
+ */
+export function matchConstraintsForPaths(targets: string[], constraints: DesignConstraint[]): ConstraintHit | undefined {
   for (const constraint of constraints) {
     for (const scopePattern of constraint.scope) {
       if (targets.some((t) => t === scopePattern || minimatch(t, scopePattern))) {
@@ -71,6 +81,11 @@ function constraintMatch(
     }
   }
   return undefined;
+}
+
+/** Tier 3: `creates`/`touches` against a constraint's scope globs. */
+function constraintMatch(candidate: DesignStatement, constraints: DesignConstraint[]): ConstraintHit | undefined {
+  return matchConstraintsForPaths([...candidate.creates, ...candidate.touches], constraints);
 }
 
 function keywordSet(s: string): Set<string> {

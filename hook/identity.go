@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -39,13 +40,37 @@ func readOrCreatePersistedID(idPath string) string {
 	return generated
 }
 
-// computeProjectID mirrors identity.ts's computeProjectId: sha256(git remote
-// get-url origin), falling back to a gitignored random id per repo (§8).
-// `cwd` need not be the repo root -- git resolves the enclosing repo from
-// any subdirectory.
+var scpLikeRemoteRe = regexp.MustCompile(`^[^@/]+@([^:/]+):(.+)$`)
+var schemeRemoteRe = regexp.MustCompile(`(?i)^[a-z][a-z0-9+.-]*://(?:[^@/]+@)?`)
+
+// canonicalizeRemoteURL mirrors core/identity.ts's canonicalizeRemoteUrl --
+// must stay byte-for-byte equivalent, or cross-session detection breaks the
+// same way it did in production, 2026-08-11 (SSH vs HTTPS clones of the
+// same repo hashing to different projectIds).
+func canonicalizeRemoteURL(raw string) string {
+	s := strings.TrimSpace(raw)
+
+	if m := scpLikeRemoteRe.FindStringSubmatch(s); m != nil {
+		s = m[1] + "/" + m[2]
+	} else {
+		s = schemeRemoteRe.ReplaceAllString(s, "")
+	}
+
+	if strings.HasSuffix(strings.ToLower(s), ".git") {
+		s = s[:len(s)-len(".git")]
+	}
+	s = strings.TrimRight(s, "/")
+
+	return strings.ToLower(s)
+}
+
+// computeProjectID mirrors identity.ts's computeProjectId: sha256(canonicalized
+// git remote get-url origin), falling back to a gitignored random id per repo
+// (§8). `cwd` need not be the repo root -- git resolves the enclosing repo
+// from any subdirectory.
 func computeProjectID(cwd string) string {
 	if remoteURL, ok := gitOutput(cwd, "remote", "get-url", "origin"); ok && remoteURL != "" {
-		sum := sha256.Sum256([]byte(remoteURL))
+		sum := sha256.Sum256([]byte(canonicalizeRemoteURL(remoteURL)))
 		return hex.EncodeToString(sum[:])
 	}
 	return readOrCreatePersistedID(filepath.Join(cwd, ".git", "twing-project-id"))

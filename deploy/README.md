@@ -44,6 +44,22 @@ None of these are required to start the server -- without `OPENROUTER_API_KEY`,
 "you need a registered design" check still works either way, since it doesn't
 need extraction.
 
+### Auth (§17.10 of the design doc) -- optional, off by default
+
+```sh
+export TWING_SERVE_PASSWORD='...'   # generate one: openssl rand -base64 24
+deploy/start-server.sh
+```
+
+Unset (the default) means every route stays open, exactly this project's original v0
+security model. Set it, and every `/v1/*` route except `/v1/auth/*` requires a bearer
+token derived from the password; `twing init` prompts for it once per server and never
+asks again. This travels over plain HTTP unless you've put TLS in front (see the main
+design doc's §9) -- fine on a trusted network, not a substitute for TLS on an open one.
+There's no way to rotate the password without every developer re-running `twing init`
+against the new one (the old token simply stops matching) -- acceptable for the one
+shared-secret model this is, not built for frequent rotation.
+
 ## Logs
 
 ```sh
@@ -67,8 +83,8 @@ deploy/redeploy.sh
 ```
 
 Runs `git pull && npm install && npm run build`, then stop + start. Export the
-design-gate env vars above in the same shell before running this if you want
-them picked up -- `start-server.sh` inherits them either way, since
+design-gate and auth env vars above in the same shell before running this if
+you want them picked up -- `start-server.sh` inherits them either way, since
 `redeploy.sh` calls it as a child process rather than a separate login.
 
 ## If you want it to survive a reboot / auto-restart on crash

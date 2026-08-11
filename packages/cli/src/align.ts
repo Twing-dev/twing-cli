@@ -4,7 +4,7 @@
  */
 
 import * as path from "node:path";
-import { readConfig, findRepoRoot, computeProjectId, loadManifestFromFile, matchTriggers, type Finding } from "@twing/core";
+import { readConfig, findRepoRoot, computeProjectId, loadManifestFromFile, matchTriggers, authFetch, type Finding } from "@twing/core";
 import { gatherClaims } from "./gather-claims.js";
 import { queryDaemonNotices } from "./daemon-client.js";
 import { printReport } from "./report.js";
@@ -26,20 +26,27 @@ export async function runAlign(options: AlignOptions): Promise<void> {
   // treated as evidence, never suppresses a diff-based finding.
   const intentHits = options.intent ? matchTriggers(manifest, options.intent) : [];
 
-  const serverUrl = readConfig().serverUrl;
+  const config = readConfig();
+  const serverUrl = config.serverUrl;
   let findings: Finding[] = [];
   let serverError: string | undefined;
 
   if (serverUrl && (gathered.claims.length > 0 || gathered.callEdges.length > 0)) {
     try {
-      const res = await fetch(`${serverUrl}/v1/claims`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectId, claims: gathered.claims, callEdges: gathered.callEdges }),
-      });
+      const res = await authFetch(
+        `${serverUrl}/v1/claims`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId, claims: gathered.claims, callEdges: gathered.callEdges }),
+        },
+        config.authToken,
+      );
       if (res.ok) {
         const body = (await res.json()) as { findings: Finding[] };
         findings = body.findings;
+      } else if (res.status === 401) {
+        serverError = "unauthorized -- run `twing init` again to re-authenticate";
       } else {
         serverError = `server responded ${res.status}`;
       }

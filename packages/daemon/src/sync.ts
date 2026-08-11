@@ -5,7 +5,7 @@
  * cache-check is an instant local read, never a live server round-trip.
  */
 
-import { readConfig, type Claim, type CallEdge, type Notice } from "@twing/core";
+import { readConfig, authFetch, type Claim, type CallEdge, type Notice } from "@twing/core";
 
 const FLUSH_INTERVAL_MS = 7_000; // "every 5-10s of activity, not per-edit" (§5)
 const POLL_INTERVAL_MS = 5_000;
@@ -25,6 +25,7 @@ interface CachedNotice {
 
 export class Syncer {
   private readonly serverUrl: string | undefined;
+  private readonly authToken: string | undefined;
   private pendingByProject = new Map<string, PendingBatch>();
   private knownDevelopers = new Set<string>();
   private sinceByDeveloper = new Map<string, number>();
@@ -32,8 +33,9 @@ export class Syncer {
   private flushTimer: ReturnType<typeof setInterval>;
   private pollTimer: ReturnType<typeof setInterval>;
 
-  constructor(serverUrl: string | undefined = readConfig().serverUrl) {
+  constructor(serverUrl: string | undefined = readConfig().serverUrl, authToken: string | undefined = readConfig().authToken) {
     this.serverUrl = serverUrl;
+    this.authToken = authToken;
     this.flushTimer = setInterval(() => void this.flush(), FLUSH_INTERVAL_MS);
     this.flushTimer.unref?.();
     this.pollTimer = setInterval(() => void this.poll(), POLL_INTERVAL_MS);
@@ -65,11 +67,15 @@ export class Syncer {
       // batch instead of being dropped or double-sent.
       this.pendingByProject.set(projectId, { claims: [], edges: [] });
       try {
-        const res = await fetch(`${this.serverUrl}/v1/claims`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ projectId, claims: batch.claims, callEdges: batch.edges }),
-        });
+        const res = await authFetch(
+          `${this.serverUrl}/v1/claims`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ projectId, claims: batch.claims, callEdges: batch.edges }),
+          },
+          this.authToken,
+        );
         if (!res.ok) {
           console.error(`twing daemon: sync failed (${res.status}) for project ${projectId}`);
         }
@@ -88,7 +94,7 @@ export class Syncer {
       // caught by the *next* poll instead of being silently skipped.
       const requestTime = Date.now();
       try {
-        const res = await fetch(`${this.serverUrl}/v1/notices?developerId=${encodeURIComponent(developerId)}&since=${since}`);
+        const res = await authFetch(`${this.serverUrl}/v1/notices?developerId=${encodeURIComponent(developerId)}&since=${since}`, {}, this.authToken);
         if (!res.ok) continue;
         const body = (await res.json()) as { items: Notice[] };
         this.sinceByDeveloper.set(developerId, requestTime);

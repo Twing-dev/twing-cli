@@ -1,7 +1,8 @@
 /**
- * `twing serve` — the coordination server (§7). No auth, no accounts, no
- * database: the server URL is the only thing gating access, an accepted
- * tradeoff for a small trusted team or OSS dogfooding, not an oversight.
+ * `twing serve` — the coordination server (§7). No accounts, no database:
+ * a single shared password (§17.10) is the only access control, an
+ * accepted tradeoff for a small trusted team or OSS dogfooding, not a full
+ * multi-tenant auth system.
  */
 
 import { Hono } from "hono";
@@ -9,8 +10,9 @@ import type { Claim, CallEdge, DesignStatement, DesignConstraintType } from "@tw
 import { Store } from "./store.js";
 import { runChecks } from "./checks.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
-import { runDesignChecks } from "./design-checks.js";
+import { runDesignChecks, matchConstraintsForPaths } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
+import { hashPassword } from "./auth.js";
 
 interface ClaimsRequestBody {
   projectId?: string;
@@ -50,6 +52,11 @@ export interface CreateAppOptions {
   constraints?: ConstraintStore;
   extractModel?: string;
   openRouterApiKey?: string;
+  /** Pre-hashed expected token (§17.10) -- undefined means auth is fully
+   * disabled, today's zero-config default. `main.ts` computes this from
+   * `TWING_SERVE_PASSWORD` via `hashPassword`; `createApp` itself never
+   * touches a plaintext password. */
+  authToken?: string;
 }
 
 const RAW_PLAN_EXCERPT_CHARS = 2000;
@@ -60,10 +67,42 @@ export function createApp(options: CreateAppOptions = {}) {
   const constraintStore = options.constraints ?? new ConstraintStore();
   const extractModel = options.extractModel ?? "openai/gpt-oss-20b:free";
   const openRouterApiKey = options.openRouterApiKey;
+  const authToken = options.authToken;
 
   const app = new Hono();
 
+  // §17.10: every /v1/* route except /v1/auth/* requires a matching bearer
+  // token when a password is configured. No-op entirely when it isn't --
+  // today's behavior stays the default.
+  app.use("/v1/*", async (c, next) => {
+    if (!authToken) return next();
+    if (c.req.path.startsWith("/v1/auth/")) return next();
+    const header = c.req.header("authorization") ?? "";
+    const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+    if (token !== authToken) {
+      return c.json({ error: "unauthorized -- run `twing init` again to re-authenticate" }, 401);
+    }
+    return next();
+  });
+
   app.get("/", (c) => c.text("twing serve"));
+
+  // §17.10: whether this server requires a password at all -- lets `twing
+  // init` skip prompting entirely for a server that has none configured.
+  app.get("/v1/auth/status", (c) => c.json({ required: authToken !== undefined }));
+
+  // §17.10: the one endpoint a plaintext password ever crosses the wire to.
+  // Returns the token to store (= the hash) on success so `init` never has
+  // to compute it client-side and risk drifting from the server's own hash.
+  app.post("/v1/auth/login", async (c) => {
+    if (!authToken) return c.json({ required: false });
+    const body = await c.req.json<{ password?: string }>().catch(() => null);
+    const candidate = body?.password ? hashPassword(body.password) : undefined;
+    if (candidate !== authToken) {
+      return c.json({ required: true, error: "invalid password" }, 401);
+    }
+    return c.json({ required: true, token: authToken });
+  });
 
   // §7: upserts claims + call-graph edges for projectId/developerId, runs
   // the divergence checks against everything active in the project, and
@@ -258,6 +297,25 @@ export function createApp(options: CreateAppOptions = {}) {
       constraintStore.add(projectId, entry.statement, entry.scope, entry.type ?? "canonical_abstraction", "seeded"),
     );
     return c.json({ seeded: added.length });
+  });
+
+  // §17.9: the ground-truth backstop. Checks one literal path against the
+  // Constraint Store directly -- no design registration involved, so it
+  // can't be sidestepped by a session whose registered design just never
+  // happens to mention the path it's about to edit. Called by the
+  // Edit|Write gate on every tool call, ahead of (and independent of) the
+  // "does this session have an open design at all" check.
+  app.get("/v1/constraints/match", (c) => {
+    const projectId = c.req.query("projectId");
+    const path = c.req.query("path");
+    if (!projectId || !path) {
+      return c.json({ error: "expected ?projectId=&path=" }, 400);
+    }
+    const hit = matchConstraintsForPaths([path], constraintStore.forProject(projectId));
+    if (hit) {
+      console.log(`twing serve: constraint match on ${path} (project ${projectId.slice(0, 12)}) -- ${hit.type}: ${hit.statement}`);
+    }
+    return c.json({ matched: hit !== undefined, constraint: hit });
   });
 
   return app;

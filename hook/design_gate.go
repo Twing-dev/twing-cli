@@ -81,7 +81,16 @@ type designListResponse struct {
 	} `json:"items"`
 }
 
-func postJSON(targetURL string, body any, timeout time.Duration) (*http.Response, error) {
+// setAuthHeader adds the §17.10 bearer token when non-empty -- a no-op
+// against a server with no password configured, since authToken is "" in
+// that case (readTwingConfig never has one to give).
+func setAuthHeader(req *http.Request, authToken string) {
+	if authToken != "" {
+		req.Header.Set("authorization", "Bearer "+authToken)
+	}
+}
+
+func postJSON(targetURL string, body any, timeout time.Duration, authToken string) (*http.Response, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -91,13 +100,19 @@ func postJSON(targetURL string, body any, timeout time.Duration) (*http.Response
 		return nil, err
 	}
 	req.Header.Set("content-type", "application/json")
+	setAuthHeader(req, authToken)
 	client := &http.Client{Timeout: timeout}
 	return client.Do(req)
 }
 
-func getJSON(targetURL string) (*http.Response, error) {
+func getJSON(targetURL string, authToken string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	setAuthHeader(req, authToken)
 	client := &http.Client{Timeout: designGateTimeout}
-	return client.Get(targetURL)
+	return client.Do(req)
 }
 
 func writeJSON(v any) {
@@ -142,8 +157,8 @@ func handlePreToolUse(payload hookPayload) {
 }
 
 func handleExitPlanMode(payload hookPayload) {
-	serverURL := readServerURL()
-	if serverURL == "" {
+	config := readTwingConfig()
+	if config.ServerURL == "" {
 		return
 	}
 
@@ -161,7 +176,7 @@ func handleExitPlanMode(payload hookPayload) {
 		RawPlanText: input.Plan,
 	}
 
-	res, err := postJSON(strings.TrimRight(serverURL, "/")+"/v1/designs/check", reqBody, designExtractionTimeout)
+	res, err := postJSON(strings.TrimRight(config.ServerURL, "/")+"/v1/designs/check", reqBody, designExtractionTimeout, config.AuthToken)
 	if err != nil {
 		logDesignGate("ExitPlanMode check failed (fail open): %v", err)
 		return
@@ -226,17 +241,81 @@ func openDesignsURL(serverURL, projectID, sessionID string) string {
 		strings.TrimRight(serverURL, "/"), url.QueryEscape(projectID), url.QueryEscape(sessionID))
 }
 
+func constraintMatchURL(serverURL, projectID, path string) string {
+	return fmt.Sprintf("%s/v1/constraints/match?projectId=%s&path=%s",
+		strings.TrimRight(serverURL, "/"), url.QueryEscape(projectID), url.QueryEscape(path))
+}
+
+type constraintMatchResponse struct {
+	Matched    bool                  `json:"matched"`
+	Constraint *designConstraintInfo `json:"constraint,omitempty"`
+}
+
+// checkPathConstraint is §17.9's ground-truth backstop: checks the literal
+// file being edited against the Constraint Store directly, independent of
+// whatever the session's registered design claims to touch. Returns
+// (matched, reason). Fails open (matched=false) on any network/parse error,
+// same as every other check on this path.
+func checkPathConstraint(serverURL, authToken, projectID, filePath string) (bool, string) {
+	res, err := getJSON(constraintMatchURL(serverURL, projectID, filePath), authToken)
+	if err != nil {
+		logDesignGate("constraint match check failed (fail open): %v", err)
+		return false, ""
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		logDesignGate("constraint match check returned status %d (fail open)", res.StatusCode)
+		return false, ""
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		logDesignGate("constraint match check: failed reading response body (fail open): %v", err)
+		return false, ""
+	}
+	var result constraintMatchResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		logDesignGate("constraint match check: malformed response (fail open): %v", err)
+		return false, ""
+	}
+	if !result.Matched || result.Constraint == nil {
+		return false, ""
+	}
+	return true, fmt.Sprintf(
+		"twing design coordinator: %s is covered by an existing %s rule: %q. This applies regardless of what your "+
+			"registered design claims to touch. If this is intentional and reviewed, record it as a justified "+
+			"divergence: `twing design resolve --id <your-design-id> --justify \"<reason>\"` (queues for human "+
+			"review, does not itself unblock you).",
+		filePath, result.Constraint.Type, result.Constraint.Statement,
+	)
+}
+
 // handleEditWriteGate is the universal fallback (§17/spec §9a): if an agent
 // skips plan mode entirely, this is what actually gets a design registered
-// before its first write.
+// before its first write. As of §17.9, it also checks the specific file
+// against the Constraint Store directly (ground truth) before falling back
+// to the "any open design" check -- a session can't sidestep a
+// review_required rule just by registering an unrelated design first.
 func handleEditWriteGate(payload hookPayload) {
-	serverURL := readServerURL()
-	if serverURL == "" {
+	config := readTwingConfig()
+	if config.ServerURL == "" {
 		return
 	}
 
+	var input struct {
+		FilePath string `json:"file_path"`
+	}
+	_ = json.Unmarshal(payload.ToolInput, &input)
+
 	projectID := computeProjectID(payload.Cwd)
-	res, err := getJSON(openDesignsURL(serverURL, projectID, payload.SessionID))
+
+	if input.FilePath != "" {
+		if matched, reason := checkPathConstraint(config.ServerURL, config.AuthToken, projectID, input.FilePath); matched {
+			writeJSON(denyOutput("PreToolUse", reason))
+			return
+		}
+	}
+
+	res, err := getJSON(openDesignsURL(config.ServerURL, projectID, payload.SessionID), config.AuthToken)
 	if err != nil {
 		logDesignGate("Edit|Write gate check failed (fail open): %v", err)
 		return
@@ -278,13 +357,13 @@ func handleSessionEnd(payload hookPayload) {
 	if !designGateEnabled() {
 		return
 	}
-	serverURL := readServerURL()
-	if serverURL == "" {
+	config := readTwingConfig()
+	if config.ServerURL == "" {
 		return
 	}
 
 	projectID := computeProjectID(payload.Cwd)
-	res, err := getJSON(openDesignsURL(serverURL, projectID, payload.SessionID))
+	res, err := getJSON(openDesignsURL(config.ServerURL, projectID, payload.SessionID), config.AuthToken)
 	if err != nil {
 		return
 	}
@@ -303,10 +382,11 @@ func handleSessionEnd(payload hookPayload) {
 
 	client := &http.Client{Timeout: designGateTimeout}
 	for _, item := range result.Items {
-		req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/v1/designs/%s/close", strings.TrimRight(serverURL, "/"), item.ID), nil)
+		req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/v1/designs/%s/close", strings.TrimRight(config.ServerURL, "/"), item.ID), nil)
 		if err != nil {
 			continue
 		}
+		setAuthHeader(req, config.AuthToken)
 		if resp, err := client.Do(req); err == nil {
 			resp.Body.Close()
 		}

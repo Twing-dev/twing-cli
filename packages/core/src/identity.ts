@@ -34,11 +34,42 @@ function readOrCreatePersistedId(idPath: string): string {
   return generated;
 }
 
-/** `projectId = sha256(git remote get-url origin)` (§8). */
+/**
+ * Canonicalizes a git remote URL so equivalent clone forms hash to the same
+ * `projectId` (§8) -- discovered live, 2026-08-11: two clones of the same
+ * repo using `git@host:org/repo.git` (SSH) vs `https://host/org/repo.git`
+ * computed *different* projectIds and never saw each other's claims or
+ * designs at all. Must stay byte-for-byte equivalent to the Go port in
+ * `hook/identity.go`'s `canonicalizeRemoteURL`, or this breaks the same way
+ * again for whichever side drifts.
+ */
+export function canonicalizeRemoteUrl(url: string): string {
+  let s = url.trim();
+
+  // SCP-like SSH syntax: git@host:org/repo(.git) -> host/org/repo
+  const scpMatch = s.match(/^[^@/]+@([^:/]+):(.+)$/);
+  if (scpMatch) {
+    s = `${scpMatch[1]}/${scpMatch[2]}`;
+  } else {
+    // scheme://[user@]host/path -> host/path (https, http, ssh, git, ...)
+    s = s.replace(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?/i, "");
+  }
+
+  s = s.replace(/\.git$/i, "");
+  s = s.replace(/\/+$/, "");
+
+  // Hosts are case-insensitive, and GitHub-style paths route
+  // case-insensitively too -- lowercase the whole thing rather than risk a
+  // false negative (missed cross-session match) from an incidental case
+  // difference between two clones.
+  return s.toLowerCase();
+}
+
+/** `projectId = sha256(canonicalized git remote get-url origin)` (§8). */
 export function computeProjectId(repoRoot: string): string {
   const remoteUrl = git(["remote", "get-url", "origin"], repoRoot);
   if (remoteUrl) {
-    return crypto.createHash("sha256").update(remoteUrl).digest("hex");
+    return crypto.createHash("sha256").update(canonicalizeRemoteUrl(remoteUrl)).digest("hex");
   }
   // Edge case (§8): no remote means no way to clone, so no cross-developer
   // coordination need by construction — a random id gitignored per-repo.

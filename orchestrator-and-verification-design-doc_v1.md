@@ -14,8 +14,9 @@ replaced.
 
 **Explicit non-goals for v0.** Opposite-direction design detection (row 4 of the
 divergence table in §7); embedding/similarity-based duplicate detection; a blocking CI
-gate; multi-tenant self-serve signup; **authentication of any kind** (§7). All are named
-again where relevant so nobody accidentally builds toward them.
+gate; multi-tenant self-serve signup; **per-developer authentication or accounts** (§7 —
+a single shared-password gate was added later, §17.10; still not per-developer auth).
+All are named again where relevant so nobody accidentally builds toward them.
 
 **Addendum, August 2026 — §17 adds design-time enforcement.** Everything above this
 line describes `align`/`review` as originally shipped, and none of it changed: claim
@@ -243,10 +244,12 @@ time `init` runs there, but the daemon and the server URL are machine-wide, so r
 `init` in a second repo on the same machine just adds hook entries and reuses the
 already-running daemon):
 
-1. **Store the server URL.** `--server <url>`, or the `TWING_SERVER` env var. No token, no
-   credentials — v0 has no authentication at all (§7); the URL is the only thing gating
-   who can reach the server, an accepted, deliberate limitation for a small trusted
-   OSS/dogfood setting, not an oversight. Stored in `~/.twing/config.json`. Re-running
+1. **Store the server URL, and authenticate if the server asks (§17.10).** `--server
+   <url>`, or the `TWING_SERVER` env var. Originally no token, no credentials at all (§7);
+   a shared per-server password was added later — `init` checks whether one's required and
+   prompts once if so, storing the resulting token alongside the URL. Still no
+   per-developer accounts, an accepted, deliberate limitation for a small trusted
+   OSS/dogfood setting. Stored in `~/.twing/config.json`. Re-running
    `twing init --server <new-url>` re-points an existing install — there's no separate
    command for this, and no reason for one.
 2. **Install `twing-hook`.** Ensure the Go binary is present — fetch a prebuilt release
@@ -338,12 +341,15 @@ row anyone creates.
 
 ### Security model for v0
 
-**There is none, deliberately.** No tokens, no accounts, no per-developer
-authentication. The server URL is the only thing gating access — whoever has it can push
-claims and read notices. Fine for a small trusted team or open-source dogfooding;
+**Originally none, deliberately — revised 2026-08-11 to add one shared password, still
+deliberately far short of real auth.** No accounts, no per-developer tokens, no
+revocation. Whoever has the server URL *and* (if the operator set one) the shared
+password can push claims and read notices; there's no way to tell developers apart or
+scope what any of them can see. Fine for a small trusted team or open-source dogfooding;
 unacceptable the moment this needs to serve people who shouldn't see each other's claims.
-Authentication, per-developer tokens, and revocation are planned for a later
-managed/enterprise phase and are explicitly **not designed here** — see §16.
+Per-developer tokens and revocation are planned for a later managed/enterprise phase and
+are explicitly **not designed here** — see §16. See §17.10 for the shared-password
+mechanism actually built.
 
 ---
 
@@ -352,13 +358,23 @@ managed/enterprise phase and are explicitly **not designed here** — see §16.
 This is the part that has to work with **zero setup ceremony** for it to be adopted at
 all, so it's designed to require none:
 
-> **`projectId = sha256(git remote get-url origin)`.**
+> **`projectId = sha256(canonicalize(git remote get-url origin))`.**
 
 Computed identically, independently, by every developer's CLI/daemon the moment they run
 any `twing` command inside the repo. No registration step, no "first developer creates
 the project," no file to commit and keep in sync. Two developers who clone the same repo
 arrive at the same `projectId` without ever coordinating about it, because they're
 hashing the same remote URL.
+
+**The canonicalization step was added live, 2026-08-11**, after two clones of the same
+repo -- one over SSH (`git@github.com:org/repo.git`), one over HTTPS
+(`https://github.com/org/repo.git`) -- computed different `projectId`s and silently never
+saw each other's claims or designs at all, discovered only because a design-conflict test
+came back clean when it should have flagged. `canonicalizeRemoteUrl`
+(`packages/core/src/identity.ts`, ported byte-for-byte in `hook/identity.go`'s
+`canonicalizeRemoteURL`) normalizes SCP-like SSH syntax, strips `scheme://[user@]`,
+strips a trailing `.git` and trailing slash, and lowercases the result before hashing --
+see §17's live-testing note for the full story.
 
 The server does not need a project to be explicitly created — the first `POST /v1/claims`
 for a new `projectId` simply starts populating rows tagged with it. There is no
@@ -438,8 +454,9 @@ required — run it wherever it can be reached by the developers who need it:
    use whatever's already familiar.
 3. **TLS or a custom domain** are the operator's call, not something this doc mandates.
    Put a reverse proxy in front if wanted; run it plain over HTTP on a trusted network if
-   not. Since there's no auth yet (§7), TLS mainly protects claim data in transit rather
-   than gating access either way.
+   not. Set `TWING_SERVE_PASSWORD` too (§17.10) if this is reachable beyond a fully
+   trusted network — without TLS, that password (and the bearer token derived from it)
+   still travels in the clear, so the two are complementary, not substitutes.
 4. **Handing out the URL.** Whatever `twing serve` printed on startup is what goes into
    every developer's `twing init --server <url>` (§6, §8) — however the team already
    shares this kind of thing.
@@ -810,3 +827,76 @@ Bash tool calls, and it matches the id the hook receives in every `PreToolUse`
 payload — confirmed by registering with it against a real gated session and watching
 the next `Edit` succeed. `register` defaults to it now; `--session` remains for
 callers/harnesses where that env var isn't set.
+
+### 17.9 Ground-truth per-path constraint check — closing a gap found in live testing
+
+**What happened, 2026-08-11:** the first genuinely adversarial live test — a second,
+independent Claude Code session tasked with removing `packages/server` entirely and
+moving the coordinator into the daemon (the most extreme design conflict possible with
+everything in this section) — went through completely unblocked. Two compounding causes,
+both real bugs, not a gap in the concept:
+
+1. **`projectId` mismatch** (§8) — that session's clone used a different remote URL form
+   than the one whose hash the live server had data for, so cross-session detection never
+   had a chance regardless of anything else. Fixed by canonicalization (§8).
+2. **The `Edit`\|`Write` gate only ever checked "does *any* open design exist for this
+   session"** (§17.2's fallback path) — never whether the specific file being edited was
+   actually covered by anything. A session registering *any* design, however narrow or
+   honestly described, got unconditional edit access for the rest of the session. A
+   `review_required` constraint on `packages/server/**` — the obvious rule for exactly
+   this — existed in `.twing/verify.yml` only after the fact, and even a pre-existing one
+   wouldn't have helped: `seedConstraints` (`twing init`) only ever forwarded the
+   `constraints:` section, silently dropping `require_human_review:` entirely. Both fixed.
+
+**The fix, structurally:** the `Edit`\|`Write` gate now checks the literal file path
+(`tool_input.file_path`, ground truth from the hook payload) against the Constraint Store
+directly — `GET /v1/constraints/match?projectId=&path=` — *before* falling back to the
+"any open design" check, and independent of it. A `review_required`/`canonical_abstraction`
+hit denies unconditionally, regardless of what any registered design claims to touch.
+
+This is deliberately not just "make designs more honest" — self-reported `creates`/
+`touches` at registration time is a narration-quality signal (memo §2), the same category
+of thing this whole product otherwise refuses to trust as evidence. The per-path check
+instead asks the question the memo's evidence principle actually demands: not *what did
+the session say it would touch*, but *what file is it touching right now*. That's a
+strictly stronger backstop than anything that depends on a design's declared scope being
+complete, whether the incompleteness is adversarial or just an honest oversight.
+
+**What this does not fix:** the `ExitPlanMode` path's constraint check (§17.4 tier 3)
+still runs against the *extracted* `creates`/`touches` from plan text, which can still
+under-report before any code exists — there's no "actual file path" ground truth
+available yet at that point by construction. The `Edit`\|`Write` path's per-file check is
+the real backstop for both paths in practice, since it fires on every actual write
+regardless of how (or whether) a design was registered first.
+
+### 17.10 Shared-password auth
+
+Added 2026-08-11, once the coordinator started actually blocking real work: a single
+shared password per server, not a user/account system. §7's "the server URL is the only
+access control" is revised — it's now "the server URL plus (optionally) one shared
+secret," still nothing close to per-developer auth, deliberately.
+
+**Server.** `TWING_SERVE_PASSWORD` env var. Unset → every route open, today's default,
+unchanged. Set → `expectedToken = sha256(password)`; every `/v1/*` route except
+`/v1/auth/*` requires `Authorization: Bearer <token>` matching it, or a 401. The token
+being a hash rather than an issued session id is deliberate: stateless to verify (no
+session table), survives a server restart without forcing every developer to re-run
+`twing init`, and never hands back the plaintext password even if a stored token leaks.
+Two endpoints: `GET /v1/auth/status` → `{required}`, and `POST /v1/auth/login {password}`
+→ the token on match, 401 otherwise — the only endpoint a plaintext password ever
+crosses the wire to.
+
+**Client.** `~/.twing/config.json` gains `authToken`, alongside `serverUrl`, written by
+`twing init`. Every TS caller of `twing serve` (`align`, `design *`, the seed call, the
+daemon's sync loop) goes through one `authFetch` wrapper (`packages/core/src/http.ts`)
+that adds the header when a token is present; the Go hook's `postJSON`/`getJSON` do the
+same from `~/.twing/config.json`'s `authToken` field.
+
+**`twing init`'s login flow — "ask once, never again":** calls `/v1/auth/status` first.
+Not required → proceeds untouched. Required and a token is already stored for this exact
+`serverUrl` → skips prompting. Required and no token → prompts on stdin (masked, raw-mode
+read, `packages/cli/src/prompt-password.ts`), posts to `/v1/auth/login`, stores the
+returned token. A token stops working (server restarted with a different password) →
+the next `align`/`design` call gets a 401 and prints a one-line hint to re-run `init`;
+there's no automatic re-prompt buried inside every command, `init` is the one blessed
+place this happens.
