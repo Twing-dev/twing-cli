@@ -75,6 +75,25 @@ async function ensureAuthenticated(serverUrl: string, existingToken: string | un
     return existingToken;
   }
 
+  // Non-interactive escape hatch (scripting/CI, or any environment without
+  // a real TTY to prompt on) -- promptPassword requires raw-mode stdin and
+  // deliberately refuses to run without one.
+  if (process.env.TWING_PASSWORD) {
+    const res = await fetch(`${serverUrl}/v1/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: process.env.TWING_PASSWORD }),
+    });
+    if (res.ok) {
+      const body = (await res.json()) as { token?: string };
+      if (body.token) {
+        console.log("twing init: authenticated (via TWING_PASSWORD)");
+        return body.token;
+      }
+    }
+    throw new Error(`twing init: TWING_PASSWORD was rejected by ${serverUrl}`);
+  }
+
   const MAX_ATTEMPTS = 3;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const password = await promptPassword(`twing init: password for ${serverUrl}: `);

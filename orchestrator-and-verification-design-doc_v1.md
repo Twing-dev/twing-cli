@@ -900,3 +900,8 @@ returned token. A token stops working (server restarted with a different passwor
 the next `align`/`design` call gets a 401 and prints a one-line hint to re-run `init`;
 there's no automatic re-prompt buried inside every command, `init` is the one blessed
 place this happens.
+
+**`TWING_PASSWORD` env var** is a non-interactive escape hatch for `init` -- the raw-mode
+prompt refuses to run without a real TTY (scripting, CI, or verifying this from an agent
+session with no terminal to type into), so if this is set, `init` posts it directly to
+`/v1/auth/login` instead of prompting. Not documented as the primary path; the prompt is.
