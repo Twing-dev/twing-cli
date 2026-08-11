@@ -69,20 +69,22 @@ export interface RegisterOptions {
 }
 
 /**
- * Known gap (spec §9a's own open question, not resolved here): the
- * Edit|Write PreToolUse gate looks up open designs by Claude Code's exact
- * session id, but this command has no reliable way to read that id for
- * itself when invoked as a Bash tool call -- so `--session` is required and
- * must be supplied by whoever/whatever calls this. When in doubt, prefer
- * plan mode: `ExitPlanMode` registers a design automatically with the real
- * session id and doesn't have this problem.
+ * The Edit|Write PreToolUse gate looks up open designs by Claude Code's
+ * exact session id. Confirmed live (2026-08-11, against a real gated
+ * session): Claude Code sets `CLAUDE_CODE_SESSION_ID` in the environment a
+ * Bash tool call runs in, and it matches the `session_id` the hook receives
+ * -- registering with it and retrying an Edit actually unblocks. Falls back
+ * to `--session` for callers/harnesses where that env var isn't set (spec
+ * §9a's original open question -- still real for non-Claude-Code callers,
+ * just resolved for the common case here).
  */
 export async function runDesignRegister(options: RegisterOptions): Promise<void> {
   const serverUrl = requireServerUrl();
-  if (!options.session) {
+  const session = options.session ?? process.env.CLAUDE_CODE_SESSION_ID;
+  if (!session) {
     throw new Error(
-      "twing design register: --session <id> is required (must be Claude Code's actual session id -- " +
-        "the Edit|Write gate looks up open designs by exact session id). If unavailable, use plan mode instead: " +
+      "twing design register: no session id -- pass --session <id> explicitly (must be Claude Code's actual " +
+        "session id; CLAUDE_CODE_SESSION_ID wasn't set in this environment). If unavailable, use plan mode instead: " +
         "ExitPlanMode registers a design automatically.",
     );
   }
@@ -97,7 +99,7 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
     body: JSON.stringify({
       projectId,
       developerId,
-      sessionId: options.session,
+      sessionId: session,
       agentLabel: options.label,
       summary: options.summary ?? "",
       creates: splitList(options.creates),

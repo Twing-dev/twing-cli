@@ -59,15 +59,16 @@ export OPENROUTER_API_KEY=$(cat openrouter_key.txt)
 node simulator/dist/index.js --enable-design-gate
 ```
 
-Known rough edge, not a simulator bug: agents run with
+Rough edge, not a simulator bug: agents run with
 `--permission-mode bypassPermissions` have no permission friction to avoid, so
 a real session may never call `ExitPlanMode` on its own and instead hits the
 `Edit`|`Write` fallback immediately -- which denies with instructions to run
-`twing design register --session <id> ...`, but the agent has no reliable way
-to read its own Claude Code session id from inside a Bash tool call (a known
-gap, see the design doc §17's register command notes). The `ExitPlanMode`
-path doesn't have this problem, since the hook already receives the real
-session id in every `PreToolUse` payload.
+`twing design register ...`. That command now defaults its session id from
+`CLAUDE_CODE_SESSION_ID` (confirmed to match what the hook receives, see the
+design doc §17), so a real agent following the deny message's instructions
+should be able to self-serve past it without needing `--session` at all --
+worth watching whether the agent actually does that, since it still has to
+notice and act on the instruction.
 
 Example: drive session A yourself, let OpenRouter drive session B, and use
 two independent clones instead of worktrees:

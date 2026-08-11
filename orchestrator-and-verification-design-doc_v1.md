@@ -802,3 +802,11 @@ no network call) — useful for quickly disabling the gate without editing
   TTL.
 - **Constraint Store is a JSON file, not Postgres/SQLite** (§17.6) — a deliberate
   divergence from the spec, consistent with this doc's existing persistence stance.
+
+**Resolved during first live validation, 2026-08-11, not a scope cut:** `twing design
+register` needs Claude Code's real session id, since the `Edit`/`Write` gate looks
+open designs up by exact session id. Claude Code sets `CLAUDE_CODE_SESSION_ID` for
+Bash tool calls, and it matches the id the hook receives in every `PreToolUse`
+payload — confirmed by registering with it against a real gated session and watching
+the next `Edit` succeed. `register` defaults to it now; `--session` remains for
+callers/harnesses where that env var isn't set.

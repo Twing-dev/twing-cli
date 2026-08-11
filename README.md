@@ -147,7 +147,7 @@ agent over a missing key -- the `Edit`/`Write` "you need a registered design"
 check still works either way, since it doesn't need extraction.
 
 ```sh
-twing design register --session <id> --summary "adds a retry wrapper" \
+twing design register --summary "adds a retry wrapper" \
   --creates RetryPolicy --touches src/net/retry.ts --depends-on PaymentsClient
 twing design resolve --id <designId> --adopt <otherDesignId>
 twing design resolve --id <designId> --justify "streaming needs a different backoff shape"
@@ -155,11 +155,13 @@ twing design reviews                                    # list pending justified
 twing design reviews --decide <reviewId> --decision approve
 ```
 
-`--session` on `register` needs Claude Code's real session id, which this
-command has no reliable way to read for itself when invoked as a Bash call --
-a known gap, not a bug. When in doubt, prefer plan mode: `ExitPlanMode`
-registers a design automatically with the real session id and doesn't have
-this problem.
+`register` needs Claude Code's real session id -- the `Edit`|`Write` gate looks
+open designs up by exact session id. It defaults to the `CLAUDE_CODE_SESSION_ID`
+env var, which Claude Code sets for Bash tool calls and which matches what the
+hook receives (confirmed live against a real gated session, 2026-08-11); pass
+`--session <id>` explicitly for callers/harnesses where that isn't set. When in
+doubt, plan mode works unconditionally: `ExitPlanMode` registers a design
+automatically with the real session id.
 
 ## Trying it against real agents
 
