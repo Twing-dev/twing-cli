@@ -38,6 +38,14 @@ export function createApp(store: Store = new Store()) {
     const edges = store.callEdgesFor(projectId);
     const findings = runChecks(changed, active, edges);
 
+    console.log(
+      `twing serve: project ${projectId.slice(0, 12)} -- received ${claims.length} claim(s), ${callEdges.length} edge(s) ` +
+        `(${changed.length} new/changed) -> ${findings.length} finding(s)`,
+    );
+    for (const f of findings) {
+      console.log(`twing serve:   [${f.kind}] ${f.symbolId} -- ${f.developerId} <-> ${f.otherDeveloperId}`);
+    }
+
     // Deliver to both parties: the submitter gets it synchronously here too
     // (redundant with this response but keeps the daemon's poll loop
     // uniform — it always just reads notices), and the other party learns
@@ -59,6 +67,11 @@ export function createApp(store: Store = new Store()) {
     }
     const since = Number(c.req.query("since") ?? "0");
     const items = store.noticesSince(developerId, Number.isFinite(since) ? since : 0);
+    // Silent when empty -- this is polled every few seconds per developer
+    // (§5), and an empty result is the overwhelmingly common, boring case.
+    if (items.length > 0) {
+      console.log(`twing serve: delivering ${items.length} notice(s) to ${developerId}`);
+    }
     return c.json({ items });
   });
 
