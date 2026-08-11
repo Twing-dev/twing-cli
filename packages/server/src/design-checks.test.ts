@@ -141,3 +141,54 @@ test("matchConstraintsForPaths: fires even when the path was never declared by a
   const hit = matchConstraintsForPaths([editedFilePath], [constraint]);
   assert.notEqual(hit, undefined);
 });
+
+// Found live, 2026-08-11: a broad canonical_abstraction constraint on
+// packages/** was seeded before a narrower review_required rule on
+// packages/server/**, and the broad one won just by being first in the
+// array -- masking the more important sign-off requirement.
+test("matchConstraintsForPaths: review_required wins over canonical_abstraction even when the broader rule was seeded first", () => {
+  const broad: DesignConstraint = {
+    id: "c1",
+    projectId: "p1",
+    type: "canonical_abstraction",
+    statement: "use the shared frame codec; don't invent a second wire format",
+    scope: ["packages/**"],
+    source: "seeded",
+    createdAt: Date.now(),
+  };
+  const narrow: DesignConstraint = {
+    id: "c2",
+    projectId: "p1",
+    type: "review_required",
+    statement: "the hosted coordinator -- do not remove without sign-off",
+    scope: ["packages/server/**"],
+    source: "seeded",
+    createdAt: Date.now(),
+  };
+  const hit = matchConstraintsForPaths(["packages/server/src/app.ts"], [broad, narrow]);
+  assert.equal(hit?.type, "review_required");
+  assert.equal(hit?.statement, narrow.statement);
+});
+
+test("matchConstraintsForPaths: among same-type matches, the more specific (longer) scope wins", () => {
+  const wide: DesignConstraint = {
+    id: "c1",
+    projectId: "p1",
+    type: "review_required",
+    statement: "wide rule",
+    scope: ["packages/**"],
+    source: "seeded",
+    createdAt: Date.now(),
+  };
+  const specific: DesignConstraint = {
+    id: "c2",
+    projectId: "p1",
+    type: "review_required",
+    statement: "specific rule",
+    scope: ["packages/server/**"],
+    source: "seeded",
+    createdAt: Date.now(),
+  };
+  const hit = matchConstraintsForPaths(["packages/server/src/app.ts"], [wide, specific]);
+  assert.equal(hit?.statement, "specific rule");
+});

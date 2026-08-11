@@ -72,15 +72,38 @@ export interface ConstraintHit {
  * session's self-reported `creates`/`touches` claimed at registration time.
  * See §17.9.
  */
+// When several constraints match the same path, `review_required` outranks
+// `canonical_abstraction`/`domain_fact` regardless of scope width (a
+// sign-off requirement shouldn't get silently masked by a broader
+// duplicate-abstraction rule seeded earlier -- found live, 2026-08-11:
+// packages/server/** correctly matched, but the earlier, broader
+// packages/** "don't invent a second wire format" rule won the race and
+// reported instead, which is a misleading reason even though the deny
+// itself was still correct).
+const CONSTRAINT_TYPE_PRIORITY: Record<DesignConstraintType, number> = {
+  review_required: 0,
+  canonical_abstraction: 1,
+  domain_fact: 2,
+};
+
 export function matchConstraintsForPaths(targets: string[], constraints: DesignConstraint[]): ConstraintHit | undefined {
+  let best: { constraint: DesignConstraint; scopeLength: number } | undefined;
+
   for (const constraint of constraints) {
     for (const scopePattern of constraint.scope) {
-      if (targets.some((t) => t === scopePattern || minimatch(t, scopePattern))) {
-        return { statement: constraint.statement, type: constraint.type };
+      if (!targets.some((t) => t === scopePattern || minimatch(t, scopePattern))) continue;
+
+      const isHigherPriority = !best || CONSTRAINT_TYPE_PRIORITY[constraint.type] < CONSTRAINT_TYPE_PRIORITY[best.constraint.type];
+      const isMoreSpecificTie =
+        best && CONSTRAINT_TYPE_PRIORITY[constraint.type] === CONSTRAINT_TYPE_PRIORITY[best.constraint.type] && scopePattern.length > best.scopeLength;
+      if (isHigherPriority || isMoreSpecificTie) {
+        best = { constraint, scopeLength: scopePattern.length };
       }
+      break; // this constraint already matched -- no need to check its other scope patterns
     }
   }
-  return undefined;
+
+  return best ? { statement: best.constraint.statement, type: best.constraint.type } : undefined;
 }
 
 /** Tier 3: `creates`/`touches` against a constraint's scope globs. */
