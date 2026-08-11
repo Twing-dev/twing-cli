@@ -9,3 +9,10 @@ openrouter_key.txt
 simulator/.workspaces/
 /twing-serve.log
 /twing-serve.pid
+
+# Hook commands in here are absolute, $HOME-specific paths baked in by
+# `twing init` (hookBinaryPath()) -- committing it breaks on every machine
+# whose $HOME differs from whoever committed it last (hit live, 2026-08-11:
+# a checked-in /home/remote/... entry errored with ENOENT on this machine).
+# Run `twing init` locally to (re)generate it instead.
+.claude/settings.json
