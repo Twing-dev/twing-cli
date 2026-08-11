@@ -45,6 +45,7 @@ function printUsage(): void {
       "  --openrouter-model <model>    default: openai/gpt-oss-20b:free",
       "  --openrouter-key-file <path>  default: <repo root>/openrouter_key.txt",
       "  --server-port <port>          default: 8790",
+      "  --enable-design-gate          leave the §17 PreToolUse gate wired (default: off)",
     ].join("\n"),
   );
 }
@@ -69,6 +70,7 @@ async function main(): Promise<void> {
     openrouterKeyFile: flags["openrouter-key-file"] ?? path.join(repoRoot, "openrouter_key.txt"),
     serverPort: Number(flags["server-port"] ?? 8790),
     workspacesRoot: path.join(SIMULATOR_ROOT, ".workspaces"),
+    enableDesignGate: flags["enable-design-gate"] === "true",
   });
 }
 

@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { fixtureDir, type Scenario } from "./config.js";
 import { setupWorkspace, type WorkspaceMode, type SessionWorkspace } from "./workspace.js";
 import { startEphemeralServer } from "./ephemeral-server.js";
-import { runTwingInit, runTwingAlign } from "./twing-cli.js";
+import { runTwingInit, runTwingAlign, runTwingDesignDisableGate } from "./twing-cli.js";
 import { ClaudeSession } from "./claude-session.js";
 import type { Driver } from "./drivers/driver.js";
 import { HumanDriver, closeHumanInput } from "./drivers/human-driver.js";
@@ -20,6 +20,10 @@ export interface RunOptions {
   openrouterKeyFile: string;
   serverPort: number;
   workspacesRoot: string;
+  /** §17: leaves the design gate wired (init's new default) instead of
+   * disabling it right after init. Off by default -- existing scenarios
+   * don't instruct their agents to register a design. */
+  enableDesignGate: boolean;
 }
 
 // Longer than the daemon's ~7s claim-flush interval and ~5s notice-poll
@@ -94,6 +98,11 @@ export async function run(options: RunOptions): Promise<void> {
     for (const session of setup.sessions) {
       console.log(`twing-simulator: twing init (session ${session.label}) in ${session.dir}`);
       await runTwingInit(session.dir, server.url);
+      if (!options.enableDesignGate) {
+        await runTwingDesignDisableGate(session.dir);
+      } else {
+        console.log(`twing-simulator: design gate (§17) left enabled for session ${session.label} -- edits are denied until a design is registered`);
+      }
     }
 
     const driverA = createDriver(options.driverA, options);

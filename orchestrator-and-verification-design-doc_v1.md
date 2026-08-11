@@ -17,6 +17,17 @@ divergence table in §7); embedding/similarity-based duplicate detection; a bloc
 gate; multi-tenant self-serve signup; **authentication of any kind** (§7). All are named
 again where relevant so nobody accidentally builds toward them.
 
+**Addendum, August 2026 — §17 adds design-time enforcement.** Everything above this
+line describes `align`/`review` as originally shipped, and none of it changed: claim
+capture and the divergence checks in §12 remain advisory-only, exactly as designed.
+§17 merges in a separate, later piece — the "design conflicts" third of a three-part
+oracle (design conflicts / merge issues / compound memory) drafted in
+`design-conflict-coordinator-spec.md` — which adds a genuinely new mechanism: a
+blocking pre-code gate on design registration. It reuses this doc's identity model
+(§8) and manifest (§10) but is a distinct code path from `align`, described in full in
+§17. Merge-issue detection (this doc, unchanged) and compound memory (unbuilt) are the
+other two-thirds of that oracle and remain out of scope.
+
 **This doc is written to be implemented from directly.** Concrete schemas, protocols,
 file layout, and an ordered build sequence are below. Where a detail depends on Claude
 Code's hook contract, it's sourced from `code.claude.com/docs/en/hooks` as of this
@@ -32,7 +43,9 @@ writing — confirm against current docs before implementing, hook schemas evolv
 | `twing align [--intent "..."]` | Design/coordination check: constraint and trigger matches, cross-session divergence. | Developer or agent, on request, any time | Optional — richer if running | Yes |
 | `twing review` | Everything `align` does, plus test-delta integrity analysis over the diff. Run after code exists. | Developer or agent, on request, typically pre-commit | Optional | Yes |
 | `twing daemon` | Long-running local process, started by `init`. Rarely invoked directly. | Auto (started by `init`) | — | Yes (async) |
-| `twing-hook <event>` | Not a human-facing command, and not a process that "starts" — spawned fresh per event by Claude Code, exits immediately. `init` only ensures the binary is present. | Claude Code | Yes (fails silently if absent) | No |
+| `twing-hook <event>` | Not a human-facing command, and not a process that "starts" — spawned fresh per event by Claude Code, exits immediately. `init` only ensures the binary is present. On `PreToolUse` it can now deny (§17); on every other event it stays advisory (§4). | Claude Code | Yes (fails silently if absent) | No |
+| `twing design register/resolve/list/reviews` | Design-conflict gate (§17): register a design's structured fields directly, resolve an overlap (adopt or justify), list open designs, and — the one human-facing one — decide a pending justified-divergence review. | Agent (`register`/`resolve`), developer (`reviews`) | No | Yes |
+| `twing design enable-gate` / `disable-gate` | Wires/unwires the §17 `PreToolUse` hook entries into `.claude/settings.json`. `init` wires these by default now (§17); these two commands are for toggling on repos that ran `init` before this existed, or opting a repo out. | Developer, once per repo | No | No |
 
 `align` and `review` work with **zero daemon and zero hooks installed** —
 they fall back to computing claims from the current git diff directly (§6). The daemon
@@ -83,7 +96,11 @@ about it.
 ## 4. `twing-hook` (Go) — the capture edge
 
 **Job, precisely:** two operations, both against the local daemon over a Unix socket.
-Nothing else. No Tree-sitter, no HTTP, no decision logic.
+Nothing else. No Tree-sitter, no decision logic. (§17 adds a third, unrelated job on
+`PreToolUse` — a direct HTTPS call to `twing serve`, bypassing the daemon entirely,
+because that path needs a synchronous verdict before Claude Code proceeds. It's a
+distinct code path with its own section; nothing below in this section changes because
+of it.)
 
 | Event | Operation | Behavior |
 |---|---|---|
@@ -138,15 +155,16 @@ schema:
 If there's nothing cached, output nothing (empty stdout, still exit 0) — Claude Code
 only parses stdout JSON on exit 0, so an empty body with exit 0 is a clean no-op.
 
-**Hard rules:**
+**Hard rules for this capture path specifically:**
 - Always exit 0. Socket missing, daemon down, socket write timeout (>50ms) → exit 0,
-  empty stdout, silently. Never use exit code 2 (blocking) for anything — that's a
-  deliberate policy choice (§4 of the memo: advisory only, never block), not an
-  oversight to fix later.
-- Never touch `PreToolUse`. It's the one event that *can* deny a tool call, and using it
-  for coordination is explicitly out of scope.
-- Single static binary, no dependencies, no config file reads beyond the socket path
-  (`~/.twing/daemon.sock`, or `$TWING_SOCK` if set — useful for tests).
+  empty stdout, silently. Never use exit code 2 (blocking) for anything on this path —
+  claim capture stays advisory-only (memo §4), unchanged.
+- This capture path never touches `PreToolUse` and never denies. `PreToolUse` is used,
+  but only by the separate design-gate code path in §17 — the capture path described in
+  this section doesn't gain decision logic just because the binary now has another job.
+- Single static binary, no dependencies. This path's own state is limited to the socket
+  path (`~/.twing/daemon.sock`, or `$TWING_SOCK` if set); §17's `PreToolUse` path
+  additionally reads `~/.twing/config.json` for the server URL — see §17.
 
 **Build:** `go build`, cross-compiled per platform via `GOOS`/`GOARCH`. `twing init`
 installs the appropriate prebuilt binary (or builds from source if Go is available) and
@@ -585,7 +603,7 @@ For whoever implements this without the full prior discussion:
 |---|---|---|---|
 | `PostToolUse` enqueue | Waits for subprocess exit (unavoidable — Claude Code mechanic), but not for any real work | Sub-few-ms | Hook only writes to a socket and exits; all parsing happens in the daemon afterward |
 | `SessionStart`/`UserPromptSubmit` cache-check | Same | Sub-few-ms | Daemon answers from an already-computed local cache, never live computation |
-| `PreToolUse` | N/A — not used | — | Deliberately unused; it's the one event that can deny an action, out of scope by policy |
+| `PreToolUse` design gate (§17) | **Yes, by design** — this is the one intentionally blocking path in the system | `Edit`\|`Write` status check: 15s. `ExitPlanMode` check: 60s (may run server-side extraction — a real LLM call, observed routinely taking >15s against a free-tier model). Fail open past the budget either way. | Registering/checking a design needs a real verdict before the write proceeds; bounded by a hard timeout and a fail-open fallback so a coordinator outage (or a slow extraction call) degrades to "no gate" rather than a hang |
 | `align`/`review` | N/A — separate process, not a hook | None | Deliberate, on-request invocation; a human or agent is already waiting for it |
 | Daemon → server sync | N/A | None | Fully async, debounced, decoupled from any session |
 
@@ -638,3 +656,149 @@ boot once and run for hours.
   matching against a human-authored file, which sidesteps precision risk on the
   detection side, but doesn't resolve whether the *patterns people write* end up firing
   usefully often vs. constantly vs. never. Only real usage will show this.
+
+---
+
+## 17. Design-time enforcement — the coordinator gate
+
+**Merged in from `design-conflict-coordinator-spec.md`, August 2026.** That file specs
+"item 1 of a three-part oracle: design conflicts / merge issues / compound memory."
+Merge issues are §§1–16 above (`align`'s textual-overlap/contract-divergence/
+trigger-duplication checks) — unchanged, still advisory. Compound memory is unbuilt.
+This section is design conflicts: the one piece of this product that deliberately
+blocks, per the revised guardrail in memo §4 Point 1.
+
+**What it does.** Before an agent's first `Edit`/`Write` in a session, its design must
+be registered with the coordinator. The coordinator checks it against every other
+currently-open design for the same `projectId` and against a `Constraint Store` of
+ratified facts. No meaningful overlap → proceed immediately. Overlap → the agent must
+adopt the existing design or state a justified divergence, which routes to a human.
+
+### 17.1 Data model
+
+Reuses this doc's identity model (§8: `projectId`/`developerId`/`sessionId`) rather
+than the spec's `repo_id`/`session_id`/`agent_label` naming, and lives in
+`packages/core/src/types.ts` alongside `Claim`/`CallEdge`/`Finding`:
+
+```ts
+interface DesignStatement {
+  id: string; projectId: string; developerId: string; sessionId: string;
+  agentLabel?: string; status: "open" | "superseded" | "closed" | "expired";
+  createdAt: number; closedAt?: number; summary: string;
+  creates: string[]; touches: string[]; dependsOn: string[];
+  rawPlanExcerpt?: string; ttlMs: number;
+}
+
+interface DesignConstraint {
+  id: string; projectId: string;
+  type: "canonical_abstraction" | "domain_fact" | "review_required";
+  statement: string; scope: string[]; source: string; createdAt: number;
+}
+```
+
+`creates`/`touches`/`dependsOn` are the structured fields overlap detection runs
+against, exactly as in the spec — free-form `summary` is a secondary, lower-weight
+signal, only consulted when the structured checks find nothing (§17.4).
+
+### 17.2 Endpoints (on the existing `twing serve` Hono app, alongside `/v1/claims`)
+
+- `POST /v1/designs/check` — the one call the hook makes. Accepts **either**
+  `rawPlanText` (the coordinator runs extraction, §17.3) **or** pre-structured
+  `creates`/`touches`/`dependsOn`/`summary` directly (skips extraction) — this unifies
+  the spec's two separate input paths (`ExitPlanMode` plan text vs. `register-design`'s
+  agent-supplied fields) into one endpoint with two input modes, registers the design,
+  and returns `{verdict: "clean" | "overlap" | "constraint_flag", ...}` per the spec's
+  response shapes.
+- `POST /v1/designs/:id/resolve` — `{resolution: "adopted", adoptedDesignId}` or
+  `{resolution: "justified_divergence", justification}` (queues to `/v1/reviews`).
+- `PATCH /v1/designs/:id/close`
+- `GET /v1/designs?projectId=&status=&sessionId=`
+- `GET /v1/reviews?projectId=` / `POST /v1/reviews/:id/decide {decision}`
+- `POST /v1/constraints/seed` — idempotent upsert, called by `twing init` with this
+  repo's local `.twing/verify.yml` `constraints` list (§10). This is the cold-start seed
+  the spec calls for (§12 item 7) without needing the server to read the repo itself —
+  the CLI already parses the manifest locally for `align`, so `init` just forwards it.
+
+### 17.3 Extraction
+
+`rawPlanText` → structured fields via one OpenRouter chat-completion call
+(`packages/server/src/design-extract.ts`), same call shape already used by
+`simulator/src/drivers/openrouter-driver.ts` (duplicated, not imported — the server
+package shouldn't depend on the simulator). Model: `TWING_EXTRACT_MODEL`, default
+`openai/gpt-oss-20b:free` (the simulator's existing default, kept for consistency and
+zero marginal cost while dogfooding). Key: `OPENROUTER_API_KEY` env var on the machine
+running `twing serve`.
+
+Schema-validated by hand on the way out (matches `manifest.ts`'s existing manual-parse
+style — no new dependency); one retry with a stricter prompt on malformed JSON. Unlike
+the spec's "reject/retry," a second failure **fails soft**: empty `creates`/`touches`/
+`dependsOn`, verdict proceeds as `clean`, failure logged server-side. An extraction bug
+degrading to "no check ran" is the right failure mode for a blocking gate — degrading to
+"deny everyone" is not.
+
+### 17.4 Overlap detection
+
+Same four tiers as the spec, in the same cheapest-first order, run in
+`packages/server/src/design-checks.ts`:
+
+1. Exact `creates`/`touches` intersection against every other `open` design, same
+   `projectId`.
+2. `creates` ∩ `depends_on` collision (either direction) — the "two agents each build
+   their own retry helper" case.
+3. `creates`/`touches` against `DesignConstraint.scope` (reused `minimatch`, already a
+   `@twing/core` dependency) — a `canonical_abstraction` hit or `review_required` scope
+   hit is `constraint_flag`, independent of any agent-vs-agent overlap.
+4. Jaccard keyword-set similarity over `summary`, only if 1–3 found nothing — a
+   deliberately weak fallback net, not the primary signal.
+
+### 17.5 Resolution flow
+
+Unchanged from the spec: `deny` (not `ask`) carries the conflicting design's summary
+and an adopt-or-justify instruction in `permissionDecisionReason`, since
+`permissionDecisionReason` is shown to Claude only on `deny`. `justified_divergence`
+queues to `/v1/reviews` and does not unblock by itself; the hook keeps denying with
+"awaiting review" until a human calls `POST /v1/reviews/:id/decide {decision:
+"approve"}` — the one legitimate human-facing pause in this system, run via `twing
+design reviews --decide`.
+
+### 17.6 Lifecycle
+
+`DesignRegistry` (in-memory, mirrors `store.ts`'s `Store` — TTL sweep, default 24h)
+plus two close triggers, narrower than the spec's three:
+
+- Explicit close via `resolve`'s `adopted` path (marks the abandoned design
+  `superseded`).
+- `SessionEnd` hook (new case in `hook/main.go`) best-effort closes any open design for
+  that session — simpler and higher-precision than the spec's git-commit-detection
+  trigger, which is **deferred**, along with its more-robust CI-webhook variant.
+- TTL fallback (24h) for anything neither of the above caught, marked `expired` (not
+  `closed`) so it's possible to tell "this got built" from "this session died."
+
+The `Constraint Store` is durable — unlike `DesignRegistry`, a restart must not lose
+ratified facts. Rather than the spec's Postgres/SQLite, it's a JSON file at
+`TWING_SERVE_DATA_DIR` (default `~/.twing/serve-data/constraints.json`), keyed by
+`projectId` — this project's existing "no DB, JSON snapshot is the cheapest durability
+upgrade" position (§16 above), applied to the one piece of state here that actually
+needs it.
+
+### 17.7 Fail-open, and a local kill-switch
+
+Same recommendation as the spec (§10): fail open with a loud local log
+(`~/.twing/design-coordinator.log`) on any coordinator unreachable/timeout/error — a
+tool that occasionally blocks all work over its own backend hiccup gets disabled, and
+that's a worse outcome than a missed check. `twing-hook` additionally honors
+`TWING_DESIGN_GATE=off` as a local kill-switch (short-circuits to an immediate allow,
+no network call) — useful for quickly disabling the gate without editing
+`.claude/settings.json`.
+
+### 17.8 Explicit scope cuts for this pass
+
+- **Claude Code only.** The spec's §13 cross-harness generalization (Codex CLI,
+  opencode, Gemini CLI, Pi via a shared `coordinator-cli.sh`) is not built here — this
+  doc's dogfood target is Claude Code, matching everything else in this doc.
+- **No CI backstop** (spec §11) — the non-bypassable version of the `Edit`/`Write`
+  fallback gate. Not needed to validate the concept on our own usage first.
+- **Git-commit-detection close trigger deferred** (§17.6) in favor of `SessionEnd` +
+  TTL.
+- **Constraint Store is a JSON file, not Postgres/SQLite** (§17.6) — a deliberate
+  divergence from the spec, consistent with this doc's existing persistence stance.

@@ -57,3 +57,70 @@ export interface Finding {
   reason: string;
   ts: number;
 }
+
+/**
+ * Design-conflict coordinator (design doc §17, merged from
+ * design-conflict-coordinator-spec.md). A distinct code path from
+ * Claim/Finding above — this is the one part of the system that blocks.
+ */
+
+export const DEFAULT_DESIGN_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface DesignStatement {
+  id: string;
+  projectId: string;
+  developerId: string;
+  sessionId: string;
+  agentLabel?: string;
+  status: "open" | "superseded" | "closed" | "expired";
+  createdAt: number;
+  closedAt?: number;
+  summary: string;
+  creates: string[];
+  touches: string[];
+  dependsOn: string[];
+  rawPlanExcerpt?: string;
+  ttlMs: number;
+}
+
+export type DesignConstraintType = "canonical_abstraction" | "domain_fact" | "review_required";
+
+export interface DesignConstraint {
+  id: string;
+  projectId: string;
+  type: DesignConstraintType;
+  statement: string;
+  /** Path globs or symbol names this applies to. */
+  scope: string[];
+  /** "seeded" | "ratified_from_divergence:<designId>" */
+  source: string;
+  createdAt: number;
+}
+
+export type DesignVerdict = "clean" | "overlap" | "constraint_flag";
+
+export type DesignOverlapKind = "creates" | "touches" | "depends_on" | "constraint";
+
+export interface DesignConflict {
+  conflictingDesignId: string;
+  agentLabel?: string;
+  overlapKind: DesignOverlapKind;
+  overlapDetail: string;
+  conflictingSummary: string;
+}
+
+export interface DesignCheckResult {
+  verdict: DesignVerdict;
+  designId: string;
+  conflicts?: DesignConflict[];
+  constraint?: { statement: string; type: DesignConstraintType };
+}
+
+export interface PendingReview {
+  id: string;
+  designId: string;
+  projectId: string;
+  justification: string;
+  createdAt: number;
+  decision?: "approve" | "reject";
+}

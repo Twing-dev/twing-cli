@@ -3,6 +3,14 @@ import { startDaemon } from "@twing/daemon";
 import { defaultSocketPath } from "@twing/core";
 import { runInit } from "./init.js";
 import { runAlign } from "./align.js";
+import {
+  runDesignRegister,
+  runDesignResolve,
+  runDesignList,
+  runDesignReviews,
+  runDesignEnableGate,
+  runDesignDisableGate,
+} from "./design.js";
 
 function parseFlags(args: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
@@ -23,7 +31,50 @@ function parseFlags(args: string[]): Record<string, string> {
 }
 
 function printUsage(): void {
-  console.error("Usage:\n  twing init --server <url>\n  twing daemon\n  twing align [--intent \"...\"]");
+  console.error(
+    [
+      "Usage:",
+      "  twing init --server <url>",
+      "  twing daemon",
+      "  twing align [--intent \"...\"]",
+      "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f",
+      "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
+      "  twing design list [--status open]",
+      "  twing design reviews [--decide <reviewId> --decision approve|reject]",
+      "  twing design enable-gate",
+      "  twing design disable-gate",
+    ].join("\n"),
+  );
+}
+
+async function runDesignCommand(rest: string[]): Promise<void> {
+  const [sub, ...subArgs] = rest;
+  const flags = parseFlags(subArgs);
+  const cwd = process.cwd();
+
+  switch (sub) {
+    case "register":
+      await runDesignRegister({ cwd, session: flags.session, label: flags.label, summary: flags.summary, creates: flags.creates, touches: flags.touches, dependsOn: flags["depends-on"] });
+      return;
+    case "resolve":
+      await runDesignResolve({ id: flags.id, adopt: flags.adopt, justify: flags.justify });
+      return;
+    case "list":
+      await runDesignList({ cwd, status: flags.status });
+      return;
+    case "reviews":
+      await runDesignReviews({ cwd, decide: flags.decide, decision: flags.decision === "approve" || flags.decision === "reject" ? flags.decision : undefined });
+      return;
+    case "enable-gate":
+      runDesignEnableGate({ cwd });
+      return;
+    case "disable-gate":
+      runDesignDisableGate({ cwd });
+      return;
+    default:
+      printUsage();
+      process.exit(1);
+  }
 }
 
 async function runDaemonForeground(): Promise<void> {
@@ -50,6 +101,9 @@ async function main(): Promise<void> {
       return;
     case "align":
       await runAlign({ intent: flags.intent, cwd: process.cwd() });
+      return;
+    case "design":
+      await runDesignCommand(rest);
       return;
     default:
       printUsage();

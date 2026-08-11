@@ -1,11 +1,13 @@
 require_human_review:
   - path: "hook/**"
     reason: "capture edge — must stay a trivial socket client with no decision logic (design doc §4)"
+  - path: "packages/server/src/design-*.ts"
+    reason: "coordinator's core verdict logic — a bug here blocks real Edit/Write calls across every gated session (design doc §17)"
 
 constraints:
   - text: "use the shared length-prefixed frame codec in packages/core; don't invent a second wire format"
     scope: "packages/**"
-  - text: "twing-hook must never touch PreToolUse and must never exit non-zero — advisory only, never blocking (§4)"
+  - text: "twing-hook's PostToolUse capture path must never exit non-zero and must never itself deny a tool call — advisory only, unchanged (§4). PreToolUse is used only by the separate design-gate path (design doc §17), never by capture."
     scope: "hook/**"
 
 triggers:

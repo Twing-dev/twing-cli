@@ -150,7 +150,27 @@ Humans define triggers in the same rule language as the gate (*"any new persiste
 
 **Coordination claims.** Git implements optimistic concurrency control: assume collisions are rare, detect at merge. Correct when changes were human-paced. Databases established long ago that OCC wins at low conflict rates and pessimistic coordination wins at high ones, and that the crossover is empirical. At 19.8–41.7% with 79.4% temporal overlap, **the crossover has been passed.**
 
-The guardrail: mandatory locking serialises and deadlocks. If the registry makes agents wait, we destroy the parallelism the customer is buying. **Advisory claims only — announce, never block.**
+**Revised, August 2026 — this guardrail no longer describes the product.** The
+original worry was real: mandatory locking serialises and deadlocks, and a
+registry that makes agents wait indefinitely destroys the parallelism the
+customer is buying. But "advisory only, never block" was answering the wrong
+question by conflating two different moments. Claims over already-declared
+symbols (Read/Grep/Edit/Write on code that exists) stay exactly as advisory as
+this section originally argued — locking at that granularity, mid-flight,
+genuinely would deadlock two agents against each other.
+
+Design registration is a different moment: once, before an agent's first
+write in a session, gated on a single short round trip. Task-time
+coordination now has two mechanisms, not one — the claim registry (below,
+unchanged, advisory) and a **blocking pre-code design gate** (design doc §17)
+that denies the first `Edit`/`Write` until a design is registered and any
+overlap with another open design or a ratified constraint is adopted or
+justified. This is the deliberate implementation of Point 1's design-trigger
+half, not an exception carved out of the concurrency half. It doesn't
+reintroduce the deadlock risk this guardrail was written against: it gates
+one write, not a symbol for the session's duration; it fails open on any
+coordinator trouble rather than hanging; it's TTL-bounded; and unresolved
+conflicts route to adopt-or-justify rather than an indefinite wait.
 
 *Granularity.* Git merges on line/hunk adjacency with no semantic understanding. Replicating that buys only earlier delivery of the same signal. The real issue is that **git conflicts on textual adjacency; agents conflict on contract adjacency** — a signature change plus a caller in another file has *zero* textual overlap and guaranteed breakage. Line numbers are also unstable identity.
 

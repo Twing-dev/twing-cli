@@ -26,6 +26,24 @@ disconnect, writes a PID file (`twing-serve.pid`) for `stop-server.sh` to
 find later, and refuses to start if it's already running or if there's no
 build yet.
 
+### Design gate (§17 of the design doc) -- optional env vars
+
+`start-server.sh` just inherits whatever's already in your shell's
+environment, so export these first if you want the design-conflict gate's
+plan-text extraction working:
+
+```sh
+export OPENROUTER_API_KEY=$(cat openrouter_key.txt)   # or your own key
+export TWING_EXTRACT_MODEL=openai/gpt-oss-20b:free    # optional, this is the default
+export TWING_SERVE_DATA_DIR=~/.twing/serve-data        # optional, this is the default -- where ratified constraints persist
+deploy/start-server.sh
+```
+
+None of these are required to start the server -- without `OPENROUTER_API_KEY`,
+`ExitPlanMode` checks fail soft to "clean" (logged), and the `Edit`/`Write`
+"you need a registered design" check still works either way, since it doesn't
+need extraction.
+
 ## Logs
 
 ```sh
@@ -48,7 +66,10 @@ deploy/stop-server.sh
 deploy/redeploy.sh
 ```
 
-Runs `git pull && npm install && npm run build`, then stop + start.
+Runs `git pull && npm install && npm run build`, then stop + start. Export the
+design-gate env vars above in the same shell before running this if you want
+them picked up -- `start-server.sh` inherits them either way, since
+`redeploy.sh` calls it as a child process rather than a separate login.
 
 ## If you want it to survive a reboot / auto-restart on crash
 

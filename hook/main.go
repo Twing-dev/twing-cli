@@ -42,9 +42,16 @@ func main() {
 		handlePostToolUse(payload)
 	case "SessionStart", "UserPromptSubmit":
 		handleCacheCheck(payload)
+	case "PreToolUse":
+		// §17's design gate, a separate code path from the capture handlers
+		// above -- see design_gate.go. Never used by capture (§4).
+		handlePreToolUse(payload)
+	case "SessionEnd":
+		// §17.6 close trigger. No-op unless the design gate is registered
+		// (handleSessionEnd checks TWING_DESIGN_GATE itself).
+		handleSessionEnd(payload)
 	default:
-		// Includes PreToolUse, deliberately untouched (§4): it's the one
-		// event that can deny a tool call, and that's out of scope by policy.
+		// No-op for anything else.
 	}
 }
 

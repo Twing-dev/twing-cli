@@ -37,7 +37,37 @@ Usage: twing-simulator [options]
   --openrouter-model <model>    default: openai/gpt-oss-20b:free
   --openrouter-key-file <path>  default: <repo root>/openrouter_key.txt
   --server-port <port>          default: 8790
+  --enable-design-gate          leave the §17 PreToolUse gate wired (default: off)
 ```
+
+## Testing the design-conflict gate (§17)
+
+`twing init` now wires the design gate (`PreToolUse` on `ExitPlanMode`/
+`Edit`\|`Write`, plus `SessionEnd`) into every repo it runs in, including the
+scratch session directories this simulator sets up. Since the existing
+scenarios weren't written with design registration in mind, the orchestrator
+disables the gate again right after `init` **unless** you pass
+`--enable-design-gate` -- otherwise every real agent's first edit would get
+denied for having no registered design, breaking scenarios that have nothing
+to do with this feature.
+
+With the flag on, export `OPENROUTER_API_KEY` first (the ephemeral server
+needs it for `ExitPlanMode`'s ~structured-field extraction, §17.3):
+
+```sh
+export OPENROUTER_API_KEY=$(cat openrouter_key.txt)
+node simulator/dist/index.js --enable-design-gate
+```
+
+Known rough edge, not a simulator bug: agents run with
+`--permission-mode bypassPermissions` have no permission friction to avoid, so
+a real session may never call `ExitPlanMode` on its own and instead hits the
+`Edit`|`Write` fallback immediately -- which denies with instructions to run
+`twing design register --session <id> ...`, but the agent has no reliable way
+to read its own Claude Code session id from inside a Bash tool call (a known
+gap, see the design doc §17's register command notes). The `ExitPlanMode`
+path doesn't have this problem, since the hook already receives the real
+session id in every `PreToolUse` payload.
 
 Example: drive session A yourself, let OpenRouter drive session B, and use
 two independent clones instead of worktrees:
