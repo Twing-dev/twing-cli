@@ -17,13 +17,37 @@ export interface InitOptions {
   cwd: string;
 }
 
+/**
+ * `fetch` requires an absolute URL with a scheme -- `--server host:port`
+ * (a very natural thing to type) otherwise fails deep inside a network
+ * try/catch with a cryptic "failed to parse URL" error that gets silently
+ * swallowed as "server unreachable," leaving `init` reporting "done" while
+ * having stored a URL that breaks every subsequent command too. Caught
+ * live, 2026-08-11, on a real second-developer `init` run. Validate and
+ * normalize once, here, instead of letting a caller-input error masquerade
+ * as a connectivity problem three layers down.
+ */
+export function normalizeServerUrl(input: string): string {
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(input) ? input : `http://${input}`;
+  try {
+    new URL(withScheme);
+  } catch {
+    throw new Error(`twing init: "${input}" isn't a valid server URL (tried "${withScheme}") -- expected something like http://host:port`);
+  }
+  return withScheme;
+}
+
 export async function runInit(options: InitOptions): Promise<void> {
   const existing = readConfig();
-  const serverUrl = options.server ?? process.env.TWING_SERVER ?? existing.serverUrl;
-  if (!serverUrl) {
+  const rawServerUrl = options.server ?? process.env.TWING_SERVER ?? existing.serverUrl;
+  if (!rawServerUrl) {
     throw new Error(
       "twing init: no server URL given -- pass --server <url>, set TWING_SERVER, or run init once with --server to store it in ~/.twing/config.json",
     );
+  }
+  const serverUrl = normalizeServerUrl(rawServerUrl);
+  if (serverUrl !== rawServerUrl) {
+    console.log(`twing init: "${rawServerUrl}" has no scheme -- assuming ${serverUrl}`);
   }
   console.log(`twing init: server = ${serverUrl}`);
 
