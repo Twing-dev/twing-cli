@@ -2,6 +2,7 @@
 import { startDaemon } from "./daemon/server.js";
 import { defaultSocketPath } from "@twing/core";
 import { runInit } from "./init.js";
+import { runLogin } from "./login.js";
 import { runAlign } from "./align.js";
 import {
   runDesignRegister,
@@ -34,7 +35,8 @@ function printUsage(): void {
   console.error(
     [
       "Usage:",
-      "  twing init --server <url>",
+      "  twing init [--server <url>]",
+      "  twing login [--server <url>]",
       "  twing daemon",
       "  twing align [--intent \"...\"]",
       "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f",
@@ -57,7 +59,7 @@ async function runDesignCommand(rest: string[]): Promise<void> {
       await runDesignRegister({ cwd, session: flags.session, label: flags.label, summary: flags.summary, creates: flags.creates, touches: flags.touches, dependsOn: flags["depends-on"] });
       return;
     case "resolve":
-      await runDesignResolve({ id: flags.id, adopt: flags.adopt, justify: flags.justify });
+      await runDesignResolve({ cwd, id: flags.id, adopt: flags.adopt, justify: flags.justify });
       return;
     case "list":
       await runDesignList({ cwd, status: flags.status });
@@ -95,6 +97,9 @@ async function main(): Promise<void> {
   switch (command) {
     case "init":
       await runInit({ server: flags.server, cwd: process.cwd() });
+      return;
+    case "login":
+      await runLogin({ server: flags.server, cwd: process.cwd() });
       return;
     case "daemon":
       await runDaemonForeground();

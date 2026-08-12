@@ -136,7 +136,7 @@ under `simulator/fixtures/`.
 
 Whether `align`'s trigger-duplication check fires depends on the agent's
 edit style: a localized `Edit` call produces a symbol-level claim (so a new
-function's name gets checked against `.twing/verify.yml` triggers), but a
+function's name gets checked against `.twing/twing.yml` triggers), but a
 full-file `Write` falls back to a file-level claim with no symbol name to
 check (§5 of the design doc, deliberately, for v0). Two sessions that
 independently build near-duplicate helpers may or may not both get flagged

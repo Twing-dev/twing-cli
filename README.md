@@ -64,12 +64,18 @@ node /path/to/twing-cli/packages/cli/dist/index.js init --server http://localhos
 
 That one command:
 
-1. Stores the server URL in `~/.twing/config.json`.
+1. Writes `coordinator.serverUrl` into that repo's `.twing/twing.yml` --
+   **commit this file** so the rest of your team never has to pass
+   `--server` themselves; their `twing init` (or `twing login`) picks it up
+   automatically. Skipped if the file already declares a different
+   coordinator -- `init` warns and leaves it untouched rather than silently
+   repointing your whole team; edit `.twing/twing.yml` directly if that's
+   what you actually want.
 2. **If the server has a password set** (`TWING_SERVE_PASSWORD`, see
    `deploy/README.md`), prompts for it once, right there in the terminal
-   (masked input), and stores the resulting token alongside the URL --
-   never asks again for that server. A server with no password configured
-   skips this entirely.
+   (masked input), and caches the resulting token in `~/.twing/config.json`
+   -- keyed by server URL, never asks again for that specific server. A
+   server with no password configured skips this entirely.
 3. Builds `twing-hook` from source and installs it to `~/.twing/bin/twing-hook`
    (needs Go the first time; reused after that).
 4. Merges hook entries into `<that-repo>/.claude/settings.json` -- merges
@@ -78,7 +84,20 @@ That one command:
    running -- one daemon per machine, shared across every repo you `init`.
 
 Re-running `twing init --server <url>` is safe -- it re-points an existing
-install rather than duplicating anything.
+install rather than duplicating anything. Once a repo's `.twing/twing.yml`
+already declares a coordinator (because someone committed it, per step 1
+above), everyone else can just run `twing init` with **no `--server` flag at
+all** -- it's discovered from the repo. `TWING_SERVER` still works as a
+one-off override (e.g. pointing at a staging coordinator) without touching
+the committed file.
+
+A machine can have cached tokens for several different coordinators at
+once -- `~/.twing/config.json` is a map, not a single slot, so switching
+between repos pointed at different `twing serve` instances doesn't require
+re-authenticating every time you switch. Use `twing login [--server <url>]`
+on its own to (re)authenticate against a server without repeating the rest
+of `init`'s setup -- useful for a second repo on a new coordinator, or a
+token that's gone stale.
 
 ### Optional: a global `twing` command
 
@@ -113,7 +132,8 @@ checks and how the report is built.
 
 | Command | What it does |
 |---|---|
-| `twing init --server <url>` | One-time setup per machine: config, hook install, hook wiring (including the design gate below), daemon start. Safe to re-run. |
+| `twing init [--server <url>]` | One-time setup per machine: discovers/bootstraps the coordinator, authenticates, hook install, hook wiring (including the design gate below), daemon start. Safe to re-run. `--server` only needed the first time a repo declares its coordinator, or to override. |
+| `twing login [--server <url>]` | Just (re)authenticate against a coordinator -- no hook install, no settings wiring, no daemon start. For a second repo on a new server, or a stale token. |
 | `twing align [--intent "..."]` | Local constraint/trigger checks plus a server round-trip for cross-session divergence findings. |
 | `twing daemon` | Runs the daemon in the foreground (rarely needed manually -- `init` already starts it detached). |
 | `twing design register/resolve/list/reviews` | Design-conflict gate commands, see below. |

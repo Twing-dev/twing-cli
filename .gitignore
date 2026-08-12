@@ -1,8 +1,17 @@
 node_modules/
 dist/
 *.tsbuildinfo
-.twing/daemon.sock
-.twing/state.json
+
+# A repo's own .twing/twing.yml is committed -- it's shared team policy plus
+# the coordinator's location (serverUrl), never a credential. Everything
+# machine-local (daemon.sock, the multi-server auth-token config, the
+# twing-hook binary) lives under ~/.twing/ instead -- the user's home
+# directory, not inside any repo's working tree at all, so it can't be
+# accidentally committed here. (Two now-dead entries used to live in this
+# file claiming a repo-local .twing/daemon.sock and .twing/state.json --
+# neither is real: the socket is always ~/.twing/daemon.sock per
+# defaultSocketPath(), and nothing in this codebase ever creates a
+# state.json anywhere.)
 /hook/twing-hook
 /hook/hook
 openrouter_key.txt

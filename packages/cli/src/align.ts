@@ -3,8 +3,7 @@
  * matches (local), cross-session divergence (server round-trip).
  */
 
-import * as path from "node:path";
-import { readConfig, findRepoRoot, computeProjectId, loadManifestFromFile, matchTriggers, authFetch, type Finding } from "@twing/core";
+import { readConfig, getServerAuth, findRepoRoot, computeProjectId, loadManifestFromFile, twingConfigPath, matchTriggers, authFetch, type Finding } from "@twing/core";
 import { gatherClaims } from "./gather-claims.js";
 import { queryDaemonNotices } from "./daemon-client.js";
 import { printReport } from "./report.js";
@@ -16,7 +15,7 @@ export interface AlignOptions {
 
 export async function runAlign(options: AlignOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const manifest = loadManifestFromFile(path.join(repoRoot, ".twing", "verify.yml"));
+  const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
   const projectId = computeProjectId(repoRoot);
 
   const gathered = await gatherClaims(options.cwd);
@@ -26,8 +25,12 @@ export async function runAlign(options: AlignOptions): Promise<void> {
   // treated as evidence, never suppresses a diff-based finding.
   const intentHits = options.intent ? matchTriggers(manifest, options.intent) : [];
 
-  const config = readConfig();
-  const serverUrl = config.serverUrl;
+  // Resolve serverUrl from the repo's own committed coordinator, not a
+  // single global slot -- this repo is the source of truth for which
+  // coordinator it talks to, independent of what other repos/servers this
+  // machine has ever pointed at.
+  const serverUrl = manifest.coordinator.serverUrl;
+  const authToken = serverUrl ? getServerAuth(readConfig(), serverUrl)?.authToken : undefined;
   let findings: Finding[] = [];
   let serverError: string | undefined;
 
@@ -40,13 +43,13 @@ export async function runAlign(options: AlignOptions): Promise<void> {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ projectId, claims: gathered.claims, callEdges: gathered.callEdges }),
         },
-        config.authToken,
+        authToken,
       );
       if (res.ok) {
         const body = (await res.json()) as { findings: Finding[] };
         findings = body.findings;
       } else if (res.status === 401) {
-        serverError = "unauthorized -- run `twing init` again to re-authenticate";
+        serverError = "unauthorized -- run `twing login` to re-authenticate";
       } else {
         serverError = `server responded ${res.status}`;
       }

@@ -83,7 +83,7 @@ type designListResponse struct {
 
 // setAuthHeader adds the §17.10 bearer token when non-empty -- a no-op
 // against a server with no password configured, since authToken is "" in
-// that case (readTwingConfig never has one to give).
+// that case (resolveServerConfig never has one to give).
 func setAuthHeader(req *http.Request, authToken string) {
 	if authToken != "" {
 		req.Header.Set("authorization", "Bearer "+authToken)
@@ -157,7 +157,7 @@ func handlePreToolUse(payload hookPayload) {
 }
 
 func handleExitPlanMode(payload hookPayload) {
-	config := readTwingConfig()
+	config := resolveServerConfig(payload.Cwd)
 	if config.ServerURL == "" {
 		return
 	}
@@ -296,7 +296,7 @@ func checkPathConstraint(serverURL, authToken, projectID, filePath string) (bool
 // to the "any open design" check -- a session can't sidestep a
 // review_required rule just by registering an unrelated design first.
 func handleEditWriteGate(payload hookPayload) {
-	config := readTwingConfig()
+	config := resolveServerConfig(payload.Cwd)
 	if config.ServerURL == "" {
 		return
 	}
@@ -357,7 +357,7 @@ func handleSessionEnd(payload hookPayload) {
 	if !designGateEnabled() {
 		return
 	}
-	config := readTwingConfig()
+	config := resolveServerConfig(payload.Cwd)
 	if config.ServerURL == "" {
 		return
 	}

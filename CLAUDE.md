@@ -53,6 +53,8 @@ Running the pieces locally:
 ```sh
 npm run start --workspace packages/server   # twing serve, port 8787 (PORT env to override)
 node packages/cli/dist/index.js init --server http://localhost:8787   # run from the target repo, not from twing-cli
+node packages/cli/dist/index.js init        # no --server needed once that repo's .twing/twing.yml declares a coordinator
+node packages/cli/dist/index.js login --server http://localhost:8787  # (re)authenticate only, no other setup
 node packages/cli/dist/index.js align
 node packages/cli/dist/index.js daemon      # foreground daemon (init normally starts one detached)
 ```
@@ -90,7 +92,7 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     the TS daemon/CLI (this happened in production once, per the comments).
   - `framing.ts` — length-prefixed JSON frame codec for the Unix socket.
     There is exactly one wire format; nothing should invent a second one
-    (enforced as a constraint in this repo's own `.twing/verify.yml`).
+    (enforced as a constraint in this repo's own `.twing/twing.yml`).
   - `tree-sitter.ts`/`symbol-id.ts` — symbol-level parsing (JS/TS only in
     v0) used to turn a file edit into a `symbolId` like
     `src/net/retry.ts::RetryPolicy.backoff`; a full-file `Write` (vs. a
@@ -102,6 +104,24 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     runtime caller) because `align`'s no-daemon git-diff fallback
     (`diff-claims.ts`) needs the same pure algorithm without pulling in the
     daemon's socket-server/sync machinery.
+  - `manifest.ts` — `.twing/twing.yml` parser (renamed from `verify.yml`:
+    its scope grew beyond verification policy). `requireHumanReview`/
+    `constraints`/`triggers` are evaluated locally, only the match *results*
+    transit as part of a Claim (`constraints`/`requireHumanReview` text
+    itself is separately uploaded verbatim by `init`'s constraint-seeding
+    step, §17 — see the file's own doc comment for the distinction).
+    `coordinator.serverUrl` is different in kind from all of that: never
+    uploaded anywhere, read purely locally by `init`/`login`/`align`/
+    `design *` and by the Go hook to know where to send everything else.
+    `upsertCoordinatorServerUrl` (comment-preserving, `yaml.parseDocument`)
+    is what `init` uses to bootstrap/update that field without disturbing
+    the rest of the file.
+  - `config.ts` — `~/.twing/config.json`, the machine-local (never
+    committed) counterpart to `manifest.ts`'s repo-local (committed) file: a
+    map of coordinator server URL → cached auth token, not a single slot —
+    a developer can have cached credentials for several coordinators at
+    once. `getServerAuth`/`setServerAuth` are the accessors everything else
+    uses; `readConfig` transparently migrates the old single-slot shape.
 
 - **`packages/cli`'s daemon** (`packages/cli/src/daemon/`) — one process per
   machine, shared across every repo `init` runs in; spawned detached by
@@ -136,14 +156,18 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     Constraint Store directly, independent of what the session's registered
     design claims to touch (closes a bypass where a session registers an
     unrelated design first).
-  - This package's own `.twing/verify.yml` in this repo flags
+  - This package's own `.twing/twing.yml` in this repo flags
     `packages/server/**` and especially `design-*.ts` as
     `require_human_review` — a bug in the verdict logic blocks real
     `Edit`/`Write` calls across every gated session.
 
 - **`packages/cli`** — the `twing` command. `index.ts` dispatches
-  `init`/`daemon`/`align`/`design <sub>`; each subcommand is one file
-  (`init.ts`, `align.ts`, `design.ts`). `align.ts` falls back to computing
+  `init`/`login`/`daemon`/`align`/`design <sub>`; each subcommand is one
+  file (`init.ts`, `login.ts`, `align.ts`, `design.ts`). `auth.ts` holds the
+  shared password-login flow both `init` and `login` call — `login` is the
+  cheap, repeatable subset of `init` (just authenticate, no hook
+  install/settings wiring/daemon start/constraint seed), for a second repo
+  on a new coordinator or a stale token. `align.ts` falls back to computing
   claims directly from `git diff` against the branch's merge-base with the
   default branch when there's no daemon/hooks (works standalone).
   `install-hook.ts`/`wire-hooks.ts` build `twing-hook` from Go source and
@@ -160,15 +184,28 @@ as a failure or looking like a block. Two independent handlers dispatched by
 - **Capture** (`PostToolUse`, `SessionStart`, `UserPromptSubmit`) — dumb pipe
   to the daemon over the Unix socket (`socket.go`, mirrors `core/protocol.ts`
   and `core/framing.ts`). Never parses `toolInput`; forwards it verbatim —
-  the daemon owns interpretation. Must never deny a tool call (constraint in
-  this repo's own `.twing/verify.yml`).
+  the daemon owns interpretation, including resolving this repo's
+  coordinator (`manifest.ts`'s `coordinator.serverUrl`, already loaded
+  per-repo for constraint/trigger matching, reused there rather than making
+  the hook shell out to `git`/read YAML on this path too — see the
+  capture-path note in `daemon/server.ts`). Must never deny a tool call
+  (constraint in this repo's own `.twing/twing.yml`).
 - **Design gate** (`design_gate.go`, `PreToolUse` on `ExitPlanMode`/
   `Edit`|`Write`, and `SessionEnd`) — talks to `twing serve` directly over
   HTTP, bypassing the daemon entirely, because this path needs a synchronous
   allow/deny verdict. Fails open on any network/parse error (logged to
   `~/.twing/design-coordinator.log`), same as capture, for a different
   reason: §17.7's policy, not §4's advisory-only one. `TWING_DESIGN_GATE=off`
-  short-circuits it with zero network calls.
+  short-circuits it with zero network calls. `resolveServerConfig`
+  (`config.go`) is what every call site on this path uses to find the
+  coordinator: `manifest.go`'s `readCoordinatorServerURL` reads the repo's
+  committed `.twing/twing.yml` (repo root via `git rev-parse
+  --show-toplevel`, reusing `identity.go`'s `gitOutput` helper — repo-root
+  resolution is always delegated to `git` on this side, never a hand-rolled
+  walk), combined with this machine's cached token for that specific server
+  from `~/.twing/config.json` (`config.go`'s multi-server map — the one
+  third-party Go dependency in this module, `gopkg.in/yaml.v3`, exists
+  solely to parse that repo-committed file).
 
 `hook/**` itself is flagged `require_human_review` in this repo's constraint
 file: it must stay a trivial socket/HTTP client with no decision logic.
@@ -207,11 +244,19 @@ Claude Code tool call
   `CLAUDE_CODE_SESSION_ID` by default (confirmed live against a real gated
   session) or `--session` explicitly for other callers. `ExitPlanMode`
   always uses the real one automatically.
+- `serverUrl` (a repo's coordinator) — resolved from `--server`/
+  `TWING_SERVER` first, then the repo's committed `.twing/twing.yml`
+  (`coordinator.serverUrl`); deliberately **no** fallback to "whatever was
+  last cached globally" — a machine can have several coordinators cached at
+  once (multi-server, `~/.twing/config.json`'s `servers` map), so there's no
+  single meaningful default to guess. `authToken` is a separate lookup, by
+  `serverUrl`, into that same map — never stored in or read from the repo
+  file.
 
 ## Working in this repo
 
 This repo dogfoods its own design-conflict gate against a remote coordinator
-(see `.twing/verify.yml` and local `.claude/settings.json`, which is
+(see `.twing/twing.yml` and local `.claude/settings.json`, which is
 gitignored — it's regenerated by `twing init`, not committed, since its hook
 commands bake in an absolute `$HOME`-specific path). Expect `Edit`/`Write`
 gate checks to fire in this repo's own sessions; if one denies with "no
@@ -219,9 +264,12 @@ design registered", run `twing design register --summary "..." --touches
 <paths>` (or enter plan mode, which registers one automatically via
 `ExitPlanMode`) before retrying.
 
-`.gitignore` also excludes `dist/`, `*.tsbuildinfo`, `.twing/daemon.sock`,
-`.twing/state.json`, the built `hook/twing-hook` binary, `openrouter_key.txt`,
-`simulator/.workspaces/`, and the `deploy/`-generated `twing-serve.log`/`.pid`.
+`.gitignore` also excludes `dist/`, `*.tsbuildinfo`, the built
+`hook/twing-hook` binary, `openrouter_key.txt`, `simulator/.workspaces/`,
+and the `deploy/`-generated `twing-serve.log`/`.pid`. Everything
+machine-local (`daemon.sock`, the multi-server auth-token config) lives
+under `~/.twing/` — the user's home directory, not inside this repo's
+working tree at all, so it was never something `.gitignore` needed to name.
 
 License is dual MIT/Apache-2.0 for most packages, but `packages/server` is
 AGPL-3.0-only — check a package's own `package.json` `license` field before
