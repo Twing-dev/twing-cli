@@ -16,6 +16,7 @@ import {
   computeSymbolId,
   leafName,
   loadManifestFromFile,
+  twingConfigPath,
   matchConstraints,
   matchTriggers,
   languageForPath,
@@ -26,8 +27,8 @@ import {
   type Claim,
   type CallEdge,
   type EnclosingSymbol,
+  updateCallGraph,
 } from "@twing/core";
-import { updateCallGraph } from "@twing/daemon";
 import type { Node } from "web-tree-sitter";
 
 /**
@@ -118,7 +119,7 @@ export async function gatherFromDiff(repoRoot: string): Promise<DiffClaims | nul
   if (!mergeBase) return null;
 
   const files = changedFilesSince(repoRoot, mergeBase).filter((f) => f.status !== "D");
-  const manifest = loadManifestFromFile(path.join(repoRoot, ".twing", "verify.yml"));
+  const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
   const projectId = computeProjectId(repoRoot);
   const developerId = computeDeveloperId(repoRoot);
   const branch = computeBranch(repoRoot);

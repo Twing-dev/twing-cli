@@ -132,6 +132,16 @@ function handleMessage(
         claims.push(result.claim);
         callEdges.push(...result.newCallEdges);
         developerBySession.set(result.claim.sessionId, result.claim.developerId);
+        // extractClaim already had this repo's manifest loaded (per-repo
+        // cache in claims.ts) to check constraints/triggers -- reusing its
+        // `coordinator.serverUrl` here is free, and keeps the capture path
+        // (this handler) untouched by multi-server support: the hook still
+        // does zero interpretation, exactly as §4 intends. Absent when the
+        // repo has no coordinator configured yet -- the claim still gets
+        // captured locally, it just can't sync until one is.
+        if (result.coordinatorServerUrl) {
+          syncer.registerProjectServer(result.claim.projectId, result.coordinatorServerUrl);
+        }
         syncer.enqueue(result.claim, result.newCallEdges);
         console.log(
           `twing daemon: ${result.claim.stage} claim on ${result.claim.symbolId}` +

@@ -13,6 +13,7 @@ import {
   computeSymbolId,
   leafName,
   loadManifestFromFile,
+  twingConfigPath,
   matchConstraints,
   matchTriggers,
   stageForTool,
@@ -26,8 +27,8 @@ import {
   type Manifest,
   type EnclosingSymbol,
   type HookToolName,
+  updateCallGraph,
 } from "@twing/core";
-import { updateCallGraph } from "./call-graph.js";
 
 interface RepoState {
   repoRoot: string;
@@ -58,7 +59,7 @@ function getRepoState(repoRoot: string): RepoState {
       repoRoot,
       projectId: computeProjectId(repoRoot),
       developerId: computeDeveloperId(repoRoot),
-      manifest: loadManifestFromFile(path.join(repoRoot, ".twing", "verify.yml")),
+      manifest: loadManifestFromFile(twingConfigPath(repoRoot)),
       fileContent: new Map(),
       fileSymbols: new Map(),
       nameIndex: new Map(),
@@ -100,6 +101,11 @@ export interface ExtractionInput {
 export interface ExtractionResult {
   claim: Claim;
   newCallEdges: CallEdge[];
+  /** This repo's coordinator, if `.twing/twing.yml` declares one --
+   * `state.manifest` is already loaded per-repo (cached in `RepoState`), so
+   * this is free: no extra file I/O, no reason for `server.ts` to reload
+   * the manifest itself just to learn the project->server mapping. */
+  coordinatorServerUrl?: string;
 }
 
 /** Returns null when there's nothing file-scoped to extract a claim from —
@@ -198,5 +204,5 @@ export async function extractClaim(input: ExtractionInput): Promise<ExtractionRe
     ttlMs: DEFAULT_CLAIM_TTL_MS,
   };
 
-  return { claim, newCallEdges };
+  return { claim, newCallEdges, coordinatorServerUrl: state.manifest.coordinator.serverUrl };
 }

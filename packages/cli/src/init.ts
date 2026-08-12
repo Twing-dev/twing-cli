@@ -1,48 +1,37 @@
 /**
- * `twing init` (§6): the single onboarding step. Store the server URL,
- * authenticate if the server requires it (§17.10), ensure the hook binary
- * is present, wire hooks into this repo's `.claude/settings.json`, start
- * the daemon. Safe to re-run.
+ * `twing init` (§6): the single onboarding step. Discover the coordinator
+ * server (repo-committed `.twing/twing.yml`, or bootstrap it from an
+ * explicit `--server`), authenticate if it requires it (§17.10), ensure the
+ * hook binary is present, wire hooks into this repo's `.claude/settings.json`,
+ * start the daemon. Safe to re-run.
  */
 
-import * as path from "node:path";
-import { readConfig, writeConfig, findRepoRoot, loadManifestFromFile, computeProjectId, authFetch } from "@twing/core";
+import { findRepoRoot, loadManifestFromFile, twingConfigPath, upsertCoordinatorServerUrl, normalizeServerUrl, computeProjectId, authFetch, type Manifest } from "@twing/core";
 import { ensureHookInstalled } from "./install-hook.js";
 import { wireHooks } from "./wire-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
-import { promptPassword } from "./prompt-password.js";
+import { ensureAuthenticated } from "./auth.js";
 
 export interface InitOptions {
   server?: string;
   cwd: string;
 }
 
-/**
- * `fetch` requires an absolute URL with a scheme -- `--server host:port`
- * (a very natural thing to type) otherwise fails deep inside a network
- * try/catch with a cryptic "failed to parse URL" error that gets silently
- * swallowed as "server unreachable," leaving `init` reporting "done" while
- * having stored a URL that breaks every subsequent command too. Caught
- * live, 2026-08-11, on a real second-developer `init` run. Validate and
- * normalize once, here, instead of letting a caller-input error masquerade
- * as a connectivity problem three layers down.
- */
-export function normalizeServerUrl(input: string): string {
-  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(input) ? input : `http://${input}`;
-  try {
-    new URL(withScheme);
-  } catch {
-    throw new Error(`twing init: "${input}" isn't a valid server URL (tried "${withScheme}") -- expected something like http://host:port`);
-  }
-  return withScheme;
-}
-
 export async function runInit(options: InitOptions): Promise<void> {
-  const existing = readConfig();
-  const rawServerUrl = options.server ?? process.env.TWING_SERVER ?? existing.serverUrl;
+  const repoRoot = findRepoRoot(options.cwd);
+  const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
+
+  // §"Resolution precedence": --server flag / TWING_SERVER > repo's
+  // committed coordinator.serverUrl. Deliberately no fallback to whatever
+  // was last cached globally -- with multiple servers cacheable at once
+  // (multi-server support), guessing which one to fall back to isn't
+  // meaningful; the repo file is the source of truth once it exists.
+  const explicitServer = options.server ?? process.env.TWING_SERVER;
+  const rawServerUrl = explicitServer ?? manifest.coordinator.serverUrl;
   if (!rawServerUrl) {
     throw new Error(
-      "twing init: no server URL given -- pass --server <url>, set TWING_SERVER, or run init once with --server to store it in ~/.twing/config.json",
+      "twing init: no server URL given -- pass --server <url> once (this also writes it into " +
+        ".twing/twing.yml so your team picks it up automatically), or set TWING_SERVER for a one-off override.",
     );
   }
   const serverUrl = normalizeServerUrl(rawServerUrl);
@@ -51,100 +40,45 @@ export async function runInit(options: InitOptions): Promise<void> {
   }
   console.log(`twing init: server = ${serverUrl}`);
 
-  // A stored token only applies to the server it was issued by -- pointing
-  // at a different one starts fresh (§17.10).
-  const carriedToken = existing.serverUrl === serverUrl ? existing.authToken : undefined;
-  const authToken = await ensureAuthenticated(serverUrl, carriedToken);
-  writeConfig({ ...existing, serverUrl, authToken });
+  // Bootstrap/update the repo's committed coordinator only when the server
+  // was given explicitly (flag or env) -- never silently promote a
+  // fallback into the shared file, and never clobber a different
+  // already-committed value without an explicit, deliberate edit.
+  if (explicitServer && manifest.coordinator.serverUrl !== serverUrl) {
+    const result = upsertCoordinatorServerUrl(twingConfigPath(repoRoot), serverUrl);
+    if (result.written) {
+      console.log("twing init: wrote coordinator.serverUrl into .twing/twing.yml -- commit this so your team picks it up automatically");
+    } else if (result.conflictingExisting) {
+      console.log(
+        `twing init: .twing/twing.yml already declares a different coordinator (${result.conflictingExisting}) -- left it untouched. ` +
+          "Edit .twing/twing.yml directly if you mean to repoint your whole team.",
+      );
+    }
+  }
+
+  const authToken = await ensureAuthenticated(serverUrl, "twing init");
 
   const hookPath = ensureHookInstalled();
   console.log(`twing init: hook installed at ${hookPath}`);
 
-  const repoRoot = findRepoRoot(options.cwd);
   const wired = wireHooks(repoRoot, hookPath);
   console.log(wired ? `twing init: wired hooks into ${repoRoot}/.claude/settings.json` : `twing init: hooks already wired in ${repoRoot}/.claude/settings.json`);
 
   const daemonStatus = await ensureDaemonRunning();
   console.log(daemonStatus === "started" ? "twing init: daemon started" : "twing init: daemon already running");
 
-  await seedConstraints(repoRoot, serverUrl, authToken);
+  await seedConstraints(repoRoot, manifest, serverUrl, authToken);
 
   console.log("twing init: done");
 }
 
-/**
- * §17.10: prompts for a password exactly once per server, then never
- * again. Skips prompting entirely when the server has no password
- * configured (`{required: false}`), or when a token is already stored for
- * this exact `serverUrl`. A server that's unreachable at `init` time isn't
- * fatal -- proceeds with whatever token (or lack of one) was already held,
- * matching this command's general "config first, connectivity best-effort"
- * posture elsewhere (`seedConstraints` below).
- */
-async function ensureAuthenticated(serverUrl: string, existingToken: string | undefined): Promise<string | undefined> {
-  let status: { required?: boolean };
-  try {
-    const res = await fetch(`${serverUrl}/v1/auth/status`);
-    status = (await res.json()) as { required?: boolean };
-  } catch (err) {
-    console.log(`twing init: could not reach ${serverUrl} to check auth status (${err instanceof Error ? err.message : err}) -- continuing without authenticating`);
-    return existingToken;
-  }
-
-  if (!status.required) {
-    return undefined;
-  }
-  if (existingToken) {
-    console.log("twing init: already authenticated with this server");
-    return existingToken;
-  }
-
-  // Non-interactive escape hatch (scripting/CI, or any environment without
-  // a real TTY to prompt on) -- promptPassword requires raw-mode stdin and
-  // deliberately refuses to run without one.
-  if (process.env.TWING_PASSWORD) {
-    const res = await fetch(`${serverUrl}/v1/auth/login`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ password: process.env.TWING_PASSWORD }),
-    });
-    if (res.ok) {
-      const body = (await res.json()) as { token?: string };
-      if (body.token) {
-        console.log("twing init: authenticated (via TWING_PASSWORD)");
-        return body.token;
-      }
-    }
-    throw new Error(`twing init: TWING_PASSWORD was rejected by ${serverUrl}`);
-  }
-
-  const MAX_ATTEMPTS = 3;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const password = await promptPassword(`twing init: password for ${serverUrl}: `);
-    const res = await fetch(`${serverUrl}/v1/auth/login`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ password }),
-    });
-    if (res.ok) {
-      const body = (await res.json()) as { token?: string };
-      if (body.token) {
-        console.log("twing init: authenticated");
-        return body.token;
-      }
-    }
-    console.log(attempt < MAX_ATTEMPTS ? "twing init: incorrect password -- try again" : "twing init: incorrect password");
-  }
-  throw new Error(`twing init: failed to authenticate with ${serverUrl} after ${MAX_ATTEMPTS} attempts`);
-}
-
-/** §17.2's cold-start seed: forward this repo's local `.twing/verify.yml`
+/** §17.2's cold-start seed: forward this repo's local `.twing/twing.yml`
  * constraints to the coordinator so the Constraint Store starts non-empty,
  * without the server needing filesystem access to anyone's checkout.
  * Best-effort -- a server that isn't running the §17 endpoints yet (or
- * isn't reachable at all) must not fail `init`. */
-async function seedConstraints(repoRoot: string, serverUrl: string, authToken: string | undefined): Promise<void> {
-  const manifest = loadManifestFromFile(path.join(repoRoot, ".twing", "verify.yml"));
+ * isn't reachable at all) must not fail `init`. Takes the manifest `runInit`
+ * already loaded rather than re-reading the file a second time. */
+async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: string, authToken: string | undefined): Promise<void> {
   // §17.9 fix, 2026-08-11: require_human_review entries were silently never
   // forwarded here -- only `constraints:` was. That's the section meant to
   // hold rules like "packages/server/** needs sign-off," and it was never

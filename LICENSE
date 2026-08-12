@@ -4,7 +4,7 @@ choice. The rule of thumb: the client/capture layer is permissive, the
 hosted-coordination layer is copyleft.
 
 ────────────────────────────────────────────────────────────────────────────
-Component: packages/cli, packages/daemon, hook/ (twing-hook)
+Component: packages/cli (including the daemon it manages), hook/ (twing-hook)
 License:   MIT OR Apache-2.0 (your choice)
 Why:       This is the "git" layer -- the more freely it spreads (bundled by
            orchestrators, embedded anywhere, zero legal friction), the

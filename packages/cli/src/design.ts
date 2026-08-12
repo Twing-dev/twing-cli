@@ -5,7 +5,7 @@
  * or unwire the PreToolUse hook entries (`wire-hooks.ts`).
  */
 
-import { readConfig, findRepoRoot, computeProjectId, computeDeveloperId, authFetch } from "@twing/core";
+import { readConfig, getServerAuth, findRepoRoot, loadManifestFromFile, twingConfigPath, computeProjectId, computeDeveloperId, authFetch } from "@twing/core";
 import { hookBinaryPath } from "./install-hook.js";
 import { wireDesignGate, unwireDesignGate } from "./wire-hooks.js";
 
@@ -14,12 +14,18 @@ interface RequiredConfig {
   authToken?: string;
 }
 
-function requireConfig(): RequiredConfig {
-  const config = readConfig();
-  if (!config.serverUrl) {
-    throw new Error("twing design: no server configured -- run `twing init --server <url>` first");
+/** Resolves the coordinator for `repoRoot`'s own committed `.twing/twing.yml`
+ * -- not a single global slot -- then looks up this machine's cached token
+ * for that specific server (multi-server: a repo's coordinator and this
+ * machine's auth for it are two separate lookups). */
+function requireConfig(repoRoot: string): RequiredConfig {
+  const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
+  const serverUrl = manifest.coordinator.serverUrl;
+  if (!serverUrl) {
+    throw new Error("twing design: no coordinator configured for this repo -- run `twing init --server <url>` once to set it up");
   }
-  return { serverUrl: config.serverUrl, authToken: config.authToken };
+  const authToken = getServerAuth(readConfig(), serverUrl)?.authToken;
+  return { serverUrl, authToken };
 }
 
 function splitList(value?: string): string[] {
@@ -30,7 +36,7 @@ function splitList(value?: string): string[] {
     .filter(Boolean);
 }
 
-const UNAUTHORIZED_HINT = "unauthorized -- run `twing init` again to re-authenticate";
+const UNAUTHORIZED_HINT = "unauthorized -- run `twing login` to re-authenticate";
 
 interface DesignConflictJSON {
   conflictingDesignId: string;
@@ -91,7 +97,8 @@ export interface RegisterOptions {
  * just resolved for the common case here).
  */
 export async function runDesignRegister(options: RegisterOptions): Promise<void> {
-  const { serverUrl, authToken } = requireConfig();
+  const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken } = requireConfig(repoRoot);
   const session = options.session ?? process.env.CLAUDE_CODE_SESSION_ID;
   if (!session) {
     throw new Error(
@@ -101,7 +108,6 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
     );
   }
 
-  const repoRoot = findRepoRoot(options.cwd);
   const projectId = computeProjectId(repoRoot);
   const developerId = computeDeveloperId(repoRoot);
 
@@ -127,13 +133,15 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
 }
 
 export interface ResolveOptions {
+  cwd: string;
   id?: string;
   adopt?: string;
   justify?: string;
 }
 
 export async function runDesignResolve(options: ResolveOptions): Promise<void> {
-  const { serverUrl, authToken } = requireConfig();
+  const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken } = requireConfig(repoRoot);
   if (!options.id) {
     throw new Error("twing design resolve: --id <designId> is required");
   }
@@ -163,8 +171,8 @@ export interface ListOptions {
 }
 
 export async function runDesignList(options: ListOptions): Promise<void> {
-  const { serverUrl, authToken } = requireConfig();
   const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken } = requireConfig(repoRoot);
   const projectId = computeProjectId(repoRoot);
 
   const params = new URLSearchParams({ projectId });
@@ -190,8 +198,8 @@ export interface ReviewsOptions {
 /** The one human-facing command in this set (§17.5): list pending
  * justified-divergence reviews, or decide one. */
 export async function runDesignReviews(options: ReviewsOptions): Promise<void> {
-  const { serverUrl, authToken } = requireConfig();
   const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken } = requireConfig(repoRoot);
   const projectId = computeProjectId(repoRoot);
 
   if (options.decide) {
