@@ -1,8 +1,8 @@
 # twing-cli
 
 Task-time coordination and change-time evidence for multi-agent codebases.
-See `orchestrator-and-verification-design-doc_v1.md` for the full design and
-`verification-layer-strategy-memo_6.md` for the strategy behind it.
+See `docs/orchestrator-and-verification-design-doc_v1.md` for the full design
+and `docs/verification-layer-strategy-memo_6.md` for the strategy behind it.
 
 Pre-release: no npm package is published yet, and `twing init` builds
 `twing-hook` from source (needs Go) rather than fetching a prebuilt binary.
@@ -23,8 +23,8 @@ npm install
 npm run build
 ```
 
-This builds every package (`packages/core`, `packages/cli`, `packages/daemon`,
-`packages/server`) via TypeScript project references.
+This builds every package (`packages/core`, `packages/cli`, `packages/server`)
+via TypeScript project references.
 
 ## Starting `twing serve`
 

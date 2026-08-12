@@ -9,15 +9,17 @@
 
 import { spawn } from "node:child_process";
 import * as net from "node:net";
-import { createRequire } from "node:module";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defaultSocketPath } from "@twing/core";
 
-const require = createRequire(import.meta.url);
-
+// packages/cli/dist/daemon/main.js -- a sibling of this file (spawn-daemon.js)
+// once built, mirroring the src/daemon/ layout. Was previously resolved via
+// require.resolve("@twing/daemon/package.json") back when the daemon was a
+// separate npm package; folded into @twing/cli directly since it was that
+// package's only consumer (no more reason for the package boundary).
 function daemonMainPath(): string {
-  const pkgJsonPath = require.resolve("@twing/daemon/package.json");
-  return path.join(path.dirname(pkgJsonPath), "dist", "main.js");
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), "daemon", "main.js");
 }
 
 function isDaemonRunning(socketPath: string): Promise<boolean> {

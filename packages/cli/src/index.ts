@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { startDaemon } from "@twing/daemon";
+import { startDaemon } from "./daemon/server.js";
 import { defaultSocketPath } from "@twing/core";
 import { runInit } from "./init.js";
 import { runAlign } from "./align.js";

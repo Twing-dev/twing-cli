@@ -60,7 +60,7 @@ export interface Finding {
 
 /**
  * Design-conflict coordinator (design doc §17, merged from
- * design-conflict-coordinator-spec.md). A distinct code path from
+ * docs/design-conflict-coordinator-spec.md). A distinct code path from
  * Claim/Finding above — this is the one part of the system that blocks.
  */
 

@@ -26,8 +26,8 @@ import {
   type Claim,
   type CallEdge,
   type EnclosingSymbol,
+  updateCallGraph,
 } from "@twing/core";
-import { updateCallGraph } from "@twing/daemon";
 import type { Node } from "web-tree-sitter";
 
 /**

@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@twing/core": "*",
-    "@twing/daemon": "*",
     "web-tree-sitter": "^0.26.12"
   }
 }

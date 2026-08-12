@@ -26,8 +26,8 @@ import {
   type Manifest,
   type EnclosingSymbol,
   type HookToolName,
+  updateCallGraph,
 } from "@twing/core";
-import { updateCallGraph } from "./call-graph.js";
 
 interface RepoState {
   repoRoot: string;

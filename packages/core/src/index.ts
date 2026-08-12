@@ -9,3 +9,4 @@ export * from "./identity.js";
 export * from "./config.js";
 export * from "./socket-path.js";
 export * from "./http.js";
+export * from "./call-graph.js";

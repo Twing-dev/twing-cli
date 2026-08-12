@@ -6,7 +6,8 @@
  * in during real sessions, not from an eager index built at daemon start.
  */
 
-import { findCallSites, findEnclosingSymbol, computeSymbolId, type CallEdge } from "@twing/core";
+import { findCallSites, findEnclosingSymbol, computeSymbolId } from "./symbol-id.js";
+import type { CallEdge } from "./types.js";
 import type { Node } from "web-tree-sitter";
 
 function edgeKey(edge: CallEdge): string {
