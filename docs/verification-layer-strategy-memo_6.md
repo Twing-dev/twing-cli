@@ -168,9 +168,11 @@ overlap with another open design or a ratified constraint is adopted or
 justified. This is the deliberate implementation of Point 1's design-trigger
 half, not an exception carved out of the concurrency half. It doesn't
 reintroduce the deadlock risk this guardrail was written against: it gates
-one write, not a symbol for the session's duration; it fails open on any
-coordinator trouble rather than hanging; it's TTL-bounded; and unresolved
-conflicts route to adopt-or-justify rather than an indefinite wait.
+one write, not a symbol for the session's duration; it's bounded by a hard
+timeout rather than hanging (and denies with a clear reason on coordinator
+trouble past that budget, not a silent pass-through — reversed 2026-08-13,
+see design doc §17.7); it's TTL-bounded; and unresolved conflicts route to
+adopt-or-justify rather than an indefinite wait.
 
 *Granularity.* Git merges on line/hunk adjacency with no semantic understanding. Replicating that buys only earlier delivery of the same signal. The real issue is that **git conflicts on textual adjacency; agents conflict on contract adjacency** — a signature change plus a caller in another file has *zero* textual overlap and guaranteed breakage. Line numbers are also unstable identity.
 

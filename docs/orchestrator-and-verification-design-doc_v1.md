@@ -620,7 +620,7 @@ For whoever implements this without the full prior discussion:
 |---|---|---|---|
 | `PostToolUse` enqueue | Waits for subprocess exit (unavoidable — Claude Code mechanic), but not for any real work | Sub-few-ms | Hook only writes to a socket and exits; all parsing happens in the daemon afterward |
 | `SessionStart`/`UserPromptSubmit` cache-check | Same | Sub-few-ms | Daemon answers from an already-computed local cache, never live computation |
-| `PreToolUse` design gate (§17) | **Yes, by design** — this is the one intentionally blocking path in the system | `Edit`\|`Write` status check: 15s. `ExitPlanMode` check: 60s (may run server-side extraction — a real LLM call, observed routinely taking >15s against a free-tier model). Fail open past the budget either way. | Registering/checking a design needs a real verdict before the write proceeds; bounded by a hard timeout and a fail-open fallback so a coordinator outage (or a slow extraction call) degrades to "no gate" rather than a hang |
+| `PreToolUse` design gate (§17) | **Yes, by design** — this is the one intentionally blocking path in the system | `Edit`\|`Write` status check: 15s. `ExitPlanMode` check: 60s (may run server-side extraction — a real LLM call, observed routinely taking >15s against a free-tier model). Fails *closed* past the budget either way (reversed 2026-08-13, see §17.7). | Registering/checking a design needs a real verdict before the write proceeds; bounded by a hard timeout, and a coordinator outage or slow extraction call now denies with a clear reason rather than silently degrading to "no gate" |
 | `align`/`review` | N/A — separate process, not a hook | None | Deliberate, on-request invocation; a human or agent is already waiting for it |
 | Daemon → server sync | N/A | None | Fully async, debounced, decoupled from any session |
 
@@ -798,15 +798,28 @@ ratified facts. Rather than the spec's Postgres/SQLite, it's a JSON file at
 upgrade" position (§16 above), applied to the one piece of state here that actually
 needs it.
 
-### 17.7 Fail-open, and a local kill-switch
+### 17.7 Fail-closed (reversed 2026-08-13), and a local kill-switch
 
-Same recommendation as the spec (§10): fail open with a loud local log
-(`~/.twing/design-coordinator.log`) on any coordinator unreachable/timeout/error — a
-tool that occasionally blocks all work over its own backend hiccup gets disabled, and
-that's a worse outcome than a missed check. `twing-hook` additionally honors
-`TWING_DESIGN_GATE=off` as a local kill-switch (short-circuits to an immediate allow,
-no network call) — useful for quickly disabling the gate without editing
-`.claude/settings.json`.
+Originally: fail open with a loud local log, same as the spec's §10 recommendation. In
+practice the log wasn't loud — nothing surfaced it, and a fail-open event was
+indistinguishable from a developer deleting their own cached token specifically to
+bypass the gate (confirmed live, same day, via `~/.twing/design-coordinator.log`
+showing real 401s taking the exact same silent-allow path a genuine outage would).
+
+Reversed: the gate now **fails closed** against any *configured* coordinator, on all
+three ways a check can fail to produce a real verdict — no cached token (checked
+client-side before any network call), an authentication rejection (401/403), or an
+unreachable/malformed response from a reachable coordinator. Each denies with a reason
+that says which of the three it hit, still logged to
+`~/.twing/design-coordinator.log` for an audit trail, but the log is no longer the only
+place the failure is visible — the deny reason itself is. This project isn't designing
+for coordinator outages as an operating condition, so "a backend hiccup blocks work" is
+an accepted cost now rather than the reason to fail open. A repo with **no coordinator
+configured** (`coordinator.serverUrl` unset) still resolves to a silent allow — that's
+the gate not being wired up there, not a failure. `twing-hook` still honors
+`TWING_DESIGN_GATE=off` as a local kill-switch (immediate allow, no network call) —
+useful for deliberately working offline, as opposed to silently degrading when you
+didn't ask it to.
 
 ### 17.8 Explicit scope cuts for this pass
 

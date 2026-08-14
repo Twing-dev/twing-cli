@@ -76,14 +76,8 @@ func computeProjectID(cwd string) string {
 	return readOrCreatePersistedID(filepath.Join(cwd, ".git", "twing-project-id"))
 }
 
-// computeDeveloperID mirrors identity.ts's computeDeveloperId.
-func computeDeveloperID(cwd string) string {
-	if email, ok := gitOutput(cwd, "config", "user.email"); ok && email != "" {
-		return email
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	return readOrCreatePersistedID(filepath.Join(home, ".twing", "id"))
-}
+// developerId is no longer computed on this side at all (§17.10 hardening):
+// the server resolves it from the authenticated bearer PAT, never from
+// anything the hook could compute locally. `computeDeveloperID` (which used
+// to mirror identity.ts's computeDeveloperId here) was removed along with
+// its one call site in design_gate.go.

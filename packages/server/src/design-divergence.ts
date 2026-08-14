@@ -1,0 +1,87 @@
+/**
+ * Cross-session design divergence (statefulness redesign, 2026-08) -- the
+ * first place §4 (real, Tree-sitter-derived `Claim`s) and §17 (self-reported
+ * `DesignStatement`s) intentionally share logic, not just a data-model
+ * family. Before this, `design-checks.ts`'s overlap detection only ever
+ * compared two designs' self-reported `creates`/`touches` against each
+ * other -- a session's *actual* edits were never checked against what
+ * another session's open design claims to own, so two agents could each
+ * register honest, non-overlapping designs and then silently drift into
+ * each other's territory with nothing noticing.
+ *
+ * Deliberately async/advisory only (§4's model, not §17's blocking one):
+ * this runs from `POST /v1/claims`, the same request that already runs
+ * `checks.ts`'s divergence checks, and produces ordinary `Finding`s
+ * delivered through the existing notice pipeline -- never a deny. Flag, not
+ * punish: divergence is expected and fine, this is for visibility and
+ * voluntary reconciliation (see `alignment-store.ts`), not enforcement.
+ */
+
+import { minimatch } from "minimatch";
+import type { Claim, DesignStatement, Finding } from "@twing/core";
+
+function filePathOf(symbolId: string): string {
+  const idx = symbolId.indexOf("::");
+  return idx === -1 ? symbolId : symbolId.slice(0, idx);
+}
+
+/** True if `claim` falls inside `design`'s declared scope -- checked against
+ * both the claim's file path and its full symbolId, against both
+ * `creates` and `touches`, the same "literal match or glob" approach
+ * `design-checks.ts`'s `matchConstraintsForPaths` uses for constraint
+ * scopes (kept as a separate, small function here rather than imported --
+ * a real Claim vs. a self-reported design is a different concern from that
+ * file's documented two-designs/constraint scope). */
+function claimFallsInsideDesign(claim: Claim, design: DesignStatement): boolean {
+  const filePath = filePathOf(claim.symbolId);
+  const targets = [...design.creates, ...design.touches];
+  return targets.some((t) => t === filePath || t === claim.symbolId || minimatch(filePath, t) || minimatch(claim.symbolId, t));
+}
+
+function divergenceReason(claim: Claim, design: DesignStatement): string {
+  return (
+    `twing design coordinator: ${claim.symbolId} was just edited by developer ${claim.developerId}, which falls inside ` +
+    `developer ${design.developerId}'s open design (session ${design.sessionId}): "${design.summary || "(no summary)"}". ` +
+    `Worth aligning -- see \`twing align threads\` to reply.`
+  );
+}
+
+export interface DesignDivergenceMatch {
+  finding: Finding;
+  design: DesignStatement;
+}
+
+/** For each new/changed claim, checks every currently-open design from a
+ * *different session* (not developer -- matches `checks.ts`'s existing
+ * convention of also catching one developer's own two concurrent sessions)
+ * for scope overlap. One match per (claim, design) pair. Returns the
+ * matched `design` alongside its `Finding` -- `app.ts` needs it to open/
+ * reuse the right `alignment_threads` row; `runDesignDivergenceChecks`
+ * below is the plain-`Finding[]` convenience wrapper for callers (and
+ * tests) that don't need that. */
+export function findDesignDivergences(newClaims: Claim[], openDesigns: DesignStatement[]): DesignDivergenceMatch[] {
+  const matches: DesignDivergenceMatch[] = [];
+  for (const claim of newClaims) {
+    for (const design of openDesigns) {
+      if (design.sessionId === claim.sessionId) continue;
+      if (!claimFallsInsideDesign(claim, design)) continue;
+      matches.push({
+        design,
+        finding: {
+          kind: "design_divergence",
+          projectId: claim.projectId,
+          symbolId: claim.symbolId,
+          developerId: claim.developerId,
+          otherDeveloperId: design.developerId,
+          reason: divergenceReason(claim, design),
+          ts: claim.ts,
+        },
+      });
+    }
+  }
+  return matches;
+}
+
+export function runDesignDivergenceChecks(newClaims: Claim[], openDesigns: DesignStatement[]): Finding[] {
+  return findDesignDivergences(newClaims, openDesigns).map((m) => m.finding);
+}

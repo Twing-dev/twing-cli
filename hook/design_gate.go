@@ -18,9 +18,21 @@ import (
 // serve` directly over HTTPS/HTTP, bypassing the daemon entirely -- this
 // path needs a synchronous verdict before Claude Code proceeds, and routing
 // that through the daemon's socket protocol would mean adding a blocking
-// hop where none currently exists. Fail-open, always: any error here must
-// resolve to an empty stdout + exit 0, same as the capture path, just for a
-// different reason (§17.7, not §4's advisory-only policy).
+// hop where none currently exists.
+//
+// Fail-closed, deliberately, against a *configured* coordinator: this
+// reverses §17.7's original fail-open recommendation
+// (design-conflict-coordinator-spec.md §10). This project doesn't design
+// for coordinator outages as an operating condition, and a silent allow on
+// an auth/network failure is indistinguishable from someone deliberately
+// deleting their own cached token to bypass the gate (confirmed live,
+// 2026-08-13 -- see the log entries this reversal was made from). Every
+// deny below names exactly which of three failure classes it hit -- no
+// cached token, a rejected token, or an unreachable/malformed coordinator
+// -- so nobody has to guess why a write was blocked. The one path that
+// still resolves to a silent allow is a repo with no coordinator configured
+// at all (`coordinator.serverUrl` unset): that's "the gate isn't wired up
+// here", not a failure, same category as TWING_DESIGN_GATE=off.
 
 // Two budgets: the Edit|Write status check is a plain in-memory lookup, so
 // it stays tight; the ExitPlanMode check may run server-side extraction (a
@@ -49,9 +61,11 @@ func logDesignGate(format string, args ...any) {
 	fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), line)
 }
 
+// developerId is deliberately not part of this shape (§17.10 hardening) --
+// the server resolves it from the authenticated bearer token, not a
+// client-supplied field.
 type designCheckRequest struct {
 	ProjectID   string `json:"projectId"`
-	DeveloperID string `json:"developerId"`
 	SessionID   string `json:"sessionId"`
 	RawPlanText string `json:"rawPlanText,omitempty"`
 }
@@ -81,9 +95,10 @@ type designListResponse struct {
 	} `json:"items"`
 }
 
-// setAuthHeader adds the §17.10 bearer token when non-empty -- a no-op
-// against a server with no password configured, since authToken is "" in
-// that case (resolveServerConfig never has one to give).
+// setAuthHeader adds the §17.10 bearer PAT when non-empty -- a no-op when
+// this machine hasn't authenticated to the server yet (resolveServerConfig
+// has nothing cached to give), in which case every call on this path fails
+// open the same as a network error would.
 func setAuthHeader(req *http.Request, authToken string) {
 	if authToken != "" {
 		req.Header.Set("authorization", "Bearer "+authToken)
@@ -142,6 +157,53 @@ func denyOutput(eventName, reason string) map[string]any {
 	}
 }
 
+// The four reason strings below are the only ways a call on this path ends
+// without a real verdict from the coordinator -- kept as plain strings
+// (rather than baked directly into *Output below) because checkPathConstraint
+// needs the reason text alone, not the hookSpecificOutput wrapper, to hand
+// back to its caller.
+
+func authRequiredReason(serverURL string) string {
+	return fmt.Sprintf(
+		"twing design coordinator: no auth token cached for %s. Run `twing login --server %s` "+
+			"(or `twing init`), then retry -- the design gate blocks rather than letting an "+
+			"unauthenticated write through.", serverURL, serverURL)
+}
+
+func authRejectedReason() string {
+	return "twing design coordinator: authentication rejected (401/403). Your cached token is " +
+		"stale or revoked -- run `twing login` to get a valid one, then retry."
+}
+
+func unreachableReason(err error) string {
+	return fmt.Sprintf(
+		"twing design coordinator unreachable: %v. This action is blocked until the coordinator "+
+			"is reachable -- the design gate does not fail open. Set TWING_DESIGN_GATE=off if you "+
+			"need to work offline.", err)
+}
+
+func coordinatorErrorReason(detail string) string {
+	return fmt.Sprintf(
+		"twing design coordinator error: %s. This action is blocked -- the design gate does not "+
+			"fail open. Set TWING_DESIGN_GATE=off if you need to work offline.", detail)
+}
+
+func authRequiredOutput(eventName, serverURL string) map[string]any {
+	return denyOutput(eventName, authRequiredReason(serverURL))
+}
+
+func authRejectedOutput(eventName string) map[string]any {
+	return denyOutput(eventName, authRejectedReason())
+}
+
+func unreachableOutput(eventName string, err error) map[string]any {
+	return denyOutput(eventName, unreachableReason(err))
+}
+
+func coordinatorErrorOutput(eventName, detail string) map[string]any {
+	return denyOutput(eventName, coordinatorErrorReason(detail))
+}
+
 // handlePreToolUse is the §17 entry point. Kill-switch first: TWING_DESIGN_GATE=off
 // short-circuits to a plain no-op with zero network calls.
 func handlePreToolUse(payload hookPayload) {
@@ -169,32 +231,45 @@ func handleExitPlanMode(payload hookPayload) {
 		return
 	}
 
+	if config.AuthToken == "" {
+		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
+		return
+	}
+
 	reqBody := designCheckRequest{
 		ProjectID:   computeProjectID(payload.Cwd),
-		DeveloperID: computeDeveloperID(payload.Cwd),
 		SessionID:   payload.SessionID,
 		RawPlanText: input.Plan,
 	}
 
 	res, err := postJSON(strings.TrimRight(config.ServerURL, "/")+"/v1/designs/check", reqBody, designExtractionTimeout, config.AuthToken)
 	if err != nil {
-		logDesignGate("ExitPlanMode check failed (fail open): %v", err)
+		logDesignGate("ExitPlanMode check failed (blocking): %v", err)
+		writeJSON(unreachableOutput("PreToolUse", err))
 		return
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		logDesignGate("ExitPlanMode check returned status %d (blocking)", res.StatusCode)
+		writeJSON(authRejectedOutput("PreToolUse"))
+		return
+	}
 	if res.StatusCode != http.StatusOK {
-		logDesignGate("ExitPlanMode check returned status %d (fail open)", res.StatusCode)
+		logDesignGate("ExitPlanMode check returned status %d (blocking)", res.StatusCode)
+		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unexpected status %d", res.StatusCode)))
 		return
 	}
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		logDesignGate("ExitPlanMode check: failed reading response body (fail open): %v", err)
+		logDesignGate("ExitPlanMode check: failed reading response body (blocking): %v", err)
+		writeJSON(coordinatorErrorOutput("PreToolUse", "failed reading response body"))
 		return
 	}
 	var result designCheckResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		logDesignGate("ExitPlanMode check: malformed response (fail open): %v", err)
+		logDesignGate("ExitPlanMode check: malformed response (blocking): %v", err)
+		writeJSON(coordinatorErrorOutput("PreToolUse", "malformed response"))
 		return
 	}
 
@@ -206,7 +281,8 @@ func handleExitPlanMode(payload hookPayload) {
 	case "constraint_flag":
 		writeJSON(denyOutput("PreToolUse", constraintReason(result)))
 	default:
-		logDesignGate("ExitPlanMode check: unknown verdict %q (fail open)", result.Verdict)
+		logDesignGate("ExitPlanMode check: unknown verdict %q (blocking)", result.Verdict)
+		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown verdict %q", result.Verdict)))
 	}
 }
 
@@ -251,36 +327,52 @@ type constraintMatchResponse struct {
 	Constraint *designConstraintInfo `json:"constraint,omitempty"`
 }
 
+// constraintCheckResult is checkPathConstraint's tri-state verdict --
+// "we couldn't tell" (constraintCheckFailed) is deliberately not folded
+// into "clear": a failed check must deny, same as a failed open-designs
+// lookup, not be silently treated as "no constraint matched".
+type constraintCheckResult int
+
+const (
+	constraintClear constraintCheckResult = iota
+	constraintMatched
+	constraintCheckFailed
+)
+
 // checkPathConstraint is §17.9's ground-truth backstop: checks the literal
 // file being edited against the Constraint Store directly, independent of
-// whatever the session's registered design claims to touch. Returns
-// (matched, reason). Fails open (matched=false) on any network/parse error,
-// same as every other check on this path.
-func checkPathConstraint(serverURL, authToken, projectID, filePath string) (bool, string) {
+// whatever the session's registered design claims to touch. Fail-closed
+// like every other check on this path -- a network/auth/parse error here
+// returns constraintCheckFailed with a reason, not a silent "clear".
+func checkPathConstraint(serverURL, authToken, projectID, filePath string) (constraintCheckResult, string) {
 	res, err := getJSON(constraintMatchURL(serverURL, projectID, filePath), authToken)
 	if err != nil {
-		logDesignGate("constraint match check failed (fail open): %v", err)
-		return false, ""
+		logDesignGate("constraint match check failed (blocking): %v", err)
+		return constraintCheckFailed, unreachableReason(err)
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		logDesignGate("constraint match check returned status %d (blocking)", res.StatusCode)
+		return constraintCheckFailed, authRejectedReason()
+	}
 	if res.StatusCode != http.StatusOK {
-		logDesignGate("constraint match check returned status %d (fail open)", res.StatusCode)
-		return false, ""
+		logDesignGate("constraint match check returned status %d (blocking)", res.StatusCode)
+		return constraintCheckFailed, coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
 	}
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		logDesignGate("constraint match check: failed reading response body (fail open): %v", err)
-		return false, ""
+		logDesignGate("constraint match check: failed reading response body (blocking): %v", err)
+		return constraintCheckFailed, coordinatorErrorReason("failed reading response body")
 	}
 	var result constraintMatchResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		logDesignGate("constraint match check: malformed response (fail open): %v", err)
-		return false, ""
+		logDesignGate("constraint match check: malformed response (blocking): %v", err)
+		return constraintCheckFailed, coordinatorErrorReason("malformed response")
 	}
 	if !result.Matched || result.Constraint == nil {
-		return false, ""
+		return constraintClear, ""
 	}
-	return true, fmt.Sprintf(
+	return constraintMatched, fmt.Sprintf(
 		"twing design coordinator: %s is covered by an existing %s rule: %q. This applies regardless of what your "+
 			"registered design claims to touch. If this is intentional and reviewed, record it as a justified "+
 			"divergence: `twing design resolve --id <your-design-id> --justify \"<reason>\"` (queues for human "+
@@ -306,10 +398,16 @@ func handleEditWriteGate(payload hookPayload) {
 	}
 	_ = json.Unmarshal(payload.ToolInput, &input)
 
+	if config.AuthToken == "" {
+		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
+		return
+	}
+
 	projectID := computeProjectID(payload.Cwd)
 
 	if input.FilePath != "" {
-		if matched, reason := checkPathConstraint(config.ServerURL, config.AuthToken, projectID, input.FilePath); matched {
+		verdict, reason := checkPathConstraint(config.ServerURL, config.AuthToken, projectID, input.FilePath)
+		if verdict == constraintMatched || verdict == constraintCheckFailed {
 			writeJSON(denyOutput("PreToolUse", reason))
 			return
 		}
@@ -317,23 +415,32 @@ func handleEditWriteGate(payload hookPayload) {
 
 	res, err := getJSON(openDesignsURL(config.ServerURL, projectID, payload.SessionID), config.AuthToken)
 	if err != nil {
-		logDesignGate("Edit|Write gate check failed (fail open): %v", err)
+		logDesignGate("Edit|Write gate check failed (blocking): %v", err)
+		writeJSON(unreachableOutput("PreToolUse", err))
 		return
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		logDesignGate("Edit|Write gate check returned status %d (blocking)", res.StatusCode)
+		writeJSON(authRejectedOutput("PreToolUse"))
+		return
+	}
 	if res.StatusCode != http.StatusOK {
-		logDesignGate("Edit|Write gate check returned status %d (fail open)", res.StatusCode)
+		logDesignGate("Edit|Write gate check returned status %d (blocking)", res.StatusCode)
+		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unexpected status %d", res.StatusCode)))
 		return
 	}
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		logDesignGate("Edit|Write gate: failed reading response body (fail open): %v", err)
+		logDesignGate("Edit|Write gate: failed reading response body (blocking): %v", err)
+		writeJSON(coordinatorErrorOutput("PreToolUse", "failed reading response body"))
 		return
 	}
 	var result designListResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		logDesignGate("Edit|Write gate: malformed response (fail open): %v", err)
+		logDesignGate("Edit|Write gate: malformed response (blocking): %v", err)
+		writeJSON(coordinatorErrorOutput("PreToolUse", "malformed response"))
 		return
 	}
 

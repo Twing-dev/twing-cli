@@ -1,8 +1,9 @@
 /**
  * `twing init` (§6): the single onboarding step. Discover the coordinator
  * server (repo-committed `.twing/twing.yml`, or bootstrap it from an
- * explicit `--server`), authenticate if it requires it (§17.10), ensure the
- * hook binary is present, wire hooks into this repo's `.claude/settings.json`,
+ * explicit `--server`), authenticate (§17.10 hardening -- a cached PAT, or
+ * `--invite <code>` to redeem one in this same step), ensure the hook
+ * binary is present, wire hooks into this repo's `.claude/settings.json`,
  * start the daemon. Safe to re-run.
  */
 
@@ -10,10 +11,12 @@ import { findRepoRoot, loadManifestFromFile, twingConfigPath, upsertCoordinatorS
 import { ensureHookInstalled } from "./install-hook.js";
 import { wireHooks } from "./wire-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
-import { ensureAuthenticated } from "./auth.js";
+import { requireAuth } from "./auth.js";
+import { runKeygen } from "./keygen.js";
 
 export interface InitOptions {
   server?: string;
+  invite?: string;
   cwd: string;
 }
 
@@ -56,7 +59,11 @@ export async function runInit(options: InitOptions): Promise<void> {
     }
   }
 
-  const authToken = await ensureAuthenticated(serverUrl, "twing init");
+  // §17.10 hardening: `--invite <code>` folds `keygen`+redeem into this
+  // same command (decision 9) -- a brand-new contributor never needs to
+  // run `twing keygen` separately before `twing init`. Otherwise a PAT
+  // must already be cached; there's no password to prompt for anymore.
+  const authToken = options.invite ? await runKeygen({ cwd: repoRoot, serverUrl, invite: options.invite }) : requireAuth(serverUrl, "twing init");
 
   const hookPath = ensureHookInstalled();
   console.log(`twing init: hook installed at ${hookPath}`);
@@ -78,7 +85,7 @@ export async function runInit(options: InitOptions): Promise<void> {
  * Best-effort -- a server that isn't running the §17 endpoints yet (or
  * isn't reachable at all) must not fail `init`. Takes the manifest `runInit`
  * already loaded rather than re-reading the file a second time. */
-async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: string, authToken: string | undefined): Promise<void> {
+async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: string, authToken: string): Promise<void> {
   // §17.9 fix, 2026-08-11: require_human_review entries were silently never
   // forwarded here -- only `constraints:` was. That's the section meant to
   // hold rules like "packages/server/** needs sign-off," and it was never

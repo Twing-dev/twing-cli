@@ -36,6 +36,10 @@ export interface CallEdge {
 
 export interface Notice {
   message: string;
+  /** Mirrors Finding.threadId when this notice was generated from a
+   * design_divergence finding -- lets the delivered text point straight at
+   * `twing align respond --finding <id>` without a second round trip. */
+  threadId?: string;
 }
 
 /**
@@ -44,7 +48,7 @@ export interface Notice {
  * `align`/`review` (§6) can print "the symbol, the other party
  * involved, and why it was flagged" from a POST /v1/claims response (§7).
  */
-export type FindingKind = "textual_overlap" | "contract_divergence" | "trigger_duplication";
+export type FindingKind = "textual_overlap" | "contract_divergence" | "trigger_duplication" | "design_divergence" | "design_semantic_conflict";
 
 export interface Finding {
   kind: FindingKind;
@@ -56,6 +60,11 @@ export interface Finding {
   otherDeveloperId: string;
   reason: string;
   ts: number;
+  /** Set only for `design_divergence` findings -- the alignment thread this
+   * finding opened/reused, for replying via `twing align respond`. Optional
+   * so every existing Finding producer/consumer (including `hook/**`, which
+   * never touches this shape) stays unaffected. */
+  threadId?: string;
 }
 
 /**
@@ -81,6 +90,13 @@ export interface DesignStatement {
   dependsOn: string[];
   rawPlanExcerpt?: string;
   ttlMs: number;
+  /** Set once a justified-divergence review on this design is decided --
+   * durable independent of later `status` changes (e.g. reopening on
+   * approval), so it's a directly-queryable precedent fact for later
+   * compounding rather than something only recoverable by joining
+   * PendingReview. Undefined means no review was ever attached, or one is
+   * still pending. */
+  reviewDecision?: "approve" | "reject";
 }
 
 export type DesignConstraintType = "canonical_abstraction" | "domain_fact" | "review_required";

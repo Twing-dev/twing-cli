@@ -21,8 +21,8 @@ type twingYAML struct {
 // coordinator.serverUrl out of its committed .twing/twing.yml, if any.
 // Repo-root resolution is delegated to the git binary (git rev-parse
 // --show-toplevel), reusing identity.go's gitOutput helper -- consistent
-// with how computeProjectID/computeDeveloperID already resolve repo
-// context on this side, rather than a hand-rolled directory walk.
+// with how computeProjectID already resolves repo context on this side,
+// rather than a hand-rolled directory walk.
 func readCoordinatorServerURL(cwd string) (string, bool) {
 	repoRoot, ok := gitOutput(cwd, "rev-parse", "--show-toplevel")
 	if !ok || repoRoot == "" {

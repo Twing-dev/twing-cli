@@ -1,18 +1,28 @@
 /**
- * `twing serve` — the coordination server (§7). No accounts, no database:
- * a single shared password (§17.10) is the only access control, an
- * accepted tradeoff for a small trusted team or OSS dogfooding, not a full
- * multi-tenant auth system.
+ * `twing serve` — the coordination server (§7). Access control is
+ * per-developer PATs (§17.10 hardening) resolved through `IdentityStore`:
+ * every `/v1/*` route (barring the two exemptions noted at the auth
+ * middleware below) requires a valid bearer token, and `developerId` is
+ * always the authenticated identity, never a client-supplied field --
+ * that's the actual fix for the "anyone can claim to be anyone" gap this
+ * replaces. `Organization`/`ProjectMembership` roles gate who can do what;
+ * see `identity-store.ts`'s header comment for the three trust boundaries.
  */
 
 import { Hono } from "hono";
-import type { Claim, CallEdge, DesignStatement, DesignConstraintType } from "@twing/core";
+import type { Claim, CallEdge, DesignStatement, DesignConstraintType, Finding } from "@twing/core";
+import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
 import { runChecks } from "./checks.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
 import { runDesignChecks, matchConstraintsForPaths } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
-import { hashPassword } from "./auth.js";
+import type { LlmProvider } from "./llm-client.js";
+import { checkSemanticConflict } from "./design-semantic-check.js";
+import { findDesignDivergences } from "./design-divergence.js";
+import { AlignmentThreadStore } from "./alignment-store.js";
+import { DrizzleActivityLog } from "./activity-log.js";
+import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role } from "./identity-store.js";
 
 interface ClaimsRequestBody {
   projectId?: string;
@@ -22,9 +32,10 @@ interface ClaimsRequestBody {
 
 // §17.2's single check endpoint accepts either rawPlanText (extraction runs
 // server-side) or pre-structured fields (agent-supplied, extraction skipped).
+// developerId is deliberately not part of this shape -- resolved from the
+// authenticated identity instead (§17.10 hardening).
 interface DesignCheckRequestBody {
   projectId?: string;
-  developerId?: string;
   sessionId?: string;
   agentLabel?: string;
   rawPlanText?: string;
@@ -46,75 +57,263 @@ interface SeedRequestBody {
   constraints?: { statement: string; scope: string[]; type?: DesignConstraintType }[];
 }
 
+interface BootstrapRequestBody {
+  bootstrapToken?: string;
+  tokenHash?: string;
+  label?: string;
+  orgName?: string;
+}
+
+interface InviteRequestBody {
+  label?: string;
+  role?: Role;
+  orgId?: string;
+}
+
+interface RedeemRequestBody {
+  tokenHash?: string;
+  label?: string;
+}
+
 export interface CreateAppOptions {
+  /** Shared Drizzle handle every store below is built from -- pass one
+   * explicitly to share a single database across a test; otherwise built
+   * from `dataDir` (statefulness redesign, 2026-08). */
+  db?: Db;
+  /** Only consulted when `db` isn't supplied directly, and by `identities`
+   * for its bootstrap-token file (which stays a plaintext file regardless
+   * of the DB, see identity-store.ts's header comment). */
+  dataDir?: string;
   store?: Store;
   designs?: DesignRegistry;
   constraints?: ConstraintStore;
+  identities?: IdentityStore;
+  alignmentThreads?: AlignmentThreadStore;
   extractModel?: string;
+  /** Defaults to "openrouter" -- see llm-client.ts's provider seam. */
+  extractProvider?: LlmProvider;
   openRouterApiKey?: string;
-  /** Pre-hashed expected token (§17.10) -- undefined means auth is fully
-   * disabled, today's zero-config default. `main.ts` computes this from
-   * `TWING_SERVE_PASSWORD` via `hashPassword`; `createApp` itself never
-   * touches a plaintext password. */
-  authToken?: string;
+  /** design-semantic-check.ts's model -- always Bedrock (see that file's
+   * header comment), defaults to the model this repo's own eval settled on. */
+  semanticCheckModel?: string;
 }
 
 const RAW_PLAN_EXCERPT_CHARS = 2000;
 
+type Variables = { identity: ResolvedIdentity };
+
 export function createApp(options: CreateAppOptions = {}) {
-  const store = options.store ?? new Store();
-  const designs = options.designs ?? new DesignRegistry();
-  const constraintStore = options.constraints ?? new ConstraintStore();
+  const db = options.db ?? createDb({ dataDir: options.dataDir });
+  const store = options.store ?? new Store(db);
+  const designs = options.designs ?? new DesignRegistry(db);
+  const constraintStore = options.constraints ?? new ConstraintStore(db);
+  const identities = options.identities ?? new IdentityStore(db, { dataDir: options.dataDir });
+  const alignmentThreads = options.alignmentThreads ?? new AlignmentThreadStore(db);
+  const activityLog = new DrizzleActivityLog(db);
   const extractModel = options.extractModel ?? "openai/gpt-oss-20b:free";
+  const extractProvider = options.extractProvider ?? "openrouter";
   const openRouterApiKey = options.openRouterApiKey;
-  const authToken = options.authToken;
+  const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
 
-  const app = new Hono();
+  const app = new Hono<{ Variables: Variables }>();
 
-  // §17.10: every /v1/* route except /v1/auth/* requires a matching bearer
-  // token when a password is configured. No-op entirely when it isn't --
-  // today's behavior stays the default.
+  // §17.10: every /v1/* route requires a valid bearer PAT, except the two
+  // that can't assume one exists yet -- bootstrap (nobody has a PAT before
+  // their first one) and invite redemption (works both authenticated, for
+  // an existing developer joining a second org/project, and unauthenticated,
+  // for a brand-new developer redeeming with a freshly-generated token).
   app.use("/v1/*", async (c, next) => {
-    if (!authToken) return next();
-    if (c.req.path.startsWith("/v1/auth/")) return next();
+    if (c.req.path === "/v1/admin/bootstrap") return next();
+    if (/^\/v1\/invites\/[^/]+\/redeem$/.test(c.req.path)) return next();
     const header = c.req.header("authorization") ?? "";
     const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
-    if (token !== authToken) {
-      return c.json({ error: "unauthorized -- run `twing init` again to re-authenticate" }, 401);
+    const identity = token ? identities.resolveToken(token) : undefined;
+    if (!identity) {
+      return c.json({ error: "unauthorized -- run `twing login --token <pat>` (or `twing keygen --invite <code>` if you don't have one yet)" }, 401);
     }
+    c.set("identity", identity);
     return next();
   });
 
   app.get("/", (c) => c.text("twing serve"));
 
-  // §17.10: whether this server requires a password at all -- lets `twing
-  // init` skip prompting entirely for a server that has none configured.
-  app.get("/v1/auth/status", (c) => c.json({ required: authToken !== undefined }));
+  // §17.10: who am I, and what am I a member of -- what `twing whoami` and
+  // `twing login`'s validation step both call.
+  app.get("/v1/auth/whoami", (c) => c.json(c.get("identity")));
 
-  // §17.10: the one endpoint a plaintext password ever crosses the wire to.
-  // Returns the token to store (= the hash) on success so `init` never has
-  // to compute it client-side and risk drifting from the server's own hash.
-  app.post("/v1/auth/login", async (c) => {
-    if (!authToken) return c.json({ required: false });
-    const body = await c.req.json<{ password?: string }>().catch(() => null);
-    const candidate = body?.password ? hashPassword(body.password) : undefined;
-    if (candidate !== authToken) {
-      return c.json({ required: true, error: "invalid password" }, 401);
+  // Break-glass: the one-time bootstrap token (never a human-chosen
+  // password) authorizes creating the first org + its admin. The
+  // developer's own PAT is still generated client-side (`tokenHash`) --
+  // the bootstrap token only proves "I'm allowed to do this," it isn't
+  // itself the credential used afterward.
+  app.post("/v1/admin/bootstrap", async (c) => {
+    const body = await c.req.json<BootstrapRequestBody>().catch(() => null);
+    if (!body || !body.bootstrapToken || !body.tokenHash || !body.label) {
+      return c.json({ error: "expected { bootstrapToken, tokenHash, label, orgName? }" }, 400);
     }
-    return c.json({ required: true, token: authToken });
+    const result = identities.bootstrap(body.bootstrapToken, body.tokenHash, body.label, body.orgName);
+    if ("error" in result) return c.json(result, 400);
+    console.log(`twing serve: bootstrapped org ${result.orgId.slice(0, 8)} with admin ${result.developerId}`);
+    return c.json(result);
   });
 
-  // §7: upserts claims + call-graph edges for projectId/developerId, runs
-  // the divergence checks against everything active in the project, and
-  // returns findings involving the just-submitted claims.
+  /** Resolves which org an admin-scoped action applies to: explicit
+   * `orgId` if the caller is admin of it, else their first admin org (v1
+   * only ever has one). */
+  function resolveAdminOrg(identity: ResolvedIdentity, requestedOrgId?: string): string | undefined {
+    const adminOrgIds = identity.orgs.filter((o) => o.role === "admin").map((o) => o.orgId);
+    if (requestedOrgId) return adminOrgIds.includes(requestedOrgId) ? requestedOrgId : undefined;
+    return adminOrgIds[0];
+  }
+
+  app.post("/v1/admin/invites", async (c) => {
+    const identity = c.get("identity");
+    const body = await c.req.json<InviteRequestBody>().catch(() => null);
+    if (!body || !body.label) return c.json({ error: "expected { label, role?, orgId? }" }, 400);
+    const orgId = resolveAdminOrg(identity, body.orgId);
+    if (!orgId) return c.json({ error: "not an admin of that organization" }, 403);
+    const invite = identities.createInvite({ kind: "org", orgId }, body.role ?? "member", body.label, identity.developerId);
+    return c.json({ code: invite.code, expiresAt: invite.expiresAt });
+  });
+
+  app.get("/v1/admin/invites", (c) => {
+    const identity = c.get("identity");
+    const orgId = resolveAdminOrg(identity, c.req.query("orgId"));
+    if (!orgId) return c.json({ error: "not an admin of that organization" }, 403);
+    return c.json({ items: identities.listInvites({ kind: "org", orgId }) });
+  });
+
+  app.get("/v1/admin/developers", (c) => {
+    const identity = c.get("identity");
+    const orgId = resolveAdminOrg(identity, c.req.query("orgId"));
+    if (!orgId) return c.json({ error: "not an admin of that organization" }, 403);
+    return c.json({ items: identities.listOrgMembers(orgId) });
+  });
+
+  app.post("/v1/admin/developers/:id/revoke", (c) => {
+    const identity = c.get("identity");
+    const targetId = c.req.param("id");
+    // Any org the caller admins that the target also belongs to authorizes the revoke.
+    const callerAdminOrgs = identity.orgs.filter((o) => o.role === "admin").map((o) => o.orgId);
+    const authorized = callerAdminOrgs.some((orgId) => identities.listOrgMembers(orgId).some((m) => m.developerId === targetId));
+    if (!authorized) return c.json({ error: "not authorized to revoke this developer" }, 403);
+    const revoked = identities.revokeDeveloper(targetId);
+    if (!revoked) return c.json({ error: "no such developer" }, 404);
+    return c.json({ status: "revoked" });
+  });
+
+  function projectOrgId(projectId: string): string | undefined {
+    return identities.getProjectRecord(projectId)?.orgId;
+  }
+
+  function canManageProject(identity: ResolvedIdentity, projectId: string): boolean {
+    if (identity.projects.some((p) => p.projectId === projectId && p.role === "admin")) return true;
+    const orgId = projectOrgId(projectId);
+    return orgId !== undefined && identity.orgs.some((o) => o.orgId === orgId && o.role === "admin");
+  }
+
+  app.post("/v1/projects/:id/invites", async (c) => {
+    const identity = c.get("identity");
+    const projectId = c.req.param("id");
+    if (!canManageProject(identity, projectId)) return c.json({ error: "not an admin of this project" }, 403);
+    const body = await c.req.json<InviteRequestBody>().catch(() => null);
+    if (!body || !body.label) return c.json({ error: "expected { label, role? }" }, 400);
+    const invite = identities.createInvite({ kind: "project", projectId }, body.role ?? "member", body.label, identity.developerId);
+    return c.json({ code: invite.code, expiresAt: invite.expiresAt });
+  });
+
+  app.get("/v1/projects/:id/invites", (c) => {
+    const identity = c.get("identity");
+    const projectId = c.req.param("id");
+    if (!canManageProject(identity, projectId)) return c.json({ error: "not an admin of this project" }, 403);
+    return c.json({ items: identities.listInvites({ kind: "project", projectId }) });
+  });
+
+  app.delete("/v1/invites/:code", (c) => {
+    const identity = c.get("identity");
+    const invite = identities.getInvite(c.req.param("code"));
+    if (!invite) return c.json({ error: "no such invite" }, 404);
+    const scope = invite.scope;
+    const authorized =
+      scope.kind === "org" ? identity.orgs.some((o) => o.orgId === scope.orgId && o.role === "admin") : canManageProject(identity, scope.projectId);
+    if (!authorized) return c.json({ error: "not authorized to revoke this invite" }, 403);
+    identities.revokeInvite(invite.code);
+    return c.json({ status: "revoked" });
+  });
+
+  app.get("/v1/projects/:id/developers", (c) => {
+    const identity = c.get("identity");
+    const projectId = c.req.param("id");
+    if (!identity.projects.some((p) => p.projectId === projectId)) return c.json({ error: "not a member of this project" }, 403);
+    return c.json({ items: identities.listProjectMembers(projectId) });
+  });
+
+  app.delete("/v1/projects/:id/developers/:developerId", (c) => {
+    const identity = c.get("identity");
+    const projectId = c.req.param("id");
+    if (!canManageProject(identity, projectId)) return c.json({ error: "not an admin of this project" }, 403);
+    const removed = identities.removeProjectMember(projectId, c.req.param("developerId"));
+    if (!removed) return c.json({ error: "no such member" }, 404);
+    return c.json({ status: "removed" });
+  });
+
+  // Works both authenticated (an existing developer joining a second
+  // org/project with their already-cached PAT -- no new keygen needed) and
+  // unauthenticated (a brand-new developer presenting a freshly-generated
+  // token's hash). The plaintext token itself never reaches this route
+  // either way -- only its hash, generated client-side.
+  app.post("/v1/invites/:code/redeem", async (c) => {
+    const code = c.req.param("code");
+    const header = c.req.header("authorization") ?? "";
+    const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+    const existing = bearer ? identities.resolveToken(bearer) : undefined;
+
+    let result;
+    if (existing) {
+      result = identities.redeemInvite(code, { developerId: existing.developerId });
+    } else {
+      const body = await c.req.json<RedeemRequestBody>().catch(() => null);
+      if (!body || !body.tokenHash || !body.label) {
+        return c.json({ error: "expected { tokenHash, label } when not already authenticated" }, 400);
+      }
+      result = identities.redeemInvite(code, { tokenHash: body.tokenHash, label: body.label });
+    }
+    if ("error" in result) return c.json(result, 400);
+    console.log(`twing serve: invite ${code.slice(0, 8)} redeemed by ${result.developerId}`);
+    return c.json(result);
+  });
+
+  /** §boundary 1/3: reject a projectId the authenticated developer isn't a
+   * member of, except founding it for the first time. This is where the
+   * trust boundaries actually bind operationally -- the admin/invite
+   * endpoints alone don't enforce anything by themselves. */
+  function authorizeProject(identity: ResolvedIdentity, projectId: string): { ok: true } | { ok: false; status: 403; error: string } {
+    if (identity.projects.some((p) => p.projectId === projectId)) return { ok: true };
+    if (!identities.isProjectFounded(projectId)) {
+      const founded = identities.foundProject(projectId, identity.developerId);
+      if ("error" in founded) return { ok: false, status: 403, error: founded.error };
+      identity.projects.push({ projectId, orgId: founded.orgId, role: "admin" });
+      return { ok: true };
+    }
+    return { ok: false, status: 403, error: `not a member of project ${projectId}` };
+  }
+
+  // §7: upserts claims + call-graph edges for projectId, runs the
+  // divergence checks against everything active in the project, and
+  // returns findings involving the just-submitted claims. Every claim's
+  // developerId is stamped with the authenticated identity -- whatever a
+  // client sent is ignored, not merely validated.
   app.post("/v1/claims", async (c) => {
+    const identity = c.get("identity");
     const body = await c.req.json<ClaimsRequestBody>().catch(() => null);
     if (!body || typeof body.projectId !== "string" || !Array.isArray(body.claims)) {
       return c.json({ error: "expected { projectId: string, claims: Claim[], callEdges?: CallEdge[] }" }, 400);
     }
+    const authz = authorizeProject(identity, body.projectId);
+    if (!authz.ok) return c.json({ error: authz.error }, authz.status);
 
     const projectId = body.projectId;
-    const claims = body.claims;
+    const claims = body.claims.map((claim) => ({ ...claim, developerId: identity.developerId }));
     const callEdges = body.callEdges ?? [];
 
     const changed = store.upsert(projectId, claims, callEdges);
@@ -122,41 +321,130 @@ export function createApp(options: CreateAppOptions = {}) {
     const edges = store.callEdgesFor(projectId);
     const findings = runChecks(changed, active, edges);
 
+    // Cross-session design divergence (statefulness redesign, 2026-08): the
+    // first place a real Claim is checked against another session's
+    // self-reported open DesignStatement, not just against other designs'
+    // self-reported fields. Advisory only, same as every other finding here
+    // -- never a deny. Each match opens/reuses a persistent alignment
+    // thread (dedup handled by AlignmentThreadStore.findOrCreate) so both
+    // parties can reconcile asynchronously; the thread's id rides along on
+    // the Finding/Notice so `twing align respond` has something to point at.
+    const divergences = findDesignDivergences(changed, designs.openDesigns(projectId));
+    const divergenceFindings: Finding[] = divergences.map(({ finding, design }) => {
+      const thread = alignmentThreads.findOrCreate({
+        projectId,
+        symbolId: finding.symbolId,
+        developerId: finding.developerId,
+        otherDeveloperId: finding.otherDeveloperId,
+        designId: design.id,
+        systemDescription: finding.reason,
+        ts: finding.ts,
+      });
+      return { ...finding, threadId: thread.id };
+    });
+
+    const allFindings = [...findings, ...divergenceFindings];
+
     console.log(
       `twing serve: project ${projectId.slice(0, 12)} -- received ${claims.length} claim(s), ${callEdges.length} edge(s) ` +
-        `(${changed.length} new/changed) -> ${findings.length} finding(s)`,
+        `(${changed.length} new/changed) -> ${allFindings.length} finding(s)`,
     );
-    for (const f of findings) {
+    for (const f of allFindings) {
       console.log(`twing serve:   [${f.kind}] ${f.symbolId} -- ${f.developerId} <-> ${f.otherDeveloperId}`);
+      activityLog.append({
+        projectId: f.projectId,
+        developerId: f.developerId,
+        kind: "finding_raised",
+        relatedId: f.threadId,
+        ts: f.ts,
+        payload: { kind: f.kind, symbolId: f.symbolId, otherDeveloperId: f.otherDeveloperId, reason: f.reason },
+      });
     }
 
     // Deliver to both parties: the submitter gets it synchronously here too
     // (redundant with this response but keeps the daemon's poll loop
     // uniform — it always just reads notices), and the other party learns
     // of it asynchronously on their next poll (§7).
-    for (const f of findings) {
-      store.addNotice(f.developerId, f.reason, f.ts);
-      store.addNotice(f.otherDeveloperId, f.reason, f.ts);
+    for (const f of allFindings) {
+      store.addNotice(f.developerId, f.reason, f.ts, f.threadId);
+      store.addNotice(f.otherDeveloperId, f.reason, f.ts, f.threadId);
     }
 
-    return c.json({ findings });
+    return c.json({ findings: allFindings });
   });
 
   // §7: findings generated after the daemon's last push, including ones
-  // triggered by another developer's later activity.
+  // triggered by another developer's later activity. Scoped to the
+  // authenticated identity -- no longer an arbitrary query param, so one
+  // developer can't read another's notices.
   app.get("/v1/notices", (c) => {
-    const developerId = c.req.query("developerId");
-    if (!developerId) {
-      return c.json({ error: "expected ?developerId=" }, 400);
-    }
+    const identity = c.get("identity");
     const since = Number(c.req.query("since") ?? "0");
-    const items = store.noticesSince(developerId, Number.isFinite(since) ? since : 0);
+    const items = store.noticesSince(identity.developerId, Number.isFinite(since) ? since : 0);
     // Silent when empty -- this is polled every few seconds per developer
     // (§5), and an empty result is the overwhelmingly common, boring case.
     if (items.length > 0) {
-      console.log(`twing serve: delivering ${items.length} notice(s) to ${developerId}`);
+      console.log(`twing serve: delivering ${items.length} notice(s) to ${identity.developerId}`);
     }
     return c.json({ items });
+  });
+
+  /** Membership check shared by all four alignment-thread routes below:
+   * only the two parties on a thread (never a bystander, even a project
+   * admin) can read/reply/close it -- this is a private, voluntary
+   * reconciliation channel between the two developers it names, not a
+   * project-wide one. */
+  function isThreadParty(identity: ResolvedIdentity, thread: { developerId: string; otherDeveloperId: string }): boolean {
+    return identity.developerId === thread.developerId || identity.developerId === thread.otherDeveloperId;
+  }
+
+  // Alignment threads (statefulness redesign, 2026-08): the async,
+  // never-blocking "conversation layer" for a design_divergence finding
+  // (design-divergence.ts). Purely additive to the notice pipeline above --
+  // no PreToolUse/deny semantics anywhere on this path, and hook/design_gate.go
+  // needs no changes for any of these.
+  app.get("/v1/alignment-threads", (c) => {
+    const identity = c.get("identity");
+    const projectId = c.req.query("projectId");
+    if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
+    if (!identity.projects.some((p) => p.projectId === projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
+    const status = c.req.query("status") as "open" | "closed" | undefined;
+    const items = alignmentThreads.listByProject(projectId, status).filter((t) => isThreadParty(identity, t));
+    return c.json({ items });
+  });
+
+  app.get("/v1/alignment-threads/:id", (c) => {
+    const identity = c.get("identity");
+    const thread = alignmentThreads.get(c.req.param("id"));
+    if (!thread) return c.json({ error: "no such thread" }, 404);
+    if (!isThreadParty(identity, thread)) return c.json({ error: "not a party to this thread" }, 403);
+    return c.json({ thread, messages: alignmentThreads.messages(thread.id) });
+  });
+
+  app.post("/v1/alignment-threads/:id/messages", async (c) => {
+    const identity = c.get("identity");
+    const thread = alignmentThreads.get(c.req.param("id"));
+    if (!thread) return c.json({ error: "no such thread" }, 404);
+    if (!isThreadParty(identity, thread)) return c.json({ error: "not a party to this thread" }, 403);
+    const body = await c.req.json<{ message?: string }>().catch(() => null);
+    if (!body || !body.message) return c.json({ error: "expected { message }" }, 400);
+    const message = alignmentThreads.postMessage(thread.id, identity.developerId, body.message);
+    // Notify whichever party didn't just post -- rides the same
+    // notice-polling delivery every other finding already uses.
+    const otherParty = identity.developerId === thread.developerId ? thread.otherDeveloperId : thread.developerId;
+    store.addNotice(otherParty, `twing align: ${identity.developerId} replied on an alignment thread: "${body.message}"`, Date.now(), thread.id);
+    return c.json({ message });
+  });
+
+  app.patch("/v1/alignment-threads/:id/close", (c) => {
+    const identity = c.get("identity");
+    const thread = alignmentThreads.get(c.req.param("id"));
+    if (!thread) return c.json({ error: "no such thread" }, 404);
+    if (!isThreadParty(identity, thread)) return c.json({ error: "not a party to this thread" }, 403);
+    const closed = alignmentThreads.close(thread.id, identity.developerId);
+    return c.json({ status: closed?.status });
   });
 
   // §17.2: the one call twing-hook makes. Accepts either rawPlanText
@@ -164,10 +452,18 @@ export function createApp(options: CreateAppOptions = {}) {
   // `twing design register`, extraction skipped). Registers the design and
   // returns the verdict in one round trip.
   app.post("/v1/designs/check", async (c) => {
+    const identity = c.get("identity");
     const body = await c.req.json<DesignCheckRequestBody>().catch(() => null);
-    if (!body || typeof body.projectId !== "string" || typeof body.developerId !== "string" || typeof body.sessionId !== "string") {
-      return c.json({ error: "expected { projectId, developerId, sessionId, ... }" }, 400);
+    if (!body || typeof body.projectId !== "string" || typeof body.sessionId !== "string") {
+      return c.json({ error: "expected { projectId, sessionId, ... }" }, 400);
     }
+    const authz = authorizeProject(identity, body.projectId);
+    if (!authz.ok) return c.json({ error: authz.error }, authz.status);
+
+    // Narrowed once here, not re-read off `body` inside the fire-and-forget
+    // closure below -- TS can't carry the top-of-handler `typeof === "string"`
+    // narrowing through a nested async function capturing the same object.
+    const projectId = body.projectId;
 
     const hasStructured = Array.isArray(body.creates) || Array.isArray(body.touches) || Array.isArray(body.dependsOn) || typeof body.summary === "string";
     if (!body.rawPlanText && !hasStructured) {
@@ -180,7 +476,7 @@ export function createApp(options: CreateAppOptions = {}) {
     let summary = body.summary ?? "";
 
     if (body.rawPlanText && !hasStructured) {
-      const extracted = await extractDesign(body.rawPlanText, { model: extractModel, apiKey: openRouterApiKey });
+      const extracted = await extractDesign(body.rawPlanText, { model: extractModel, provider: extractProvider, apiKey: openRouterApiKey });
       creates = extracted.creates;
       touches = extracted.touches;
       dependsOn = extracted.dependsOn;
@@ -189,7 +485,7 @@ export function createApp(options: CreateAppOptions = {}) {
 
     const design = designs.register({
       projectId: body.projectId,
-      developerId: body.developerId,
+      developerId: identity.developerId,
       sessionId: body.sessionId,
       agentLabel: body.agentLabel,
       summary,
@@ -208,6 +504,53 @@ export function createApp(options: CreateAppOptions = {}) {
       `twing serve: design ${design.id.slice(0, 8)} project ${body.projectId.slice(0, 12)} -> ${outcome.verdict}` +
         (outcome.conflicts.length > 0 ? ` (${outcome.conflicts.length} conflict(s))` : ""),
     );
+    activityLog.append({
+      projectId: body.projectId,
+      developerId: identity.developerId,
+      sessionId: body.sessionId,
+      kind: "design_checked",
+      relatedId: design.id,
+      ts: Date.now(),
+      payload: { verdict: outcome.verdict, conflictCount: outcome.conflicts.length },
+    });
+
+    // Async semantic-conflict comparator (design-semantic-check.ts,
+    // 2026-08): fired here, unawaited, so it never delays this response --
+    // runs unconditionally against every currently-open design regardless
+    // of `outcome.verdict` above. Deliberately not gated on a syntactic
+    // hit: neither the deny payload a gated Edit/Write sees nor the
+    // justified-divergence review flow ever surfaces a design's full raw
+    // text (just `summary` + a narrow `overlapDetail` string), so a
+    // syntactic `overlap` doesn't guarantee a human would ever see a
+    // deeper, un-flagged issue in the same pair. Mirrors the
+    // findDesignDivergences pipeline in POST /v1/claims below almost
+    // exactly -- same alignment-thread/notice/activity-log shape, just
+    // triggered from design registration instead of claim ingestion.
+    void (async () => {
+      for (const other of open) {
+        const result = await checkSemanticConflict(design, other, { model: semanticCheckModel });
+        if (!result.conflict) continue;
+        const thread = alignmentThreads.findOrCreate({
+          projectId,
+          symbolId: design.id, // stand-in dedup key -- no real symbolId for a design-vs-design finding
+          developerId: design.developerId,
+          otherDeveloperId: other.developerId,
+          designId: other.id,
+          systemDescription: result.reason,
+          ts: Date.now(),
+        });
+        activityLog.append({
+          projectId,
+          developerId: design.developerId,
+          kind: "design_semantic_conflict",
+          relatedId: thread.id,
+          ts: Date.now(),
+          payload: { otherDesignId: other.id, kind: result.kind, reason: result.reason },
+        });
+        store.addNotice(design.developerId, result.reason, Date.now(), thread.id);
+        store.addNotice(other.developerId, result.reason, Date.now(), thread.id);
+      }
+    })().catch((err) => console.error("twing serve: semantic conflict check failed", err));
 
     if (outcome.verdict === "clean") {
       return c.json({ verdict: "clean", designId: design.id });
@@ -221,9 +564,13 @@ export function createApp(options: CreateAppOptions = {}) {
   // §17.5: adopt the conflicting design (superseded), or justify diverging
   // (queues to /v1/reviews -- does not unblock by itself).
   app.post("/v1/designs/:id/resolve", async (c) => {
+    const identity = c.get("identity");
     const id = c.req.param("id");
     const design = designs.get(id);
     if (!design) return c.json({ error: "no such design" }, 404);
+    if (!identity.projects.some((p) => p.projectId === design.projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
 
     const body = await c.req.json<ResolveRequestBody>().catch(() => null);
     if (!body || (body.resolution !== "adopted" && body.resolution !== "justified_divergence")) {
@@ -247,17 +594,26 @@ export function createApp(options: CreateAppOptions = {}) {
   // design, per session -- not exposed as a separate bulk endpoint since the
   // hook already knows which session it is).
   app.patch("/v1/designs/:id/close", (c) => {
+    const identity = c.get("identity");
     const id = c.req.param("id");
-    const design = designs.close(id);
+    const design = designs.get(id);
     if (!design) return c.json({ error: "no such design" }, 404);
-    return c.json({ status: design.status });
+    if (!identity.projects.some((p) => p.projectId === design.projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
+    const closed = designs.close(id);
+    return c.json({ status: closed?.status });
   });
 
   // Visibility/debugging (§17.2), and also what the hook's Edit|Write gate
   // calls to check "is there an open design for my session" (?sessionId=&status=open).
   app.get("/v1/designs", (c) => {
+    const identity = c.get("identity");
     const projectId = c.req.query("projectId");
     if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
+    if (!identity.projects.some((p) => p.projectId === projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
     const status = c.req.query("status") as DesignStatement["status"] | undefined;
     const sessionId = c.req.query("sessionId");
     let items = designs.listByProject(projectId, status);
@@ -267,31 +623,47 @@ export function createApp(options: CreateAppOptions = {}) {
 
   // §17.5: the human-facing queue -- justified divergences pending sign-off.
   app.get("/v1/reviews", (c) => {
+    const identity = c.get("identity");
     const projectId = c.req.query("projectId");
     if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
+    if (!identity.projects.some((p) => p.projectId === projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
     return c.json({ items: designs.listReviews(projectId) });
   });
 
+  // §17.10 hardening: deciding a review requires being that project's
+  // admin, not mere token possession -- closes the gap flagged against the
+  // old shared-token model.
   app.post("/v1/reviews/:id/decide", async (c) => {
+    const identity = c.get("identity");
     const id = c.req.param("id");
+    const review = designs.getReview(id);
+    if (!review) return c.json({ error: "no such review" }, 404);
+    if (!canManageProject(identity, review.projectId)) {
+      return c.json({ error: "not an admin of this project" }, 403);
+    }
     const body = await c.req.json<{ decision?: "approve" | "reject" }>().catch(() => null);
     if (!body || (body.decision !== "approve" && body.decision !== "reject")) {
       return c.json({ error: "expected decision: approve | reject" }, 400);
     }
-    const review = designs.decideReview(id, body.decision);
-    if (!review) return c.json({ error: "no such review" }, 404);
+    const decided = designs.decideReview(id, body.decision);
     console.log(`twing serve: review ${id.slice(0, 8)} decided -> ${body.decision}`);
-    return c.json({ review });
+    return c.json({ review: decided });
   });
 
   // §17.2/§17.6's cold-start seed: `twing init` forwards this repo's local
-  // .twing/verify.yml constraints so the Constraint Store starts non-empty
+  // .twing/twing.yml constraints so the Constraint Store starts non-empty
   // without the server needing filesystem access to anyone's checkout.
   app.post("/v1/constraints/seed", async (c) => {
+    const identity = c.get("identity");
     const body = await c.req.json<SeedRequestBody>().catch(() => null);
     if (!body || typeof body.projectId !== "string" || !Array.isArray(body.constraints)) {
       return c.json({ error: "expected { projectId, constraints: [{statement, scope, type?}] }" }, 400);
     }
+    const authz = authorizeProject(identity, body.projectId);
+    if (!authz.ok) return c.json({ error: authz.error }, authz.status);
+
     const projectId = body.projectId;
     const added = body.constraints.map((entry) =>
       constraintStore.add(projectId, entry.statement, entry.scope, entry.type ?? "canonical_abstraction", "seeded"),
@@ -306,11 +678,14 @@ export function createApp(options: CreateAppOptions = {}) {
   // Edit|Write gate on every tool call, ahead of (and independent of) the
   // "does this session have an open design at all" check.
   app.get("/v1/constraints/match", (c) => {
+    const identity = c.get("identity");
     const projectId = c.req.query("projectId");
     const path = c.req.query("path");
     if (!projectId || !path) {
       return c.json({ error: "expected ?projectId=&path=" }, 400);
     }
+    const authz = authorizeProject(identity, projectId);
+    if (!authz.ok) return c.json({ error: authz.error }, authz.status);
     const hit = matchConstraintsForPaths([path], constraintStore.forProject(projectId));
     if (hit) {
       console.log(`twing serve: constraint match on ${path} (project ${projectId.slice(0, 12)}) -- ${hit.type}: ${hit.statement}`);

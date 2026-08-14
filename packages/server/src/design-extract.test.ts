@@ -83,3 +83,29 @@ test("network error fails soft to empty", async () => {
     },
   );
 });
+
+test("provider: bedrock -- routes through bedrock-mantle, no OPENROUTER_API_KEY needed, retry/parse/fail-soft all still apply", async () => {
+  const originalToken = process.env.AWS_BEARER_TOKEN_BEDROCK;
+  process.env.AWS_BEARER_TOKEN_BEDROCK = "test-token";
+  try {
+    await withMockFetch(
+      (async (url: string) => {
+        assert.match(url, /^https:\/\/bedrock-mantle\.us-east-1\.api\.aws\/v1\/chat\/completions$/);
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({ creates: ["Foo"], touches: ["a.ts"], dependsOn: [], summary: "does foo via bedrock" }) } }],
+          }),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+      async () => {
+        // No apiKey passed at all -- confirms the openrouter-only precheck
+        // doesn't block the bedrock path.
+        const result = await extractDesign("plan", { model: "zai.glm-5", provider: "bedrock", region: "us-east-1" });
+        assert.deepEqual(result, { creates: ["Foo"], touches: ["a.ts"], dependsOn: [], summary: "does foo via bedrock" });
+      },
+    );
+  } finally {
+    process.env.AWS_BEARER_TOKEN_BEDROCK = originalToken;
+  }
+});

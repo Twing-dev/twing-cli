@@ -1,7 +1,10 @@
 /**
- * Masked stdin password prompt (§17.10) -- zero-dependency raw-mode read,
- * no echo. Used exactly once per server by `twing init`'s login flow; every
- * other command either has a stored token or doesn't need one.
+ * Masked stdin input prompt -- zero-dependency raw-mode read, no echo.
+ * Used by `twing login`'s interactive-paste path when no `--token` is
+ * given; every other command either has a stored PAT or doesn't need one.
+ * Not password-specific despite the name (kept for now to avoid touching
+ * every call site) -- it's a generic masked line reader, used today for
+ * pasting a personal access token rather than typing a password.
  *
  * Control characters are built via String.fromCharCode rather than typed
  * literally, so the source stays plain ASCII and unambiguous to read.
@@ -15,7 +18,7 @@ const BACKSPACE_CHARS = new Set([String.fromCharCode(127), String.fromCharCode(8
 export function promptPassword(question: string): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!process.stdin.isTTY) {
-      reject(new Error("twing init: this server requires a password, but stdin isn't a TTY to prompt for one -- run interactively once to authenticate"));
+      reject(new Error("stdin isn't a TTY to prompt on -- pass the value as a flag instead, or run this interactively once"));
       return;
     }
 
