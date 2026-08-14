@@ -30,6 +30,13 @@ export type ActivityEventKind =
   | "review_decided"
   | "design_closed"
   | "design_expired"
+  /** §17 scope enforcement (2026-08): a design's own registration/amendment
+   * verdict wasn't `clean` -- it's persisted as `status: "flagged"` instead
+   * of `"open"` (see `DesignRegistry.flag`). */
+  | "design_flagged"
+  /** §17 scope enforcement (2026-08): `DesignRegistry.amend` expanded an
+   * open design's creates/touches/dependsOn after a clean re-check. */
+  | "design_amended"
   | "constraint_ratified"
   /** Async semantic-conflict comparator (design-semantic-check.ts) flagged
    * a conflict between two designs that the syntactic tiers (design-

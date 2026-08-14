@@ -15,7 +15,7 @@ import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
 import { runChecks } from "./checks.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
-import { runDesignChecks, matchConstraintsForPaths } from "./design-checks.js";
+import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
 import type { LlmProvider } from "./llm-client.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
@@ -50,6 +50,14 @@ interface ResolveRequestBody {
   resolution?: "adopted" | "justified_divergence";
   adoptedDesignId?: string;
   justification?: string;
+}
+
+// §17 scope enforcement (2026-08): "add" fields only -- amend expands an
+// open design's declared scope, it never removes from it.
+interface AmendRequestBody {
+  addTouches?: string[];
+  addCreates?: string[];
+  addDependsOn?: string[];
 }
 
 interface SeedRequestBody {
@@ -298,6 +306,60 @@ export function createApp(options: CreateAppOptions = {}) {
     return { ok: false, status: 403, error: `not a member of project ${projectId}` };
   }
 
+  /**
+   * Async semantic-conflict comparator (design-semantic-check.ts, 2026-08):
+   * called unawaited so it never delays the response that triggered it --
+   * runs unconditionally against every currently-live design regardless of
+   * the syntactic verdict. Deliberately not gated on a syntactic hit:
+   * neither the deny payload a gated Edit/Write sees nor the
+   * justified-divergence review flow ever surfaces a design's full raw
+   * text (just `summary` + a narrow `overlapDetail` string), so a syntactic
+   * `overlap` doesn't guarantee a human would ever see a deeper, un-flagged
+   * issue in the same pair. Mirrors the findDesignDivergences pipeline in
+   * POST /v1/claims below almost exactly -- same alignment-thread/notice/
+   * activity-log shape.
+   *
+   * Shared by both initial registration and `amend` (§17 scope enforcement,
+   * 2026-08): `amend` bumps `scopeVersion` before calling this, so a stale
+   * pass from a *prior* call (registration or an earlier amend) that's
+   * still mid-loop cooperatively stops issuing further comparisons the next
+   * time it re-reads the design -- "kill" without aborting an in-flight
+   * HTTP call, "retain the findings" because activity_events/alignment
+   * threads are append-only and nothing here ever retracts a past one.
+   */
+  function runSemanticComparatorPass(candidateId: string, others: DesignStatement[]): void {
+    const started = designs.get(candidateId);
+    if (!started) return;
+    const startVersion = started.scopeVersion;
+    void (async () => {
+      for (const other of others) {
+        const current = designs.get(candidateId);
+        if (!current || current.scopeVersion !== startVersion) return; // superseded by a later amend -- stop
+        const result = await checkSemanticConflict(current, other, { model: semanticCheckModel });
+        if (!result.conflict) continue;
+        const thread = alignmentThreads.findOrCreate({
+          projectId: current.projectId,
+          symbolId: current.id, // stand-in dedup key -- no real symbolId for a design-vs-design finding
+          developerId: current.developerId,
+          otherDeveloperId: other.developerId,
+          designId: other.id,
+          systemDescription: result.reason,
+          ts: Date.now(),
+        });
+        activityLog.append({
+          projectId: current.projectId,
+          developerId: current.developerId,
+          kind: "design_semantic_conflict",
+          relatedId: thread.id,
+          ts: Date.now(),
+          payload: { otherDesignId: other.id, kind: result.kind, reason: result.reason },
+        });
+        store.addNotice(current.developerId, result.reason, Date.now(), thread.id);
+        store.addNotice(other.developerId, result.reason, Date.now(), thread.id);
+      }
+    })().catch((err) => console.error("twing serve: semantic conflict check failed", err));
+  }
+
   // §7: upserts claims + call-graph edges for projectId, runs the
   // divergence checks against everything active in the project, and
   // returns findings involving the just-submitted claims. Every claim's
@@ -460,11 +522,6 @@ export function createApp(options: CreateAppOptions = {}) {
     const authz = authorizeProject(identity, body.projectId);
     if (!authz.ok) return c.json({ error: authz.error }, authz.status);
 
-    // Narrowed once here, not re-read off `body` inside the fire-and-forget
-    // closure below -- TS can't carry the top-of-handler `typeof === "string"`
-    // narrowing through a nested async function capturing the same object.
-    const projectId = body.projectId;
-
     const hasStructured = Array.isArray(body.creates) || Array.isArray(body.touches) || Array.isArray(body.dependsOn) || typeof body.summary === "string";
     if (!body.rawPlanText && !hasStructured) {
       return c.json({ error: "expected rawPlanText, or structured creates/touches/dependsOn/summary" }, 400);
@@ -514,43 +571,16 @@ export function createApp(options: CreateAppOptions = {}) {
       payload: { verdict: outcome.verdict, conflictCount: outcome.conflicts.length },
     });
 
-    // Async semantic-conflict comparator (design-semantic-check.ts,
-    // 2026-08): fired here, unawaited, so it never delays this response --
-    // runs unconditionally against every currently-open design regardless
-    // of `outcome.verdict` above. Deliberately not gated on a syntactic
-    // hit: neither the deny payload a gated Edit/Write sees nor the
-    // justified-divergence review flow ever surfaces a design's full raw
-    // text (just `summary` + a narrow `overlapDetail` string), so a
-    // syntactic `overlap` doesn't guarantee a human would ever see a
-    // deeper, un-flagged issue in the same pair. Mirrors the
-    // findDesignDivergences pipeline in POST /v1/claims below almost
-    // exactly -- same alignment-thread/notice/activity-log shape, just
-    // triggered from design registration instead of claim ingestion.
-    void (async () => {
-      for (const other of open) {
-        const result = await checkSemanticConflict(design, other, { model: semanticCheckModel });
-        if (!result.conflict) continue;
-        const thread = alignmentThreads.findOrCreate({
-          projectId,
-          symbolId: design.id, // stand-in dedup key -- no real symbolId for a design-vs-design finding
-          developerId: design.developerId,
-          otherDeveloperId: other.developerId,
-          designId: other.id,
-          systemDescription: result.reason,
-          ts: Date.now(),
-        });
-        activityLog.append({
-          projectId,
-          developerId: design.developerId,
-          kind: "design_semantic_conflict",
-          relatedId: thread.id,
-          ts: Date.now(),
-          payload: { otherDesignId: other.id, kind: result.kind, reason: result.reason },
-        });
-        store.addNotice(design.developerId, result.reason, Date.now(), thread.id);
-        store.addNotice(other.developerId, result.reason, Date.now(), thread.id);
-      }
-    })().catch((err) => console.error("twing serve: semantic conflict check failed", err));
+    // §17 scope enforcement (2026-08): a non-clean verdict demotes the
+    // design out of "open" immediately -- before this response is ever
+    // sent -- so it stops counting as a usable open design for the
+    // Edit/Write gate's own-session check (`/v1/designs/scope-match`
+    // below), rather than staying "open" until someone resolves it.
+    if (outcome.verdict !== "clean") {
+      designs.flag(design.id, outcome.verdict);
+    }
+
+    runSemanticComparatorPass(design.id, open);
 
     if (outcome.verdict === "clean") {
       return c.json({ verdict: "clean", designId: design.id });
@@ -605,8 +635,59 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ status: closed?.status });
   });
 
-  // Visibility/debugging (§17.2), and also what the hook's Edit|Write gate
-  // calls to check "is there an open design for my session" (?sessionId=&status=open).
+  // §17 scope enforcement (2026-08): expand an *open* design's declared
+  // creates/touches/dependsOn -- the escape hatch for legitimately touching
+  // a file that wasn't declared at registration time. Re-runs the full
+  // syntactic check (design-checks.ts tiers 1-3) against the *merged*
+  // candidate before persisting anything, exactly like initial registration
+  // does -- an amendment can't be used to silently launder a scope
+  // expansion past overlap/constraint detection. On a non-clean verdict,
+  // the amendment is rejected and the design's *existing* scope is left
+  // untouched (still open) -- only the proposed addition is refused, same
+  // adopt-or-justify path as initial registration, scoped to this same
+  // design id. On success, kicks off a fresh full semantic-comparator pass
+  // (runSemanticComparatorPass, above) that supersedes any still-running
+  // pass from the prior registration/amendment.
+  app.post("/v1/designs/:id/amend", async (c) => {
+    const identity = c.get("identity");
+    const id = c.req.param("id");
+    const design = designs.get(id);
+    if (!design) return c.json({ error: "no such design" }, 404);
+    if (!identity.projects.some((p) => p.projectId === design.projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
+    if (design.status !== "open") {
+      return c.json({ error: `design is ${design.status}, not open -- can't amend` }, 409);
+    }
+
+    const body = await c.req.json<AmendRequestBody>().catch(() => null);
+    const delta = { touches: body?.addTouches ?? [], creates: body?.addCreates ?? [], dependsOn: body?.addDependsOn ?? [] };
+    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0) {
+      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn" }, 400);
+    }
+
+    const merged = mergeDesignScope(design, delta);
+    const candidate: DesignStatement = { ...design, ...merged };
+    const open = designs.openDesigns(design.projectId, Date.now(), design.id);
+    const constraints = constraintStore.forProject(design.projectId);
+    const outcome = runDesignChecks(candidate, open, constraints);
+
+    if (outcome.verdict !== "clean") {
+      console.log(`twing serve: design ${id.slice(0, 8)} amend rejected -> ${outcome.verdict}`);
+      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraint: outcome.constraint });
+    }
+
+    const amended = designs.amend(id, delta);
+    if (!amended) return c.json({ error: `design is ${design.status}, not open -- can't amend` }, 409);
+    console.log(`twing serve: design ${id.slice(0, 8)} amended -> scopeVersion ${amended.scopeVersion}`);
+    runSemanticComparatorPass(amended.id, open);
+    return c.json({ verdict: "clean", designId: amended.id });
+  });
+
+  // Visibility/debugging (§17.2). Was also what the hook's Edit|Write gate
+  // used to check "is there an open design for my session" -- superseded by
+  // /v1/designs/scope-match below (§17 scope enforcement, 2026-08), which
+  // additionally checks the specific file against that design's own scope.
   app.get("/v1/designs", (c) => {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
@@ -619,6 +700,45 @@ export function createApp(options: CreateAppOptions = {}) {
     let items = designs.listByProject(projectId, status);
     if (sessionId) items = items.filter((d) => d.sessionId === sessionId);
     return c.json({ items });
+  });
+
+  // §17 scope enforcement (2026-08): the design equivalent of
+  // /v1/constraints/match's ground-truth backstop below -- checks the
+  // literal file being edited against the session's own *open* design(s)
+  // directly, instead of trusting "the session has *a* design registered"
+  // as proof enough. Four states:
+  //  - "no_design": nothing registered for this session at all.
+  //  - "flagged": something's registered, but its own verdict wasn't clean
+  //    (DesignRegistry.flag) -- resolve it before it counts as usable.
+  //  - "in_scope" / "out_of_scope": whether `path` falls within an open
+  //    design's own creates/touches (pathInDesignScope). `path` is optional
+  //    -- omitted, this can only report no_design/flagged/in_scope, same
+  //    permissiveness as the old plain "has an open design" check for
+  //    callers that don't have a file path to check.
+  app.get("/v1/designs/scope-match", (c) => {
+    const identity = c.get("identity");
+    const projectId = c.req.query("projectId");
+    const sessionId = c.req.query("sessionId");
+    if (!projectId || !sessionId) {
+      return c.json({ error: "expected ?projectId=&sessionId=" }, 400);
+    }
+    const authz = authorizeProject(identity, projectId);
+    if (!authz.ok) return c.json({ error: authz.error }, authz.status);
+    const path = c.req.query("path");
+
+    const sessionDesigns = designs
+      .listByProject(projectId)
+      .filter((d) => d.sessionId === sessionId && (d.status === "open" || d.status === "flagged"));
+    if (sessionDesigns.length === 0) return c.json({ state: "no_design" });
+
+    const openOnes = sessionDesigns.filter((d) => d.status === "open");
+    if (openOnes.length === 0) {
+      return c.json({ state: "flagged", designId: sessionDesigns[sessionDesigns.length - 1].id });
+    }
+    if (!path) return c.json({ state: "in_scope" });
+    const hit = openOnes.find((d) => pathInDesignScope(path, d));
+    if (hit) return c.json({ state: "in_scope", designId: hit.id });
+    return c.json({ state: "out_of_scope", designId: openOnes[openOnes.length - 1].id });
   });
 
   // §17.5: the human-facing queue -- justified divergences pending sign-off.

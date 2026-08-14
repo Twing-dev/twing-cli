@@ -31,6 +31,7 @@ function makeDesign(overrides: Partial<DesignStatement> = {}): DesignStatement {
     touches: [],
     dependsOn: [],
     ttlMs: 24 * 60 * 60 * 1000,
+    scopeVersion: 1,
     ...overrides,
   };
 }

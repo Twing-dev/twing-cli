@@ -24,6 +24,7 @@ import {
 import {
   runDesignRegister,
   runDesignResolve,
+  runDesignAmend,
   runDesignList,
   runDesignReviews,
   runDesignEnableGate,
@@ -74,6 +75,7 @@ function printUsage(): void {
       "  twing project list-developers [--project <id>] [--server <url>]",
       "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f",
       "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
+      "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f]",
       "  twing design list [--status open]",
       "  twing design reviews [--decide <reviewId> --decision approve|reject]",
       "  twing design enable-gate",
@@ -93,6 +95,9 @@ async function runDesignCommand(rest: string[]): Promise<void> {
       return;
     case "resolve":
       await runDesignResolve({ cwd, id: flags.id, adopt: flags.adopt, justify: flags.justify });
+      return;
+    case "amend":
+      await runDesignAmend({ cwd, id: flags.id, touches: flags.touches, creates: flags.creates, dependsOn: flags["depends-on"] });
       return;
     case "list":
       await runDesignList({ cwd, status: flags.status });

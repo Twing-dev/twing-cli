@@ -191,8 +191,8 @@ func TestHandleEditWriteGate_ConstraintMatched_DeniesAndSkipsOpenDesignsCall(t *
 		case "/v1/constraints/match":
 			w.Header().Set("content-type", "application/json")
 			_, _ = w.Write([]byte(`{"matched":true,"constraint":{"statement":"needs review","type":"review_required"}}`))
-		case "/v1/designs":
-			t.Fatal("open-designs lookup should not run once the constraint check matched")
+		case "/v1/designs/scope-match":
+			t.Fatal("scope-match lookup should not run once the constraint check matched")
 		}
 	}))
 	defer server.Close()
@@ -216,7 +216,7 @@ func TestHandleEditWriteGate_OpenDesignsUnexpectedStatus_Denies(t *testing.T) {
 		case "/v1/constraints/match":
 			w.Header().Set("content-type", "application/json")
 			_, _ = w.Write([]byte(`{"matched":false}`))
-		case "/v1/designs":
+		case "/v1/designs/scope-match":
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 	}))
@@ -240,8 +240,8 @@ func TestHandleEditWriteGate_NoOpenDesign_DeniesWithRegisterInstructions(t *test
 		switch r.URL.Path {
 		case "/v1/constraints/match":
 			_, _ = w.Write([]byte(`{"matched":false}`))
-		case "/v1/designs":
-			_, _ = w.Write([]byte(`{"items":[]}`))
+		case "/v1/designs/scope-match":
+			_, _ = w.Write([]byte(`{"state":"no_design"}`))
 		}
 	}))
 	defer server.Close()
@@ -259,13 +259,16 @@ func TestHandleEditWriteGate_NoOpenDesign_DeniesWithRegisterInstructions(t *test
 	}
 }
 
-func TestHandleEditWriteGate_OpenDesignExists_Allows(t *testing.T) {
+func TestHandleEditWriteGate_InScope_Allows(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/constraints/match":
 			_, _ = w.Write([]byte(`{"matched":false}`))
-		case "/v1/designs":
-			_, _ = w.Write([]byte(`{"items":[{"id":"d1"}]}`))
+		case "/v1/designs/scope-match":
+			if r.URL.Query().Get("path") != "foo.go" {
+				t.Errorf("scope-match path = %q, want foo.go", r.URL.Query().Get("path"))
+			}
+			_, _ = w.Write([]byte(`{"state":"in_scope","designId":"d1"}`))
 		}
 	}))
 	defer server.Close()
@@ -277,6 +280,85 @@ func TestHandleEditWriteGate_OpenDesignExists_Allows(t *testing.T) {
 	decision, _ := decisionOf(t, stdout)
 	if decision != "allow" {
 		t.Fatalf("decision = %q, want allow", decision)
+	}
+}
+
+// A tool call with no file_path at all (ToolInput doesn't decode a path) --
+// the constraint check is skipped entirely (unchanged, existing behavior),
+// and the scope-match call is still made but with no `path`, which the
+// server treats permissively ("can't verify scope without a path", same
+// permissiveness the old plain "has an open design" check had). Only
+// no_design/flagged states are actually distinguishable without a path.
+func TestHandleEditWriteGate_NoFilePath_ScopeMatchOmitsPathAndStillAllows(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/constraints/match":
+			t.Errorf("constraint match must not be called when there's no file_path")
+		case "/v1/designs/scope-match":
+			if got := r.URL.Query().Get("path"); got != "" {
+				t.Errorf("scope-match path = %q, want omitted", got)
+			}
+			_, _ = w.Write([]byte(`{"state":"in_scope","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	payload := hookPayload{SessionID: "sess1", Cwd: repo, ToolName: "Write", ToolInput: json.RawMessage(`{}`)}
+	stdout := captureStdout(t, func() { handleEditWriteGate(payload) })
+	decision, _ := decisionOf(t, stdout)
+	if decision != "allow" {
+		t.Fatalf("decision = %q, want allow", decision)
+	}
+}
+
+func TestHandleEditWriteGate_Flagged_DeniesWithResolveInstructions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/constraints/match":
+			_, _ = w.Write([]byte(`{"matched":false}`))
+		case "/v1/designs/scope-match":
+			_, _ = w.Write([]byte(`{"state":"flagged","designId":"d-flagged"}`))
+		}
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+	if !strings.Contains(reason, "d-flagged") || !strings.Contains(reason, "design resolve") {
+		t.Errorf("reason = %q, want it to name the flagged design and point at `twing design resolve`", reason)
+	}
+}
+
+func TestHandleEditWriteGate_OutOfScope_DeniesWithAmendInstructions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/constraints/match":
+			_, _ = w.Write([]byte(`{"matched":false}`))
+		case "/v1/designs/scope-match":
+			_, _ = w.Write([]byte(`{"state":"out_of_scope","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+	if !strings.Contains(reason, "foo.go") || !strings.Contains(reason, "d1") || !strings.Contains(reason, "design amend") {
+		t.Errorf("reason = %q, want it to name the file, the design id, and point at `twing design amend`", reason)
 	}
 }
 

@@ -101,7 +101,7 @@ export const designs = sqliteTable(
     developerId: text("developer_id").notNull(),
     sessionId: text("session_id").notNull(),
     agentLabel: text("agent_label"),
-    status: text("status").notNull(), // "open" | "superseded" | "closed" | "expired"
+    status: text("status").notNull(), // "open" | "flagged" | "superseded" | "closed" | "expired"
     /** Set once a justified-divergence review on this design is decided --
      * durable independent of `status` changes afterward (e.g. reopening on
      * approval), so it's a directly-queryable precedent fact rather than
@@ -115,6 +115,9 @@ export const designs = sqliteTable(
     dependsOn: text("depends_on").notNull(), // JSON string[]
     rawPlanExcerpt: text("raw_plan_excerpt"),
     ttlMs: integer("ttl_ms").notNull(),
+    /** §17 scope enforcement (2026-08): bumped on every `amend`, so the async
+     * semantic-comparator loop can detect it's been superseded mid-run. */
+    scopeVersion: integer("scope_version").notNull().default(1),
   },
   (t) => [index("designs_project_id_idx").on(t.projectId), index("designs_session_id_idx").on(t.sessionId)],
 );

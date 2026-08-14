@@ -42,6 +42,7 @@ export function design(overrides: Partial<DesignStatement> = {}): DesignStatemen
     touches: [],
     dependsOn: [],
     ttlMs: 60_000,
+    scopeVersion: 1,
     ...overrides,
   };
 }

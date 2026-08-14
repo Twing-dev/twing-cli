@@ -533,3 +533,238 @@ test("POST /v1/designs/check: the async semantic-conflict comparator produces no
   const threadsBody = (await threadsRes.json()) as { items: unknown[] };
   assert.equal(threadsBody.items.length, 0);
 });
+
+// --- §17 scope enforcement (2026-08): flag / scope-match / amend ---
+
+test("POST /v1/designs/check: an overlap verdict persists as status 'flagged', not 'open' (§17 scope enforcement)", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const overlapRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "second, overlapping", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const overlapBody = (await overlapRes.json()) as { verdict: string; designId: string };
+  assert.equal(overlapBody.verdict, "overlap");
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s2`, { headers: bearer(admin.token) });
+  const listBody = (await listRes.json()) as { items: { id: string; status: string }[] };
+  const registered = listBody.items.find((d) => d.id === overlapBody.designId);
+  assert.equal(registered?.status, "flagged", "a design whose own verdict wasn't clean must not read back as 'open'");
+});
+
+test("GET /v1/designs/scope-match: no_design, in_scope, out_of_scope, and flagged", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const noDesign = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s-never-registered&path=a.ts`, { headers: bearer(admin.token) });
+  assert.deepEqual(await noDesign.json(), { state: "no_design" });
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  const inScope = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=a.ts`, { headers: bearer(admin.token) });
+  assert.deepEqual(await inScope.json(), { state: "in_scope", designId });
+
+  const outOfScope = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=z.ts`, { headers: bearer(admin.token) });
+  assert.deepEqual(await outOfScope.json(), { state: "out_of_scope", designId });
+
+  const flaggedRegisterRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId: flaggedId, verdict: flaggedVerdict } = (await flaggedRegisterRes.json()) as { designId: string; verdict: string };
+  assert.equal(flaggedVerdict, "overlap");
+
+  const flagged = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s2&path=a.ts`, { headers: bearer(admin.token) });
+  assert.deepEqual(await flagged.json(), { state: "flagged", designId: flaggedId });
+});
+
+test("GET /v1/designs/scope-match: with no ?path=, can only report no_design/flagged/in_scope (can't verify scope without a path)", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const noPathNoDesign = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s-never-registered`, { headers: bearer(admin.token) });
+  assert.deepEqual(await noPathNoDesign.json(), { state: "no_design" });
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const noPathInScope = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
+  const noPathBody = (await noPathInScope.json()) as { state: string; designId?: string };
+  assert.equal(noPathBody.state, "in_scope");
+  assert.equal(noPathBody.designId, undefined, "no designId hint when there's nothing to disambiguate a path against");
+});
+
+test("POST /v1/designs/check: a flagged design stays visible to a *third* design's overlap check (openDesigns includes flagged, end to end)", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "second, overlapping", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+  const secondBody = (await secondRes.json()) as { verdict: string; designId: string };
+  assert.equal(secondBody.verdict, "overlap"); // and is now flagged, not open (design_gate.go's Edit/Write check would stop seeing it as usable)
+
+  const thirdRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s3", summary: "third, also overlapping", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+  const thirdBody = (await thirdRes.json()) as { verdict: string; conflicts: { conflictingDesignId: string }[] };
+  assert.equal(thirdBody.verdict, "overlap", "a flagged design must not become invisible to new registrations' overlap checks");
+  assert.ok(
+    thirdBody.conflicts.some((c) => c.conflictingDesignId === secondBody.designId),
+    "the flagged (second) design specifically should show up as a conflict, not just the still-open first one",
+  );
+});
+
+test("POST /v1/designs/:id/amend: a clean amendment persists, bumps scopeVersion, and fires a fresh semantic-comparator pass", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      (async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: false, kind: null, reason: "" }) } }] }), { status: 200 })) as typeof fetch,
+      async () => {
+        const amendRes = await app.request(`/v1/designs/${designId}/amend`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ addTouches: ["b.ts"] }),
+        });
+        assert.deepEqual(await amendRes.json(), { verdict: "clean", designId });
+      },
+    ),
+  );
+
+  const scopeMatch = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=b.ts`, { headers: bearer(admin.token) });
+  assert.deepEqual(await scopeMatch.json(), { state: "in_scope", designId });
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
+  const listBody = (await listRes.json()) as { items: { id: string; touches: string[] }[] };
+  assert.deepEqual(listBody.items.find((d) => d.id === designId)?.touches, ["a.ts", "b.ts"]);
+});
+
+test("POST /v1/designs/:id/amend: a conflicting amendment is rejected and leaves the design's existing scope untouched", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  const amendRes = await app.request(`/v1/designs/${designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ addTouches: ["shared.ts"] }),
+  });
+  const amendBody = (await amendRes.json()) as { verdict: string; designId: string };
+  assert.equal(amendBody.verdict, "overlap");
+
+  // The design must still be open (amendment rejected, not the design itself)
+  // and its scope must be exactly what it was before the amend attempt.
+  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
+  const listBody = (await listRes.json()) as { items: { id: string; status: string; touches: string[] }[] };
+  const design = listBody.items.find((d) => d.id === designId);
+  assert.equal(design?.status, "open");
+  assert.deepEqual(design?.touches, ["a.ts"]);
+});
+
+test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator pass from the prior registration (kill stale, retain findings, start fresh)", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other1", summary: "", creates: [], touches: ["other1.ts"], dependsOn: [] }),
+  });
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other2", summary: "", creates: [], touches: ["other2.ts"], dependsOn: [] }),
+  });
+
+  let calls = 0;
+  let releaseFirstCall!: () => void;
+  const firstCallRelease = new Promise<void>((resolve) => {
+    releaseFirstCall = resolve;
+  });
+
+  await withBedrockEnv(async () => {
+    await withMockFetch(
+      (async () => {
+        calls++;
+        if (calls === 1) {
+          await firstCallRelease; // pause the stale run's first (in-flight) comparison
+        }
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: false, kind: null, reason: "" }) } }] }), { status: 200 });
+      }) as typeof fetch,
+      async () => {
+        const registerRes = await app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-candidate", summary: "", creates: [], touches: ["candidate.ts"], dependsOn: [] }),
+        });
+        const { designId } = (await registerRes.json()) as { designId: string };
+
+        // Give the fire-and-forget pass a moment to actually start its first
+        // (now-paused) comparison call before amending underneath it.
+        await waitFor(() => calls >= 1);
+
+        const amendRes = await app.request(`/v1/designs/${designId}/amend`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ addTouches: ["candidate2.ts"] }),
+        });
+        assert.equal((await amendRes.json()).verdict, "clean");
+
+        releaseFirstCall(); // let the stale, now-superseded call finish
+
+        // Stale run: 1 call (other1), then its next iteration sees the
+        // bumped scopeVersion and stops -- it never reaches other2. Fresh
+        // run (from amend): 2 calls (other1 + other2, recompared in full).
+        await waitFor(() => calls === 3);
+        // Give a superseded stale run a further beat to (incorrectly) fire
+        // a second call, if the version guard were broken.
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assert.equal(calls, 3, "the stale pass must not have compared against other2 after being superseded");
+      },
+    );
+  });
+});

@@ -139,6 +139,40 @@ function summarySimilarity(candidate: DesignStatement, other: DesignStatement): 
   };
 }
 
+/**
+ * §17 scope enforcement's ground-truth backstop for a design's *own* claim
+ * (as opposed to `matchConstraintsForPaths`, which checks a path against the
+ * project's constraint scopes): is this literal file actually declared by
+ * the design that's supposedly covering it? Same minimatch-based match as
+ * `matchConstraintsForPaths`'s inner loop, just a plain boolean -- there's
+ * no cross-constraint priority to resolve here, only "declared or not".
+ * `creates` is included alongside `touches` since a design's own overlap
+ * check (`exactOverlap` above) already treats the two as one combined scope
+ * for matching purposes.
+ */
+export function pathInDesignScope(path: string, design: DesignStatement): boolean {
+  const declared = [...design.creates, ...design.touches];
+  return declared.some((p) => p === path || minimatch(path, p));
+}
+
+/**
+ * Dedup union of a design's current creates/touches/dependsOn with a
+ * proposed addition -- the one merge implementation shared by `/v1/designs/
+ * :id/amend`'s pre-persist conflict check (which needs the *candidate*
+ * merged shape to run `runDesignChecks` against) and `DesignRegistry.amend`
+ * (which needs the same merge to persist), so the two can't drift apart.
+ */
+export function mergeDesignScope(
+  design: DesignStatement,
+  delta: { touches?: string[]; creates?: string[]; dependsOn?: string[] },
+): { touches: string[]; creates: string[]; dependsOn: string[] } {
+  return {
+    touches: [...new Set([...design.touches, ...(delta.touches ?? [])])],
+    creates: [...new Set([...design.creates, ...(delta.creates ?? [])])],
+    dependsOn: [...new Set([...design.dependsOn, ...(delta.dependsOn ?? [])])],
+  };
+}
+
 export function runDesignChecks(
   candidate: DesignStatement,
   openDesigns: DesignStatement[],

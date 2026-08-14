@@ -317,6 +317,72 @@ func openDesignsURL(serverURL, projectID, sessionID string) string {
 		strings.TrimRight(serverURL, "/"), url.QueryEscape(projectID), url.QueryEscape(sessionID))
 }
 
+func designScopeMatchURL(serverURL, projectID, sessionID, filePath string) string {
+	u := fmt.Sprintf("%s/v1/designs/scope-match?projectId=%s&sessionId=%s",
+		strings.TrimRight(serverURL, "/"), url.QueryEscape(projectID), url.QueryEscape(sessionID))
+	if filePath != "" {
+		u += "&path=" + url.QueryEscape(filePath)
+	}
+	return u
+}
+
+type designScopeMatchResponse struct {
+	State    string `json:"state"` // "no_design" | "flagged" | "in_scope" | "out_of_scope"
+	DesignID string `json:"designId,omitempty"`
+}
+
+// checkDesignScope is §17 scope enforcement's (2026-08) ground-truth
+// backstop for a design's *own* claim: checks the literal file being edited
+// against the session's own open design(s) directly, instead of trusting
+// "the session has *a* design registered" as proof enough. Same fail-closed
+// shape as checkPathConstraint -- a network/auth/parse error here returns a
+// non-empty failReason, never a silent "in_scope".
+func checkDesignScope(serverURL, authToken, projectID, sessionID, filePath string) (state, designID, failReason string) {
+	res, err := getJSON(designScopeMatchURL(serverURL, projectID, sessionID, filePath), authToken)
+	if err != nil {
+		logDesignGate("design scope check failed (blocking): %v", err)
+		return "", "", unreachableReason(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
+		return "", "", authRejectedReason()
+	}
+	if res.StatusCode != http.StatusOK {
+		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
+		return "", "", coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		logDesignGate("design scope check: failed reading response body (blocking): %v", err)
+		return "", "", coordinatorErrorReason("failed reading response body")
+	}
+	var result designScopeMatchResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		logDesignGate("design scope check: malformed response (blocking): %v", err)
+		return "", "", coordinatorErrorReason("malformed response")
+	}
+	return result.State, result.DesignID, ""
+}
+
+func flaggedDesignReason(designID string) string {
+	return fmt.Sprintf(
+		"twing design coordinator: your registered design (id %s) has an unresolved overlap/constraint "+
+			"conflict from its own registration -- it doesn't count as a usable open design until you resolve "+
+			"it. Run `twing design resolve --id %s (--adopt <designId> | --justify \"<reason>\")`, then retry this edit.",
+		designID, designID,
+	)
+}
+
+func outOfScopeReason(designID, path string) string {
+	return fmt.Sprintf(
+		"twing design coordinator: %s isn't in your registered design's declared scope (id %s). Either run "+
+			"`twing design amend --id %s --touches %s` (re-checked against other open designs/constraints, doesn't "+
+			"just silently expand your scope), or register a separate design if this is genuinely unrelated work.",
+		path, designID, designID, path,
+	)
+}
+
 func constraintMatchURL(serverURL, projectID, path string) string {
 	return fmt.Sprintf("%s/v1/constraints/match?projectId=%s&path=%s",
 		strings.TrimRight(serverURL, "/"), url.QueryEscape(projectID), url.QueryEscape(path))
@@ -385,8 +451,15 @@ func checkPathConstraint(serverURL, authToken, projectID, filePath string) (cons
 // skips plan mode entirely, this is what actually gets a design registered
 // before its first write. As of §17.9, it also checks the specific file
 // against the Constraint Store directly (ground truth) before falling back
-// to the "any open design" check -- a session can't sidestep a
-// review_required rule just by registering an unrelated design first.
+// to the design-scope check -- a session can't sidestep a review_required
+// rule just by registering an unrelated design first. As of §17 scope
+// enforcement (2026-08), "has any open design" is no longer sufficient by
+// itself: /v1/designs/scope-match additionally checks the file against that
+// design's own declared creates/touches (ground truth, same reasoning as
+// §17.9 but against the design's own claim instead of a constraint), and
+// distinguishes "nothing registered" from "something's registered but its
+// own verdict flagged a conflict" -- previously indistinguishable from a
+// clean design as far as this gate was concerned.
 func handleEditWriteGate(payload hookPayload) {
 	config := resolveServerConfig(payload.Cwd)
 	if config.ServerURL == "" {
@@ -413,47 +486,29 @@ func handleEditWriteGate(payload hookPayload) {
 		}
 	}
 
-	res, err := getJSON(openDesignsURL(config.ServerURL, projectID, payload.SessionID), config.AuthToken)
-	if err != nil {
-		logDesignGate("Edit|Write gate check failed (blocking): %v", err)
-		writeJSON(unreachableOutput("PreToolUse", err))
-		return
-	}
-	defer res.Body.Close()
-	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
-		logDesignGate("Edit|Write gate check returned status %d (blocking)", res.StatusCode)
-		writeJSON(authRejectedOutput("PreToolUse"))
-		return
-	}
-	if res.StatusCode != http.StatusOK {
-		logDesignGate("Edit|Write gate check returned status %d (blocking)", res.StatusCode)
-		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unexpected status %d", res.StatusCode)))
+	state, designID, failReason := checkDesignScope(config.ServerURL, config.AuthToken, projectID, payload.SessionID, input.FilePath)
+	if failReason != "" {
+		writeJSON(denyOutput("PreToolUse", failReason))
 		return
 	}
 
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		logDesignGate("Edit|Write gate: failed reading response body (blocking): %v", err)
-		writeJSON(coordinatorErrorOutput("PreToolUse", "failed reading response body"))
-		return
-	}
-	var result designListResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		logDesignGate("Edit|Write gate: malformed response (blocking): %v", err)
-		writeJSON(coordinatorErrorOutput("PreToolUse", "malformed response"))
-		return
-	}
-
-	if len(result.Items) > 0 {
+	switch state {
+	case "in_scope":
 		writeJSON(allowOutput("PreToolUse"))
-		return
+	case "flagged":
+		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(designID)))
+	case "out_of_scope":
+		writeJSON(denyOutput("PreToolUse", outOfScopeReason(designID, input.FilePath)))
+	case "no_design":
+		writeJSON(denyOutput("PreToolUse",
+			"twing design coordinator: no design registered for this session yet. Either enter plan mode "+
+				"(ExitPlanMode registers one automatically), or run `twing design register --summary \"...\" "+
+				"--creates a,b --touches c,d --depends-on e,f` directly, then retry this edit.",
+		))
+	default:
+		logDesignGate("design scope check: unknown state %q (blocking)", state)
+		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown state %q", state)))
 	}
-
-	writeJSON(denyOutput("PreToolUse",
-		"twing design coordinator: no design registered for this session yet. Either enter plan mode "+
-			"(ExitPlanMode registers one automatically), or run `twing design register --summary \"...\" "+
-			"--creates a,b --touches c,d --depends-on e,f` directly, then retry this edit.",
-	))
 }
 
 // handleSessionEnd best-effort closes any open design for this session --

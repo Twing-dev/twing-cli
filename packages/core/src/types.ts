@@ -81,7 +81,12 @@ export interface DesignStatement {
   developerId: string;
   sessionId: string;
   agentLabel?: string;
-  status: "open" | "superseded" | "closed" | "expired";
+  /** "flagged" (2026-08, §17 scope enforcement): the design's own
+   * registration/amendment verdict wasn't `clean` -- it's addressable by id
+   * (`resolve`/`amend` still work on it) but does NOT count as "this
+   * session has a usable open design" for the Edit/Write gate. Never set
+   * directly by `register`/`amend`; only `DesignRegistry.flag()` sets it. */
+  status: "open" | "flagged" | "superseded" | "closed" | "expired";
   createdAt: number;
   closedAt?: number;
   summary: string;
@@ -90,6 +95,11 @@ export interface DesignStatement {
   dependsOn: string[];
   rawPlanExcerpt?: string;
   ttlMs: number;
+  /** Bumped by `DesignRegistry.amend()` on every scope expansion -- lets the
+   * async semantic-comparator loop (`app.ts`'s `runSemanticComparatorPass`)
+   * cooperatively cancel a stale in-flight pass once a newer amendment has
+   * superseded the scope it was comparing. */
+  scopeVersion: number;
   /** Set once a justified-divergence review on this design is decided --
    * durable independent of later `status` changes (e.g. reopening on
    * approval), so it's a directly-queryable precedent fact for later

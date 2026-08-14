@@ -165,6 +165,50 @@ export async function runDesignResolve(options: ResolveOptions): Promise<void> {
   console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
 }
 
+export interface AmendOptions {
+  cwd: string;
+  id?: string;
+  touches?: string;
+  creates?: string;
+  dependsOn?: string;
+}
+
+/**
+ * §17 scope enforcement (2026-08): the escape hatch for legitimately
+ * touching a file that wasn't declared at registration time. The server
+ * re-runs the full syntactic check against the *merged* scope before
+ * persisting anything -- this can't be used to silently launder a scope
+ * expansion past overlap/constraint detection, it can only be rejected the
+ * same way initial registration can. Response shape matches
+ * `/v1/designs/check`'s, so `printDesignVerdict`'s existing "adopt the
+ * existing design, or run twing design resolve ..." hint applies unchanged.
+ */
+export async function runDesignAmend(options: AmendOptions): Promise<void> {
+  const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken } = requireConfig(repoRoot);
+  if (!options.id) {
+    throw new Error("twing design amend: --id <designId> is required");
+  }
+  if (!options.touches && !options.creates && !options.dependsOn) {
+    throw new Error("twing design amend: pass at least one of --touches, --creates, --depends-on");
+  }
+
+  const res = await authFetch(
+    `${serverUrl}/v1/designs/${options.id}/amend`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        addTouches: splitList(options.touches),
+        addCreates: splitList(options.creates),
+        addDependsOn: splitList(options.dependsOn),
+      }),
+    },
+    authToken,
+  );
+  printDesignVerdict(await parseJsonOrUnauthorized<DesignCheckResponseJSON>(res));
+}
+
 export interface ListOptions {
   cwd: string;
   status?: string;

@@ -16,15 +16,17 @@ import {
   type DesignStatement,
   type DesignConstraint,
   type DesignConstraintType,
+  type DesignVerdict,
   type PendingReview,
 } from "@twing/core";
 import type { Db } from "./db/client.js";
 import { designs as designsTable, pendingReviews as reviewsTable, constraints as constraintsTable } from "./db/schema.js";
 import { DrizzleActivityLog, type ActivityLogWriter } from "./activity-log.js";
+import { mergeDesignScope } from "./design-checks.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
 
-export type NewDesignInput = Omit<DesignStatement, "id" | "status" | "createdAt" | "closedAt" | "ttlMs" | "reviewDecision"> & {
+export type NewDesignInput = Omit<DesignStatement, "id" | "status" | "createdAt" | "closedAt" | "ttlMs" | "reviewDecision" | "scopeVersion"> & {
   ttlMs?: number;
 };
 
@@ -44,6 +46,7 @@ interface DesignRow {
   dependsOn: string;
   rawPlanExcerpt: string | null;
   ttlMs: number;
+  scopeVersion: number;
 }
 
 function fromDesignRow(row: DesignRow): DesignStatement {
@@ -63,6 +66,7 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     dependsOn: JSON.parse(row.dependsOn),
     rawPlanExcerpt: row.rawPlanExcerpt ?? undefined,
     ttlMs: row.ttlMs,
+    scopeVersion: row.scopeVersion,
   };
 }
 
@@ -113,6 +117,7 @@ export class DesignRegistry {
       status: "open",
       createdAt: Date.now(),
       ttlMs: input.ttlMs ?? DEFAULT_DESIGN_TTL_MS,
+      scopeVersion: 1,
     };
     this.db
       .insert(designsTable)
@@ -132,6 +137,7 @@ export class DesignRegistry {
         dependsOn: JSON.stringify(design.dependsOn),
         rawPlanExcerpt: design.rawPlanExcerpt ?? null,
         ttlMs: design.ttlMs,
+        scopeVersion: design.scopeVersion,
       })
       .run();
     this.activityLog.append({
@@ -151,10 +157,20 @@ export class DesignRegistry {
     return row ? fromDesignRow(row) : undefined;
   }
 
-  /** Every currently-open design for a project, excluding a given id (the
-   * candidate itself, once registered). */
+  /** Every currently-*live* design for a project, excluding a given id (the
+   * candidate itself, once registered) -- "live" means `status IN ("open",
+   * "flagged")`, not strictly `"open"` (§17 scope enforcement, 2026-08): a
+   * flagged/disputed design must stay visible to *other* new registrations'
+   * overlap checks, or once one design is flagged that scope becomes
+   * invisible to tier-1 detection. Callers that need strictly `"open"` (the
+   * Edit/Write gate's own-session check, via `/v1/designs/scope-match`) use
+   * `listByProject(projectId, "open")` directly instead. */
   openDesigns(projectId: string, now: number = Date.now(), excludeId?: string): DesignStatement[] {
-    const conditions = [eq(designsTable.projectId, projectId), eq(designsTable.status, "open"), sql`${designsTable.createdAt} + ${designsTable.ttlMs} > ${now}`];
+    const conditions = [
+      eq(designsTable.projectId, projectId),
+      sql`${designsTable.status} IN ('open', 'flagged')`,
+      sql`${designsTable.createdAt} + ${designsTable.ttlMs} > ${now}`,
+    ];
     if (excludeId) conditions.push(sql`${designsTable.id} != ${excludeId}`);
     const rows = this.db
       .select()
@@ -162,6 +178,62 @@ export class DesignRegistry {
       .where(and(...conditions))
       .all() as DesignRow[];
     return rows.map(fromDesignRow);
+  }
+
+  /** §17 scope enforcement (2026-08): a design's own registration/amendment
+   * verdict wasn't `clean` -- demote it out of "open" so it stops counting
+   * as a usable design for the Edit/Write gate, without losing its id
+   * (`resolve`/`amend` still address it). No-op (returns the design
+   * unchanged) if it isn't currently `"open"`. */
+  flag(id: string, verdict: DesignVerdict): DesignStatement | undefined {
+    const existing = this.get(id);
+    if (!existing || existing.status !== "open") return existing;
+    this.db.update(designsTable).set({ status: "flagged" }).where(eq(designsTable.id, id)).run();
+    this.activityLog.append({
+      projectId: existing.projectId,
+      developerId: existing.developerId,
+      sessionId: existing.sessionId,
+      kind: "design_flagged",
+      relatedId: id,
+      ts: Date.now(),
+      payload: { verdict },
+    });
+    return this.get(id);
+  }
+
+  /** §17 scope enforcement (2026-08): expands an *open* design's declared
+   * scope (post-conflict-check -- the caller, `/v1/designs/:id/amend`, is
+   * responsible for re-running `runDesignChecks` against the merged shape
+   * first and only calling this once that comes back clean). Bumps
+   * `scopeVersion` so the async semantic-comparator loop can detect it's
+   * been superseded. Returns `undefined` if the design isn't currently
+   * `"open"` (flagged/closed/superseded/expired designs can't be amended --
+   * resolve or re-register instead). */
+  amend(id: string, delta: { touches?: string[]; creates?: string[]; dependsOn?: string[] }): DesignStatement | undefined {
+    const existing = this.get(id);
+    if (!existing || existing.status !== "open") return undefined;
+    const merged = mergeDesignScope(existing, delta);
+    const scopeVersion = existing.scopeVersion + 1;
+    this.db
+      .update(designsTable)
+      .set({
+        touches: JSON.stringify(merged.touches),
+        creates: JSON.stringify(merged.creates),
+        dependsOn: JSON.stringify(merged.dependsOn),
+        scopeVersion,
+      })
+      .where(eq(designsTable.id, id))
+      .run();
+    this.activityLog.append({
+      projectId: existing.projectId,
+      developerId: existing.developerId,
+      sessionId: existing.sessionId,
+      kind: "design_amended",
+      relatedId: id,
+      ts: Date.now(),
+      payload: { addedTouches: delta.touches ?? [], addedCreates: delta.creates ?? [], addedDependsOn: delta.dependsOn ?? [] },
+    });
+    return this.get(id);
   }
 
   listByProject(projectId: string, status?: DesignStatement["status"]): DesignStatement[] {
@@ -205,7 +277,7 @@ export class DesignRegistry {
   close(id: string): DesignStatement | undefined {
     const existing = this.get(id);
     if (!existing) return undefined;
-    if (existing.status === "open") {
+    if (existing.status === "open" || existing.status === "flagged") {
       const closedAt = Date.now();
       this.db.update(designsTable).set({ status: "closed", closedAt }).where(eq(designsTable.id, id)).run();
       this.activityLog.append({
@@ -220,15 +292,17 @@ export class DesignRegistry {
     return this.get(id);
   }
 
-  /** Best-effort close of every open design for a session -- the `SessionEnd`
-   * hook trigger (§17.6), a higher-precision substitute for the spec's
-   * deferred git-commit-detection trigger. */
+  /** Best-effort close of every open *or flagged* design for a session --
+   * the `SessionEnd` hook trigger (§17.6), a higher-precision substitute for
+   * the spec's deferred git-commit-detection trigger. Includes `"flagged"`
+   * (§17 scope enforcement, 2026-08) so an abandoned, never-resolved
+   * conflicting design doesn't linger past session end. */
   closeSession(sessionId: string): number {
     const now = Date.now();
     const open = this.db
       .select()
       .from(designsTable)
-      .where(and(eq(designsTable.sessionId, sessionId), eq(designsTable.status, "open")))
+      .where(and(eq(designsTable.sessionId, sessionId), sql`${designsTable.status} IN ('open', 'flagged')`))
       .all() as DesignRow[];
     for (const row of open) {
       this.db.update(designsTable).set({ status: "closed", closedAt: now }).where(eq(designsTable.id, row.id)).run();
@@ -286,7 +360,19 @@ export class DesignRegistry {
     const review = this.getReview(id);
     if (!review) return undefined;
     this.db.update(reviewsTable).set({ decision }).where(eq(reviewsTable.id, id)).run();
-    this.db.update(designsTable).set({ reviewDecision: decision, ...(decision === "approve" ? { status: "open" } : {}) }).where(eq(designsTable.id, review.designId)).run();
+    // Approve reopens the design as a second valid canonical path (unchanged).
+    // Reject (§17 scope enforcement, 2026-08 -- previously left `status`
+    // untouched, so a rejected design just stayed "flagged" forever with
+    // nothing ever consulting `reviewDecision`) now makes the rejection
+    // terminal: the design closes, the developer registers a fresh one.
+    this.db
+      .update(designsTable)
+      .set({
+        reviewDecision: decision,
+        ...(decision === "approve" ? { status: "open" } : { status: "closed", closedAt: Date.now() }),
+      })
+      .where(eq(designsTable.id, review.designId))
+      .run();
     this.activityLog.append({
       projectId: review.projectId,
       kind: "review_decided",
@@ -297,12 +383,15 @@ export class DesignRegistry {
     return this.getReview(id);
   }
 
+  /** Sweeps both `"open"` and `"flagged"` designs past their TTL (§17 scope
+   * enforcement, 2026-08: a flagged-but-abandoned design shouldn't linger
+   * forever just because it never got resolved). */
   private sweepExpired(): void {
     const now = Date.now();
     const expiring = this.db
       .select()
       .from(designsTable)
-      .where(and(eq(designsTable.status, "open"), sql`${designsTable.createdAt} + ${designsTable.ttlMs} <= ${now}`))
+      .where(and(sql`${designsTable.status} IN ('open', 'flagged')`, sql`${designsTable.createdAt} + ${designsTable.ttlMs} <= ${now}`))
       .all() as DesignRow[];
     for (const row of expiring) {
       this.db.update(designsTable).set({ status: "expired", closedAt: now }).where(eq(designsTable.id, row.id)).run();
