@@ -37,6 +37,18 @@ export type ActivityEventKind =
   /** §17 scope enforcement (2026-08): `DesignRegistry.amend` expanded an
    * open design's creates/touches/dependsOn after a clean re-check. */
   | "design_amended"
+  /** §17 design lifecycle (2026-08): `DesignRegistry.sweepExpired` demoted
+   * an open/flagged design to "dormant" for no activity within `ttlMs`. */
+  | "design_dormant"
+  /** §17 design lifecycle (2026-08): `DesignRegistry.resume` reactivated a
+   * dormant design, possibly reassigning it to a different developer/
+   * session -- payload carries both the from- and to- identity. */
+  | "design_resumed"
+  /** §17 design lifecycle (2026-08): a session registered a new design
+   * while it already had another non-overlapping open/flagged design --
+   * advisory only, never changes the sibling's status (see app.ts's
+   * registration-time stale-sibling notice). */
+  | "design_stale_sibling_suggested"
   | "constraint_ratified"
   /** Async semantic-conflict comparator (design-semantic-check.ts) flagged
    * a conflict between two designs that the syntactic tiers (design-

@@ -12,7 +12,8 @@
 import * as crypto from "node:crypto";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import {
-  DEFAULT_DESIGN_TTL_MS,
+  DEFAULT_DESIGN_ACTIVE_TTL_MS,
+  DEFAULT_DESIGN_DORMANT_TTL_MS,
   type DesignStatement,
   type DesignConstraint,
   type DesignConstraintType,
@@ -26,7 +27,7 @@ import { mergeDesignScope } from "./design-checks.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
 
-export type NewDesignInput = Omit<DesignStatement, "id" | "status" | "createdAt" | "closedAt" | "ttlMs" | "reviewDecision" | "scopeVersion"> & {
+export type NewDesignInput = Omit<DesignStatement, "id" | "status" | "createdAt" | "closedAt" | "ttlMs" | "reviewDecision" | "scopeVersion" | "lastActivityAt"> & {
   ttlMs?: number;
 };
 
@@ -47,6 +48,7 @@ interface DesignRow {
   rawPlanExcerpt: string | null;
   ttlMs: number;
   scopeVersion: number;
+  lastActivityAt: number;
 }
 
 function fromDesignRow(row: DesignRow): DesignStatement {
@@ -67,6 +69,7 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     rawPlanExcerpt: row.rawPlanExcerpt ?? undefined,
     ttlMs: row.ttlMs,
     scopeVersion: row.scopeVersion,
+    lastActivityAt: row.lastActivityAt,
   };
 }
 
@@ -111,13 +114,15 @@ export class DesignRegistry {
   }
 
   register(input: NewDesignInput): DesignStatement {
+    const now = Date.now();
     const design: DesignStatement = {
       ...input,
       id: crypto.randomUUID(),
       status: "open",
-      createdAt: Date.now(),
-      ttlMs: input.ttlMs ?? DEFAULT_DESIGN_TTL_MS,
+      createdAt: now,
+      ttlMs: input.ttlMs ?? DEFAULT_DESIGN_ACTIVE_TTL_MS,
       scopeVersion: 1,
+      lastActivityAt: now,
     };
     this.db
       .insert(designsTable)
@@ -138,6 +143,7 @@ export class DesignRegistry {
         rawPlanExcerpt: design.rawPlanExcerpt ?? null,
         ttlMs: design.ttlMs,
         scopeVersion: design.scopeVersion,
+        lastActivityAt: design.lastActivityAt,
       })
       .run();
     this.activityLog.append({
@@ -162,14 +168,23 @@ export class DesignRegistry {
    * "flagged")`, not strictly `"open"` (§17 scope enforcement, 2026-08): a
    * flagged/disputed design must stay visible to *other* new registrations'
    * overlap checks, or once one design is flagged that scope becomes
-   * invisible to tier-1 detection. Callers that need strictly `"open"` (the
+   * invisible to tier-1 detection. `"dormant"` is deliberately *not*
+   * included here (§17 design lifecycle, 2026-08) -- that exclusion is the
+   * actual fix for unbounded O(n²) pairwise-comparison growth, the entire
+   * reason dormancy exists. Callers that need strictly `"open"` (the
    * Edit/Write gate's own-session check, via `/v1/designs/scope-match`) use
-   * `listByProject(projectId, "open")` directly instead. */
+   * `listByProject(projectId, "open")` directly instead.
+   *
+   * The TTL filter is based on `lastActivityAt`, not `createdAt` (§17
+   * design lifecycle, 2026-08) -- read-time double-protection matching the
+   * periodic sweep below, so a design that's gone stale stops appearing
+   * here immediately rather than waiting up to `SWEEP_INTERVAL_MS` for the
+   * next sweep tick to physically flip its status. */
   openDesigns(projectId: string, now: number = Date.now(), excludeId?: string): DesignStatement[] {
     const conditions = [
       eq(designsTable.projectId, projectId),
       sql`${designsTable.status} IN ('open', 'flagged')`,
-      sql`${designsTable.createdAt} + ${designsTable.ttlMs} > ${now}`,
+      sql`${designsTable.lastActivityAt} + ${designsTable.ttlMs} > ${now}`,
     ];
     if (excludeId) conditions.push(sql`${designsTable.id} != ${excludeId}`);
     const rows = this.db
@@ -201,6 +216,16 @@ export class DesignRegistry {
     return this.get(id);
   }
 
+  /** §17 design lifecycle (2026-08): bumps `lastActivityAt` to now, refreshing
+   * the active-inactivity clock -- called by `/v1/designs/scope-match` as a
+   * side effect of a real `in_scope` hit (a genuine Edit/Write against this
+   * exact design's declared scope), so a design that's actually being
+   * worked on never goes dormant regardless of how old it is. Silent no-op
+   * if the design doesn't exist (nothing meaningful to signal back). */
+  touch(id: string): void {
+    this.db.update(designsTable).set({ lastActivityAt: Date.now() }).where(eq(designsTable.id, id)).run();
+  }
+
   /** §17 scope enforcement (2026-08): expands an *open* design's declared
    * scope (post-conflict-check -- the caller, `/v1/designs/:id/amend`, is
    * responsible for re-running `runDesignChecks` against the merged shape
@@ -221,6 +246,7 @@ export class DesignRegistry {
         creates: JSON.stringify(merged.creates),
         dependsOn: JSON.stringify(merged.dependsOn),
         scopeVersion,
+        lastActivityAt: Date.now(), // §17 design lifecycle: amending is itself real activity
       })
       .where(eq(designsTable.id, id))
       .run();
@@ -232,6 +258,61 @@ export class DesignRegistry {
       relatedId: id,
       ts: Date.now(),
       payload: { addedTouches: delta.touches ?? [], addedCreates: delta.creates ?? [], addedDependsOn: delta.dependsOn ?? [] },
+    });
+    return this.get(id);
+  }
+
+  /** §17 design lifecycle (2026-08): reactivates a *dormant* design, always
+   * as an explicit, deliberate act -- never called silently by a mere file
+   * match (see `/v1/designs/scope-match`'s `"dormant"` state and the
+   * `twing design resume` CLI command it points at). Cross-developer by
+   * design: any project member can pick up a design someone else parked,
+   * same as `resolve`/`close` already allow -- so this reassigns both
+   * `sessionId` and `developerId` to whoever's resuming it, which is what
+   * makes the Edit/Write gate's per-session `scope-match` lookup and future
+   * notices/activity attribute correctly to whoever's actually driving now.
+   * Original authorship isn't lost -- it's still exactly what the untouched
+   * `design_registered` event says, same "current-state row vs. append-only
+   * log" split as everywhere else in this domain. Returns `undefined` if
+   * the design isn't currently `"dormant"` (the caller, `/v1/designs/:id/
+   * resume`, is responsible for re-running `runDesignChecks` against the
+   * merged shape first and only calling this once that comes back clean --
+   * same contract as `amend`). */
+  resume(
+    id: string,
+    args: { sessionId: string; developerId: string; delta: { touches?: string[]; creates?: string[]; dependsOn?: string[] } },
+  ): DesignStatement | undefined {
+    const existing = this.get(id);
+    if (!existing || existing.status !== "dormant") return undefined;
+    const merged = mergeDesignScope(existing, args.delta);
+    const now = Date.now();
+    this.db
+      .update(designsTable)
+      .set({
+        status: "open",
+        sessionId: args.sessionId,
+        developerId: args.developerId,
+        touches: JSON.stringify(merged.touches),
+        creates: JSON.stringify(merged.creates),
+        dependsOn: JSON.stringify(merged.dependsOn),
+        scopeVersion: existing.scopeVersion + 1,
+        lastActivityAt: now,
+      })
+      .where(eq(designsTable.id, id))
+      .run();
+    this.activityLog.append({
+      projectId: existing.projectId,
+      developerId: args.developerId,
+      sessionId: args.sessionId,
+      kind: "design_resumed",
+      relatedId: id,
+      ts: now,
+      payload: {
+        fromDeveloperId: existing.developerId,
+        toDeveloperId: args.developerId,
+        fromSessionId: existing.sessionId,
+        toSessionId: args.sessionId,
+      },
     });
     return this.get(id);
   }
@@ -277,7 +358,7 @@ export class DesignRegistry {
   close(id: string): DesignStatement | undefined {
     const existing = this.get(id);
     if (!existing) return undefined;
-    if (existing.status === "open" || existing.status === "flagged") {
+    if (existing.status === "open" || existing.status === "flagged" || existing.status === "dormant") {
       const closedAt = Date.now();
       this.db.update(designsTable).set({ status: "closed", closedAt }).where(eq(designsTable.id, id)).run();
       this.activityLog.append({
@@ -292,17 +373,18 @@ export class DesignRegistry {
     return this.get(id);
   }
 
-  /** Best-effort close of every open *or flagged* design for a session --
-   * the `SessionEnd` hook trigger (§17.6), a higher-precision substitute for
-   * the spec's deferred git-commit-detection trigger. Includes `"flagged"`
-   * (§17 scope enforcement, 2026-08) so an abandoned, never-resolved
-   * conflicting design doesn't linger past session end. */
+  /** Best-effort close of every open, flagged, *or dormant* design for a
+   * session -- the `SessionEnd` hook trigger (§17.6), a higher-precision
+   * substitute for the spec's deferred git-commit-detection trigger.
+   * Includes `"flagged"` (§17 scope enforcement, 2026-08) so an abandoned,
+   * never-resolved conflicting design doesn't linger past session end, and
+   * `"dormant"` (§17 design lifecycle, 2026-08) for the same reason. */
   closeSession(sessionId: string): number {
     const now = Date.now();
     const open = this.db
       .select()
       .from(designsTable)
-      .where(and(eq(designsTable.sessionId, sessionId), sql`${designsTable.status} IN ('open', 'flagged')`))
+      .where(and(eq(designsTable.sessionId, sessionId), sql`${designsTable.status} IN ('open', 'flagged', 'dormant')`))
       .all() as DesignRow[];
     for (const row of open) {
       this.db.update(designsTable).set({ status: "closed", closedAt: now }).where(eq(designsTable.id, row.id)).run();
@@ -383,15 +465,46 @@ export class DesignRegistry {
     return this.getReview(id);
   }
 
-  /** Sweeps both `"open"` and `"flagged"` designs past their TTL (§17 scope
-   * enforcement, 2026-08: a flagged-but-abandoned design shouldn't linger
-   * forever just because it never got resolved). */
-  private sweepExpired(): void {
-    const now = Date.now();
+  /** Two-stage sweep (§17 design lifecycle, 2026-08 -- previously a single
+   * open/flagged-straight-to-expired pass keyed off `createdAt`):
+   *
+   * 1. `"open"`/`"flagged"` designs with no activity for `ttlMs` demote to
+   *    `"dormant"` -- not closed, still fully addressable
+   *    (`resolve`/`amend`/`resume`), just excluded from `openDesigns()`'s
+   *    pairwise-comparison set. This is the actual n² fix.
+   * 2. `"dormant"` designs with no activity for
+   *    `DEFAULT_DESIGN_DORMANT_TTL_MS` terminally expire, same as before.
+   *
+   * Both stages key off `lastActivityAt`, not `createdAt` -- genuinely
+   * active work never dies just for being old.
+   *
+   * Public (unlike the pre-lifecycle version) and takes an injectable `now`
+   * -- same reason `openDesigns` already does: lets tests exercise real
+   * TTL-elapsed transitions without waiting out `SWEEP_INTERVAL_MS` or
+   * mocking `Date.now()` globally. The constructor's interval timer still
+   * calls this the normal way, with no `now` override. */
+  sweepExpired(now: number = Date.now()): void {
+    const goingDormant = this.db
+      .select()
+      .from(designsTable)
+      .where(and(sql`${designsTable.status} IN ('open', 'flagged')`, sql`${designsTable.lastActivityAt} + ${designsTable.ttlMs} <= ${now}`))
+      .all() as DesignRow[];
+    for (const row of goingDormant) {
+      this.db.update(designsTable).set({ status: "dormant" }).where(eq(designsTable.id, row.id)).run();
+      this.activityLog.append({
+        projectId: row.projectId,
+        developerId: row.developerId,
+        sessionId: row.sessionId,
+        kind: "design_dormant",
+        relatedId: row.id,
+        ts: now,
+      });
+    }
+
     const expiring = this.db
       .select()
       .from(designsTable)
-      .where(and(sql`${designsTable.status} IN ('open', 'flagged')`, sql`${designsTable.createdAt} + ${designsTable.ttlMs} <= ${now}`))
+      .where(and(eq(designsTable.status, "dormant"), sql`${designsTable.lastActivityAt} + ${DEFAULT_DESIGN_DORMANT_TTL_MS} <= ${now}`))
       .all() as DesignRow[];
     for (const row of expiring) {
       this.db.update(designsTable).set({ status: "expired", closedAt: now }).where(eq(designsTable.id, row.id)).run();

@@ -768,3 +768,268 @@ test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator
     );
   });
 });
+
+// --- §17 design lifecycle (2026-08): dormancy, touch, resume, stale-sibling notice ---
+
+test("GET /v1/designs/scope-match: dormant state end-to-end, with summary and dormantSinceMs", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "old plan", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  designs.sweepExpired(Date.now() + 1000); // well past the 10ms active TTL -- forces the dormant transition
+
+  const scopeMatch = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=a.ts`, { headers: bearer(admin.token) });
+  const body = (await scopeMatch.json()) as { state: string; designId?: string; summary?: string; dormantSinceMs?: number };
+  assert.equal(body.state, "dormant");
+  assert.equal(body.designId, designId);
+  assert.equal(body.summary, "old plan");
+  assert.ok(typeof body.dormantSinceMs === "number" && body.dormantSinceMs >= 0);
+});
+
+test("GET /v1/designs/scope-match: a real in_scope hit bumps the design's lastActivityAt", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const before = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
+  const beforeActivity = ((await before.json()) as { items: { lastActivityAt: number }[] }).items[0].lastActivityAt;
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const scopeMatch = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=a.ts`, { headers: bearer(admin.token) });
+  assert.equal((await scopeMatch.json()).state, "in_scope");
+
+  const after = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
+  const afterActivity = ((await after.json()) as { items: { lastActivityAt: number }[] }).items[0].lastActivityAt;
+  assert.ok(afterActivity > beforeActivity);
+});
+
+test("POST /v1/designs/check: a dormant design is excluded from a third design's overlap check (the n² fix)", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [], ttlMs: 10 }),
+  });
+  designs.sweepExpired(Date.now() + 1000);
+
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+  const secondBody = (await secondRes.json()) as { verdict: string };
+  assert.equal(secondBody.verdict, "clean", "a dormant design must not still count as a live conflict");
+});
+
+test("POST /v1/designs/:id/resume: a clean resume reassigns sessionId/developerId to a different developer and merges the delta", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const { alice, bobToken } = await (async () => {
+    const admin = await bootstrapAdmin(app, dataDir); // alice
+    const registerRes = await app.request("/v1/designs/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's paused work", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+    });
+    const { designId } = (await registerRes.json()) as { designId: string };
+    const inviteRes = await app.request("/v1/projects/proj-1/invites", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ label: "bob@example.com", role: "member" }),
+    });
+    const invite = (await inviteRes.json()) as { code: string };
+    await app.request(`/v1/invites/${invite.code}/redeem`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tokenHash: sha256Hex("bobs-pat"), label: "bob@example.com" }),
+    });
+    return { alice: { token: admin.token, designId }, bobToken: "bobs-pat" };
+  })();
+
+  designs.sweepExpired(Date.now() + 1000); // -> dormant
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      (async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: false, kind: null, reason: "" }) } }] }), { status: 200 })) as typeof fetch,
+      async () => {
+        const resumeRes = await app.request(`/v1/designs/${alice.designId}/resume`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(bobToken) },
+          body: JSON.stringify({ sessionId: "s-bob", addTouches: ["b.ts"] }),
+        });
+        assert.deepEqual(await resumeRes.json(), { verdict: "clean", designId: alice.designId });
+      },
+    ),
+  );
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s-bob`, { headers: bearer(alice.token) });
+  const listBody = (await listRes.json()) as { items: { id: string; status: string; sessionId: string; developerId: string; touches: string[] }[] };
+  const resumed = listBody.items.find((d) => d.id === alice.designId);
+  assert.equal(resumed?.status, "open");
+  assert.equal(resumed?.sessionId, "s-bob");
+  assert.equal(resumed?.developerId, "bob@example.com");
+  assert.deepEqual(resumed?.touches, ["a.ts", "b.ts"]);
+});
+
+test("POST /v1/designs/:id/resume: a conflicting resume is rejected and the design stays dormant", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [], ttlMs: 10 }),
+  });
+  const { designId } = (await firstRes.json()) as { designId: string };
+  designs.sweepExpired(Date.now() + 1000); // -> dormant
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+
+  const resumeRes = await app.request(`/v1/designs/${designId}/resume`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ sessionId: "s1" }),
+  });
+  const resumeBody = (await resumeRes.json()) as { verdict: string };
+  assert.equal(resumeBody.verdict, "overlap");
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
+  const listBody = (await listRes.json()) as { items: { id: string; status: string }[] };
+  assert.equal(listBody.items.find((d) => d.id === designId)?.status, "dormant"); // untouched by the rejected attempt
+});
+
+test("POST /v1/designs/check: registering a non-overlapping design for the same session notifies about the stale sibling without changing its status", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first task", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId: firstId } = (await firstRes.json()) as { designId: string };
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "unrelated second task", creates: [], touches: ["b.ts"], dependsOn: [] }),
+  });
+
+  const notices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
+  const noticesBody = (await notices.json()) as { items: { message: string }[] };
+  assert.ok(noticesBody.items.some((n) => n.message.includes(firstId) && n.message.includes("also have design")));
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
+  const listBody = (await listRes.json()) as { items: { id: string; status: string }[] };
+  assert.equal(listBody.items.find((d) => d.id === firstId)?.status, "open", "notify-only -- the sibling's status must not change");
+});
+
+test("POST /v1/designs/check: an overlapping second design does not also fire the stale-sibling notice", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+
+  const notices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
+  const noticesBody = (await notices.json()) as { items: { message: string }[] };
+  assert.equal(
+    noticesBody.items.filter((n) => n.message.includes("also have design")).length,
+    0,
+    "already caught by the real overlap/flagged path -- no double-signal",
+  );
+});
+
+test("POST /v1/designs/check: a non-overlapping design from a *different* session does not fire a stale-sibling notice", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["b.ts"], dependsOn: [] }),
+  });
+
+  const notices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
+  const noticesBody = (await notices.json()) as { items: { message: string }[] };
+  assert.equal(
+    noticesBody.items.filter((n) => n.message.includes("also have design")).length,
+    0,
+    "the nudge is scoped to same-session siblings only",
+  );
+});
+
+test("GET /v1/designs/scope-match: an open design takes precedence over a dormant one when both cover the same path", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const dormantRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+  });
+  const { designId: dormantId } = (await dormantRes.json()) as { designId: string };
+  designs.sweepExpired(Date.now() + 1000); // -> dormant
+
+  // Registering again in the same session, also touching a.ts, is clean --
+  // the dormant sibling is excluded from openDesigns()'s conflict feed.
+  const openRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId: openId, verdict } = (await openRes.json()) as { designId: string; verdict: string };
+  assert.equal(verdict, "clean");
+  assert.notEqual(openId, dormantId);
+
+  const scopeMatch = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=a.ts`, { headers: bearer(admin.token) });
+  const body = (await scopeMatch.json()) as { state: string; designId?: string };
+  assert.equal(body.state, "in_scope");
+  assert.equal(body.designId, openId, "the open design must win, not the dormant one");
+});
+
+test("GET /v1/designs/scope-match: dormant state still fires even when path doesn't match the dormant design's own scope", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+  designs.sweepExpired(Date.now() + 1000);
+
+  const scopeMatch = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=totally-unrelated.ts`, { headers: bearer(admin.token) });
+  const body = (await scopeMatch.json()) as { state: string; designId?: string };
+  assert.equal(body.state, "dormant", "unlike out_of_scope, a dormant nudge doesn't require the path to actually match");
+  assert.equal(body.designId, designId);
+});

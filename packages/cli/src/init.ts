@@ -20,7 +20,26 @@ export interface InitOptions {
   cwd: string;
 }
 
-export async function runInit(options: InitOptions): Promise<void> {
+/**
+ * The three side-effecting calls `runInit` makes that a unit test can't
+ * safely exercise for real: a `go build` subprocess, writing a repo's
+ * `.claude/settings.json`, and spawning a detached background daemon
+ * process. Injectable (defaulting to the real implementations below, so no
+ * real caller -- `index.ts`'s dispatch never passes a second argument --
+ * changes behavior at all) rather than mocked via module interception,
+ * since Node 20 (what this project runs on) has no `node:test` module-mock
+ * support. Same shape as `createApp`'s injectable stores on the server side
+ * -- not a new pattern for this codebase.
+ */
+export interface InitDeps {
+  ensureHookInstalled: () => string;
+  wireHooks: (repoRoot: string, hookPath: string) => boolean;
+  ensureDaemonRunning: () => Promise<"already-running" | "started">;
+}
+
+const defaultInitDeps: InitDeps = { ensureHookInstalled, wireHooks, ensureDaemonRunning };
+
+export async function runInit(options: InitOptions, deps: InitDeps = defaultInitDeps): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
   const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
 
@@ -65,13 +84,13 @@ export async function runInit(options: InitOptions): Promise<void> {
   // must already be cached; there's no password to prompt for anymore.
   const authToken = options.invite ? await runKeygen({ cwd: repoRoot, serverUrl, invite: options.invite }) : requireAuth(serverUrl, "twing init");
 
-  const hookPath = ensureHookInstalled();
+  const hookPath = deps.ensureHookInstalled();
   console.log(`twing init: hook installed at ${hookPath}`);
 
-  const wired = wireHooks(repoRoot, hookPath);
+  const wired = deps.wireHooks(repoRoot, hookPath);
   console.log(wired ? `twing init: wired hooks into ${repoRoot}/.claude/settings.json` : `twing init: hooks already wired in ${repoRoot}/.claude/settings.json`);
 
-  const daemonStatus = await ensureDaemonRunning();
+  const daemonStatus = await deps.ensureDaemonRunning();
   console.log(daemonStatus === "started" ? "twing init: daemon started" : "twing init: daemon already running");
 
   await seedConstraints(repoRoot, manifest, serverUrl, authToken);

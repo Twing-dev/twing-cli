@@ -1,0 +1,122 @@
+/**
+ * Shared fixtures for packages/cli's tests -- extracted from design.test.ts
+ * (the first CLI test file written; everything else here follows its
+ * conventions). Deliberately not named `*.test.ts` so `node --test
+ * dist/*.test.js` doesn't try to run it as its own suite.
+ *
+ * Two conventions borrowed from elsewhere rather than invented: the
+ * `globalThis.fetch`-swap used throughout packages/server's tests
+ * (`withMockFetch`), and the throwaway-git-repo-plus-isolated-$HOME fixture
+ * `hook/design_gate_test.go` uses for exercising real config resolution
+ * instead of mocking `findRepoRoot`/`readConfig` themselves.
+ */
+
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+/** A throwaway repo with `.twing/twing.yml` pointing at `serverUrl` --
+ * `findRepoRoot` needs a real `.git` to stop the walk here rather than
+ * risking it climbing past the OS tmpdir into whatever's above it. Omit
+ * `serverUrl` for the "no coordinator configured" case. */
+export function tmpRepo(serverUrl?: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-cli-test-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  if (serverUrl) {
+    fs.mkdirSync(path.join(dir, ".twing"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".twing", "twing.yml"), `coordinator:\n  serverUrl: ${serverUrl}\n`);
+  }
+  return dir;
+}
+
+/** Points `os.homedir()` (via $HOME) at an isolated dir for the duration of
+ * `run` -- never touches the real machine's `~/.twing/config.json`, same
+ * reasoning as the Go gate tests' `setCachedToken`. */
+export async function withHome<T>(run: (home: string) => Promise<T>): Promise<T> {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "twing-cli-home-"));
+  const original = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    return await run(home);
+  } finally {
+    if (original === undefined) delete process.env.HOME;
+    else process.env.HOME = original;
+  }
+}
+
+/** Caches an auth token for `serverUrl` in the current $HOME's config.json
+ * -- must be called after `withHome` has already repointed $HOME. */
+export function cacheToken(serverUrl: string, token: string): void {
+  const configDir = path.join(os.homedir(), ".twing");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ servers: { [serverUrl]: { authToken: token } } }));
+}
+
+export function withMockFetch<T>(impl: typeof fetch, run: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = impl;
+  return run().finally(() => {
+    globalThis.fetch = original;
+  });
+}
+
+export function withEnv<T>(vars: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
+  const originals: Record<string, string | undefined> = {};
+  for (const key of Object.keys(vars)) originals[key] = process.env[key];
+  for (const [key, value] of Object.entries(vars)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return run().finally(() => {
+    for (const [key, value] of Object.entries(originals)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
+
+export async function captureConsole<T>(run: () => Promise<T>): Promise<{ result: T; logs: string[]; errors: string[] }> {
+  const logs: string[] = [];
+  const errors: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  try {
+    const result = await run();
+    return { result, logs, errors };
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+}
+
+export function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+/** Captures every fetch call's URL/method and parsed JSON body while
+ * returning `response` for all of them -- the shape nearly every test
+ * needs for a single-call command. For multi-call flows (e.g. list-then-act),
+ * inspect `calls` directly instead of assuming `calls[0]`. */
+export function captureFetch(response: Response): { fetch: typeof fetch; calls: { url: string; method: string; body: unknown }[] } {
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const impl = (async (url: string | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), method: init?.method ?? "GET", body: init?.body ? JSON.parse(init.body as string) : undefined });
+    return response;
+  }) as typeof fetch;
+  return { fetch: impl, calls };
+}
+
+/** Same as `captureFetch`, but each call gets the next response in
+ * `responses` (repeating the last one if there are more calls than
+ * responses) -- for flows that make more than one request. */
+export function captureFetchSequence(responses: Response[]): { fetch: typeof fetch; calls: { url: string; method: string; body: unknown }[] } {
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const impl = (async (url: string | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), method: init?.method ?? "GET", body: init?.body ? JSON.parse(init.body as string) : undefined });
+    return responses[Math.min(calls.length - 1, responses.length - 1)];
+  }) as typeof fetch;
+  return { fetch: impl, calls };
+}

@@ -43,6 +43,7 @@ export function design(overrides: Partial<DesignStatement> = {}): DesignStatemen
     dependsOn: [],
     ttlMs: 60_000,
     scopeVersion: 1,
+    lastActivityAt: Date.now(),
     ...overrides,
   };
 }

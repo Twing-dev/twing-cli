@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { DEFAULT_DESIGN_DORMANT_TTL_MS } from "@twing/core";
 import { createDb } from "./db/client.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
 import { DrizzleActivityLog } from "./activity-log.js";
@@ -211,6 +212,144 @@ test("DesignRegistry: closeSession also closes flagged designs for the session",
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
   registry.flag(a.id, "overlap");
+  const count = registry.closeSession("s1");
+  assert.equal(count, 1);
+  assert.equal(registry.get(a.id)?.status, "closed");
+  registry.stop();
+});
+
+// --- §17 design lifecycle (2026-08): touch / two-stage sweep / resume ---
+
+test("DesignRegistry: touch bumps lastActivityAt", async () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  registry.touch(a.id);
+  const after = registry.get(a.id);
+  assert.ok(after && after.lastActivityAt > a.lastActivityAt);
+  registry.stop();
+});
+
+test("DesignRegistry: openDesigns' TTL basis is lastActivityAt, not createdAt -- proves the actual point of the feature", async () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 50)); // real gap so lastActivityAt measurably outpaces createdAt
+  registry.touch(a.id);
+  const touched = registry.get(a.id)!;
+  assert.ok(touched.lastActivityAt > a.createdAt + 10, "sanity: touch happened well after createdAt+ttlMs would already have expired it");
+
+  // Past createdAt+ttlMs (would have excluded it under the old basis), but
+  // still comfortably inside lastActivityAt+ttlMs.
+  const now = a.createdAt + 30;
+  const open = registry.openDesigns("p1", now);
+  assert.equal(open.length, 1, "still live -- genuinely active work must not die just for being old");
+  registry.stop();
+});
+
+test("DesignRegistry: amend also refreshes lastActivityAt -- amending is itself real activity", async () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  registry.amend(a.id, { touches: ["b.ts"] });
+  const after = registry.get(a.id);
+  assert.ok(after && after.lastActivityAt > a.lastActivityAt);
+  registry.stop();
+});
+
+test("DesignRegistry: sweepExpired demotes an inactive open design to dormant, not straight to expired", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 10 });
+
+  // Well past the 10ms active TTL, nowhere near the 7-day dormant TTL --
+  // isolates the first stage of the sweep from the second.
+  registry.sweepExpired(a.createdAt + 1000);
+  const dormant = registry.get(a.id);
+  assert.equal(dormant?.status, "dormant");
+  assert.equal(log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_dormant").length, 1);
+  registry.stop();
+});
+
+test("DesignRegistry: sweepExpired also demotes an inactive flagged design to dormant", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 10 });
+  registry.flag(a.id, "overlap");
+  registry.sweepExpired(a.createdAt + 1000);
+  assert.equal(registry.get(a.id)?.status, "dormant");
+  registry.stop();
+});
+
+test("DesignRegistry: sweepExpired terminally expires a dormant design past the dormant TTL", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 10 });
+
+  registry.sweepExpired(a.createdAt + 1000); // -> dormant
+  assert.equal(registry.get(a.id)?.status, "dormant");
+
+  registry.sweepExpired(a.createdAt + DEFAULT_DESIGN_DORMANT_TTL_MS + 1000); // -> expired
+  const expired = registry.get(a.id);
+  assert.equal(expired?.status, "expired");
+  assert.ok(expired?.closedAt);
+  assert.equal(log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_expired").length, 1);
+  registry.stop();
+});
+
+test("DesignRegistry: openDesigns excludes dormant designs -- this is the actual n² fix", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 10 });
+  registry.sweepExpired(a.createdAt + 1000);
+  assert.equal(registry.get(a.id)?.status, "dormant");
+  assert.equal(registry.openDesigns("p1").length, 0);
+  registry.stop();
+});
+
+test("DesignRegistry: resume reactivates a dormant design, reassigning sessionId/developerId, bumping scopeVersion, and merging the delta", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const a = registry.register({ projectId: "p1", developerId: "alice", sessionId: "s-alice", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 });
+  registry.sweepExpired(a.createdAt + 1000);
+  assert.equal(registry.get(a.id)?.status, "dormant");
+  assert.equal(a.scopeVersion, 1);
+
+  const resumed = registry.resume(a.id, { sessionId: "s-bob", developerId: "bob", delta: { touches: ["b.ts"] } });
+  assert.equal(resumed?.status, "open");
+  assert.equal(resumed?.sessionId, "s-bob");
+  assert.equal(resumed?.developerId, "bob");
+  assert.deepEqual(resumed?.touches, ["a.ts", "b.ts"]);
+  assert.equal(resumed?.scopeVersion, 2);
+
+  const events = log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_resumed");
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0].payload, { fromDeveloperId: "alice", toDeveloperId: "bob", fromSessionId: "s-alice", toSessionId: "s-bob" });
+  registry.stop();
+});
+
+test("DesignRegistry: resume rejects a design that isn't dormant", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
+  const result = registry.resume(a.id, { sessionId: "s2", developerId: "d2", delta: {} });
+  assert.equal(result, undefined);
+  assert.equal(registry.get(a.id)?.status, "open"); // untouched
+  registry.stop();
+});
+
+test("DesignRegistry: close also closes a dormant design", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 10 });
+  registry.sweepExpired(a.createdAt + 1000);
+  const closed = registry.close(a.id);
+  assert.equal(closed?.status, "closed");
+  registry.stop();
+});
+
+test("DesignRegistry: closeSession also closes dormant designs for the session", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 10 });
+  registry.sweepExpired(a.createdAt + 1000);
   const count = registry.closeSession("s1");
   assert.equal(count, 1);
   assert.equal(registry.get(a.id)?.status, "closed");

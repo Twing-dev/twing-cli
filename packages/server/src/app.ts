@@ -60,6 +60,17 @@ interface AmendRequestBody {
   addDependsOn?: string[];
 }
 
+// §17 design lifecycle (2026-08): sessionId is required -- resume
+// reassigns the design to whoever's calling this, so the gate's
+// per-session scope-match lookup works for them afterward. Scope delta is
+// optional, unlike amend's (resuming with no new files is a valid call).
+interface ResumeRequestBody {
+  sessionId?: string;
+  addTouches?: string[];
+  addCreates?: string[];
+  addDependsOn?: string[];
+}
+
 interface SeedRequestBody {
   projectId?: string;
   constraints?: { statement: string; scope: string[]; type?: DesignConstraintType }[];
@@ -360,6 +371,23 @@ export function createApp(options: CreateAppOptions = {}) {
     })().catch((err) => console.error("twing serve: semantic conflict check failed", err));
   }
 
+  /** Shared by `/v1/designs/:id/amend` and `/v1/designs/:id/resume`: builds
+   * the merged-scope candidate and runs the full syntactic check
+   * (design-checks.ts tiers 1-3) against whatever's currently live, exactly
+   * like initial registration does -- neither route can be used to
+   * silently launder a scope change past overlap/constraint detection.
+   * Callers persist (`designs.amend`/`designs.resume`) only on a clean
+   * verdict; `open` is returned too since a clean persist also needs it for
+   * `runSemanticComparatorPass`. */
+  function checkAmendedScope(design: DesignStatement, delta: { touches?: string[]; creates?: string[]; dependsOn?: string[] }) {
+    const merged = mergeDesignScope(design, delta);
+    const candidate: DesignStatement = { ...design, ...merged };
+    const open = designs.openDesigns(design.projectId, Date.now(), design.id);
+    const constraints = constraintStore.forProject(design.projectId);
+    const outcome = runDesignChecks(candidate, open, constraints);
+    return { outcome, open };
+  }
+
   // §7: upserts claims + call-graph edges for projectId, runs the
   // divergence checks against everything active in the project, and
   // returns findings involving the just-submitted claims. Every claim's
@@ -580,6 +608,32 @@ export function createApp(options: CreateAppOptions = {}) {
       designs.flag(design.id, outcome.verdict);
     }
 
+    // §17 design lifecycle (2026-08): registering a new design is a much
+    // faster, more precise signal of context-switch than any inactivity
+    // window -- if this session already has other open/flagged designs
+    // that this one genuinely doesn't overlap (not already caught by
+    // outcome.conflicts above), nudge about it. Advisory only: nothing
+    // about the sibling's status/lastActivityAt changes here -- dormancy
+    // stays driven by inactivity alone, this is purely informational.
+    const conflictingIds = new Set(outcome.conflicts.map((c) => c.conflictingDesignId));
+    const staleSiblings = open.filter((d) => d.sessionId === body.sessionId && !conflictingIds.has(d.id));
+    for (const sibling of staleSiblings) {
+      const message =
+        `twing design coordinator: you also have design ${sibling.id} [${sibling.status}] open ` +
+        `("${sibling.summary || "no summary"}") that this new design doesn't touch. If that work is done, ` +
+        `close it: twing design close --id ${sibling.id}`;
+      activityLog.append({
+        projectId: body.projectId,
+        developerId: identity.developerId,
+        sessionId: body.sessionId,
+        kind: "design_stale_sibling_suggested",
+        relatedId: sibling.id,
+        ts: Date.now(),
+        payload: { newDesignId: design.id, staleDesignId: sibling.id },
+      });
+      store.addNotice(identity.developerId, message, Date.now());
+    }
+
     runSemanticComparatorPass(design.id, open);
 
     if (outcome.verdict === "clean") {
@@ -666,11 +720,7 @@ export function createApp(options: CreateAppOptions = {}) {
       return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn" }, 400);
     }
 
-    const merged = mergeDesignScope(design, delta);
-    const candidate: DesignStatement = { ...design, ...merged };
-    const open = designs.openDesigns(design.projectId, Date.now(), design.id);
-    const constraints = constraintStore.forProject(design.projectId);
-    const outcome = runDesignChecks(candidate, open, constraints);
+    const { outcome, open } = checkAmendedScope(design, delta);
 
     if (outcome.verdict !== "clean") {
       console.log(`twing serve: design ${id.slice(0, 8)} amend rejected -> ${outcome.verdict}`);
@@ -682,6 +732,51 @@ export function createApp(options: CreateAppOptions = {}) {
     console.log(`twing serve: design ${id.slice(0, 8)} amended -> scopeVersion ${amended.scopeVersion}`);
     runSemanticComparatorPass(amended.id, open);
     return c.json({ verdict: "clean", designId: amended.id });
+  });
+
+  // §17 design lifecycle (2026-08): reactivate a *dormant* design -- always
+  // an explicit, deliberate call, never triggered automatically by a file
+  // matching its declared scope (see /v1/designs/scope-match's "dormant"
+  // state, which denies and points here rather than silently waking it). A
+  // file match isn't proof of intent to resume: a single long-lived session
+  // can register design A, abandon it, and later touch a file A happens to
+  // cover for entirely unrelated reasons. Cross-developer by design, same
+  // as resolve/close -- any project member can pick up a design someone
+  // else parked, not just the original session/developer; resume
+  // reassigns both to whoever's calling this. Re-runs the full conflict
+  // check against whatever's currently open before persisting anything,
+  // exactly like amend -- on a non-clean verdict the design stays exactly
+  // "dormant", nothing persists.
+  app.post("/v1/designs/:id/resume", async (c) => {
+    const identity = c.get("identity");
+    const id = c.req.param("id");
+    const design = designs.get(id);
+    if (!design) return c.json({ error: "no such design" }, 404);
+    if (!identity.projects.some((p) => p.projectId === design.projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
+    if (design.status !== "dormant") {
+      return c.json({ error: `design is ${design.status}, not dormant -- can't resume` }, 409);
+    }
+
+    const body = await c.req.json<ResumeRequestBody>().catch(() => null);
+    if (!body || typeof body.sessionId !== "string") {
+      return c.json({ error: "expected { sessionId, addTouches?, addCreates?, addDependsOn? }" }, 400);
+    }
+    const delta = { touches: body.addTouches ?? [], creates: body.addCreates ?? [], dependsOn: body.addDependsOn ?? [] };
+
+    const { outcome, open } = checkAmendedScope(design, delta);
+
+    if (outcome.verdict !== "clean") {
+      console.log(`twing serve: design ${id.slice(0, 8)} resume rejected -> ${outcome.verdict}`);
+      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraint: outcome.constraint });
+    }
+
+    const resumed = designs.resume(id, { sessionId: body.sessionId, developerId: identity.developerId, delta });
+    if (!resumed) return c.json({ error: `design is ${design.status}, not dormant -- can't resume` }, 409);
+    console.log(`twing serve: design ${id.slice(0, 8)} resumed by ${identity.developerId.slice(0, 12)}/${body.sessionId.slice(0, 12)}`);
+    runSemanticComparatorPass(resumed.id, open);
+    return c.json({ verdict: "clean", designId: resumed.id });
   });
 
   // Visibility/debugging (§17.2). Was also what the hook's Edit|Write gate
@@ -706,15 +801,22 @@ export function createApp(options: CreateAppOptions = {}) {
   // /v1/constraints/match's ground-truth backstop below -- checks the
   // literal file being edited against the session's own *open* design(s)
   // directly, instead of trusting "the session has *a* design registered"
-  // as proof enough. Four states:
-  //  - "no_design": nothing registered for this session at all.
+  // as proof enough. Five states, most-actionable-first:
+  //  - "in_scope": an open design covers `path` (or none given -- can't
+  //    verify, same permissiveness as the old plain "has an open design"
+  //    check) -- also refreshes that design's `lastActivityAt` (§17 design
+  //    lifecycle, 2026-08: this is the one place real per-design activity
+  //    gets recorded, since this call already round-trips synchronously on
+  //    every real Edit/Write).
+  //  - "out_of_scope": an open design exists but none cover `path`.
+  //  - "dormant" (§17 design lifecycle, 2026-08): no open design (matching
+  //    or not), but a dormant one exists -- never silently allowed or
+  //    woken; points at `twing design resume`, which re-checks against
+  //    whatever's live before reactivating anything.
   //  - "flagged": something's registered, but its own verdict wasn't clean
   //    (DesignRegistry.flag) -- resolve it before it counts as usable.
-  //  - "in_scope" / "out_of_scope": whether `path` falls within an open
-  //    design's own creates/touches (pathInDesignScope). `path` is optional
-  //    -- omitted, this can only report no_design/flagged/in_scope, same
-  //    permissiveness as the old plain "has an open design" check for
-  //    callers that don't have a file path to check.
+  //  - "no_design": nothing registered for this session at all (or
+  //    everything's closed/superseded/expired).
   app.get("/v1/designs/scope-match", (c) => {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
@@ -728,17 +830,30 @@ export function createApp(options: CreateAppOptions = {}) {
 
     const sessionDesigns = designs
       .listByProject(projectId)
-      .filter((d) => d.sessionId === sessionId && (d.status === "open" || d.status === "flagged"));
+      .filter((d) => d.sessionId === sessionId && (d.status === "open" || d.status === "flagged" || d.status === "dormant"));
     if (sessionDesigns.length === 0) return c.json({ state: "no_design" });
 
     const openOnes = sessionDesigns.filter((d) => d.status === "open");
-    if (openOnes.length === 0) {
-      return c.json({ state: "flagged", designId: sessionDesigns[sessionDesigns.length - 1].id });
+    if (openOnes.length > 0) {
+      if (!path) return c.json({ state: "in_scope" });
+      const hit = openOnes.find((d) => pathInDesignScope(path, d));
+      if (hit) {
+        designs.touch(hit.id);
+        return c.json({ state: "in_scope", designId: hit.id });
+      }
+      return c.json({ state: "out_of_scope", designId: openOnes[openOnes.length - 1].id });
     }
-    if (!path) return c.json({ state: "in_scope" });
-    const hit = openOnes.find((d) => pathInDesignScope(path, d));
-    if (hit) return c.json({ state: "in_scope", designId: hit.id });
-    return c.json({ state: "out_of_scope", designId: openOnes[openOnes.length - 1].id });
+
+    const dormantOnes = sessionDesigns.filter((d) => d.status === "dormant");
+    if (dormantOnes.length > 0) {
+      const now = Date.now();
+      const named = (path && dormantOnes.find((d) => pathInDesignScope(path, d))) || dormantOnes[dormantOnes.length - 1];
+      return c.json({ state: "dormant", designId: named.id, summary: named.summary, dormantSinceMs: now - named.lastActivityAt });
+    }
+
+    // Only flagged designs remain, since sessionDesigns was non-empty and
+    // openOnes/dormantOnes were both empty.
+    return c.json({ state: "flagged", designId: sessionDesigns[sessionDesigns.length - 1].id });
   });
 
   // §17.5: the human-facing queue -- justified divergences pending sign-off.

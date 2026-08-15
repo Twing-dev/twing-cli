@@ -32,6 +32,7 @@ function makeDesign(overrides: Partial<DesignStatement> = {}): DesignStatement {
     dependsOn: [],
     ttlMs: 24 * 60 * 60 * 1000,
     scopeVersion: 1,
+    lastActivityAt: 0,
     ...overrides,
   };
 }

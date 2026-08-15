@@ -15,6 +15,13 @@
       "when": 1786712400170,
       "tag": "0001_smooth_echo",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786716267611,
+      "tag": "0002_lumpy_sumo",
+      "breakpoints": true
     }
   ]
 }

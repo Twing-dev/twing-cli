@@ -101,7 +101,7 @@ export const designs = sqliteTable(
     developerId: text("developer_id").notNull(),
     sessionId: text("session_id").notNull(),
     agentLabel: text("agent_label"),
-    status: text("status").notNull(), // "open" | "flagged" | "superseded" | "closed" | "expired"
+    status: text("status").notNull(), // "open" | "flagged" | "dormant" | "superseded" | "closed" | "expired"
     /** Set once a justified-divergence review on this design is decided --
      * durable independent of `status` changes afterward (e.g. reopening on
      * approval), so it's a directly-queryable precedent fact rather than
@@ -118,6 +118,10 @@ export const designs = sqliteTable(
     /** §17 scope enforcement (2026-08): bumped on every `amend`, so the async
      * semantic-comparator loop can detect it's been superseded mid-run. */
     scopeVersion: integer("scope_version").notNull().default(1),
+    /** §17 design lifecycle (2026-08): what `ttlMs`/`openDesigns()`/the
+     * dormancy sweep are computed from, instead of `createdAt`. Backfilled
+     * to `created_at` for pre-existing rows in the migration (see its .sql). */
+    lastActivityAt: integer("last_activity_at").notNull(),
   },
   (t) => [index("designs_project_id_idx").on(t.projectId), index("designs_session_id_idx").on(t.sessionId)],
 );

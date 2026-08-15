@@ -17,6 +17,7 @@ function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
     dependsOn: [],
     ttlMs: 60_000,
     scopeVersion: 1,
+    lastActivityAt: Date.now(),
     ...overrides,
   };
 }

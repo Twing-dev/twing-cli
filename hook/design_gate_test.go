@@ -338,6 +338,33 @@ func TestHandleEditWriteGate_Flagged_DeniesWithResolveInstructions(t *testing.T)
 	}
 }
 
+// §17 design lifecycle (2026-08): a dormant design is never silently
+// allowed or woken -- the reason must name the design, show its summary,
+// and point at `twing design resume` rather than just retrying the edit.
+func TestHandleEditWriteGate_Dormant_DeniesWithResumeInstructions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/constraints/match":
+			_, _ = w.Write([]byte(`{"matched":false}`))
+		case "/v1/designs/scope-match":
+			_, _ = w.Write([]byte(`{"state":"dormant","designId":"d-dormant","summary":"the paused refactor","dormantSinceMs":10800000}`))
+		}
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+	if !strings.Contains(reason, "d-dormant") || !strings.Contains(reason, "the paused refactor") || !strings.Contains(reason, "design resume") {
+		t.Errorf("reason = %q, want it to name the dormant design, its summary, and point at `twing design resume`", reason)
+	}
+}
+
 func TestHandleEditWriteGate_OutOfScope_DeniesWithAmendInstructions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

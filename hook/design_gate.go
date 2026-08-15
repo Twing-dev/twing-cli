@@ -327,8 +327,13 @@ func designScopeMatchURL(serverURL, projectID, sessionID, filePath string) strin
 }
 
 type designScopeMatchResponse struct {
-	State    string `json:"state"` // "no_design" | "flagged" | "in_scope" | "out_of_scope"
+	State    string `json:"state"` // "no_design" | "flagged" | "dormant" | "in_scope" | "out_of_scope"
 	DesignID string `json:"designId,omitempty"`
+	// Set only for state "dormant" (§17 design lifecycle, 2026-08) -- enough
+	// context for whoever decides (agent or the human supervising it) to
+	// actually judge "same task or not", not just retry a denied command.
+	Summary        string `json:"summary,omitempty"`
+	DormantSinceMs int64  `json:"dormantSinceMs,omitempty"`
 }
 
 // checkDesignScope is §17 scope enforcement's (2026-08) ground-truth
@@ -337,32 +342,31 @@ type designScopeMatchResponse struct {
 // "the session has *a* design registered" as proof enough. Same fail-closed
 // shape as checkPathConstraint -- a network/auth/parse error here returns a
 // non-empty failReason, never a silent "in_scope".
-func checkDesignScope(serverURL, authToken, projectID, sessionID, filePath string) (state, designID, failReason string) {
+func checkDesignScope(serverURL, authToken, projectID, sessionID, filePath string) (result designScopeMatchResponse, failReason string) {
 	res, err := getJSON(designScopeMatchURL(serverURL, projectID, sessionID, filePath), authToken)
 	if err != nil {
 		logDesignGate("design scope check failed (blocking): %v", err)
-		return "", "", unreachableReason(err)
+		return designScopeMatchResponse{}, unreachableReason(err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
-		return "", "", authRejectedReason()
+		return designScopeMatchResponse{}, authRejectedReason()
 	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
-		return "", "", coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
+		return designScopeMatchResponse{}, coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
 	}
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		logDesignGate("design scope check: failed reading response body (blocking): %v", err)
-		return "", "", coordinatorErrorReason("failed reading response body")
+		return designScopeMatchResponse{}, coordinatorErrorReason("failed reading response body")
 	}
-	var result designScopeMatchResponse
 	if err := json.Unmarshal(body, &result); err != nil {
 		logDesignGate("design scope check: malformed response (blocking): %v", err)
-		return "", "", coordinatorErrorReason("malformed response")
+		return designScopeMatchResponse{}, coordinatorErrorReason("malformed response")
 	}
-	return result.State, result.DesignID, ""
+	return result, ""
 }
 
 func flaggedDesignReason(designID string) string {
@@ -380,6 +384,38 @@ func outOfScopeReason(designID, path string) string {
 			"`twing design amend --id %s --touches %s` (re-checked against other open designs/constraints, doesn't "+
 			"just silently expand your scope), or register a separate design if this is genuinely unrelated work.",
 		path, designID, designID, path,
+	)
+}
+
+// dormantSinceText renders a millisecond duration as a coarse,
+// human-readable approximation ("3h", "2d") -- just enough for a reader to
+// judge "recently" vs "a while ago", not a precise timestamp.
+func dormantSinceText(ms int64) string {
+	d := time.Duration(ms) * time.Millisecond
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// dormantDesignReason is §17 design lifecycle's (2026-08) counterpart to
+// flaggedDesignReason/outOfScopeReason -- deliberately never a silent
+// allow-and-wake: a file matching a dormant design's declared scope isn't
+// proof of intent to resume it (a single long-lived session can register
+// design A, abandon it, and later touch a file A happens to cover for
+// entirely unrelated reasons), so this always denies and shows enough
+// context (summary, how long dormant) for whoever decides to actually
+// judge "same task or not" before running `twing design resume`.
+func dormantDesignReason(designID, summary string, dormantSinceMs int64) string {
+	return fmt.Sprintf(
+		"twing design coordinator: this file matches design %s (%q), which has been dormant (no activity) for "+
+			"~%s. It's not resumed automatically -- if this really is the same task, run `twing design resume --id %s "+
+			"[--touches <path>]` (re-checked against everything currently open before it reactivates). If it's "+
+			"unrelated, register a separate design instead.",
+		designID, summary, dormantSinceText(dormantSinceMs), designID,
 	)
 }
 
@@ -486,19 +522,21 @@ func handleEditWriteGate(payload hookPayload) {
 		}
 	}
 
-	state, designID, failReason := checkDesignScope(config.ServerURL, config.AuthToken, projectID, payload.SessionID, input.FilePath)
+	scopeMatch, failReason := checkDesignScope(config.ServerURL, config.AuthToken, projectID, payload.SessionID, input.FilePath)
 	if failReason != "" {
 		writeJSON(denyOutput("PreToolUse", failReason))
 		return
 	}
 
-	switch state {
+	switch scopeMatch.State {
 	case "in_scope":
 		writeJSON(allowOutput("PreToolUse"))
 	case "flagged":
-		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(designID)))
+		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch.DesignID)))
+	case "dormant":
+		writeJSON(denyOutput("PreToolUse", dormantDesignReason(scopeMatch.DesignID, scopeMatch.Summary, scopeMatch.DormantSinceMs)))
 	case "out_of_scope":
-		writeJSON(denyOutput("PreToolUse", outOfScopeReason(designID, input.FilePath)))
+		writeJSON(denyOutput("PreToolUse", outOfScopeReason(scopeMatch.DesignID, input.FilePath)))
 	case "no_design":
 		writeJSON(denyOutput("PreToolUse",
 			"twing design coordinator: no design registered for this session yet. Either enter plan mode "+
@@ -506,8 +544,8 @@ func handleEditWriteGate(payload hookPayload) {
 				"--creates a,b --touches c,d --depends-on e,f` directly, then retry this edit.",
 		))
 	default:
-		logDesignGate("design scope check: unknown state %q (blocking)", state)
-		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown state %q", state)))
+		logDesignGate("design scope check: unknown state %q (blocking)", scopeMatch.State)
+		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown state %q", scopeMatch.State)))
 	}
 }
 
