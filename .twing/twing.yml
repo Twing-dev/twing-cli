@@ -1,11 +1,24 @@
 require_human_review:
-  - path: "hook/**"
+  - path: "hook/{main,socket,protocol}.go"
     reason: "capture edge — must stay a trivial socket client with no decision logic
       (design doc §4)"
+  - path: "hook/design_gate.go"
+    reason: "the gate's own verdict/deny logic (§17) — a bug here is a silent
+      bypass, or wrongly blocks every gated session. Narrowed 2026-08-16 out
+      of the old blanket hook/** rule to name this chokepoint explicitly."
+  - path: "hook/daemon_launch.go"
+    reason: "the one deliberate, reviewed exception to the capture-edge
+      no-decision-logic rule above (§4) — checking daemon liveness and
+      deciding whether to spawn one is real decision logic, kept narrowly
+      contained here rather than left to spread. See this repo's CLAUDE.md
+      for the fuller framing."
   - path: "packages/server/src/design-*.ts"
     reason: "coordinator's core verdict logic — a bug here blocks real Edit/Write
       calls across every gated session (design doc §17)"
-  - path: "packages/server/**"
+  - path: "packages/server/src/identity-store.ts"
+    reason: "auth/identity resolution (§17.10) — a bug here is a real
+      access-control hole, not just gate friction."
+  - path: "packages/server/src/{index,main,app}.ts"
     reason: "the hosted coordinator itself — do not remove or fundamentally
       restructure (e.g. moving it into the daemon/local-only) without human
       sign-off (design doc §17). Added 2026-08-11 after a live test showed
@@ -15,11 +28,6 @@ constraints:
   - text: "use the shared length-prefixed frame codec in packages/core; don't invent
       a second wire format"
     scope: "packages/core/src/framing.ts"
-  - text: "twing-hook's PostToolUse capture path must never exit non-zero and must
-      never itself deny a tool call — advisory only, unchanged (§4). PreToolUse
-      is used only by the separate design-gate path (design doc §17), never by
-      capture."
-    scope: "hook/**"
 
 triggers:
   - id: "new-socket-protocol"

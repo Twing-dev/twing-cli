@@ -1,0 +1,43 @@
+name: release-npm
+
+# Publishes @twing/core and @twing/cli to npm on a version tag -- same "v*"
+# tag trigger as release-hook.yml (a single tag drives both the hook
+# binary release and the npm publish, in sync). Core first, since cli
+# depends on it (packages/cli/package.json's "@twing/core" is a real
+# semver range now, not the workspace-local "*").
+#
+# Uses npm Trusted Publishing (OIDC) -- no NPM_TOKEN secret, no long-lived
+# credential in this repo at all. Requires a one-time, per-package manual
+# bootstrap outside this workflow (a package must already exist on npm
+# before trusted publishing can be configured for it -- see the README
+# section on releasing) and npm >= 11.5.1 + Node >= 22.14, which the
+# default GitHub-hosted runner's bundled npm doesn't guarantee, hence the
+# explicit self-update step below.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write # required for npm's OIDC handshake -- nothing works without this
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Ensure npm supports trusted publishing (>= 11.5.1)
+        run: npm install -g npm@latest
+      - run: npm install
+      - run: npm run build
+      - name: Publish @twing/core
+        working-directory: packages/core
+        run: npm publish --access public --provenance
+      - name: Publish @twing/cli
+        working-directory: packages/cli
+        run: npm publish --access public --provenance

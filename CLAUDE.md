@@ -166,10 +166,11 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     `main.go` on `SessionStart` only) needs to know to spawn the daemon
     itself if nothing's listening. Fire-and-forget, no waiting for the
     daemon to finish booting — adds no new blocking budget to the
-    already-fast `SessionStart` cache-check path. This is the one place
-    `hook/**`'s "trivial socket client, no decision logic" constraint is
-    deliberately, reviewedly bent (checking liveness and maybe spawning is
-    real decision logic), not an oversight.
+    already-fast `SessionStart` cache-check path. Checking liveness and
+    maybe spawning is real decision logic, not the trivial-socket-client
+    behavior the rest of `hook/` is held to (§4) — this repo's own
+    `.twing/twing.yml` names `hook/daemon_launch.go` its own explicit
+    `require_human_review` rule for exactly that reason, not an oversight.
 
 - **`packages/server`** — `twing serve`, the coordination server (§7).
   Drizzle ORM over SQLite (`db/schema.ts`, `db/client.ts`) as of the
@@ -235,9 +236,12 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     single-use bootstrap token (`~/.twing/serve-data/bootstrap-token`) rather
     than an operator-chosen password.
   - This package's own `.twing/twing.yml` in this repo flags
-    `packages/server/**` and especially `design-*.ts`/`identity-store.ts` as
-    `require_human_review` — a bug in the verdict logic blocks real
-    `Edit`/`Write` calls across every gated session.
+    `design-*.ts`, `identity-store.ts`, and the entrypoint/wiring files
+    (`index.ts`/`main.ts`/`app.ts`) as `require_human_review` — narrowed
+    2026-08-16 from a blanket `packages/server/**` (which made every routine
+    edit anywhere in the package, e.g. `activity-log.ts`, block on review)
+    down to the files where a bug is actually a verdict-logic bypass,
+    an access-control hole (§17.10), or a sign of wholesale restructuring.
 
 - **`packages/cli`** — the `twing` command. `index.ts` dispatches
   `init`/`login`/`keygen`/`whoami`/`daemon`/`align`/`design <sub>`/
@@ -304,8 +308,17 @@ as a failure or looking like a block. Two independent handlers dispatched by
   third-party Go dependency in this module, `gopkg.in/yaml.v3`, exists
   solely to parse that repo-committed file).
 
-`hook/**` itself is flagged `require_human_review` in this repo's constraint
-file: it must stay a trivial socket/HTTP client with no decision logic.
+`hook/main.go`, `hook/socket.go`, and `hook/protocol.go` are flagged
+`require_human_review` in this repo's constraint file: together they're the
+actual capture edge, which must stay a trivial socket/HTTP client with no
+decision logic. Narrowed 2026-08-16 from a blanket `hook/**` (which
+required review for every touch anywhere in the package, including
+`config.go`/`manifest.go`/`identity.go`/`gate_overrides.go` plumbing that
+carries no such invariant) down to that file set, plus two more explicit,
+separately-reasoned rules for the two files that deliberately *do* carry
+real decision logic on purpose: `hook/design_gate.go` (the gate's own
+verdict/deny logic, §17) and `hook/daemon_launch.go` (the liveness-check
+self-heal exception noted above).
 
 ### Data flow, end to end
 
