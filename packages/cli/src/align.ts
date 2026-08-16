@@ -1,12 +1,38 @@
 /**
  * `twing align` (§6): design/coordination check -- constraint and trigger
  * matches (local), cross-session divergence (server round-trip).
+ *
+ * `respond`/`threads`/`close` (statefulness redesign, 2026-08) are the CLI
+ * side of alignment threads (`alignment-store.ts` server-side) -- the async
+ * reply channel a `design_divergence` finding opens. Same shape as
+ * `design.ts`'s commands: a thin wrapper over one server call each.
  */
 
 import { readConfig, getServerAuth, findRepoRoot, computeProjectId, loadManifestFromFile, twingConfigPath, matchTriggers, authFetch, type Finding } from "@twing/core";
 import { gatherClaims } from "./gather-claims.js";
 import { queryDaemonNotices } from "./daemon-client.js";
 import { printReport } from "./report.js";
+
+const UNAUTHORIZED_HINT = "unauthorized -- run `twing login` to re-authenticate";
+
+interface RequiredConfig {
+  serverUrl: string;
+  authToken?: string;
+}
+
+/** Same resolution as `design.ts`'s `requireConfig` -- the repo's own
+ * committed coordinator, plus this machine's cached token for it. Throws
+ * (rather than `runAlign`'s silent skip) since these commands are an
+ * explicit "do this server action now", not a best-effort background check. */
+function requireCoordinator(repoRoot: string): RequiredConfig {
+  const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
+  const serverUrl = manifest.coordinator.serverUrl;
+  if (!serverUrl) {
+    throw new Error("twing align: no coordinator configured for this repo -- run `twing init --server <url>` once to set it up");
+  }
+  const authToken = getServerAuth(readConfig(), serverUrl)?.authToken;
+  return { serverUrl, authToken };
+}
 
 export interface AlignOptions {
   intent?: string;
@@ -70,4 +96,90 @@ export async function runAlign(options: AlignOptions): Promise<void> {
   }
 
   printReport({ gathered, manifest, intentHits, findings, serverUrl, serverError, daemonNotices });
+}
+
+export interface AlignRespondOptions {
+  cwd: string;
+  finding?: string;
+  message?: string;
+}
+
+export async function runAlignRespond(options: AlignRespondOptions): Promise<void> {
+  if (!options.finding) throw new Error('twing align respond: --finding <threadId> is required (see `twing align threads`)');
+  if (!options.message) throw new Error('twing align respond: --message "..." is required');
+  const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken } = requireCoordinator(repoRoot);
+
+  const res = await authFetch(
+    `${serverUrl}/v1/alignment-threads/${options.finding}/messages`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: options.message }) },
+    authToken,
+  );
+  if (res.status === 401) {
+    console.error(`twing align respond: ${UNAUTHORIZED_HINT}`);
+    return;
+  }
+  const body = (await res.json().catch(() => ({}))) as { error?: string };
+  if (body.error) {
+    console.error(`twing align respond: ${body.error}`);
+    return;
+  }
+  console.log("twing align respond: message posted");
+}
+
+export interface AlignThreadsOptions {
+  cwd: string;
+  status?: string;
+}
+
+interface AlignmentThreadJSON {
+  id: string;
+  status: string;
+  symbolId: string;
+  developerId: string;
+  otherDeveloperId: string;
+  systemDescription: string;
+}
+
+export async function runAlignThreads(options: AlignThreadsOptions): Promise<void> {
+  const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken } = requireCoordinator(repoRoot);
+  const projectId = computeProjectId(repoRoot);
+
+  const params = new URLSearchParams({ projectId });
+  if (options.status) params.set("status", options.status);
+
+  const res = await authFetch(`${serverUrl}/v1/alignment-threads?${params}`, {}, authToken);
+  if (res.status === 401) {
+    console.error(`twing align threads: ${UNAUTHORIZED_HINT}`);
+    return;
+  }
+  const body = (await res.json()) as { items?: AlignmentThreadJSON[] };
+  const items = body.items ?? [];
+  if (items.length === 0) {
+    console.log("twing align threads: no alignment threads");
+    return;
+  }
+  for (const t of items) {
+    console.log(`${t.id}  [${t.status}]  ${t.developerId} <-> ${t.otherDeveloperId}  ${t.symbolId}`);
+    console.log(`  ${t.systemDescription}`);
+  }
+}
+
+export interface AlignCloseOptions {
+  cwd: string;
+  finding?: string;
+}
+
+export async function runAlignClose(options: AlignCloseOptions): Promise<void> {
+  if (!options.finding) throw new Error('twing align close: --finding <threadId> is required (see `twing align threads`)');
+  const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken } = requireCoordinator(repoRoot);
+
+  const res = await authFetch(`${serverUrl}/v1/alignment-threads/${options.finding}/close`, { method: "PATCH" }, authToken);
+  if (res.status === 401) {
+    console.error(`twing align close: ${UNAUTHORIZED_HINT}`);
+    return;
+  }
+  console.log(JSON.stringify(await res.json().catch(() => ({})), null, 2));
 }

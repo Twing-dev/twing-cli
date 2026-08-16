@@ -18,9 +18,21 @@ import (
 // serve` directly over HTTPS/HTTP, bypassing the daemon entirely -- this
 // path needs a synchronous verdict before Claude Code proceeds, and routing
 // that through the daemon's socket protocol would mean adding a blocking
-// hop where none currently exists. Fail-open, always: any error here must
-// resolve to an empty stdout + exit 0, same as the capture path, just for a
-// different reason (§17.7, not §4's advisory-only policy).
+// hop where none currently exists.
+//
+// Fail-closed, deliberately, against a *configured* coordinator: this
+// reverses §17.7's original fail-open recommendation
+// (design-conflict-coordinator-spec.md §10). This project doesn't design
+// for coordinator outages as an operating condition, and a silent allow on
+// an auth/network failure is indistinguishable from someone deliberately
+// deleting their own cached token to bypass the gate (confirmed live,
+// 2026-08-13 -- see the log entries this reversal was made from). Every
+// deny below names exactly which of three failure classes it hit -- no
+// cached token, a rejected token, or an unreachable/malformed coordinator
+// -- so nobody has to guess why a write was blocked. The one path that
+// still resolves to a silent allow is a repo with no coordinator configured
+// at all (`coordinator.serverUrl` unset): that's "the gate isn't wired up
+// here", not a failure, same category as TWING_DESIGN_GATE=off.
 
 // Two budgets: the Edit|Write status check is a plain in-memory lookup, so
 // it stays tight; the ExitPlanMode check may run server-side extraction (a
@@ -33,6 +45,65 @@ const designExtractionTimeout = 60 * time.Second
 
 func designGateEnabled() bool {
 	return os.Getenv("TWING_DESIGN_GATE") != "off"
+}
+
+// resolveRepoRelative resolves filePath (as given in tool_input -- always
+// absolute in practice, but cwd-relative is handled too) to a path
+// relative to repoRoot, in the same repo-relative, forward-slash format
+// every design's creates/touches and every constraint's scope glob is
+// declared in (design-store.ts/manifest.ts never store absolute paths).
+//
+// Found live (2026-08): before this existed, the gate sent tool_input's
+// raw absolute file_path straight to both /v1/constraints/match and
+// /v1/designs/scope-match, which compare it byte-for-byte (or via
+// minimatch) against repo-relative declarations -- an absolute path can
+// never match a relative pattern, so both checks silently never matched
+// anything for a real session. This is why require_human_review on
+// hook/** and packages/server/** never actually fired during this whole
+// dogfooding session despite real edits to files under both.
+//
+// ok is false when filePath resolves outside repoRoot entirely (handled
+// the same as "no coordinator configured" by the caller -- see
+// handleEditWriteGate). Symlinks are resolved on the directories only,
+// never on filePath itself (which may not exist yet for a new Write) --
+// macOS's /tmp -> /private/tmp is the concrete case this guards against
+// (cwd, as Claude Code reports it, and repoRoot, from `git rev-parse
+// --show-toplevel` which does resolve symlinks, could otherwise disagree
+// on the spelling of the same location even for a genuinely in-repo file).
+func resolveRepoRelative(cwd, repoRoot, filePath string) (rel string, ok bool) {
+	if repoRoot == "" {
+		return "", false
+	}
+
+	resolvedCwd := cwd
+	if r, err := filepath.EvalSymlinks(cwd); err == nil {
+		resolvedCwd = r
+	}
+	resolvedRoot := repoRoot
+	if r, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		resolvedRoot = r
+	}
+
+	abs := filePath
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(resolvedCwd, abs)
+	} else if dir, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		abs = filepath.Join(dir, filepath.Base(abs))
+	}
+	abs = filepath.Clean(abs)
+	root := filepath.Clean(resolvedRoot)
+
+	r, err := filepath.Rel(root, abs)
+	if err != nil {
+		return "", false
+	}
+	if r == "." {
+		return "", true // the repo root itself -- not "outside", but no sensible relative path to hand back
+	}
+	if r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(r), true // forward slashes -- declared scopes are never platform-specific
 }
 
 func logDesignGate(format string, args ...any) {
@@ -49,9 +120,11 @@ func logDesignGate(format string, args ...any) {
 	fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), line)
 }
 
+// developerId is deliberately not part of this shape (§17.10 hardening) --
+// the server resolves it from the authenticated bearer token, not a
+// client-supplied field.
 type designCheckRequest struct {
 	ProjectID   string `json:"projectId"`
-	DeveloperID string `json:"developerId"`
 	SessionID   string `json:"sessionId"`
 	RawPlanText string `json:"rawPlanText,omitempty"`
 }
@@ -81,9 +154,10 @@ type designListResponse struct {
 	} `json:"items"`
 }
 
-// setAuthHeader adds the §17.10 bearer token when non-empty -- a no-op
-// against a server with no password configured, since authToken is "" in
-// that case (resolveServerConfig never has one to give).
+// setAuthHeader adds the §17.10 bearer PAT when non-empty -- a no-op when
+// this machine hasn't authenticated to the server yet (resolveServerConfig
+// has nothing cached to give), in which case every call on this path fails
+// open the same as a network error would.
 func setAuthHeader(req *http.Request, authToken string) {
 	if authToken != "" {
 		req.Header.Set("authorization", "Bearer "+authToken)
@@ -132,14 +206,81 @@ func allowOutput(eventName string) map[string]any {
 	}
 }
 
+// agentInstructionSuffix is appended to every deny reason at the one choke
+// point (denyOutput) rather than repeated in each *Reason function above --
+// found live, 2026-08-16: a fresh agent handling a "no design registered"
+// deny correctly ran the suggested `twing design register` command and
+// retried, but its final response to the human said only "Done", with zero
+// mention that a tool call had been denied or that it had just created a
+// persistent, identity-attributed record with the coordinator on the
+// operator's behalf. Fixing that with a per-repo CLAUDE.md instruction was
+// considered and rejected: it's friction every user would have to author
+// for themselves, and a blanket "surface every tool failure" rule
+// over-triggers on failures an agent should just fix silently (a typo'd
+// path, a missing directory). This suffix instead travels with the
+// message itself, so it reaches every agent that hits the gate regardless
+// of what (if anything) that repo's own CLAUDE.md says.
+const agentInstructionSuffix = "\n\n(This is twing's design-conflict gate -- a coordination check between " +
+	"agents/sessions, not a bug to route around. If you act on this yourself, say so explicitly in your reply " +
+	"to the operator: what you did and why, not a silent retry-and-succeed -- this creates a persistent record " +
+	"attributed to their identity. See twing-cli's README, \"For agents: handling a design-gate deny\", for the " +
+	"full explanation.)"
+
 func denyOutput(eventName, reason string) map[string]any {
 	return map[string]any{
 		"hookSpecificOutput": map[string]any{
 			"hookEventName":            eventName,
 			"permissionDecision":       "deny",
-			"permissionDecisionReason": reason,
+			"permissionDecisionReason": reason + agentInstructionSuffix,
 		},
 	}
+}
+
+// The four reason strings below are the only ways a call on this path ends
+// without a real verdict from the coordinator -- kept as plain strings
+// (rather than baked directly into *Output below) because checkPathConstraint
+// needs the reason text alone, not the hookSpecificOutput wrapper, to hand
+// back to its caller.
+
+func authRequiredReason(serverURL string) string {
+	return fmt.Sprintf(
+		"twing design coordinator: no auth token cached for %s. Run `twing login --server %s` "+
+			"(or `twing init`), then retry -- the design gate blocks rather than letting an "+
+			"unauthenticated write through.", serverURL, serverURL)
+}
+
+func authRejectedReason() string {
+	return "twing design coordinator: authentication rejected (401/403). Your cached token is " +
+		"stale or revoked -- run `twing login` to get a valid one, then retry."
+}
+
+func unreachableReason(err error) string {
+	return fmt.Sprintf(
+		"twing design coordinator unreachable: %v. This action is blocked until the coordinator "+
+			"is reachable -- the design gate does not fail open. Set TWING_DESIGN_GATE=off if you "+
+			"need to work offline.", err)
+}
+
+func coordinatorErrorReason(detail string) string {
+	return fmt.Sprintf(
+		"twing design coordinator error: %s. This action is blocked -- the design gate does not "+
+			"fail open. Set TWING_DESIGN_GATE=off if you need to work offline.", detail)
+}
+
+func authRequiredOutput(eventName, serverURL string) map[string]any {
+	return denyOutput(eventName, authRequiredReason(serverURL))
+}
+
+func authRejectedOutput(eventName string) map[string]any {
+	return denyOutput(eventName, authRejectedReason())
+}
+
+func unreachableOutput(eventName string, err error) map[string]any {
+	return denyOutput(eventName, unreachableReason(err))
+}
+
+func coordinatorErrorOutput(eventName, detail string) map[string]any {
+	return denyOutput(eventName, coordinatorErrorReason(detail))
 }
 
 // handlePreToolUse is the §17 entry point. Kill-switch first: TWING_DESIGN_GATE=off
@@ -169,32 +310,51 @@ func handleExitPlanMode(payload hookPayload) {
 		return
 	}
 
+	projectID := computeProjectID(payload.Cwd)
+
+	if isGateDisabled(projectID) {
+		return
+	}
+
+	if config.AuthToken == "" {
+		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
+		return
+	}
+
 	reqBody := designCheckRequest{
-		ProjectID:   computeProjectID(payload.Cwd),
-		DeveloperID: computeDeveloperID(payload.Cwd),
+		ProjectID:   projectID,
 		SessionID:   payload.SessionID,
 		RawPlanText: input.Plan,
 	}
 
 	res, err := postJSON(strings.TrimRight(config.ServerURL, "/")+"/v1/designs/check", reqBody, designExtractionTimeout, config.AuthToken)
 	if err != nil {
-		logDesignGate("ExitPlanMode check failed (fail open): %v", err)
+		logDesignGate("ExitPlanMode check failed (blocking): %v", err)
+		writeJSON(unreachableOutput("PreToolUse", err))
 		return
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		logDesignGate("ExitPlanMode check returned status %d (blocking)", res.StatusCode)
+		writeJSON(authRejectedOutput("PreToolUse"))
+		return
+	}
 	if res.StatusCode != http.StatusOK {
-		logDesignGate("ExitPlanMode check returned status %d (fail open)", res.StatusCode)
+		logDesignGate("ExitPlanMode check returned status %d (blocking)", res.StatusCode)
+		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unexpected status %d", res.StatusCode)))
 		return
 	}
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		logDesignGate("ExitPlanMode check: failed reading response body (fail open): %v", err)
+		logDesignGate("ExitPlanMode check: failed reading response body (blocking): %v", err)
+		writeJSON(coordinatorErrorOutput("PreToolUse", "failed reading response body"))
 		return
 	}
 	var result designCheckResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		logDesignGate("ExitPlanMode check: malformed response (fail open): %v", err)
+		logDesignGate("ExitPlanMode check: malformed response (blocking): %v", err)
+		writeJSON(coordinatorErrorOutput("PreToolUse", "malformed response"))
 		return
 	}
 
@@ -206,7 +366,8 @@ func handleExitPlanMode(payload hookPayload) {
 	case "constraint_flag":
 		writeJSON(denyOutput("PreToolUse", constraintReason(result)))
 	default:
-		logDesignGate("ExitPlanMode check: unknown verdict %q (fail open)", result.Verdict)
+		logDesignGate("ExitPlanMode check: unknown verdict %q (blocking)", result.Verdict)
+		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown verdict %q", result.Verdict)))
 	}
 }
 
@@ -241,6 +402,122 @@ func openDesignsURL(serverURL, projectID, sessionID string) string {
 		strings.TrimRight(serverURL, "/"), url.QueryEscape(projectID), url.QueryEscape(sessionID))
 }
 
+func designScopeMatchURL(serverURL, projectID, sessionID, filePath string) string {
+	u := fmt.Sprintf("%s/v1/designs/scope-match?projectId=%s&sessionId=%s",
+		strings.TrimRight(serverURL, "/"), url.QueryEscape(projectID), url.QueryEscape(sessionID))
+	if filePath != "" {
+		u += "&path=" + url.QueryEscape(filePath)
+	}
+	return u
+}
+
+type designScopeMatchResponse struct {
+	State    string `json:"state"` // "no_design" | "flagged" | "dormant" | "in_scope" | "out_of_scope"
+	DesignID string `json:"designId,omitempty"`
+	// Set only for state "dormant" (§17 design lifecycle, 2026-08) -- enough
+	// context for whoever decides (agent or the human supervising it) to
+	// actually judge "same task or not", not just retry a denied command.
+	Summary        string `json:"summary,omitempty"`
+	DormantSinceMs int64  `json:"dormantSinceMs,omitempty"`
+	// Set only for state "flagged" (found live, 2026-08-16) -- distinguishes
+	// "never resolved" from "resolved, an admin just hasn't decided yet".
+	// Both used to deny with the identical message telling you to run
+	// `twing design resolve`, even immediately after you already had.
+	PendingReview bool `json:"pendingReview,omitempty"`
+}
+
+// checkDesignScope is §17 scope enforcement's (2026-08) ground-truth
+// backstop for a design's *own* claim: checks the literal file being edited
+// against the session's own open design(s) directly, instead of trusting
+// "the session has *a* design registered" as proof enough. Same fail-closed
+// shape as checkPathConstraint -- a network/auth/parse error here returns a
+// non-empty failReason, never a silent "in_scope".
+func checkDesignScope(serverURL, authToken, projectID, sessionID, filePath string) (result designScopeMatchResponse, failReason string) {
+	res, err := getJSON(designScopeMatchURL(serverURL, projectID, sessionID, filePath), authToken)
+	if err != nil {
+		logDesignGate("design scope check failed (blocking): %v", err)
+		return designScopeMatchResponse{}, unreachableReason(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
+		return designScopeMatchResponse{}, authRejectedReason()
+	}
+	if res.StatusCode != http.StatusOK {
+		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
+		return designScopeMatchResponse{}, coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		logDesignGate("design scope check: failed reading response body (blocking): %v", err)
+		return designScopeMatchResponse{}, coordinatorErrorReason("failed reading response body")
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		logDesignGate("design scope check: malformed response (blocking): %v", err)
+		return designScopeMatchResponse{}, coordinatorErrorReason("malformed response")
+	}
+	return result, ""
+}
+
+func flaggedDesignReason(designID string, pendingReview bool) string {
+	if pendingReview {
+		return fmt.Sprintf(
+			"twing design coordinator: your registered design (id %s) has a justified-divergence review "+
+				"already pending -- nothing more to do on your end. An admin needs to approve or reject it "+
+				"(`twing design reviews`) before this design counts as usable again. Retrying won't help until "+
+				"then.",
+			designID,
+		)
+	}
+	return fmt.Sprintf(
+		"twing design coordinator: your registered design (id %s) has an unresolved overlap/constraint "+
+			"conflict from its own registration -- it doesn't count as a usable open design until you resolve "+
+			"it. Run `twing design resolve --id %s (--adopt <designId> | --justify \"<reason>\")`, then retry this edit.",
+		designID, designID,
+	)
+}
+
+func outOfScopeReason(designID, path string) string {
+	return fmt.Sprintf(
+		"twing design coordinator: %s isn't in your registered design's declared scope (id %s). Either run "+
+			"`twing design amend --id %s --touches %s` (re-checked against other open designs/constraints, doesn't "+
+			"just silently expand your scope), or register a separate design if this is genuinely unrelated work.",
+		path, designID, designID, path,
+	)
+}
+
+// dormantSinceText renders a millisecond duration as a coarse,
+// human-readable approximation ("3h", "2d") -- just enough for a reader to
+// judge "recently" vs "a while ago", not a precise timestamp.
+func dormantSinceText(ms int64) string {
+	d := time.Duration(ms) * time.Millisecond
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// dormantDesignReason is §17 design lifecycle's (2026-08) counterpart to
+// flaggedDesignReason/outOfScopeReason -- deliberately never a silent
+// allow-and-wake: a file matching a dormant design's declared scope isn't
+// proof of intent to resume it (a single long-lived session can register
+// design A, abandon it, and later touch a file A happens to cover for
+// entirely unrelated reasons), so this always denies and shows enough
+// context (summary, how long dormant) for whoever decides to actually
+// judge "same task or not" before running `twing design resume`.
+func dormantDesignReason(designID, summary string, dormantSinceMs int64) string {
+	return fmt.Sprintf(
+		"twing design coordinator: this file matches design %s (%q), which has been dormant (no activity) for "+
+			"~%s. It's not resumed automatically -- if this really is the same task, run `twing design resume --id %s "+
+			"[--touches <path>]` (re-checked against everything currently open before it reactivates). If it's "+
+			"unrelated, register a separate design instead.",
+		designID, summary, dormantSinceText(dormantSinceMs), designID,
+	)
+}
+
 func constraintMatchURL(serverURL, projectID, path string) string {
 	return fmt.Sprintf("%s/v1/constraints/match?projectId=%s&path=%s",
 		strings.TrimRight(serverURL, "/"), url.QueryEscape(projectID), url.QueryEscape(path))
@@ -251,36 +528,52 @@ type constraintMatchResponse struct {
 	Constraint *designConstraintInfo `json:"constraint,omitempty"`
 }
 
+// constraintCheckResult is checkPathConstraint's tri-state verdict --
+// "we couldn't tell" (constraintCheckFailed) is deliberately not folded
+// into "clear": a failed check must deny, same as a failed open-designs
+// lookup, not be silently treated as "no constraint matched".
+type constraintCheckResult int
+
+const (
+	constraintClear constraintCheckResult = iota
+	constraintMatched
+	constraintCheckFailed
+)
+
 // checkPathConstraint is §17.9's ground-truth backstop: checks the literal
 // file being edited against the Constraint Store directly, independent of
-// whatever the session's registered design claims to touch. Returns
-// (matched, reason). Fails open (matched=false) on any network/parse error,
-// same as every other check on this path.
-func checkPathConstraint(serverURL, authToken, projectID, filePath string) (bool, string) {
+// whatever the session's registered design claims to touch. Fail-closed
+// like every other check on this path -- a network/auth/parse error here
+// returns constraintCheckFailed with a reason, not a silent "clear".
+func checkPathConstraint(serverURL, authToken, projectID, filePath string) (constraintCheckResult, string) {
 	res, err := getJSON(constraintMatchURL(serverURL, projectID, filePath), authToken)
 	if err != nil {
-		logDesignGate("constraint match check failed (fail open): %v", err)
-		return false, ""
+		logDesignGate("constraint match check failed (blocking): %v", err)
+		return constraintCheckFailed, unreachableReason(err)
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		logDesignGate("constraint match check returned status %d (blocking)", res.StatusCode)
+		return constraintCheckFailed, authRejectedReason()
+	}
 	if res.StatusCode != http.StatusOK {
-		logDesignGate("constraint match check returned status %d (fail open)", res.StatusCode)
-		return false, ""
+		logDesignGate("constraint match check returned status %d (blocking)", res.StatusCode)
+		return constraintCheckFailed, coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
 	}
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		logDesignGate("constraint match check: failed reading response body (fail open): %v", err)
-		return false, ""
+		logDesignGate("constraint match check: failed reading response body (blocking): %v", err)
+		return constraintCheckFailed, coordinatorErrorReason("failed reading response body")
 	}
 	var result constraintMatchResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		logDesignGate("constraint match check: malformed response (fail open): %v", err)
-		return false, ""
+		logDesignGate("constraint match check: malformed response (blocking): %v", err)
+		return constraintCheckFailed, coordinatorErrorReason("malformed response")
 	}
 	if !result.Matched || result.Constraint == nil {
-		return false, ""
+		return constraintClear, ""
 	}
-	return true, fmt.Sprintf(
+	return constraintMatched, fmt.Sprintf(
 		"twing design coordinator: %s is covered by an existing %s rule: %q. This applies regardless of what your "+
 			"registered design claims to touch. If this is intentional and reviewed, record it as a justified "+
 			"divergence: `twing design resolve --id <your-design-id> --justify \"<reason>\"` (queues for human "+
@@ -293,8 +586,15 @@ func checkPathConstraint(serverURL, authToken, projectID, filePath string) (bool
 // skips plan mode entirely, this is what actually gets a design registered
 // before its first write. As of §17.9, it also checks the specific file
 // against the Constraint Store directly (ground truth) before falling back
-// to the "any open design" check -- a session can't sidestep a
-// review_required rule just by registering an unrelated design first.
+// to the design-scope check -- a session can't sidestep a review_required
+// rule just by registering an unrelated design first. As of §17 scope
+// enforcement (2026-08), "has any open design" is no longer sufficient by
+// itself: /v1/designs/scope-match additionally checks the file against that
+// design's own declared creates/touches (ground truth, same reasoning as
+// §17.9 but against the design's own claim instead of a constraint), and
+// distinguishes "nothing registered" from "something's registered but its
+// own verdict flagged a conflict" -- previously indistinguishable from a
+// clean design as far as this gate was concerned.
 func handleEditWriteGate(payload hookPayload) {
 	config := resolveServerConfig(payload.Cwd)
 	if config.ServerURL == "" {
@@ -306,47 +606,75 @@ func handleEditWriteGate(payload hookPayload) {
 	}
 	_ = json.Unmarshal(payload.ToolInput, &input)
 
+	// Resolve once, use everywhere below -- both the constraint check and
+	// the scope-match check compare against repo-relative declarations
+	// (design-store.ts/manifest.ts never store absolute paths), so the raw
+	// absolute file_path Claude Code actually sends must be converted
+	// before either call, not passed through raw. This also covers "this
+	// repo's coordinator has no jurisdiction over a write that isn't even
+	// part of this repo" (e.g. Claude Code's own plan files under
+	// ~/.claude/plans/): resolveRepoRelative's ok=false there is exactly
+	// the same "not this coordinator's concern" case "no coordinator
+	// configured" already gets, so it's treated identically -- silent
+	// allow, never a call into scope/constraint logic that assumes the
+	// target is in-repo.
+	relPath := ""
+	if input.FilePath != "" {
+		rel, ok := resolveRepoRelative(payload.Cwd, config.RepoRoot, input.FilePath)
+		if !ok {
+			logDesignGate("path %s is outside repo %s -- skipping gate", input.FilePath, config.RepoRoot)
+			return
+		}
+		relPath = rel
+	}
+
 	projectID := computeProjectID(payload.Cwd)
 
-	if input.FilePath != "" {
-		if matched, reason := checkPathConstraint(config.ServerURL, config.AuthToken, projectID, input.FilePath); matched {
+	// Per-repo override (`twing design disable-gate`) -- silent allow, same
+	// category as "no coordinator configured": this machine has
+	// deliberately opted this project out, not a failure.
+	if isGateDisabled(projectID) {
+		return
+	}
+
+	if config.AuthToken == "" {
+		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
+		return
+	}
+
+	if relPath != "" {
+		verdict, reason := checkPathConstraint(config.ServerURL, config.AuthToken, projectID, relPath)
+		if verdict == constraintMatched || verdict == constraintCheckFailed {
 			writeJSON(denyOutput("PreToolUse", reason))
 			return
 		}
 	}
 
-	res, err := getJSON(openDesignsURL(config.ServerURL, projectID, payload.SessionID), config.AuthToken)
-	if err != nil {
-		logDesignGate("Edit|Write gate check failed (fail open): %v", err)
-		return
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		logDesignGate("Edit|Write gate check returned status %d (fail open)", res.StatusCode)
+	scopeMatch, failReason := checkDesignScope(config.ServerURL, config.AuthToken, projectID, payload.SessionID, relPath)
+	if failReason != "" {
+		writeJSON(denyOutput("PreToolUse", failReason))
 		return
 	}
 
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		logDesignGate("Edit|Write gate: failed reading response body (fail open): %v", err)
-		return
-	}
-	var result designListResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		logDesignGate("Edit|Write gate: malformed response (fail open): %v", err)
-		return
-	}
-
-	if len(result.Items) > 0 {
+	switch scopeMatch.State {
+	case "in_scope":
 		writeJSON(allowOutput("PreToolUse"))
-		return
+	case "flagged":
+		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch.DesignID, scopeMatch.PendingReview)))
+	case "dormant":
+		writeJSON(denyOutput("PreToolUse", dormantDesignReason(scopeMatch.DesignID, scopeMatch.Summary, scopeMatch.DormantSinceMs)))
+	case "out_of_scope":
+		writeJSON(denyOutput("PreToolUse", outOfScopeReason(scopeMatch.DesignID, relPath)))
+	case "no_design":
+		writeJSON(denyOutput("PreToolUse",
+			"twing design coordinator: no design registered for this session yet. Either enter plan mode "+
+				"(ExitPlanMode registers one automatically), or run `twing design register --summary \"...\" "+
+				"--creates a,b --touches c,d --depends-on e,f` directly, then retry this edit.",
+		))
+	default:
+		logDesignGate("design scope check: unknown state %q (blocking)", scopeMatch.State)
+		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown state %q", scopeMatch.State)))
 	}
-
-	writeJSON(denyOutput("PreToolUse",
-		"twing design coordinator: no design registered for this session yet. Either enter plan mode "+
-			"(ExitPlanMode registers one automatically), or run `twing design register --summary \"...\" "+
-			"--creates a,b --touches c,d --depends-on e,f` directly, then retry this edit.",
-	))
 }
 
 // handleSessionEnd best-effort closes any open design for this session --

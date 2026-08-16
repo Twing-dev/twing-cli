@@ -389,6 +389,19 @@ during an outage is a much smaller cost than teaching the team the tool is unrel
 and should be removed. Log every fail-open event locally (`~/.claude/design-coordinator.log`)
 so you can audit how often it happens.
 
+**Reversed 2026-08-13.** In practice "loud local log" wasn't loud at all — it was a
+file nobody tailed, and a fail-open event looked identical whether the coordinator
+happened to blip or a developer deleted their own cached token specifically to bypass
+the gate (confirmed live the same day: a deleted token produced the exact same silent
+allow as a real outage). The build now fails closed against any *configured*
+coordinator on all three error classes here (unreachable, unauthenticated, malformed
+response), with the deny reason stating plainly which one it hit, so there's no gap
+between "the check ran and said no" and "the check silently didn't run" for anyone to
+stumble into. This project isn't designing for coordinator outages as an operating
+condition, so the "occasionally blocks all work" cost this section originally weighed
+against isn't being treated as the deciding factor anymore. See `hook/design_gate.go`'s
+header comment for the current implementation.
+
 ## 11. What's explicitly out of scope here
 
 - Cross-language call-graph / symbol-level conflict detection ("Half B" from the
@@ -483,7 +496,8 @@ forever, looks like a coordinator bug).
 ### 13c. What doesn't change
 
 Everything in §1–§8 and §10–§12 — data model, overlap detection, resolution flow,
-fail-open policy, lifecycle closing — is entirely agent-agnostic and unaffected by
-this. The only thing that changes across harnesses is the ~50-line adapter that gets
-a design registered and gates the first write on it having happened.
+fail-open/fail-closed policy (see §10's 2026-08-13 reversal), lifecycle closing — is
+entirely agent-agnostic and unaffected by this. The only thing that changes across
+harnesses is the ~50-line adapter that gets a design registered and gates the first
+write on it having happened.
 

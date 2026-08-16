@@ -4,7 +4,9 @@
  * tokens simultaneously (a developer working across repos pointed at
  * different coordinators), not just one machine-wide slot. Never holds
  * anything from a repo's committed config; `authToken` only ever lands here
- * via `twing login`'s (or `init`'s) password prompt (§17.10).
+ * via `twing login`/`twing keygen --invite`/`twing admin bootstrap` (§17.10
+ * hardening) -- a personal access token generated on this machine, never a
+ * password.
  */
 
 import * as fs from "node:fs";
@@ -12,9 +14,9 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 export interface ServerAuth {
-  /** sha256(password) obtained from POST /v1/auth/login (§17.10). Absent
-   * either because the server has no password configured, or because this
-   * machine hasn't logged in to it yet. */
+  /** A personal access token (§17.10 hardening), generated client-side by
+   * `twing keygen`/`admin bootstrap` -- the server only ever sees its hash.
+   * Absent when this machine hasn't authenticated to that server yet. */
   authToken?: string;
 }
 

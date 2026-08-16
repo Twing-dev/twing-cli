@@ -1,13 +1,14 @@
 /**
  * `twing design *` (design doc §17): register/resolve/list/reviews are the
  * design-gate's on-request commands, following `align.ts`'s pattern for
- * identity derivation and server calls. `enable-gate`/`disable-gate` wire
- * or unwire the PreToolUse hook entries (`wire-hooks.ts`).
+ * identity derivation and server calls. `enable-gate`/`disable-gate` set
+ * the per-project local override (`gate-overrides.ts`) -- not hook-entry
+ * wiring (`wire-hooks.ts`) anymore, since that's machine-global now;
+ * unwiring a global entry would disable the gate for every repo, not just
+ * this one.
  */
 
-import { readConfig, getServerAuth, findRepoRoot, loadManifestFromFile, twingConfigPath, computeProjectId, computeDeveloperId, authFetch } from "@twing/core";
-import { hookBinaryPath } from "./install-hook.js";
-import { wireDesignGate, unwireDesignGate } from "./wire-hooks.js";
+import { readConfig, getServerAuth, findRepoRoot, loadManifestFromFile, twingConfigPath, computeProjectId, computeDeveloperId, authFetch, isGateDisabled, setGateDisabled } from "@twing/core";
 
 interface RequiredConfig {
   serverUrl: string;
@@ -165,9 +166,115 @@ export async function runDesignResolve(options: ResolveOptions): Promise<void> {
   console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
 }
 
+export interface AmendOptions {
+  cwd: string;
+  id?: string;
+  touches?: string;
+  creates?: string;
+  dependsOn?: string;
+}
+
+/**
+ * §17 scope enforcement (2026-08): the escape hatch for legitimately
+ * touching a file that wasn't declared at registration time. The server
+ * re-runs the full syntactic check against the *merged* scope before
+ * persisting anything -- this can't be used to silently launder a scope
+ * expansion past overlap/constraint detection, it can only be rejected the
+ * same way initial registration can. Response shape matches
+ * `/v1/designs/check`'s, so `printDesignVerdict`'s existing "adopt the
+ * existing design, or run twing design resolve ..." hint applies unchanged.
+ */
+export async function runDesignAmend(options: AmendOptions): Promise<void> {
+  const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken } = requireConfig(repoRoot);
+  if (!options.id) {
+    throw new Error("twing design amend: --id <designId> is required");
+  }
+  if (!options.touches && !options.creates && !options.dependsOn) {
+    throw new Error("twing design amend: pass at least one of --touches, --creates, --depends-on");
+  }
+
+  const res = await authFetch(
+    `${serverUrl}/v1/designs/${options.id}/amend`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        addTouches: splitList(options.touches),
+        addCreates: splitList(options.creates),
+        addDependsOn: splitList(options.dependsOn),
+      }),
+    },
+    authToken,
+  );
+  printDesignVerdict(await parseJsonOrUnauthorized<DesignCheckResponseJSON>(res));
+}
+
+export interface ResumeOptions {
+  cwd: string;
+  id?: string;
+  session?: string;
+  touches?: string;
+  creates?: string;
+  dependsOn?: string;
+}
+
+/**
+ * §17 design lifecycle (2026-08): reactivates a *dormant* design -- always
+ * an explicit, deliberate call (never triggered automatically by a file
+ * match; see `/v1/designs/scope-match`'s `"dormant"` state, which is what
+ * points a session here in the first place). Cross-developer by design:
+ * any project member can pick up a design someone else parked, not just
+ * the original session/developer -- the server reassigns both to whoever
+ * calls this. Unlike `amend`, a scope delta is optional (resuming with no
+ * new files is a valid call). Session resolution mirrors `register`'s.
+ */
+export async function runDesignResume(options: ResumeOptions): Promise<void> {
+  const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken } = requireConfig(repoRoot);
+  if (!options.id) {
+    throw new Error("twing design resume: --id <designId> is required");
+  }
+  const session = options.session ?? process.env.CLAUDE_CODE_SESSION_ID;
+  if (!session) {
+    throw new Error(
+      "twing design resume: no session id -- pass --session <id> explicitly (must be Claude Code's actual " +
+        "session id; CLAUDE_CODE_SESSION_ID wasn't set in this environment).",
+    );
+  }
+
+  const res = await authFetch(
+    `${serverUrl}/v1/designs/${options.id}/resume`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId: session,
+        addTouches: splitList(options.touches),
+        addCreates: splitList(options.creates),
+        addDependsOn: splitList(options.dependsOn),
+      }),
+    },
+    authToken,
+  );
+  printDesignVerdict(await parseJsonOrUnauthorized<DesignCheckResponseJSON>(res));
+}
+
 export interface ListOptions {
   cwd: string;
   status?: string;
+}
+
+/** Coarse, human-readable approximation ("3h ago", "2d ago") -- mirrors
+ * hook/design_gate.go's dormantSinceText, just enough to judge "recently"
+ * vs "a while ago", not a precise timestamp. */
+function relativeTime(ms: number): string {
+  const diff = Date.now() - ms;
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 export async function runDesignList(options: ListOptions): Promise<void> {
@@ -183,9 +290,12 @@ export async function runDesignList(options: ListOptions): Promise<void> {
     console.error(`twing design list: ${UNAUTHORIZED_HINT}`);
     return;
   }
-  const body = (await res.json()) as { items?: { id: string; status: string; summary: string; creates: string[]; touches: string[] }[] };
+  const body = (await res.json()) as {
+    items?: { id: string; status: string; summary: string; creates: string[]; touches: string[]; lastActivityAt?: number }[];
+  };
   for (const d of body.items ?? []) {
-    console.log(`${d.id}  [${d.status}]  ${d.summary || "(no summary)"}  creates=${d.creates.join(",")}  touches=${d.touches.join(",")}`);
+    const activity = d.lastActivityAt ? `  last activity ${relativeTime(d.lastActivityAt)}` : "";
+    console.log(`${d.id}  [${d.status}]${activity}  ${d.summary || "(no summary)"}  creates=${d.creates.join(",")}  touches=${d.touches.join(",")}`);
   }
 }
 
@@ -237,20 +347,22 @@ export async function runDesignReviews(options: ReviewsOptions): Promise<void> {
 
 export function runDesignEnableGate(options: { cwd: string }): void {
   const repoRoot = findRepoRoot(options.cwd);
-  const hookPath = hookBinaryPath();
-  const changed = wireDesignGate(repoRoot, hookPath);
-  console.log(
-    changed
-      ? `twing design enable-gate: wired into ${repoRoot}/.claude/settings.json`
-      : `twing design enable-gate: already wired in ${repoRoot}/.claude/settings.json`,
-  );
+  const projectId = computeProjectId(repoRoot);
+  if (!isGateDisabled(projectId)) {
+    console.log(`twing design enable-gate: already enabled for this project`);
+    return;
+  }
+  setGateDisabled(projectId, false);
+  console.log(`twing design enable-gate: enabled for this project`);
 }
 
 export function runDesignDisableGate(options: { cwd: string }): void {
   const repoRoot = findRepoRoot(options.cwd);
-  const hookPath = hookBinaryPath();
-  const changed = unwireDesignGate(repoRoot, hookPath);
-  console.log(
-    changed ? `twing design disable-gate: removed from ${repoRoot}/.claude/settings.json` : `twing design disable-gate: wasn't wired`,
-  );
+  const projectId = computeProjectId(repoRoot);
+  if (isGateDisabled(projectId)) {
+    console.log(`twing design disable-gate: already disabled for this project`);
+    return;
+  }
+  setGateDisabled(projectId, true);
+  console.log(`twing design disable-gate: disabled for this project (other repos on this machine are unaffected)`);
 }

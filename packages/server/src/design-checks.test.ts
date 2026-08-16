@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runDesignChecks, matchConstraintsForPaths } from "./design-checks.js";
+import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope } from "./design-checks.js";
 import type { DesignStatement, DesignConstraint } from "@twing/core";
 
 function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
@@ -16,6 +16,9 @@ function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
     touches: [],
     dependsOn: [],
     ttlMs: 60_000,
+    scopeVersion: 1,
+    justifiedConstraintIds: [],
+    lastActivityAt: Date.now(),
     ...overrides,
   };
 }
@@ -191,4 +194,42 @@ test("matchConstraintsForPaths: among same-type matches, the more specific (long
   };
   const hit = matchConstraintsForPaths(["packages/server/src/app.ts"], [wide, specific]);
   assert.equal(hit?.statement, "specific rule");
+});
+
+// §17 scope enforcement (2026-08): pathInDesignScope is the ground-truth
+// backstop for a design's *own* claim -- same shape as matchConstraintsForPaths,
+// but against creates/touches instead of a constraint's scope.
+
+test("pathInDesignScope: exact match against touches", () => {
+  const d = design({ touches: ["src/net/retry.ts"] });
+  assert.equal(pathInDesignScope("src/net/retry.ts", d), true);
+});
+
+test("pathInDesignScope: exact match against creates", () => {
+  const d = design({ creates: ["src/net/backoff.ts"] });
+  assert.equal(pathInDesignScope("src/net/backoff.ts", d), true);
+});
+
+test("pathInDesignScope: glob match", () => {
+  const d = design({ touches: ["src/net/**"] });
+  assert.equal(pathInDesignScope("src/net/retry.ts", d), true);
+});
+
+test("pathInDesignScope: no match", () => {
+  const d = design({ touches: ["src/net/retry.ts"] });
+  assert.equal(pathInDesignScope("src/unrelated.ts", d), false);
+});
+
+test("mergeDesignScope: unions and dedups against the existing design", () => {
+  const d = design({ touches: ["a.ts"], creates: ["Foo"], dependsOn: ["Bar"] });
+  const merged = mergeDesignScope(d, { touches: ["a.ts", "b.ts"], creates: ["Baz"] });
+  assert.deepEqual(merged.touches, ["a.ts", "b.ts"]);
+  assert.deepEqual(merged.creates, ["Foo", "Baz"]);
+  assert.deepEqual(merged.dependsOn, ["Bar"]); // untouched delta field stays as-is
+});
+
+test("mergeDesignScope: empty delta returns the design's existing scope unchanged", () => {
+  const d = design({ touches: ["a.ts"], creates: ["Foo"], dependsOn: ["Bar"] });
+  const merged = mergeDesignScope(d, {});
+  assert.deepEqual(merged, { touches: ["a.ts"], creates: ["Foo"], dependsOn: ["Bar"] });
 });

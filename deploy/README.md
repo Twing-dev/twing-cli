@@ -44,21 +44,45 @@ None of these are required to start the server -- without `OPENROUTER_API_KEY`,
 "you need a registered design" check still works either way, since it doesn't
 need extraction.
 
-### Auth (§17.10 of the design doc) -- optional, off by default
+### Auth (§17.10 hardening) -- per-developer PATs, always on
+
+There's no `TWING_SERVE_PASSWORD` to set anymore, and no way to turn auth off --
+every `/v1/*` route (other than bootstrap/invite-redemption) requires a valid
+personal access token, resolved server-side to a real developer identity. On
+first run, `twing serve` generates its own one-time **bootstrap token** and
+writes it to `TWING_SERVE_DATA_DIR/bootstrap-token` (`~/.twing/serve-data/` by
+default, `0600`), logging the path once at startup:
 
 ```sh
-export TWING_SERVE_PASSWORD='...'   # generate one: openssl rand -base64 24
 deploy/start-server.sh
+# ...
+# twing serve: generated a one-time bootstrap token -- run `cat ~/.twing/serve-data/bootstrap-token` ...
 ```
 
-Unset (the default) means every route stays open, exactly this project's original v0
-security model. Set it, and every `/v1/*` route except `/v1/auth/*` requires a bearer
-token derived from the password; `twing init` prompts for it once per server and never
-asks again. This travels over plain HTTP unless you've put TLS in front (see the main
-design doc's §9) -- fine on a trusted network, not a substitute for TLS on an open one.
-There's no way to rotate the password without every developer re-running `twing init`
-against the new one (the old token simply stops matching) -- acceptable for the one
-shared-secret model this is, not built for frequent rotation.
+Whoever has shell access to this machine reads it and claims the first admin
+identity:
+
+```sh
+cat ~/.twing/serve-data/bootstrap-token
+twing admin bootstrap --server <url> --token <that>
+```
+
+That mints a personal access token for you (shown once, cached locally),
+creates the organization, and makes you its admin. From there, onboard
+everyone else via invites, never by generating and handing off tokens
+yourself -- see the main README's "Onboarding a team" section for the full
+flow. This travels over plain HTTP unless you've put TLS in front (see the
+main design doc's §9) -- fine on a trusted network, not a substitute for TLS
+on an open one.
+
+**Lost all admin tokens?** Regenerate the bootstrap token even after the org
+already exists -- gated by the same filesystem access to `TWING_SERVE_DATA_DIR`
+you already have as the operator, not a second network-reachable secret:
+
+```sh
+node packages/server/dist/main.js --regenerate-bootstrap-token
+twing admin bootstrap --server <url> --token <the new one>
+```
 
 ## Logs
 

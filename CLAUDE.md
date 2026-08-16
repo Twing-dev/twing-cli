@@ -21,8 +21,13 @@ source comments do this constantly and expect you to know what they mean)
 and `docs/verification-layer-strategy-memo_6.md`.
 `docs/design-conflict-coordinator-spec.md` is the spec that became §17.
 
-Pre-release: no npm package is published; `twing init` builds `twing-hook`
-from Go source rather than fetching a prebuilt binary.
+Pre-release: no npm package is published, so getting the `twing` CLI itself
+still means cloning and building this repo. `twing-hook` is different --
+`twing init` fetches a prebuilt release binary for the platform
+(`.github/workflows/release-hook.yml`) before falling back to building from
+Go source (only reached in a twing-cli checkout with Go on `PATH` — a
+contributor's own uncommitted `hook/` changes always take priority over a
+possibly-stale release).
 
 ## Commands
 
@@ -51,10 +56,11 @@ go test ./...
 Running the pieces locally:
 
 ```sh
-npm run start --workspace packages/server   # twing serve, port 8787 (PORT env to override)
-node packages/cli/dist/index.js init --server http://localhost:8787   # run from the target repo, not from twing-cli
+npm run start --workspace packages/server   # twing serve, port 8787 (PORT env to override); logs a one-time bootstrap token on first run
+node packages/cli/dist/index.js admin bootstrap --server http://localhost:8787 --token <the bootstrap token>   # once per server -- see its startup log or ~/.twing/serve-data/bootstrap-token
+node packages/cli/dist/index.js init --server http://localhost:8787   # run from the target repo, not from twing-cli -- founds it, since you're already authenticated
 node packages/cli/dist/index.js init        # no --server needed once that repo's .twing/twing.yml declares a coordinator
-node packages/cli/dist/index.js login --server http://localhost:8787  # (re)authenticate only, no other setup
+node packages/cli/dist/index.js login --token <pat>   # cache an already-generated PAT only, no other setup
 node packages/cli/dist/index.js align
 node packages/cli/dist/index.js daemon      # foreground daemon (init normally starts one detached)
 ```
@@ -122,10 +128,21 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     a developer can have cached credentials for several coordinators at
     once. `getServerAuth`/`setServerAuth` are the accessors everything else
     uses; `readConfig` transparently migrates the old single-slot shape.
+  - `gate-overrides.ts` — `~/.twing/gate-overrides.json`, same
+    machine-local-map shape as `config.ts` but keyed by `projectId` instead
+    of server URL: `twing design enable-gate`/`disable-gate`'s per-project
+    on/off switch (`isGateDisabled`/`setGateDisabled`). Exists because hook
+    wiring is machine-global now (`wire-hooks.ts`, below) — unwiring a
+    global hook entry to disable the gate would disable it for every repo
+    at once, so the toggle moved to a local override the Go hook checks
+    instead (`hook/gate_overrides.go`, read-only mirror — only this side
+    writes it).
 
 - **`packages/cli`'s daemon** (`packages/cli/src/daemon/`) — one process per
   machine, shared across every repo `init` runs in; spawned detached by
-  `spawn-daemon.ts` and otherwise invisible as a package (it was its own
+  `spawn-daemon.ts` (falls back to `daemon-service.ts`'s
+  `writeDaemonLaunchMarker` + real launch only when nothing's already
+  listening) and otherwise invisible as a package (it was its own
   `@twing/daemon` workspace until it turned out to have exactly one
   consumer — `cli` — and no tests of its own, so the npm-package boundary
   was dropped; the separate-OS-process behavior is unchanged). Listens on a
@@ -137,15 +154,66 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `developerId` — not just `sessionId` — see the long comment in
   `server.ts` about why (two worktrees, same origin, same machine,
   different local `user.email`).
+  - **Restart survival** (`daemon-service.ts`): `installDaemonService`,
+    called from `init`, best-effort installs the daemon as a persistent
+    OS-level service — a macOS `launchd` LaunchAgent or a Linux `systemd
+    --user` unit, both installable without elevation — so it comes back on
+    its own after a reboot. Windows has no privilege-free equivalent, so it
+    relies entirely on the fallback below. Either way,
+    `writeDaemonLaunchMarker` always writes `~/.twing/daemon-launch.json`
+    (the `{node, script}` pair needed to start the daemon) first — the one
+    thing the Go hook's self-heal (`hook/daemon_launch.go`, called from
+    `main.go` on `SessionStart` only) needs to know to spawn the daemon
+    itself if nothing's listening. Fire-and-forget, no waiting for the
+    daemon to finish booting — adds no new blocking budget to the
+    already-fast `SessionStart` cache-check path. This is the one place
+    `hook/**`'s "trivial socket client, no decision logic" constraint is
+    deliberately, reviewedly bent (checking liveness and maybe spawning is
+    real decision logic), not an oversight.
 
-- **`packages/server`** — `twing serve`, the coordination server (§7). No
-  accounts, no database (in-memory `Store`/`DesignRegistry`/
-  `ConstraintStore`); a single shared password (§17.10, `TWING_SERVE_PASSWORD`)
-  is the only access control, off by default. Two independent route groups
-  in `app.ts`:
+- **`packages/server`** — `twing serve`, the coordination server (§7).
+  Drizzle ORM over SQLite (`db/schema.ts`, `db/client.ts`) as of the
+  statefulness redesign (2026-08) — `Store`/`DesignRegistry`/`ConstraintStore`/
+  `IdentityStore` all take a shared `db` handle now, replacing the prior
+  in-memory-and-TTL-swept/hand-rolled-JSON mix (only `Store`'s Claims/
+  CallEdges stay in-memory, deliberately — see `db/schema.ts`'s header
+  comment for why designs get a durable table and claims don't). The
+  bootstrap token alone stays a plaintext file (`~/.twing/serve-data/
+  bootstrap-token`), independent of DB health by design. Every store's own
+  state-changing methods also append one row to `activity_events`
+  (`activity-log.ts`) — an append-only, insert-only log spanning *both* the
+  §4 (Claim/Finding) and §17 (DesignStatement/PendingReview) families in one
+  table, the first place this doc's "share a data model but never share
+  logic" framing is intentionally crossed (`design-divergence.ts`). SQLite
+  is the only driver implemented and shipped; `TWING_DB_DRIVER=postgres` is
+  a documented, not-yet-built seam for a future hosted multi-tenant backend
+  (`db/client.ts` throws rather than silently falling back). Access control
+  is per-developer PATs
+  (§17.10 hardening, `identity-store.ts`) — not a shared password: every
+  `/v1/*` route (bar bootstrap/invite-redemption) requires a bearer token
+  `IdentityStore.resolveToken` resolves to a real, authenticated identity;
+  `developerId` on every write is that resolved identity, never a
+  client-supplied field. `Organization`/`OrgMembership` and
+  `ProjectRecord`/`ProjectMembership` are the tenant-isolation anchor for a
+  possible future managed/billed offering — bare `{id, name}` shape only, no
+  `plan`/`quota`/payment fields built yet (see
+  `docs/statefulness-and-identity-memo.md`). Four route groups in `app.ts`:
   - `/v1/claims`, `/v1/notices` — advisory path: upsert claims, run
-    `checks.ts`'s divergence checks, notices delivered to both parties
-    (submitter synchronously, other party on next poll).
+    `checks.ts`'s divergence checks *and* `design-divergence.ts`'s
+    cross-session check (a real Claim landing inside another session's open
+    DesignStatement — `overlap`/`constraint_flag` only ever compares two
+    designs' self-reported fields; this is the one place a Claim gets
+    checked against a design), notices delivered to both parties (submitter
+    synchronously, other party on next poll). A `design_divergence` finding
+    opens/reuses an `alignment_threads` row (`alignment-store.ts`) and
+    stamps its id onto the `Finding`/`Notice` — always advisory (flag, never
+    block); `/v1/alignment-threads/*` (below) is how the two parties reply.
+  - `/v1/alignment-threads/*` — the async reply channel for a
+    `design_divergence` finding: list/read/reply/close, party-only (the two
+    developers a thread names, never a bystander even a project admin).
+    Closing is unilateral — neither party needs the other's agreement, this
+    is voluntary reconciliation, not enforcement. `twing align
+    threads`/`respond`/`close` is the CLI side.
   - `/v1/designs/*`, `/v1/reviews/*`, `/v1/constraints/*` — §17 gate path:
     `design-checks.ts` (verdict logic: `clean`/`overlap`/`constraint_flag`),
     `design-store.ts` (`DesignRegistry`, `ConstraintStore`), `design-extract.ts`
@@ -155,24 +223,45 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     ground-truth backstop: checks the literal file path against the
     Constraint Store directly, independent of what the session's registered
     design claims to touch (closes a bypass where a session registers an
-    unrelated design first).
+    unrelated design first). `/v1/reviews/:id/decide` requires that review's
+    project `admin` role, not mere token possession.
+  - `/v1/admin/*`, `/v1/projects/*/invites`, `/v1/invites/*/redeem`,
+    `/v1/auth/whoami` — §17.10 hardening's identity/access-control path:
+    org/project admin actions (invite, revoke), invite redemption (works
+    both authenticated — an existing developer joining a second org/project
+    — and unauthenticated, for a brand-new developer presenting a
+    freshly-generated token's hash), and identity lookup. `/v1/admin/bootstrap`
+    is the one break-glass route, gated by the server's self-generated,
+    single-use bootstrap token (`~/.twing/serve-data/bootstrap-token`) rather
+    than an operator-chosen password.
   - This package's own `.twing/twing.yml` in this repo flags
-    `packages/server/**` and especially `design-*.ts` as
+    `packages/server/**` and especially `design-*.ts`/`identity-store.ts` as
     `require_human_review` — a bug in the verdict logic blocks real
     `Edit`/`Write` calls across every gated session.
 
 - **`packages/cli`** — the `twing` command. `index.ts` dispatches
-  `init`/`login`/`daemon`/`align`/`design <sub>`; each subcommand is one
-  file (`init.ts`, `login.ts`, `align.ts`, `design.ts`). `auth.ts` holds the
-  shared password-login flow both `init` and `login` call — `login` is the
-  cheap, repeatable subset of `init` (just authenticate, no hook
-  install/settings wiring/daemon start/constraint seed), for a second repo
-  on a new coordinator or a stale token. `align.ts` falls back to computing
-  claims directly from `git diff` against the branch's merge-base with the
+  `init`/`login`/`keygen`/`whoami`/`daemon`/`align`/`design <sub>`/
+  `admin <sub>`/`project <sub>`; each subcommand is one file (`init.ts`,
+  `login.ts`, `keygen.ts`, `align.ts`, `design.ts`, `admin.ts`, `project.ts`).
+  `auth.ts` holds shared server-URL resolution (`resolveServerUrl` — flag >
+  `TWING_SERVER` > the repo's committed coordinator) and PAT lookup
+  (`requireAuth`, throws with a "how to get one" message rather than
+  prompting — there's no password to prompt for anymore, §17.10 hardening).
+  `keygen.ts` generates a PAT client-side and redeems an invite
+  (`/v1/invites/:code/redeem`) — reused by `login`'s brand-new-developer
+  path (via `init --invite`) and by `admin.ts`'s break-glass bootstrap.
+  `login` is the cheap, repeatable subset of `init` (just cache an
+  already-obtained PAT, no hook install/settings wiring/daemon
+  start/constraint seed). `align.ts` falls back to computing claims
+  directly from `git diff` against the branch's merge-base with the
   default branch when there's no daemon/hooks (works standalone).
-  `install-hook.ts`/`wire-hooks.ts` build `twing-hook` from Go source and
-  merge (never overwrite) hook entries into the target repo's
-  `.claude/settings.json`.
+  `install-hook.ts` installs `twing-hook` (prebuilt-fetch-first,
+  build-from-source fallback, see the pre-release note above) and
+  `wire-hooks.ts` merges (never overwrites) its hook entries into the
+  **user-level** `~/.claude/settings.json` — global, not per-repo, so
+  wiring only ever needs to happen once per machine; `init` also strips any
+  legacy repo-local entries a pre-this-change `init` run left behind, so a
+  repo doesn't end up double-wired.
 
 ### `hook/` (Go, separate module)
 
@@ -193,10 +282,18 @@ as a failure or looking like a block. Two independent handlers dispatched by
 - **Design gate** (`design_gate.go`, `PreToolUse` on `ExitPlanMode`/
   `Edit`|`Write`, and `SessionEnd`) — talks to `twing serve` directly over
   HTTP, bypassing the daemon entirely, because this path needs a synchronous
-  allow/deny verdict. Fails open on any network/parse error (logged to
-  `~/.twing/design-coordinator.log`), same as capture, for a different
-  reason: §17.7's policy, not §4's advisory-only one. `TWING_DESIGN_GATE=off`
-  short-circuits it with zero network calls. `resolveServerConfig`
+  allow/deny verdict. **Fails closed** on any auth/network/parse error
+  against a *configured* coordinator (reversed 2026-08-13 from §17.7's
+  original fail-open recommendation — this project doesn't design for
+  coordinator outages as an operating condition, and a silent allow on
+  failure is indistinguishable from someone deleting their own cached token
+  to bypass the gate, confirmed live the same day). Every deny names which
+  of three failure classes it hit — no cached token, a rejected token
+  (401/403), or an unreachable/malformed coordinator — logged to
+  `~/.twing/design-coordinator.log` either way. A repo with **no coordinator
+  configured at all** still resolves to a silent allow (the gate isn't wired
+  up there, which isn't a failure), same as `TWING_DESIGN_GATE=off`, which
+  still short-circuits with zero network calls. `resolveServerConfig`
   (`config.go`) is what every call site on this path uses to find the
   coordinator: `manifest.go`'s `readCoordinatorServerURL` reads the repo's
   committed `.twing/twing.yml` (repo root via `git rev-parse
@@ -236,9 +333,12 @@ Claude Code tool call
 - `projectId` — derived from the canonicalized git remote URL
   (`computeProjectId`/Go equivalent), not a path — same project across
   different clones/worktrees.
-- `developerId` — derived from local git identity, scoped per checkout (so
-  two worktrees of the same project on one machine can have different
-  `developerId`s).
+- `developerId` — server-issued and auth-derived (§17.10 hardening): resolved
+  from the authenticated PAT on every request, not read from a client-supplied
+  field. `computeDeveloperId()` (git-email-derived, local) survives only as
+  the suggested label at `keygen`/`admin bootstrap` time and for `align.ts`'s
+  no-server git-diff fallback, which never talks to a server to verify
+  anything against.
 - `sessionId` — Claude Code's real session id. The design gate's `Edit`/
   `Write` check looks open designs up by exact session id; it comes from
   `CLAUDE_CODE_SESSION_ID` by default (confirmed live against a real gated
@@ -251,25 +351,38 @@ Claude Code tool call
   once (multi-server, `~/.twing/config.json`'s `servers` map), so there's no
   single meaningful default to guess. `authToken` is a separate lookup, by
   `serverUrl`, into that same map — never stored in or read from the repo
-  file.
+  file. It's a personal access token now (§17.10 hardening), generated
+  client-side by `keygen`/`admin bootstrap`; the storage shape didn't change
+  from the prior shared-password model, only what's stored in it.
 
 ## Working in this repo
 
 This repo dogfoods its own design-conflict gate against a remote coordinator
-(see `.twing/twing.yml` and local `.claude/settings.json`, which is
-gitignored — it's regenerated by `twing init`, not committed, since its hook
-commands bake in an absolute `$HOME`-specific path). Expect `Edit`/`Write`
-gate checks to fire in this repo's own sessions; if one denies with "no
-design registered", run `twing design register --summary "..." --touches
-<paths>` (or enter plan mode, which registers one automatically via
-`ExitPlanMode`) before retrying.
+(see `.twing/twing.yml`). Hook wiring itself lives in the user-level
+`~/.claude/settings.json` now, not this repo's own `.claude/` at all (hook
+commands bake in an absolute `$HOME`-specific path, which is exactly why it
+was never committed even back when it was repo-local) — regenerated by
+`twing init`, machine-global, covers every repo, not just this one. Expect
+`Edit`/`Write` gate checks to fire in this repo's own sessions; if one
+denies with "no design registered", run `twing design register --summary
+"..." --touches <paths>` (or enter plan mode, which registers one
+automatically via `ExitPlanMode`) before retrying. A gate denial naming a
+path *outside* this repo's tree (e.g. Claude Code's own `~/.claude/plans/`
+files) is a bug, not expected behavior — the gate resolves the coordinator
+from `cwd`, but `resolveRepoRelative` (`hook/design_gate.go`) should already
+be catching that case and allowing silently; see its own doc comment for
+the live incident this was found from.
 
 `.gitignore` also excludes `dist/`, `*.tsbuildinfo`, the built
 `hook/twing-hook` binary, `openrouter_key.txt`, `simulator/.workspaces/`,
 and the `deploy/`-generated `twing-serve.log`/`.pid`. Everything
-machine-local (`daemon.sock`, the multi-server auth-token config) lives
-under `~/.twing/` — the user's home directory, not inside this repo's
-working tree at all, so it was never something `.gitignore` needed to name.
+machine-local (`daemon.sock`, `daemon-launch.json`, `gate-overrides.json`,
+the multi-server auth-token config, the OS-service definitions themselves —
+`~/Library/LaunchAgents/dev.twing.daemon.plist` on macOS,
+`~/.config/systemd/user/twing-daemon.service` on Linux) lives under
+`~/.twing/` or the platform's own service-manager directories — never
+inside this repo's working tree, so none of it was ever something
+`.gitignore` needed to name.
 
 License is dual MIT/Apache-2.0 for most packages, but `packages/server` is
 AGPL-3.0-only — check a package's own `package.json` `license` field before

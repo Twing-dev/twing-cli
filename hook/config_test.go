@@ -71,9 +71,19 @@ func TestReadCoordinatorServerURL_ReadsFromCommittedFile(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
 	writeTwingYAML(t, repoRoot, "coordinator:\n  serverUrl: http://localhost:8787\n")
 
-	got, ok := readCoordinatorServerURL(repoRoot)
+	got, gotRoot, ok := readCoordinatorServerURL(repoRoot)
 	if !ok || got != "http://localhost:8787" {
 		t.Errorf("readCoordinatorServerURL(...) = (%q, %v), want (\"http://localhost:8787\", true)", got, ok)
+	}
+	// git rev-parse --show-toplevel resolves symlinks (e.g. macOS's
+	// /tmp -> /private/tmp), so compare against t.TempDir()'s own
+	// resolved form rather than its raw, possibly-symlinked spelling.
+	wantRoot := repoRoot
+	if r, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		wantRoot = r
+	}
+	if gotRoot != wantRoot {
+		t.Errorf("readCoordinatorServerURL(...) repoRoot = %q, want %q", gotRoot, wantRoot)
 	}
 }
 
@@ -85,9 +95,16 @@ func TestReadCoordinatorServerURL_WorksFromASubdirectory(t *testing.T) {
 		t.Fatalf("mkdir subdir: %v", err)
 	}
 
-	got, ok := readCoordinatorServerURL(sub)
+	got, gotRoot, ok := readCoordinatorServerURL(sub)
 	if !ok || got != "http://localhost:8787" {
 		t.Errorf("readCoordinatorServerURL(sub) = (%q, %v), want (\"http://localhost:8787\", true)", got, ok)
+	}
+	wantRoot := repoRoot
+	if r, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		wantRoot = r
+	}
+	if gotRoot != wantRoot {
+		t.Errorf("readCoordinatorServerURL(sub) repoRoot = %q, want %q", gotRoot, wantRoot)
 	}
 }
 
@@ -95,7 +112,7 @@ func TestReadCoordinatorServerURL_IgnoresOtherManifestSections(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
 	writeTwingYAML(t, repoRoot, "require_human_review:\n  - path: \"hook/**\"\n    reason: x\nconstraints:\n  - text: y\n    scope: z\n")
 
-	_, ok := readCoordinatorServerURL(repoRoot)
+	_, _, ok := readCoordinatorServerURL(repoRoot)
 	if ok {
 		t.Errorf("readCoordinatorServerURL(...) = ok, want false for a manifest with no coordinator section")
 	}
@@ -103,7 +120,7 @@ func TestReadCoordinatorServerURL_IgnoresOtherManifestSections(t *testing.T) {
 
 func TestReadCoordinatorServerURL_NoTwingYamlAtAll(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
-	_, ok := readCoordinatorServerURL(repoRoot)
+	_, _, ok := readCoordinatorServerURL(repoRoot)
 	if ok {
 		t.Errorf("readCoordinatorServerURL(...) = ok, want false when .twing/twing.yml doesn't exist")
 	}

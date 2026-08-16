@@ -1,11 +1,21 @@
 /**
- * Merges twing's hook entries into `<repoRoot>/.claude/settings.json`
- * (§6 step 3). Must never overwrite the file — another tool may already
- * have entries there — so this only ever reads, appends if missing, writes.
+ * Merges twing's hook entries into the user-level `~/.claude/settings.json`
+ * (§6 step 3, retargeted from repo-local as part of the install-once
+ * onboarding work). Every downstream check already tolerates "no
+ * coordinator configured for this repo" as a silent no-op (capture) or
+ * silent allow (gate) -- so wiring once, globally, means every repo a
+ * developer works in already has hooks active, no per-repo `wireHooks` run
+ * needed. Must never overwrite the file — another tool may already have
+ * entries there — so this only ever reads, appends if missing, writes.
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+
+function globalSettingsPath(): string {
+  return path.join(os.homedir(), ".claude", "settings.json");
+}
 
 interface HookCommand {
   type: "command";
@@ -46,21 +56,6 @@ function addEntry(settings: ClaudeSettings, eventName: string, hookPath: string,
   return true;
 }
 
-/** Removes just this hook's command from a matcher entry, dropping the
- * entry entirely once empty -- mirror image of `addEntry`, for
- * `unwireDesignGate`. Never touches entries other tools may have added. */
-function removeEntry(settings: ClaudeSettings, eventName: string, hookPath: string, matcher?: string): boolean {
-  const entries = settings.hooks?.[eventName];
-  if (!entries) return false;
-  const before = entries.length;
-  settings.hooks![eventName] = entries.filter((entry) => {
-    if (entry.matcher !== matcher) return true;
-    entry.hooks = entry.hooks.filter((h) => h.command !== hookPath);
-    return entry.hooks.length > 0;
-  });
-  return settings.hooks![eventName].length !== before;
-}
-
 function readSettings(settingsPath: string): ClaudeSettings {
   if (!fs.existsSync(settingsPath)) return {};
   return JSON.parse(fs.readFileSync(settingsPath, "utf8")) as ClaudeSettings;
@@ -72,8 +67,8 @@ function writeSettings(settingsPath: string, settings: ClaudeSettings): void {
 }
 
 /** Returns true if the file was changed. */
-export function wireHooks(repoRoot: string, hookPath: string): boolean {
-  const settingsPath = path.join(repoRoot, ".claude", "settings.json");
+export function wireHooks(hookPath: string): boolean {
+  const settingsPath = globalSettingsPath();
   const settings = readSettings(settingsPath);
 
   const changedPostToolUse = addEntry(settings, "PostToolUse", hookPath, POST_TOOL_USE_MATCHER);
@@ -86,20 +81,20 @@ export function wireHooks(repoRoot: string, hookPath: string): boolean {
   }
 
   // §17: wired by default now, alongside the capture-path entries above --
-  // a separate read/write round trip against the same file, kept as its
-  // own function (`wireDesignGate`) so `twing design enable-gate` can call
-  // it standalone for repos that ran `init` before this existed.
-  const changedDesignGate = wireDesignGate(repoRoot, hookPath);
+  // a separate read/write round trip against the same (now global) file,
+  // kept as its own internal helper since `wireHooks` still calls it
+  // standalone. No longer exported/called by `design enable-gate`/
+  // `disable-gate` -- see gate-overrides.ts for why unwiring a global entry
+  // stopped being the right mechanism for a per-repo toggle.
+  const changedDesignGate = wireDesignGate(settingsPath, settings, hookPath);
 
   return changed || changedDesignGate;
 }
 
 /** §17: wires the PreToolUse design-gate matchers plus a SessionEnd close
- * trigger (§17.6). Returns true if the file was changed. */
-export function wireDesignGate(repoRoot: string, hookPath: string): boolean {
-  const settingsPath = path.join(repoRoot, ".claude", "settings.json");
-  const settings = readSettings(settingsPath);
-
+ * trigger (§17.6) into the already-loaded `settings`, writing back if
+ * changed. Returns true if the file was changed. */
+function wireDesignGate(settingsPath: string, settings: ClaudeSettings, hookPath: string): boolean {
   let changed = false;
   for (const matcher of DESIGN_GATE_PRE_TOOL_USE_MATCHERS) {
     changed = addEntry(settings, "PreToolUse", hookPath, matcher) || changed;
@@ -112,19 +107,30 @@ export function wireDesignGate(repoRoot: string, hookPath: string): boolean {
   return changed;
 }
 
-/** Unwinds `wireDesignGate` -- for `twing design disable-gate`. Leaves the
- * capture-path entries (PostToolUse/SessionStart/UserPromptSubmit)
- * untouched; those stay advisory regardless of the gate's state. */
-export function unwireDesignGate(repoRoot: string, hookPath: string): boolean {
+/** Upgrade migration: strips this hook's own entries (by exact command
+ * match) from a repo's *local* `.claude/settings.json`, across every event
+ * name twing ever wired there -- left behind by `init` runs from before
+ * wiring moved to the global file. Run once per `init`; without it, a repo
+ * that was `init`'d under the old scheme would end up with both the
+ * repo-local and the new global entries wired at once, double-firing the
+ * hook for every event in that one repo. Never touches any other tool's
+ * entries, and is a silent no-op if the file doesn't exist or has nothing
+ * of ours in it -- most repos hit this path exactly zero times. Returns
+ * true if anything was actually removed. */
+export function stripLegacyRepoLocalHooks(repoRoot: string, hookPath: string): boolean {
   const settingsPath = path.join(repoRoot, ".claude", "settings.json");
   if (!fs.existsSync(settingsPath)) return false;
   const settings = readSettings(settingsPath);
+  if (!settings.hooks) return false;
 
   let changed = false;
-  for (const matcher of DESIGN_GATE_PRE_TOOL_USE_MATCHERS) {
-    changed = removeEntry(settings, "PreToolUse", hookPath, matcher) || changed;
+  for (const eventName of Object.keys(settings.hooks)) {
+    const before = settings.hooks[eventName].length;
+    settings.hooks[eventName] = settings.hooks[eventName]
+      .map((entry) => ({ ...entry, hooks: entry.hooks.filter((h) => h.command !== hookPath) }))
+      .filter((entry) => entry.hooks.length > 0);
+    if (settings.hooks[eventName].length !== before) changed = true;
   }
-  changed = removeEntry(settings, "SessionEnd", hookPath) || changed;
 
   if (changed) {
     writeSettings(settingsPath, settings);

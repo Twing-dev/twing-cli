@@ -76,8 +76,13 @@ export function computeProjectId(repoRoot: string): string {
   return readOrCreatePersistedId(path.join(repoRoot, ".git", "twing-project-id"));
 }
 
-/** `developerId` defaults to `git config user.email` — a label, not a
- * credential (§8); the server never verifies it. */
+/** Suggests a `developerId` from `git config user.email` -- used only as
+ * the default label offered at `twing keygen`/`admin bootstrap` time, and
+ * by `align.ts`'s no-server git-diff fallback path (which never talks to a
+ * server to verify anything against). Once registered, `developerId` is
+ * server-issued and resolved from the authenticated PAT on every request
+ * (§17.10 hardening) -- this local computation is no longer trusted as-is
+ * for anything the server persists or acts on. */
 export function computeDeveloperId(repoRoot: string): string {
   const email = git(["config", "user.email"], repoRoot);
   if (email) return email;

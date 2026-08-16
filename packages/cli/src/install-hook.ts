@@ -1,9 +1,13 @@
 /**
  * Ensures `twing-hook` is present (§6 step 2) — "fetch a prebuilt release
  * for the platform, or build from source if a Go toolchain is available."
- * No releases are published yet (pre-v0, dogfood-only), so this only
- * implements the build-from-source path — an intentional, doc-sanctioned
- * scope cut, not a placeholder for the release-fetch path.
+ * Priority order, and why: (1) local hook source + Go toolchain wins first
+ * -- a twing-cli contributor's own checkout may have uncommitted hook
+ * changes; silently fetching a released binary instead would ignore them.
+ * (2) a prebuilt release fetch for everyone else -- the common case, no Go
+ * toolchain needed. (3) reuse whatever's already installed. (4) throw.
+ * Was pre-v0 dogfood-only build-from-source-only until the release
+ * pipeline (`.github/workflows/release-hook.yml`) existed to fetch from.
  */
 
 import { execFileSync } from "node:child_process";
@@ -18,9 +22,8 @@ export function hookBinaryPath(): string {
 }
 
 /** Walks up from this module's own install location looking for a `hook/`
- * Go module directory — the monorepo dev-mode layout. Real distribution
- * would need the hook source bundled into the published package; not built
- * here since there's nothing to distribute to yet. */
+ * Go module directory — the monorepo dev-mode layout, i.e. "this is a
+ * twing-cli contributor's own checkout." */
 function findHookSource(): string | null {
   let dir = path.dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 8; i++) {
@@ -42,16 +45,62 @@ function goAvailable(): boolean {
   }
 }
 
-/** Returns the installed binary path, building from source when possible.
- * Throws only when there's neither a fresh build nor a previously installed
- * binary to fall back to. */
-export function ensureHookInstalled(): string {
+const RELEASE_REPO = "Twing-dev/twing-cli";
+
+/** GOOS/GOARCH names, matching `.github/workflows/release-hook.yml`'s
+ * asset-naming convention (`twing-hook-<os>-<arch>[.exe]`) -- not Node's
+ * own `process.platform`/`process.arch` spelling (`win32`/`x64`). */
+export function releaseAssetName(): string | null {
+  const osNames: Partial<Record<NodeJS.Platform, string>> = { darwin: "darwin", linux: "linux", win32: "windows" };
+  const archNames: Partial<Record<NodeJS.Architecture, string>> = { x64: "amd64", arm64: "arm64" };
+  const osName = osNames[process.platform];
+  const archName = archNames[process.arch];
+  if (!osName || !archName) return null; // unsupported platform/arch -- no asset exists to fetch
+  const ext = process.platform === "win32" ? ".exe" : "";
+  return `twing-hook-${osName}-${archName}${ext}`;
+}
+
+/** Fetches the latest published release's binary for this platform,
+ * writing it to `target`. GitHub's `/releases/latest/download/<asset>` URL
+ * always redirects to the current latest release's matching asset -- no
+ * API token, no rate limit, works from a plain `fetch`. Returns false (never
+ * throws) on any failure: no release published yet, wrong platform, a
+ * network hiccup -- all fall through to the next tier the same way. */
+export async function fetchPrebuiltHook(target: string): Promise<boolean> {
+  const asset = releaseAssetName();
+  if (!asset) return false;
+
+  const url = `https://github.com/${RELEASE_REPO}/releases/latest/download/${asset}`;
+  try {
+    const res = await fetch(url, { redirect: "follow" });
+    if (!res.ok) return false;
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, bytes);
+    if (process.platform !== "win32") {
+      fs.chmodSync(target, 0o755);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Returns the installed binary path -- building from source, fetching a
+ * prebuilt release, or reusing an already-installed binary, in that
+ * priority order (see the module doc comment for why). Throws only when
+ * none of those three produced anything at all. */
+export async function ensureHookInstalled(): Promise<string> {
   const target = hookBinaryPath();
   const source = findHookSource();
 
   if (source && goAvailable()) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     execFileSync("go", ["build", "-o", target, "."], { cwd: source, stdio: "inherit" });
+    return target;
+  }
+
+  if (await fetchPrebuiltHook(target)) {
     return target;
   }
 
@@ -62,6 +111,6 @@ export function ensureHookInstalled(): string {
   throw new Error(
     source
       ? "twing init: found hook source but no Go toolchain (`go` not on PATH) -- install Go, or place a prebuilt twing-hook binary at " + target
-      : "twing init: could not locate twing-hook source (expected a hook/go.mod ancestor) and no binary is already installed at " + target,
+      : `twing init: could not locate twing-hook source (expected a hook/go.mod ancestor), no prebuilt release could be fetched, and no binary is already installed at ${target}`,
   );
 }

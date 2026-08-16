@@ -21,23 +21,29 @@ type twingYAML struct {
 // coordinator.serverUrl out of its committed .twing/twing.yml, if any.
 // Repo-root resolution is delegated to the git binary (git rev-parse
 // --show-toplevel), reusing identity.go's gitOutput helper -- consistent
-// with how computeProjectID/computeDeveloperID already resolve repo
-// context on this side, rather than a hand-rolled directory walk.
-func readCoordinatorServerURL(cwd string) (string, bool) {
-	repoRoot, ok := gitOutput(cwd, "rev-parse", "--show-toplevel")
+// with how computeProjectID already resolves repo context on this side,
+// rather than a hand-rolled directory walk.
+//
+// Also returns the resolved repoRoot itself (not just the URL) -- callers
+// need it to check whether a specific tool_input.file_path actually falls
+// inside this repo before applying repo-scoped gate logic to it (see
+// design_gate.go's resolveRepoRelative). Surfacing it here avoids a second git
+// shell-out for something already resolved on this exact path.
+func readCoordinatorServerURL(cwd string) (serverURL string, repoRoot string, ok bool) {
+	repoRoot, ok = gitOutput(cwd, "rev-parse", "--show-toplevel")
 	if !ok || repoRoot == "" {
-		return "", false
+		return "", "", false
 	}
 	data, err := os.ReadFile(filepath.Join(repoRoot, ".twing", "twing.yml"))
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	var parsed twingYAML
 	if err := yaml.Unmarshal(data, &parsed); err != nil {
-		return "", false
+		return "", "", false
 	}
 	if parsed.Coordinator.ServerURL == "" {
-		return "", false
+		return "", "", false
 	}
-	return parsed.Coordinator.ServerURL, true
+	return parsed.Coordinator.ServerURL, repoRoot, true
 }
