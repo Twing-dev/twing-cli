@@ -8,7 +8,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { computeProjectId } from "@twing/core";
 import {
   runDesignRegister,
   runDesignResolve,
@@ -225,34 +227,40 @@ test("runDesignReviews: --decide without --decision throws", async () => {
   });
 });
 
-// --- runDesignEnableGate / runDesignDisableGate (wire-hooks.ts's design-gate entries) ---
+// --- runDesignEnableGate / runDesignDisableGate (gate-overrides.ts's per-project override, ---
+// --- not hook-entry wiring anymore -- wiring is machine-global now, see wire-hooks.ts) ---
 
-test("runDesignEnableGate: wires the design-gate hooks into .claude/settings.json, then reports already-wired on a second call", async () => {
+test("runDesignDisableGate: sets the per-project override, then reports already-disabled on a second call; a different project is unaffected", async () => {
   await withHome(async () => {
     const repo = tmpRepo();
-    const { logs: first } = await captureConsole(() => Promise.resolve(runDesignEnableGate({ cwd: repo })));
-    assert.ok(first.some((l) => l.includes("wired into") && l.includes("settings.json")));
+    const other = tmpRepo();
 
-    const settings = JSON.parse(fs.readFileSync(path.join(repo, ".claude", "settings.json"), "utf8")) as { hooks?: { PreToolUse?: unknown[] } };
-    assert.equal(settings.hooks?.PreToolUse?.length, 2);
+    const { logs: first } = await captureConsole(() => Promise.resolve(runDesignDisableGate({ cwd: repo })));
+    assert.ok(first.some((l) => l.includes("disabled for this project")));
 
-    const { logs: second } = await captureConsole(() => Promise.resolve(runDesignEnableGate({ cwd: repo })));
-    assert.ok(second.some((l) => l.includes("already wired")));
+    const overridesPath = path.join(os.homedir(), ".twing", "gate-overrides.json");
+    const overrides = JSON.parse(fs.readFileSync(overridesPath, "utf8")) as Record<string, string>;
+    assert.equal(overrides[computeProjectId(repo)], "disabled");
+    assert.equal(overrides[computeProjectId(other)], undefined, "a different project's override must be untouched");
+
+    const { logs: second } = await captureConsole(() => Promise.resolve(runDesignDisableGate({ cwd: repo })));
+    assert.ok(second.some((l) => l.includes("already disabled")));
   });
 });
 
-test("runDesignDisableGate: unwires the design-gate hooks, then reports it wasn't wired on a second call", async () => {
+test("runDesignEnableGate: clears a prior disable, then reports already-enabled on a second call", async () => {
   await withHome(async () => {
     const repo = tmpRepo();
-    runDesignEnableGate({ cwd: repo });
+    runDesignDisableGate({ cwd: repo });
 
-    const { logs: first } = await captureConsole(() => Promise.resolve(runDesignDisableGate({ cwd: repo })));
-    assert.ok(first.some((l) => l.includes("removed from") && l.includes("settings.json")));
+    const { logs: first } = await captureConsole(() => Promise.resolve(runDesignEnableGate({ cwd: repo })));
+    assert.ok(first.some((l) => l.includes("enabled for this project")));
 
-    const settings = JSON.parse(fs.readFileSync(path.join(repo, ".claude", "settings.json"), "utf8")) as { hooks?: { PreToolUse?: unknown[] } };
-    assert.deepEqual(settings.hooks?.PreToolUse, []);
+    const overridesPath = path.join(os.homedir(), ".twing", "gate-overrides.json");
+    const overrides = JSON.parse(fs.readFileSync(overridesPath, "utf8")) as Record<string, string>;
+    assert.equal(overrides[computeProjectId(repo)], undefined);
 
-    const { logs: second } = await captureConsole(() => Promise.resolve(runDesignDisableGate({ cwd: repo })));
-    assert.ok(second.some((l) => l.includes("wasn't wired")));
+    const { logs: second } = await captureConsole(() => Promise.resolve(runDesignEnableGate({ cwd: repo })));
+    assert.ok(second.some((l) => l.includes("already enabled")));
   });
 });

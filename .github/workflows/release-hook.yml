@@ -1,0 +1,80 @@
+name: release-hook
+
+# Cross-compiles twing-hook for macOS/Linux/Windows and publishes the
+# binaries as GitHub Release assets on a version tag -- see
+# packages/cli/src/install-hook.ts's fetchPrebuiltHook, which fetches
+# these via the stable /releases/latest/download/<asset> redirect (no API
+# token, no rate limit). Asset names must match releaseAssetName() there
+# exactly: twing-hook-<os>-<arch>[.exe], os/arch spelled Go's way
+# (darwin/linux/windows, amd64/arm64), not Node's (darwin/linux/win32,
+# x64/arm64).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hook/go.mod
+      - name: Build linux/amd64, linux/arm64, windows/amd64
+        working-directory: hook
+        run: |
+          mkdir -p dist
+          GOOS=linux   GOARCH=amd64 go build -o dist/twing-hook-linux-amd64 .
+          GOOS=linux   GOARCH=arm64 go build -o dist/twing-hook-linux-arm64 .
+          GOOS=windows GOARCH=amd64 go build -o dist/twing-hook-windows-amd64.exe .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-windows-binaries
+          path: hook/dist/*
+
+  build-darwin:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hook/go.mod
+      - name: Build darwin/amd64, darwin/arm64
+        working-directory: hook
+        run: |
+          mkdir -p dist
+          GOOS=darwin GOARCH=amd64 go build -o dist/twing-hook-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -o dist/twing-hook-darwin-arm64 .
+      # Ad-hoc signing, not notarization: free, no Apple Developer account,
+      # no registration -- required for the arm64 binary to execute at all
+      # on Apple Silicon (a hard OS requirement since Big Sur, separate
+      # from Gatekeeper's quarantine check, which install-hook.ts's plain
+      # `fetch`-based download never triggers in the first place -- that
+      # only applies to browser/Mail downloads). Harmless on amd64.
+      - name: Ad-hoc codesign
+        working-directory: hook
+        run: |
+          codesign -s - dist/twing-hook-darwin-amd64
+          codesign -s - dist/twing-hook-darwin-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-binaries
+          path: hook/dist/*
+
+  publish:
+    needs: [build-linux-windows, build-darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release with all platform binaries attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes

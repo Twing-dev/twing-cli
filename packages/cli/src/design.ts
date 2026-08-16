@@ -1,13 +1,14 @@
 /**
  * `twing design *` (design doc §17): register/resolve/list/reviews are the
  * design-gate's on-request commands, following `align.ts`'s pattern for
- * identity derivation and server calls. `enable-gate`/`disable-gate` wire
- * or unwire the PreToolUse hook entries (`wire-hooks.ts`).
+ * identity derivation and server calls. `enable-gate`/`disable-gate` set
+ * the per-project local override (`gate-overrides.ts`) -- not hook-entry
+ * wiring (`wire-hooks.ts`) anymore, since that's machine-global now;
+ * unwiring a global entry would disable the gate for every repo, not just
+ * this one.
  */
 
-import { readConfig, getServerAuth, findRepoRoot, loadManifestFromFile, twingConfigPath, computeProjectId, computeDeveloperId, authFetch } from "@twing/core";
-import { hookBinaryPath } from "./install-hook.js";
-import { wireDesignGate, unwireDesignGate } from "./wire-hooks.js";
+import { readConfig, getServerAuth, findRepoRoot, loadManifestFromFile, twingConfigPath, computeProjectId, computeDeveloperId, authFetch, isGateDisabled, setGateDisabled } from "@twing/core";
 
 interface RequiredConfig {
   serverUrl: string;
@@ -346,20 +347,22 @@ export async function runDesignReviews(options: ReviewsOptions): Promise<void> {
 
 export function runDesignEnableGate(options: { cwd: string }): void {
   const repoRoot = findRepoRoot(options.cwd);
-  const hookPath = hookBinaryPath();
-  const changed = wireDesignGate(repoRoot, hookPath);
-  console.log(
-    changed
-      ? `twing design enable-gate: wired into ${repoRoot}/.claude/settings.json`
-      : `twing design enable-gate: already wired in ${repoRoot}/.claude/settings.json`,
-  );
+  const projectId = computeProjectId(repoRoot);
+  if (!isGateDisabled(projectId)) {
+    console.log(`twing design enable-gate: already enabled for this project`);
+    return;
+  }
+  setGateDisabled(projectId, false);
+  console.log(`twing design enable-gate: enabled for this project`);
 }
 
 export function runDesignDisableGate(options: { cwd: string }): void {
   const repoRoot = findRepoRoot(options.cwd);
-  const hookPath = hookBinaryPath();
-  const changed = unwireDesignGate(repoRoot, hookPath);
-  console.log(
-    changed ? `twing design disable-gate: removed from ${repoRoot}/.claude/settings.json` : `twing design disable-gate: wasn't wired`,
-  );
+  const projectId = computeProjectId(repoRoot);
+  if (isGateDisabled(projectId)) {
+    console.log(`twing design disable-gate: already disabled for this project`);
+    return;
+  }
+  setGateDisabled(projectId, true);
+  console.log(`twing design disable-gate: disabled for this project (other repos on this machine are unaffected)`);
 }

@@ -11,7 +11,7 @@ import type { DesignStatement, DesignConstraint, DesignConflict, DesignVerdict, 
 export interface DesignCheckOutcome {
   verdict: DesignVerdict;
   conflicts: DesignConflict[];
-  constraint?: { statement: string; type: DesignConstraintType };
+  constraint?: ConstraintHit;
 }
 
 const SUMMARY_SIMILARITY_THRESHOLD = 0.5;
@@ -58,6 +58,7 @@ function dependencyCollision(candidate: DesignStatement, other: DesignStatement)
 }
 
 export interface ConstraintHit {
+  id: string;
   statement: string;
   type: DesignConstraintType;
 }
@@ -86,10 +87,24 @@ const CONSTRAINT_TYPE_PRIORITY: Record<DesignConstraintType, number> = {
   domain_fact: 2,
 };
 
-export function matchConstraintsForPaths(targets: string[], constraints: DesignConstraint[]): ConstraintHit | undefined {
+export function matchConstraintsForPaths(
+  targets: string[],
+  constraints: DesignConstraint[],
+  excludeConstraintIds: string[] = [],
+): ConstraintHit | undefined {
+  // §17 review-flow fix (2026-08): excludeConstraintIds must be filtered
+  // *inside* the best-match selection, not applied as a post-hoc check on
+  // whatever single constraint wins -- this function only ever returns one
+  // "best" hit. Found live via this fix's own test: filtering after the
+  // fact meant an already-justified constraint winning the selection could
+  // silently hide a second, genuinely different, never-justified
+  // constraint that also matched something in scope. Skipping excluded
+  // ids up front lets the *next*-best real match win instead.
+  const excluded = new Set(excludeConstraintIds);
   let best: { constraint: DesignConstraint; scopeLength: number } | undefined;
 
   for (const constraint of constraints) {
+    if (excluded.has(constraint.id)) continue;
     for (const scopePattern of constraint.scope) {
       if (!targets.some((t) => t === scopePattern || minimatch(t, scopePattern))) continue;
 
@@ -103,12 +118,12 @@ export function matchConstraintsForPaths(targets: string[], constraints: DesignC
     }
   }
 
-  return best ? { statement: best.constraint.statement, type: best.constraint.type } : undefined;
+  return best ? { id: best.constraint.id, statement: best.constraint.statement, type: best.constraint.type } : undefined;
 }
 
 /** Tier 3: `creates`/`touches` against a constraint's scope globs. */
 function constraintMatch(candidate: DesignStatement, constraints: DesignConstraint[]): ConstraintHit | undefined {
-  return matchConstraintsForPaths([...candidate.creates, ...candidate.touches], constraints);
+  return matchConstraintsForPaths([...candidate.creates, ...candidate.touches], constraints, candidate.justifiedConstraintIds);
 }
 
 function keywordSet(s: string): Set<string> {
@@ -194,6 +209,12 @@ export function runDesignChecks(
     return { verdict: "overlap", conflicts: structuralConflicts };
   }
 
+  // §17 review-flow fix (2026-08): a constraint already justified and
+  // approved *for this exact design* doesn't re-flag -- runDesignChecks
+  // re-evaluates the whole merged scope on every amend/resume, not just the
+  // new delta, so without this a design would re-trip the same
+  // already-settled constraint forever. A *different* constraint id still
+  // flags normally; this waives one specific match, not "skip all checks."
   const constraintHit = constraintMatch(candidate, constraints);
   if (constraintHit) {
     return { verdict: "constraint_flag", conflicts: [], constraint: constraintHit };

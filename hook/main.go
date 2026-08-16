@@ -40,7 +40,15 @@ func main() {
 	switch payload.HookEventName {
 	case "PostToolUse":
 		handlePostToolUse(payload)
-	case "SessionStart", "UserPromptSubmit":
+	case "SessionStart":
+		// Restart-survival fallback for machines with no persistent OS-level
+		// daemon service installed (see daemon-service.ts) or where the
+		// service died independently of a reboot -- see daemon_launch.go.
+		// Only here, not on every UserPromptSubmit, to keep this off the
+		// higher-frequency path.
+		selfHealDaemon()
+		handleCacheCheck(payload)
+	case "UserPromptSubmit":
 		handleCacheCheck(payload)
 	case "PreToolUse":
 		// §17's design gate, a separate code path from the capture handlers

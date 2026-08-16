@@ -669,7 +669,16 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!body.justification) {
       return c.json({ error: "justified_divergence requires a justification" }, 400);
     }
-    const review = designs.addReview(id, design.projectId, body.justification);
+    // §17 review-flow fix (2026-08): if this design is currently flagged for
+    // a specific constraint, attribute the review to that constraint id --
+    // re-running the check against the design's own unchanged scope (no
+    // delta) is the cheapest way to discover it without persisting anything
+    // new on the design row just for this. Undefined for an overlap-type
+    // divergence, or a design that isn't currently constraint-flagged at
+    // all -- addReview treats that the same as before this fix.
+    const { outcome: currentOutcome } = checkAmendedScope(design, { touches: [], creates: [], dependsOn: [] });
+    const constraintId = currentOutcome.verdict === "constraint_flag" ? currentOutcome.constraint?.id : undefined;
+    const review = designs.addReview(id, design.projectId, body.justification, constraintId);
     console.log(`twing serve: design ${id.slice(0, 8)} justified divergence -> pending review ${review.id.slice(0, 8)}`);
     return c.json({ status: "pending_review", reviewId: review.id });
   });
@@ -722,13 +731,29 @@ export function createApp(options: CreateAppOptions = {}) {
 
     const { outcome, open } = checkAmendedScope(design, delta);
 
+    // §17 review-flow fix (2026-08): a non-clean amend used to return the
+    // verdict without persisting anything at all -- unlike a fresh
+    // /v1/designs/check registration, which always persists its proposed
+    // scope and only *then* flags on non-clean (see that route above). That
+    // asymmetry meant `resolve --justify` + an admin's approval had nothing
+    // to apply: `decideReview`'s approve path only reopens a design's
+    // *existing* row as-is, it was never built to replay a delta that was
+    // never written anywhere. Found live: an approved review didn't unblock
+    // a rejected amend at all. Fix: persist the merged scope unconditionally
+    // (via the same `designs.amend` used for the clean path), then flag on
+    // non-clean -- exactly mirroring registration's pattern, so a later
+    // approval correctly reopens the design with the scope that was
+    // actually reviewed and signed off on.
+    const amended = designs.amend(id, delta);
+    if (!amended) return c.json({ error: `design is ${design.status}, not open -- can't amend` }, 409);
+
     if (outcome.verdict !== "clean") {
       console.log(`twing serve: design ${id.slice(0, 8)} amend rejected -> ${outcome.verdict}`);
+      designs.flag(id, outcome.verdict);
+      runSemanticComparatorPass(id, open);
       return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraint: outcome.constraint });
     }
 
-    const amended = designs.amend(id, delta);
-    if (!amended) return c.json({ error: `design is ${design.status}, not open -- can't amend` }, 409);
     console.log(`twing serve: design ${id.slice(0, 8)} amended -> scopeVersion ${amended.scopeVersion}`);
     runSemanticComparatorPass(amended.id, open);
     return c.json({ verdict: "clean", designId: amended.id });
@@ -767,13 +792,24 @@ export function createApp(options: CreateAppOptions = {}) {
 
     const { outcome, open } = checkAmendedScope(design, delta);
 
+    // §17 review-flow fix (2026-08): same gap as /v1/designs/:id/amend
+    // above -- a non-clean resume persisted nothing, leaving an approved
+    // review with nothing to reopen. Fix: persist via `designs.resume`
+    // unconditionally (dormant -> open, scope + identity reassigned), then
+    // `flag` demotes it to "flagged" on non-clean -- composing the two
+    // existing store methods rather than adding a third path, and leaving
+    // the design addressable (not stuck "dormant") for the same
+    // resolve/review flow every other non-clean verdict already uses.
+    const resumed = designs.resume(id, { sessionId: body.sessionId, developerId: identity.developerId, delta });
+    if (!resumed) return c.json({ error: `design is ${design.status}, not dormant -- can't resume` }, 409);
+
     if (outcome.verdict !== "clean") {
       console.log(`twing serve: design ${id.slice(0, 8)} resume rejected -> ${outcome.verdict}`);
+      designs.flag(id, outcome.verdict);
+      runSemanticComparatorPass(id, open);
       return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraint: outcome.constraint });
     }
 
-    const resumed = designs.resume(id, { sessionId: body.sessionId, developerId: identity.developerId, delta });
-    if (!resumed) return c.json({ error: `design is ${design.status}, not dormant -- can't resume` }, 409);
     console.log(`twing serve: design ${id.slice(0, 8)} resumed by ${identity.developerId.slice(0, 12)}/${body.sessionId.slice(0, 12)}`);
     runSemanticComparatorPass(resumed.id, open);
     return c.json({ verdict: "clean", designId: resumed.id });
@@ -852,8 +888,13 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     // Only flagged designs remain, since sessionDesigns was non-empty and
-    // openOnes/dormantOnes were both empty.
-    return c.json({ state: "flagged", designId: sessionDesigns[sessionDesigns.length - 1].id });
+    // openOnes/dormantOnes were both empty. pendingReview distinguishes
+    // "never resolved" from "resolved, an admin just hasn't decided yet"
+    // (found live, 2026-08-16) -- both used to render as the identical
+    // deny telling you to run `twing design resolve`, even right after
+    // you'd already done so.
+    const flaggedDesign = sessionDesigns[sessionDesigns.length - 1];
+    return c.json({ state: "flagged", designId: flaggedDesign.id, pendingReview: designs.hasPendingReview(flaggedDesign.id) });
   });
 
   // §17.5: the human-facing queue -- justified divergences pending sign-off.
@@ -890,16 +931,30 @@ export function createApp(options: CreateAppOptions = {}) {
   // §17.2/§17.6's cold-start seed: `twing init` forwards this repo's local
   // .twing/twing.yml constraints so the Constraint Store starts non-empty
   // without the server needing filesystem access to anyone's checkout.
+  //
+  // Admin-gated past the initial founding (2026-08-16, found live): before
+  // this, `authorizeProject` alone let *any* project member re-seed --
+  // meaning anyone gated by a review_required rule could unilaterally
+  // narrow/widen/delete it themselves via a local .twing/twing.yml edit +
+  // `twing init`, no different in effect from the rule not existing. The
+  // one exception is founding a brand-new project, which is what
+  // `authorizeProject`'s own auto-admit path is for -- seeding is the
+  // first project-scoped call `twing init` makes, so it doubles as the
+  // founding trigger and must stay open to non-admins for that one case.
   app.post("/v1/constraints/seed", async (c) => {
     const identity = c.get("identity");
     const body = await c.req.json<SeedRequestBody>().catch(() => null);
     if (!body || typeof body.projectId !== "string" || !Array.isArray(body.constraints)) {
       return c.json({ error: "expected { projectId, constraints: [{statement, scope, type?}] }" }, 400);
     }
-    const authz = authorizeProject(identity, body.projectId);
-    if (!authz.ok) return c.json({ error: authz.error }, authz.status);
-
     const projectId = body.projectId;
+    const alreadyFounded = identities.isProjectFounded(projectId);
+    const authz = authorizeProject(identity, projectId);
+    if (!authz.ok) return c.json({ error: authz.error }, authz.status);
+    if (alreadyFounded && !canManageProject(identity, projectId)) {
+      return c.json({ error: "not an admin of this project -- constraint changes to an existing project require admin role" }, 403);
+    }
+
     const added = body.constraints.map((entry) =>
       constraintStore.add(projectId, entry.statement, entry.scope, entry.type ?? "canonical_abstraction", "seeded"),
     );

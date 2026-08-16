@@ -47,6 +47,65 @@ func designGateEnabled() bool {
 	return os.Getenv("TWING_DESIGN_GATE") != "off"
 }
 
+// resolveRepoRelative resolves filePath (as given in tool_input -- always
+// absolute in practice, but cwd-relative is handled too) to a path
+// relative to repoRoot, in the same repo-relative, forward-slash format
+// every design's creates/touches and every constraint's scope glob is
+// declared in (design-store.ts/manifest.ts never store absolute paths).
+//
+// Found live (2026-08): before this existed, the gate sent tool_input's
+// raw absolute file_path straight to both /v1/constraints/match and
+// /v1/designs/scope-match, which compare it byte-for-byte (or via
+// minimatch) against repo-relative declarations -- an absolute path can
+// never match a relative pattern, so both checks silently never matched
+// anything for a real session. This is why require_human_review on
+// hook/** and packages/server/** never actually fired during this whole
+// dogfooding session despite real edits to files under both.
+//
+// ok is false when filePath resolves outside repoRoot entirely (handled
+// the same as "no coordinator configured" by the caller -- see
+// handleEditWriteGate). Symlinks are resolved on the directories only,
+// never on filePath itself (which may not exist yet for a new Write) --
+// macOS's /tmp -> /private/tmp is the concrete case this guards against
+// (cwd, as Claude Code reports it, and repoRoot, from `git rev-parse
+// --show-toplevel` which does resolve symlinks, could otherwise disagree
+// on the spelling of the same location even for a genuinely in-repo file).
+func resolveRepoRelative(cwd, repoRoot, filePath string) (rel string, ok bool) {
+	if repoRoot == "" {
+		return "", false
+	}
+
+	resolvedCwd := cwd
+	if r, err := filepath.EvalSymlinks(cwd); err == nil {
+		resolvedCwd = r
+	}
+	resolvedRoot := repoRoot
+	if r, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		resolvedRoot = r
+	}
+
+	abs := filePath
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(resolvedCwd, abs)
+	} else if dir, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		abs = filepath.Join(dir, filepath.Base(abs))
+	}
+	abs = filepath.Clean(abs)
+	root := filepath.Clean(resolvedRoot)
+
+	r, err := filepath.Rel(root, abs)
+	if err != nil {
+		return "", false
+	}
+	if r == "." {
+		return "", true // the repo root itself -- not "outside", but no sensible relative path to hand back
+	}
+	if r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(r), true // forward slashes -- declared scopes are never platform-specific
+}
+
 func logDesignGate(format string, args ...any) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -147,12 +206,32 @@ func allowOutput(eventName string) map[string]any {
 	}
 }
 
+// agentInstructionSuffix is appended to every deny reason at the one choke
+// point (denyOutput) rather than repeated in each *Reason function above --
+// found live, 2026-08-16: a fresh agent handling a "no design registered"
+// deny correctly ran the suggested `twing design register` command and
+// retried, but its final response to the human said only "Done", with zero
+// mention that a tool call had been denied or that it had just created a
+// persistent, identity-attributed record with the coordinator on the
+// operator's behalf. Fixing that with a per-repo CLAUDE.md instruction was
+// considered and rejected: it's friction every user would have to author
+// for themselves, and a blanket "surface every tool failure" rule
+// over-triggers on failures an agent should just fix silently (a typo'd
+// path, a missing directory). This suffix instead travels with the
+// message itself, so it reaches every agent that hits the gate regardless
+// of what (if anything) that repo's own CLAUDE.md says.
+const agentInstructionSuffix = "\n\n(This is twing's design-conflict gate -- a coordination check between " +
+	"agents/sessions, not a bug to route around. If you act on this yourself, say so explicitly in your reply " +
+	"to the operator: what you did and why, not a silent retry-and-succeed -- this creates a persistent record " +
+	"attributed to their identity. See twing-cli's README, \"For agents: handling a design-gate deny\", for the " +
+	"full explanation.)"
+
 func denyOutput(eventName, reason string) map[string]any {
 	return map[string]any{
 		"hookSpecificOutput": map[string]any{
 			"hookEventName":            eventName,
 			"permissionDecision":       "deny",
-			"permissionDecisionReason": reason,
+			"permissionDecisionReason": reason + agentInstructionSuffix,
 		},
 	}
 }
@@ -231,13 +310,19 @@ func handleExitPlanMode(payload hookPayload) {
 		return
 	}
 
+	projectID := computeProjectID(payload.Cwd)
+
+	if isGateDisabled(projectID) {
+		return
+	}
+
 	if config.AuthToken == "" {
 		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
 		return
 	}
 
 	reqBody := designCheckRequest{
-		ProjectID:   computeProjectID(payload.Cwd),
+		ProjectID:   projectID,
 		SessionID:   payload.SessionID,
 		RawPlanText: input.Plan,
 	}
@@ -334,6 +419,11 @@ type designScopeMatchResponse struct {
 	// actually judge "same task or not", not just retry a denied command.
 	Summary        string `json:"summary,omitempty"`
 	DormantSinceMs int64  `json:"dormantSinceMs,omitempty"`
+	// Set only for state "flagged" (found live, 2026-08-16) -- distinguishes
+	// "never resolved" from "resolved, an admin just hasn't decided yet".
+	// Both used to deny with the identical message telling you to run
+	// `twing design resolve`, even immediately after you already had.
+	PendingReview bool `json:"pendingReview,omitempty"`
 }
 
 // checkDesignScope is §17 scope enforcement's (2026-08) ground-truth
@@ -369,7 +459,16 @@ func checkDesignScope(serverURL, authToken, projectID, sessionID, filePath strin
 	return result, ""
 }
 
-func flaggedDesignReason(designID string) string {
+func flaggedDesignReason(designID string, pendingReview bool) string {
+	if pendingReview {
+		return fmt.Sprintf(
+			"twing design coordinator: your registered design (id %s) has a justified-divergence review "+
+				"already pending -- nothing more to do on your end. An admin needs to approve or reject it "+
+				"(`twing design reviews`) before this design counts as usable again. Retrying won't help until "+
+				"then.",
+			designID,
+		)
+	}
 	return fmt.Sprintf(
 		"twing design coordinator: your registered design (id %s) has an unresolved overlap/constraint "+
 			"conflict from its own registration -- it doesn't count as a usable open design until you resolve "+
@@ -507,22 +606,51 @@ func handleEditWriteGate(payload hookPayload) {
 	}
 	_ = json.Unmarshal(payload.ToolInput, &input)
 
+	// Resolve once, use everywhere below -- both the constraint check and
+	// the scope-match check compare against repo-relative declarations
+	// (design-store.ts/manifest.ts never store absolute paths), so the raw
+	// absolute file_path Claude Code actually sends must be converted
+	// before either call, not passed through raw. This also covers "this
+	// repo's coordinator has no jurisdiction over a write that isn't even
+	// part of this repo" (e.g. Claude Code's own plan files under
+	// ~/.claude/plans/): resolveRepoRelative's ok=false there is exactly
+	// the same "not this coordinator's concern" case "no coordinator
+	// configured" already gets, so it's treated identically -- silent
+	// allow, never a call into scope/constraint logic that assumes the
+	// target is in-repo.
+	relPath := ""
+	if input.FilePath != "" {
+		rel, ok := resolveRepoRelative(payload.Cwd, config.RepoRoot, input.FilePath)
+		if !ok {
+			logDesignGate("path %s is outside repo %s -- skipping gate", input.FilePath, config.RepoRoot)
+			return
+		}
+		relPath = rel
+	}
+
+	projectID := computeProjectID(payload.Cwd)
+
+	// Per-repo override (`twing design disable-gate`) -- silent allow, same
+	// category as "no coordinator configured": this machine has
+	// deliberately opted this project out, not a failure.
+	if isGateDisabled(projectID) {
+		return
+	}
+
 	if config.AuthToken == "" {
 		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
 		return
 	}
 
-	projectID := computeProjectID(payload.Cwd)
-
-	if input.FilePath != "" {
-		verdict, reason := checkPathConstraint(config.ServerURL, config.AuthToken, projectID, input.FilePath)
+	if relPath != "" {
+		verdict, reason := checkPathConstraint(config.ServerURL, config.AuthToken, projectID, relPath)
 		if verdict == constraintMatched || verdict == constraintCheckFailed {
 			writeJSON(denyOutput("PreToolUse", reason))
 			return
 		}
 	}
 
-	scopeMatch, failReason := checkDesignScope(config.ServerURL, config.AuthToken, projectID, payload.SessionID, input.FilePath)
+	scopeMatch, failReason := checkDesignScope(config.ServerURL, config.AuthToken, projectID, payload.SessionID, relPath)
 	if failReason != "" {
 		writeJSON(denyOutput("PreToolUse", failReason))
 		return
@@ -532,11 +660,11 @@ func handleEditWriteGate(payload hookPayload) {
 	case "in_scope":
 		writeJSON(allowOutput("PreToolUse"))
 	case "flagged":
-		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch.DesignID)))
+		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch.DesignID, scopeMatch.PendingReview)))
 	case "dormant":
 		writeJSON(denyOutput("PreToolUse", dormantDesignReason(scopeMatch.DesignID, scopeMatch.Summary, scopeMatch.DormantSinceMs)))
 	case "out_of_scope":
-		writeJSON(denyOutput("PreToolUse", outOfScopeReason(scopeMatch.DesignID, input.FilePath)))
+		writeJSON(denyOutput("PreToolUse", outOfScopeReason(scopeMatch.DesignID, relPath)))
 	case "no_design":
 		writeJSON(denyOutput("PreToolUse",
 			"twing design coordinator: no design registered for this session yet. Either enter plan mode "+

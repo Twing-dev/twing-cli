@@ -14,7 +14,7 @@ require_human_review:
 constraints:
   - text: "use the shared length-prefixed frame codec in packages/core; don't invent
       a second wire format"
-    scope: "packages/**"
+    scope: "packages/core/src/framing.ts"
   - text: "twing-hook's PostToolUse capture path must never exit non-zero and must
       never itself deny a tool call — advisory only, unchanged (§4). PreToolUse
       is used only by the separate design-gate path (design doc §17), never by

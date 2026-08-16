@@ -9,8 +9,9 @@
 
 import { findRepoRoot, loadManifestFromFile, twingConfigPath, upsertCoordinatorServerUrl, normalizeServerUrl, computeProjectId, authFetch, type Manifest } from "@twing/core";
 import { ensureHookInstalled } from "./install-hook.js";
-import { wireHooks } from "./wire-hooks.js";
+import { wireHooks, stripLegacyRepoLocalHooks } from "./wire-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
+import { installDaemonService, type ServiceInstallResult } from "./daemon-service.js";
 import { requireAuth } from "./auth.js";
 import { runKeygen } from "./keygen.js";
 
@@ -21,23 +22,26 @@ export interface InitOptions {
 }
 
 /**
- * The three side-effecting calls `runInit` makes that a unit test can't
- * safely exercise for real: a `go build` subprocess, writing a repo's
- * `.claude/settings.json`, and spawning a detached background daemon
- * process. Injectable (defaulting to the real implementations below, so no
- * real caller -- `index.ts`'s dispatch never passes a second argument --
- * changes behavior at all) rather than mocked via module interception,
- * since Node 20 (what this project runs on) has no `node:test` module-mock
- * support. Same shape as `createApp`'s injectable stores on the server side
- * -- not a new pattern for this codebase.
+ * The side-effecting calls `runInit` makes that a unit test can't safely
+ * exercise for real: a `go build` subprocess, writing a repo's
+ * `.claude/settings.json`, spawning a detached background daemon process,
+ * and (§5 restart-survival) installing an OS-level service. Injectable
+ * (defaulting to the real implementations below, so no real caller --
+ * `index.ts`'s dispatch never passes a second argument -- changes behavior
+ * at all) rather than mocked via module interception, since Node 20 (what
+ * this project runs on) has no `node:test` module-mock support. Same shape
+ * as `createApp`'s injectable stores on the server side -- not a new
+ * pattern for this codebase.
  */
 export interface InitDeps {
-  ensureHookInstalled: () => string;
-  wireHooks: (repoRoot: string, hookPath: string) => boolean;
+  ensureHookInstalled: () => Promise<string>;
+  wireHooks: (hookPath: string) => boolean;
+  stripLegacyRepoLocalHooks: (repoRoot: string, hookPath: string) => boolean;
   ensureDaemonRunning: () => Promise<"already-running" | "started">;
+  installDaemonService: () => Promise<ServiceInstallResult>;
 }
 
-const defaultInitDeps: InitDeps = { ensureHookInstalled, wireHooks, ensureDaemonRunning };
+const defaultInitDeps: InitDeps = { ensureHookInstalled, wireHooks, stripLegacyRepoLocalHooks, ensureDaemonRunning, installDaemonService };
 
 export async function runInit(options: InitOptions, deps: InitDeps = defaultInitDeps): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
@@ -84,14 +88,42 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // must already be cached; there's no password to prompt for anymore.
   const authToken = options.invite ? await runKeygen({ cwd: repoRoot, serverUrl, invite: options.invite }) : requireAuth(serverUrl, "twing init");
 
-  const hookPath = deps.ensureHookInstalled();
+  const hookPath = await deps.ensureHookInstalled();
   console.log(`twing init: hook installed at ${hookPath}`);
 
-  const wired = deps.wireHooks(repoRoot, hookPath);
-  console.log(wired ? `twing init: wired hooks into ${repoRoot}/.claude/settings.json` : `twing init: hooks already wired in ${repoRoot}/.claude/settings.json`);
+  // Hook wiring is machine-global now (§ install-once onboarding work) --
+  // wired once into ~/.claude/settings.json, covers every repo on this
+  // machine from here on, not just this one.
+  const wired = deps.wireHooks(hookPath);
+  console.log(wired ? "twing init: wired hooks into ~/.claude/settings.json (all repos on this machine)" : "twing init: hooks already wired in ~/.claude/settings.json");
+
+  // Upgrade migration: a repo `init`'d before wiring went global may still
+  // have twing's own entries in its *local* .claude/settings.json --
+  // leaving them would double-fire the hook for every event in this one
+  // repo (both the old repo-local and the new global entries wired at
+  // once). Silent no-op for the common case (nothing to strip).
+  if (deps.stripLegacyRepoLocalHooks(repoRoot, hookPath)) {
+    console.log(`twing init: removed legacy repo-local hook entries from ${repoRoot}/.claude/settings.json (superseded by the global wiring above)`);
+  }
 
   const daemonStatus = await deps.ensureDaemonRunning();
   console.log(daemonStatus === "started" ? "twing init: daemon started" : "twing init: daemon already running");
+
+  // §5 restart-survival: best-effort OS-level service install (launchd on
+  // macOS, systemd --user on Linux) so the daemon comes back on its own
+  // after a reboot -- never fails init over this, same philosophy as
+  // seedConstraints below. Windows has no clean privilege-free service
+  // equivalent (installDaemonService returns "unsupported" there); the Go
+  // hook's SessionStart self-heal (hook/daemon_launch.go) is that
+  // platform's restart-survival story instead.
+  const serviceStatus = await deps.installDaemonService();
+  if (serviceStatus === "installed") {
+    console.log("twing init: daemon installed as a persistent OS-level service (survives reboot)");
+  } else if (serviceStatus === "failed") {
+    console.log("twing init: OS-level service install failed (non-fatal) -- daemon still runs, just won't auto-restart after a reboot without a new twing init/session self-heal");
+  } else {
+    console.log("twing init: no persistent OS-level service on this platform -- restart-survival relies on the hook's SessionStart self-heal instead");
+  }
 
   await seedConstraints(repoRoot, manifest, serverUrl, authToken);
 

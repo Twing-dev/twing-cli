@@ -399,6 +399,36 @@ func TestHandleEditWriteGate_NoCoordinatorConfigured_SilentNoOp(t *testing.T) {
 	}
 }
 
+// Found live: drafting a plan file (~/.claude/plans/*.md, entirely outside
+// any gated repo) while a twing-gated session was active got denied for "no
+// design registered" -- the gate resolved the coordinator from the
+// session's cwd and never checked whether the actual write target was even
+// inside that repo. A repo's coordinator has no jurisdiction over a file
+// that isn't part of it; this must resolve to the same silent allow as "no
+// coordinator configured," and must never reach the network.
+func TestHandleEditWriteGate_FilePathOutsideRepo_AllowsSilently(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected network call to %s -- a file outside the repo must never reach the coordinator", r.URL.Path)
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	outside := t.TempDir() // a different tree entirely, no relation to repo
+	payload := hookPayload{
+		SessionID: "sess1",
+		Cwd:       repo,
+		ToolName:  "Write",
+		ToolInput: json.RawMessage(fmt.Sprintf(`{"file_path":%q}`, filepath.Join(outside, "plan.md"))),
+	}
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(payload) })
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty (a path outside the repo is not this coordinator's concern)", stdout)
+	}
+}
+
 // --- ExitPlanMode gate ---
 
 func TestHandleExitPlanMode_NoCachedToken_DeniesWithoutNetworkCall(t *testing.T) {

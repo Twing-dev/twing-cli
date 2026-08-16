@@ -145,6 +145,17 @@ export interface DesignStatement {
    * PendingReview. Undefined means no review was ever attached, or one is
    * still pending. */
   reviewDecision?: "approve" | "reject";
+  /** Found live (2026-08): `runDesignChecks` re-evaluates a design's *entire*
+   * merged scope on every amend/resume, not just the newly-added delta -- so
+   * without this, a design that ever touched a `review_required` path would
+   * re-trip that same already-approved constraint on every future amend,
+   * forever, regardless of whether the new delta was even related. Appended
+   * to (never removed from) by `DesignRegistry.decideReview` when a review
+   * carrying a `constraintId` is approved; consulted by `runDesignChecks` to
+   * skip a constraint match already settled for this exact design. A *new*,
+   * different review_required match still flags normally -- this waives one
+   * specific constraint, not "never check constraints again." */
+  justifiedConstraintIds: string[];
 }
 
 export type DesignConstraintType = "canonical_abstraction" | "domain_fact" | "review_required";
@@ -177,7 +188,7 @@ export interface DesignCheckResult {
   verdict: DesignVerdict;
   designId: string;
   conflicts?: DesignConflict[];
-  constraint?: { statement: string; type: DesignConstraintType };
+  constraint?: { id: string; statement: string; type: DesignConstraintType };
 }
 
 export interface PendingReview {
@@ -187,4 +198,9 @@ export interface PendingReview {
   justification: string;
   createdAt: number;
   decision?: "approve" | "reject";
+  /** Set only when this review was created against a `constraint_flag`
+   * verdict (undefined for an `overlap`-triggered justified_divergence).
+   * Recorded so an approval can be attributed to the *specific* constraint
+   * it settled -- see DesignStatement.justifiedConstraintIds. */
+  constraintId?: string;
 }

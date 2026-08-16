@@ -64,7 +64,7 @@ function freshApp() {
   const constraints = new ConstraintStore(db);
   const alignmentThreads = new AlignmentThreadStore(db);
   const app = createApp({ db, identities, store, designs, constraints, alignmentThreads });
-  return { app, dataDir, identities, store, designs, alignmentThreads };
+  return { app, dataDir, identities, store, designs, constraints, alignmentThreads };
 }
 
 function bootstrapToken(dataDir: string): string {
@@ -263,6 +263,64 @@ test("POST /v1/reviews/:id/decide: requires the project's admin role, not mere a
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
     body: JSON.stringify({ decision: "approve" }),
+  });
+  assert.equal(allowedRes.status, 200, await allowedRes.text());
+});
+
+test("POST /v1/constraints/seed: founding a brand-new project stays open to a non-admin -- seeding is the founding trigger itself", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  // alice has never touched proj-new before -- this call must both found
+  // the project (same as twing init's first-ever run against a repo the
+  // server hasn't seen) and seed successfully, in one request.
+  const res = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-new", constraints: [{ statement: "use pkg/retry", scope: ["src/**"] }] }),
+  });
+  const body = (await res.json()) as { seeded: number };
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.equal(body.seeded, 1);
+});
+
+test("POST /v1/constraints/seed: an already-founded project's constraint change requires admin role (2026-08-16 fix)", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  // Found proj-1 first (as admin), matching a real project's history --
+  // seeding on an *already-founded* project is what this test cares about.
+  const foundRes = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "use pkg/retry", scope: ["src/**"] }] }),
+  });
+  assert.equal(foundRes.status, 200);
+
+  // Add carol as a plain *member* of proj-1 (not admin).
+  const projInviteRes = await app.request("/v1/projects/proj-1/invites", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ label: "carol@example.com", role: "member" }),
+  });
+  const projInvite = (await projInviteRes.json()) as { code: string };
+  await app.request(`/v1/invites/${projInvite.code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex("carols-pat"), label: "carol@example.com" }),
+  });
+
+  const deniedRes = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer("carols-pat") },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "use pkg/retry", scope: ["**"] }] }),
+  });
+  assert.equal(deniedRes.status, 403, "a plain member must not be able to unilaterally change what's enforced");
+
+  const allowedRes = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "use pkg/retry", scope: ["**"] }] }),
   });
   assert.equal(allowedRes.status, 200, await allowedRes.text());
 });
@@ -588,7 +646,20 @@ test("GET /v1/designs/scope-match: no_design, in_scope, out_of_scope, and flagge
   assert.equal(flaggedVerdict, "overlap");
 
   const flagged = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s2&path=a.ts`, { headers: bearer(admin.token) });
-  assert.deepEqual(await flagged.json(), { state: "flagged", designId: flaggedId });
+  assert.deepEqual(await flagged.json(), { state: "flagged", designId: flaggedId, pendingReview: false });
+
+  // §17 review-flow fix (2026-08-16): pendingReview flips true once resolve
+  // is called, without a decide -- the deny message needs to be able to
+  // tell "never resolved" apart from "resolved, awaiting an admin".
+  const resolveRes = await app.request(`/v1/designs/${flaggedId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "intentional, reviewed" }),
+  });
+  assert.equal(resolveRes.status, 200);
+
+  const flaggedAfterResolve = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s2&path=a.ts`, { headers: bearer(admin.token) });
+  assert.deepEqual(await flaggedAfterResolve.json(), { state: "flagged", designId: flaggedId, pendingReview: true });
 });
 
 test("GET /v1/designs/scope-match: with no ?path=, can only report no_design/flagged/in_scope (can't verify scope without a path)", async () => {
@@ -672,7 +743,12 @@ test("POST /v1/designs/:id/amend: a clean amendment persists, bumps scopeVersion
   assert.deepEqual(listBody.items.find((d) => d.id === designId)?.touches, ["a.ts", "b.ts"]);
 });
 
-test("POST /v1/designs/:id/amend: a conflicting amendment is rejected and leaves the design's existing scope untouched", async () => {
+test("POST /v1/designs/:id/amend: a conflicting amendment persists the merged scope and flags the design, instead of silently discarding it", async () => {
+  // Found live (2026-08): this used to leave the design's row completely
+  // untouched on a non-clean verdict, unlike a fresh /v1/designs/check
+  // registration (which always persists its proposed scope, then flags).
+  // That asymmetry meant `resolve --justify` + an approved review had
+  // nothing to reopen -- see the next test for the full loop this enables.
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
 
@@ -696,13 +772,115 @@ test("POST /v1/designs/:id/amend: a conflicting amendment is rejected and leaves
   const amendBody = (await amendRes.json()) as { verdict: string; designId: string };
   assert.equal(amendBody.verdict, "overlap");
 
-  // The design must still be open (amendment rejected, not the design itself)
-  // and its scope must be exactly what it was before the amend attempt.
+  // Demoted out of "open" (not usable for the gate) but addressable, and --
+  // the actual fix -- its scope now reflects exactly what was proposed, not
+  // the pre-amend scope, so a later review approval has something real to
+  // reopen.
   const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
   const listBody = (await listRes.json()) as { items: { id: string; status: string; touches: string[] }[] };
   const design = listBody.items.find((d) => d.id === designId);
-  assert.equal(design?.status, "open");
-  assert.deepEqual(design?.touches, ["a.ts"]);
+  assert.equal(design?.status, "flagged");
+  assert.deepEqual(design?.touches, ["a.ts", "shared.ts"]);
+});
+
+test("POST /v1/designs/:id/amend: a rejected amend's proposed scope survives an approved review -- decideReview reopens it intact, not empty-handed", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  await app.request(`/v1/designs/${designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ addTouches: ["shared.ts"] }),
+  });
+
+  const resolveRes = await app.request(`/v1/designs/${designId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "intentional, both legitimately touch shared.ts" }),
+  });
+  const { reviewId } = (await resolveRes.json()) as { reviewId: string };
+
+  const decideRes = await app.request(`/v1/reviews/${reviewId}/decide`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ decision: "approve" }),
+  });
+  assert.equal(decideRes.status, 200);
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
+  const listBody = (await listRes.json()) as { items: { id: string; status: string; touches: string[] }[] };
+  const design = listBody.items.find((d) => d.id === designId);
+  assert.equal(design?.status, "open", "approval must reopen the design");
+  assert.deepEqual(
+    design?.touches,
+    ["a.ts", "shared.ts"],
+    "the proposed scope must survive into the reopened design -- this is the actual bug: previously nothing was ever persisted for approval to reopen",
+  );
+});
+
+test("POST /v1/designs/:id/amend: an approved review waives only that specific constraint -- a later, different constraint still flags", async () => {
+  // Proves the precision of justifiedConstraintIds: approving one
+  // constraint match must not silently waive every future constraint on
+  // the same design.
+  const { app, dataDir, constraints } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  constraints.add("proj-1", "needs review A", ["a/**"], "review_required", "seeded");
+  constraints.add("proj-1", "needs review B", ["b/**"], "review_required", "seeded");
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["x.ts"], dependsOn: [] }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  const firstAmend = await app.request(`/v1/designs/${designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ addTouches: ["a/one.ts"] }),
+  });
+  assert.equal((await firstAmend.json() as { verdict: string }).verdict, "constraint_flag");
+
+  const resolveRes = await app.request(`/v1/designs/${designId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "a/** is fine here" }),
+  });
+  const { reviewId } = (await resolveRes.json()) as { reviewId: string };
+  await app.request(`/v1/reviews/${reviewId}/decide`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ decision: "approve" }),
+  });
+
+  // Re-amending with no new delta beyond what's already justified should
+  // now come back clean -- the whole point of this fix.
+  const secondAmend = await app.request(`/v1/designs/${designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ addTouches: ["a/two.ts"] }),
+  });
+  assert.equal((await secondAmend.json() as { verdict: string }).verdict, "clean", "a/** was already justified for this design -- must not re-flag");
+
+  // But a genuinely different constraint (b/**) must still flag normally.
+  const thirdAmend = await app.request(`/v1/designs/${designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ addTouches: ["b/one.ts"] }),
+  });
+  assert.equal((await thirdAmend.json() as { verdict: string }).verdict, "constraint_flag", "b/** was never justified -- approving a/** must not waive it too");
 });
 
 test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator pass from the prior registration (kill stale, retain findings, start fresh)", async () => {
@@ -882,7 +1060,12 @@ test("POST /v1/designs/:id/resume: a clean resume reassigns sessionId/developerI
   assert.deepEqual(resumed?.touches, ["a.ts", "b.ts"]);
 });
 
-test("POST /v1/designs/:id/resume: a conflicting resume is rejected and the design stays dormant", async () => {
+test("POST /v1/designs/:id/resume: a conflicting resume persists (identity reassigned, scope merged) and flags, instead of leaving the design untouched", async () => {
+  // Found live (2026-08), same gap as amend above: this used to leave the
+  // design exactly "dormant" with nothing persisted on a non-clean verdict,
+  // so an approved review had nothing to reopen. Fix: `designs.resume`
+  // (dormant -> open, identity reassigned, scope merged) runs
+  // unconditionally, then `flag` demotes to "flagged" on non-clean.
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
 
@@ -908,9 +1091,14 @@ test("POST /v1/designs/:id/resume: a conflicting resume is rejected and the desi
   const resumeBody = (await resumeRes.json()) as { verdict: string };
   assert.equal(resumeBody.verdict, "overlap");
 
+  // Demoted out of "dormant" into "flagged" -- addressable, not stuck --
+  // with the resume's identity reassignment (sessionId) already applied,
+  // so a later review approval has something real to reopen.
   const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
-  const listBody = (await listRes.json()) as { items: { id: string; status: string }[] };
-  assert.equal(listBody.items.find((d) => d.id === designId)?.status, "dormant"); // untouched by the rejected attempt
+  const listBody = (await listRes.json()) as { items: { id: string; status: string; sessionId: string }[] };
+  const design = listBody.items.find((d) => d.id === designId);
+  assert.equal(design?.status, "flagged");
+  assert.equal(design?.sessionId, "s1");
 });
 
 test("POST /v1/designs/check: registering a non-overlapping design for the same session notifies about the stale sibling without changing its status", async () => {

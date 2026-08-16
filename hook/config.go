@@ -96,6 +96,11 @@ func readGlobalConfig() globalConfig {
 type twingConfig struct {
 	ServerURL string
 	AuthToken string
+	// RepoRoot is cwd's resolved git repo root -- carried alongside
+	// ServerURL so callers can check a specific tool_input.file_path is
+	// actually inside this repo before applying repo-scoped gate logic to
+	// it (see design_gate.go's resolveRepoRelative). Empty whenever ServerURL is.
+	RepoRoot string
 }
 
 // resolveServerConfig combines the repo-level coordinator
@@ -104,11 +109,11 @@ type twingConfig struct {
 // read from the repo file -- only serverUrl is; the token stays entirely
 // local, same property the TS side keeps.
 func resolveServerConfig(cwd string) twingConfig {
-	serverURL, ok := readCoordinatorServerURL(cwd)
+	serverURL, repoRoot, ok := readCoordinatorServerURL(cwd)
 	if !ok {
 		return twingConfig{}
 	}
 	normalized := normalizeServerURL(serverURL)
 	global := readGlobalConfig()
-	return twingConfig{ServerURL: normalized, AuthToken: global.Servers[normalized].AuthToken}
+	return twingConfig{ServerURL: normalized, AuthToken: global.Servers[normalized].AuthToken, RepoRoot: repoRoot}
 }

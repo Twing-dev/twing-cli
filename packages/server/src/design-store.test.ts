@@ -366,3 +366,23 @@ test("ConstraintStore: add is idempotent per (projectId, statement) and persists
   const store2 = new ConstraintStore(createDb({ dataDir }));
   assert.equal(store2.forProject("p1").length, 1);
 });
+
+test("ConstraintStore: add updates scope/type on an existing statement match instead of ignoring the change (2026-08-16 fix)", () => {
+  const store = new ConstraintStore(createDb({ dataDir: tmpDataDir() }));
+  const original = store.add("p1", "use pkg/retry", ["packages/**"], "canonical_abstraction", "seeded");
+
+  // Re-seeding the same statement with a narrower scope -- before the fix,
+  // this silently returned the stale packages/** row unchanged.
+  const narrowed = store.add("p1", "use pkg/retry", ["packages/core/src/retry.ts"], "canonical_abstraction", "seeded");
+  assert.equal(narrowed.id, original.id, "same constraint identity, not a duplicate row");
+  assert.deepEqual(narrowed.scope, ["packages/core/src/retry.ts"]);
+  assert.equal(store.forProject("p1").length, 1, "still exactly one row, updated in place");
+
+  // A type change on the same statement also applies.
+  const retyped = store.add("p1", "use pkg/retry", ["packages/core/src/retry.ts"], "review_required", "seeded");
+  assert.equal(retyped.type, "review_required");
+
+  // A no-op re-seed (identical scope and type) doesn't append a redundant update.
+  const unchanged = store.add("p1", "use pkg/retry", ["packages/core/src/retry.ts"], "review_required", "seeded");
+  assert.equal(unchanged.id, retyped.id);
+});

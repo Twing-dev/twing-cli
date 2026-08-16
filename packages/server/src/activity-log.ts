@@ -50,6 +50,15 @@ export type ActivityEventKind =
    * registration-time stale-sibling notice). */
   | "design_stale_sibling_suggested"
   | "constraint_ratified"
+  /** §17.2 cold-start seed (`add`, design-store.ts): a repo's committed
+   * `.twing/twing.yml` re-seeded a constraint whose statement text already
+   * existed for this project, but with a different scope/type -- the
+   * upsert now applies that change instead of silently discarding it
+   * (found live, 2026-08-16: narrowing an existing constraint's scope in
+   * the local file had no effect at all before this, since the seed
+   * endpoint's upsert was keyed on statement text and returned the
+   * existing row unchanged on any match). */
+  | "constraint_updated"
   /** Async semantic-conflict comparator (design-semantic-check.ts) flagged
    * a conflict between two designs that the syntactic tiers (design-
    * checks.ts) missed or weren't asked about -- always advisory, feeds the

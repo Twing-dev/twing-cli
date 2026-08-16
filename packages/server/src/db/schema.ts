@@ -122,6 +122,11 @@ export const designs = sqliteTable(
      * dormancy sweep are computed from, instead of `createdAt`. Backfilled
      * to `created_at` for pre-existing rows in the migration (see its .sql). */
     lastActivityAt: integer("last_activity_at").notNull(),
+    /** §17 review-flow fix (2026-08): constraint ids already settled by an
+     * approved review on this exact design -- see DesignStatement's own doc
+     * comment (core/types.ts) for why this exists. JSON string[], defaults
+     * to "[]" for pre-existing rows via the migration. */
+    justifiedConstraintIds: text("justified_constraint_ids").notNull().default("[]"),
   },
   (t) => [index("designs_project_id_idx").on(t.projectId), index("designs_session_id_idx").on(t.sessionId)],
 );
@@ -135,6 +140,9 @@ export const pendingReviews = sqliteTable(
     justification: text("justification").notNull(),
     createdAt: integer("created_at").notNull(),
     decision: text("decision"), // "approve" | "reject" | null
+    /** Set only for a review created against a `constraint_flag` verdict --
+     * see PendingReview's doc comment (core/types.ts). */
+    constraintId: text("constraint_id"),
   },
   (t) => [index("pending_reviews_project_id_idx").on(t.projectId)],
 );

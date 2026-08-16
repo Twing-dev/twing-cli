@@ -27,7 +27,10 @@ import { mergeDesignScope } from "./design-checks.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
 
-export type NewDesignInput = Omit<DesignStatement, "id" | "status" | "createdAt" | "closedAt" | "ttlMs" | "reviewDecision" | "scopeVersion" | "lastActivityAt"> & {
+export type NewDesignInput = Omit<
+  DesignStatement,
+  "id" | "status" | "createdAt" | "closedAt" | "ttlMs" | "reviewDecision" | "scopeVersion" | "lastActivityAt" | "justifiedConstraintIds"
+> & {
   ttlMs?: number;
 };
 
@@ -49,6 +52,7 @@ interface DesignRow {
   ttlMs: number;
   scopeVersion: number;
   lastActivityAt: number;
+  justifiedConstraintIds: string;
 }
 
 function fromDesignRow(row: DesignRow): DesignStatement {
@@ -70,6 +74,7 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     ttlMs: row.ttlMs,
     scopeVersion: row.scopeVersion,
     lastActivityAt: row.lastActivityAt,
+    justifiedConstraintIds: JSON.parse(row.justifiedConstraintIds),
   };
 }
 
@@ -80,6 +85,7 @@ interface ReviewRow {
   justification: string;
   createdAt: number;
   decision: string | null;
+  constraintId: string | null;
 }
 
 function fromReviewRow(row: ReviewRow): PendingReview {
@@ -90,6 +96,7 @@ function fromReviewRow(row: ReviewRow): PendingReview {
     justification: row.justification,
     createdAt: row.createdAt,
     decision: (row.decision as PendingReview["decision"]) ?? undefined,
+    constraintId: row.constraintId ?? undefined,
   };
 }
 
@@ -123,6 +130,7 @@ export class DesignRegistry {
       ttlMs: input.ttlMs ?? DEFAULT_DESIGN_ACTIVE_TTL_MS,
       scopeVersion: 1,
       lastActivityAt: now,
+      justifiedConstraintIds: [],
     };
     this.db
       .insert(designsTable)
@@ -144,6 +152,7 @@ export class DesignRegistry {
         ttlMs: design.ttlMs,
         scopeVersion: design.scopeVersion,
         lastActivityAt: design.lastActivityAt,
+        justifiedConstraintIds: JSON.stringify([] as string[]),
       })
       .run();
     this.activityLog.append({
@@ -400,18 +409,26 @@ export class DesignRegistry {
     return open.length;
   }
 
-  addReview(designId: string, projectId: string, justification: string): PendingReview {
-    const review: PendingReview = { id: crypto.randomUUID(), designId, projectId, justification, createdAt: Date.now() };
+  addReview(designId: string, projectId: string, justification: string, constraintId?: string): PendingReview {
+    const review: PendingReview = { id: crypto.randomUUID(), designId, projectId, justification, createdAt: Date.now(), constraintId };
     this.db
       .insert(reviewsTable)
-      .values({ id: review.id, designId: review.designId, projectId: review.projectId, justification: review.justification, createdAt: review.createdAt, decision: null })
+      .values({
+        id: review.id,
+        designId: review.designId,
+        projectId: review.projectId,
+        justification: review.justification,
+        createdAt: review.createdAt,
+        decision: null,
+        constraintId: constraintId ?? null,
+      })
       .run();
     this.activityLog.append({
       projectId,
       kind: "review_created",
       relatedId: review.id,
       ts: review.createdAt,
-      payload: { designId, justification },
+      payload: { designId, justification, constraintId },
     });
     return review;
   }
@@ -432,6 +449,21 @@ export class DesignRegistry {
     return rows.map(fromReviewRow);
   }
 
+  /** `/v1/designs/scope-match`'s "flagged" state needs this to tell "you
+   * never resolved this" apart from "you resolved it, an admin just
+   * hasn't decided yet" -- both looked identical to a retrying Edit/Write
+   * before this (found live, 2026-08-16): the deny message told you to run
+   * `twing design resolve` even after you already had, with no signal a
+   * review was actually pending. */
+  hasPendingReview(designId: string): boolean {
+    const row = this.db
+      .select()
+      .from(reviewsTable)
+      .where(and(eq(reviewsTable.designId, designId), isNull(reviewsTable.decision)))
+      .get();
+    return row !== undefined;
+  }
+
   /** §17.5: approving a divergence reopens the design as a second valid
    * canonical path -- it does not itself write a new constraint (spec §7
    * step 5 leaves that optional; not implemented here to keep this pass
@@ -447,11 +479,23 @@ export class DesignRegistry {
     // untouched, so a rejected design just stayed "flagged" forever with
     // nothing ever consulting `reviewDecision`) now makes the rejection
     // terminal: the design closes, the developer registers a fresh one.
+    //
+    // §17 review-flow fix (2026-08): an approval that settles a specific
+    // constraint match also appends its id to justifiedConstraintIds, so
+    // runDesignChecks stops re-flagging *this exact* constraint on future
+    // amends -- see justifiedConstraintIds' own doc comment (core/types.ts).
+    // Only on approve; a rejected review settles nothing.
+    const design = this.get(review.designId);
+    const justifiedConstraintIds =
+      decision === "approve" && review.constraintId && design && !design.justifiedConstraintIds.includes(review.constraintId)
+        ? [...design.justifiedConstraintIds, review.constraintId]
+        : undefined;
     this.db
       .update(designsTable)
       .set({
         reviewDecision: decision,
         ...(decision === "approve" ? { status: "open" } : { status: "closed", closedAt: Date.now() }),
+        ...(justifiedConstraintIds ? { justifiedConstraintIds: JSON.stringify(justifiedConstraintIds) } : {}),
       })
       .where(eq(designsTable.id, review.designId))
       .run();
@@ -561,14 +605,38 @@ export class ConstraintStore {
 
   /** Idempotent upsert keyed by (projectId, statement) -- used both by the
    * cold-start seed (`twing init` -> `POST /v1/constraints/seed`, §17.2)
-   * and by future ratification of a resolved divergence. */
+   * and by future ratification of a resolved divergence.
+   *
+   * Updates scope/type on an existing match instead of returning it
+   * unchanged (fixed live, 2026-08-16): before this, narrowing or widening
+   * an existing constraint's scope in the committed `.twing/twing.yml` and
+   * re-running `twing init` had *no effect at all* -- the upsert matched
+   * on statement text alone and handed back the stale row regardless of
+   * what scope/type the caller just asked to seed, so the local file
+   * stopped being source-of-truth the moment anyone edited an existing
+   * entry rather than adding a new one. */
   add(projectId: string, statement: string, scope: string[], type: DesignConstraintType, source: string): DesignConstraint {
     const existingRow = this.db
       .select()
       .from(constraintsTable)
       .where(and(eq(constraintsTable.projectId, projectId), eq(constraintsTable.statement, statement)))
       .get() as ConstraintRow | undefined;
-    if (existingRow) return fromConstraintRow(existingRow);
+    if (existingRow) {
+      const existing = fromConstraintRow(existingRow);
+      const scopeUnchanged = JSON.stringify(existing.scope) === JSON.stringify(scope);
+      if (scopeUnchanged && existing.type === type) return existing;
+
+      this.db.update(constraintsTable).set({ scope: JSON.stringify(scope), type }).where(eq(constraintsTable.id, existing.id)).run();
+      const updated: DesignConstraint = { ...existing, scope, type };
+      this.activityLog.append({
+        projectId,
+        kind: "constraint_updated",
+        relatedId: existing.id,
+        ts: Date.now(),
+        payload: { statement, type, scope, previousScope: existing.scope, previousType: existing.type, source },
+      });
+      return updated;
+    }
 
     const constraint: DesignConstraint = { id: crypto.randomUUID(), projectId, type, statement, scope, source, createdAt: Date.now() };
     this.db

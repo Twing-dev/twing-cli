@@ -19,15 +19,23 @@ import { tmpRepo, withHome, cacheToken, withMockFetch, captureConsole, jsonRespo
 
 const SERVER_URL = "http://localhost:9999";
 
-function fakeDeps(overrides: Partial<InitDeps> = {}): { deps: InitDeps; calls: { wireHooks: { repoRoot: string; hookPath: string }[] } } {
-  const calls = { wireHooks: [] as { repoRoot: string; hookPath: string }[] };
+function fakeDeps(overrides: Partial<InitDeps> = {}): {
+  deps: InitDeps;
+  calls: { wireHooks: { hookPath: string }[]; stripLegacyRepoLocalHooks: { repoRoot: string; hookPath: string }[] };
+} {
+  const calls = { wireHooks: [] as { hookPath: string }[], stripLegacyRepoLocalHooks: [] as { repoRoot: string; hookPath: string }[] };
   const deps: InitDeps = {
-    ensureHookInstalled: () => "/fake/bin/twing-hook",
-    wireHooks: (repoRoot, hookPath) => {
-      calls.wireHooks.push({ repoRoot, hookPath });
+    ensureHookInstalled: async () => "/fake/bin/twing-hook",
+    wireHooks: (hookPath) => {
+      calls.wireHooks.push({ hookPath });
       return true;
     },
+    stripLegacyRepoLocalHooks: (repoRoot, hookPath) => {
+      calls.stripLegacyRepoLocalHooks.push({ repoRoot, hookPath });
+      return false;
+    },
     ensureDaemonRunning: async () => "started",
+    installDaemonService: async () => "installed",
     ...overrides,
   };
   return { deps, calls };
@@ -49,10 +57,52 @@ test("runInit: full flow with an already-cached PAT -- resolves the server, inst
     assert.ok(logs.some((l) => l.includes("hook installed at /fake/bin/twing-hook")));
     assert.ok(logs.some((l) => l.includes("wired hooks into")));
     assert.ok(logs.some((l) => l.includes("daemon started")));
+    assert.ok(logs.some((l) => l.includes("daemon installed as a persistent OS-level service")));
     assert.ok(logs.some((l) => l.includes("twing init: done")));
 
     const manifest = fs.readFileSync(path.join(repo, ".twing", "twing.yml"), "utf8");
     assert.match(manifest, new RegExp(SERVER_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+    assert.equal(depCalls.stripLegacyRepoLocalHooks.length, 1, "must always check for legacy repo-local entries, even when there's nothing to strip");
+    assert.equal(depCalls.stripLegacyRepoLocalHooks[0].repoRoot, repo);
+  });
+});
+
+test("runInit: reports when legacy repo-local hook entries were found and removed (upgrade migration)", async () => {
+  const { fetch } = captureFetch(jsonResponse({}));
+  const { deps } = fakeDeps({ stripLegacyRepoLocalHooks: () => true });
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const repo = tmpRepo();
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.ok(logs.some((l) => l.includes("removed legacy repo-local hook entries")));
+  });
+});
+
+test("runInit: a non-fatal OS-service install failure is logged but doesn't abort init", async () => {
+  const { fetch } = captureFetch(jsonResponse({}));
+  const { deps } = fakeDeps({ installDaemonService: async () => "failed" });
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const repo = tmpRepo();
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.ok(logs.some((l) => l.includes("OS-level service install failed (non-fatal)")));
+    assert.ok(logs.some((l) => l.includes("twing init: done")), "a failed service install must not abort init");
+  });
+});
+
+test("runInit: an unsupported platform (e.g. Windows) logs that self-heal is the fallback, not a failure", async () => {
+  const { fetch } = captureFetch(jsonResponse({}));
+  const { deps } = fakeDeps({ installDaemonService: async () => "unsupported" });
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const repo = tmpRepo();
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.ok(logs.some((l) => l.includes("restart-survival relies on the hook's SessionStart self-heal")));
+    assert.ok(
+      logs.every((l) => !l.includes("failed")),
+      "unsupported is not a failure -- must not be logged as one",
+    );
   });
 });
 

@@ -21,8 +21,13 @@ source comments do this constantly and expect you to know what they mean)
 and `docs/verification-layer-strategy-memo_6.md`.
 `docs/design-conflict-coordinator-spec.md` is the spec that became §17.
 
-Pre-release: no npm package is published; `twing init` builds `twing-hook`
-from Go source rather than fetching a prebuilt binary.
+Pre-release: no npm package is published, so getting the `twing` CLI itself
+still means cloning and building this repo. `twing-hook` is different --
+`twing init` fetches a prebuilt release binary for the platform
+(`.github/workflows/release-hook.yml`) before falling back to building from
+Go source (only reached in a twing-cli checkout with Go on `PATH` — a
+contributor's own uncommitted `hook/` changes always take priority over a
+possibly-stale release).
 
 ## Commands
 
@@ -123,10 +128,21 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     a developer can have cached credentials for several coordinators at
     once. `getServerAuth`/`setServerAuth` are the accessors everything else
     uses; `readConfig` transparently migrates the old single-slot shape.
+  - `gate-overrides.ts` — `~/.twing/gate-overrides.json`, same
+    machine-local-map shape as `config.ts` but keyed by `projectId` instead
+    of server URL: `twing design enable-gate`/`disable-gate`'s per-project
+    on/off switch (`isGateDisabled`/`setGateDisabled`). Exists because hook
+    wiring is machine-global now (`wire-hooks.ts`, below) — unwiring a
+    global hook entry to disable the gate would disable it for every repo
+    at once, so the toggle moved to a local override the Go hook checks
+    instead (`hook/gate_overrides.go`, read-only mirror — only this side
+    writes it).
 
 - **`packages/cli`'s daemon** (`packages/cli/src/daemon/`) — one process per
   machine, shared across every repo `init` runs in; spawned detached by
-  `spawn-daemon.ts` and otherwise invisible as a package (it was its own
+  `spawn-daemon.ts` (falls back to `daemon-service.ts`'s
+  `writeDaemonLaunchMarker` + real launch only when nothing's already
+  listening) and otherwise invisible as a package (it was its own
   `@twing/daemon` workspace until it turned out to have exactly one
   consumer — `cli` — and no tests of its own, so the npm-package boundary
   was dropped; the separate-OS-process behavior is unchanged). Listens on a
@@ -138,6 +154,22 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `developerId` — not just `sessionId` — see the long comment in
   `server.ts` about why (two worktrees, same origin, same machine,
   different local `user.email`).
+  - **Restart survival** (`daemon-service.ts`): `installDaemonService`,
+    called from `init`, best-effort installs the daemon as a persistent
+    OS-level service — a macOS `launchd` LaunchAgent or a Linux `systemd
+    --user` unit, both installable without elevation — so it comes back on
+    its own after a reboot. Windows has no privilege-free equivalent, so it
+    relies entirely on the fallback below. Either way,
+    `writeDaemonLaunchMarker` always writes `~/.twing/daemon-launch.json`
+    (the `{node, script}` pair needed to start the daemon) first — the one
+    thing the Go hook's self-heal (`hook/daemon_launch.go`, called from
+    `main.go` on `SessionStart` only) needs to know to spawn the daemon
+    itself if nothing's listening. Fire-and-forget, no waiting for the
+    daemon to finish booting — adds no new blocking budget to the
+    already-fast `SessionStart` cache-check path. This is the one place
+    `hook/**`'s "trivial socket client, no decision logic" constraint is
+    deliberately, reviewedly bent (checking liveness and maybe spawning is
+    real decision logic), not an oversight.
 
 - **`packages/server`** — `twing serve`, the coordination server (§7).
   Drizzle ORM over SQLite (`db/schema.ts`, `db/client.ts`) as of the
@@ -223,9 +255,13 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   start/constraint seed). `align.ts` falls back to computing claims
   directly from `git diff` against the branch's merge-base with the
   default branch when there's no daemon/hooks (works standalone).
-  `install-hook.ts`/`wire-hooks.ts` build `twing-hook` from Go source and
-  merge (never overwrite) hook entries into the target repo's
-  `.claude/settings.json`.
+  `install-hook.ts` installs `twing-hook` (prebuilt-fetch-first,
+  build-from-source fallback, see the pre-release note above) and
+  `wire-hooks.ts` merges (never overwrites) its hook entries into the
+  **user-level** `~/.claude/settings.json` — global, not per-repo, so
+  wiring only ever needs to happen once per machine; `init` also strips any
+  legacy repo-local entries a pre-this-change `init` run left behind, so a
+  repo doesn't end up double-wired.
 
 ### `hook/` (Go, separate module)
 
@@ -322,20 +358,31 @@ Claude Code tool call
 ## Working in this repo
 
 This repo dogfoods its own design-conflict gate against a remote coordinator
-(see `.twing/twing.yml` and local `.claude/settings.json`, which is
-gitignored — it's regenerated by `twing init`, not committed, since its hook
-commands bake in an absolute `$HOME`-specific path). Expect `Edit`/`Write`
-gate checks to fire in this repo's own sessions; if one denies with "no
-design registered", run `twing design register --summary "..." --touches
-<paths>` (or enter plan mode, which registers one automatically via
-`ExitPlanMode`) before retrying.
+(see `.twing/twing.yml`). Hook wiring itself lives in the user-level
+`~/.claude/settings.json` now, not this repo's own `.claude/` at all (hook
+commands bake in an absolute `$HOME`-specific path, which is exactly why it
+was never committed even back when it was repo-local) — regenerated by
+`twing init`, machine-global, covers every repo, not just this one. Expect
+`Edit`/`Write` gate checks to fire in this repo's own sessions; if one
+denies with "no design registered", run `twing design register --summary
+"..." --touches <paths>` (or enter plan mode, which registers one
+automatically via `ExitPlanMode`) before retrying. A gate denial naming a
+path *outside* this repo's tree (e.g. Claude Code's own `~/.claude/plans/`
+files) is a bug, not expected behavior — the gate resolves the coordinator
+from `cwd`, but `resolveRepoRelative` (`hook/design_gate.go`) should already
+be catching that case and allowing silently; see its own doc comment for
+the live incident this was found from.
 
 `.gitignore` also excludes `dist/`, `*.tsbuildinfo`, the built
 `hook/twing-hook` binary, `openrouter_key.txt`, `simulator/.workspaces/`,
 and the `deploy/`-generated `twing-serve.log`/`.pid`. Everything
-machine-local (`daemon.sock`, the multi-server auth-token config) lives
-under `~/.twing/` — the user's home directory, not inside this repo's
-working tree at all, so it was never something `.gitignore` needed to name.
+machine-local (`daemon.sock`, `daemon-launch.json`, `gate-overrides.json`,
+the multi-server auth-token config, the OS-service definitions themselves —
+`~/Library/LaunchAgents/dev.twing.daemon.plist` on macOS,
+`~/.config/systemd/user/twing-daemon.service` on Linux) lives under
+`~/.twing/` or the platform's own service-manager directories — never
+inside this repo's working tree, so none of it was ever something
+`.gitignore` needed to name.
 
 License is dual MIT/Apache-2.0 for most packages, but `packages/server` is
 AGPL-3.0-only — check a package's own `package.json` `license` field before
