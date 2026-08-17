@@ -26,11 +26,12 @@ cd ~/path/to/some-repo
 twing init --server https://coordination-server.twing.dev
 ```
 
-`coordination-server.twing.dev` is twing's own hosted coordinator --
-**not live yet as of this writing**; until it is, self-host (see below)
-or use your team's existing coordinator. Once one person's run this, the
-server URL is committed to `.twing/twing.yml`, so everyone else afterward
-just runs plain `twing init`.
+`coordination-server.twing.dev` is twing's own hosted coordinator -- free
+to use, no invite needed for a GitHub-hosted repo (`init` authenticates
+you via GitHub itself, see step 2 of the walkthrough below). Once one
+person's run this, the server URL is committed to `.twing/twing.yml`, so
+everyone else afterward just runs plain `twing init`. Prefer to run your
+own instead? See "Self-hosting your own coordinator" below.
 
 `init` does three things:
 
