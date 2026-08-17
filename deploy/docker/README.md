@@ -61,16 +61,28 @@ twing admin bootstrap --server <url> --token <the new one>
 ## Backups
 
 The SQLite file lives at `deploy/docker/data` in the checkout (bind-mounted
-into the container, not a named volume, specifically so this works without
-`docker exec`):
+into the container, not a named volume). The runtime image bakes in the
+`sqlite3` CLI specifically for this -- don't assume the host has one (it
+may not, and may not have passwordless sudo to install it either):
 
 ```sh
-sqlite3 ~/twing-cli/deploy/docker/data/twing.db ".backup /path/to/backup-$(date +%F).db"
+docker compose exec twing-serve sqlite3 /data/twing.db ".backup /data/backup-$(date +%F).db"
+cp data/backup-$(date +%F).db /path/to/off-box-destination/
+rm data/backup-$(date +%F).db   # don't leave backup copies inside the bind mount
 ```
 
-Cron this daily and ship the result off-box. Never `cp` the file directly
-while the service is running -- `.backup`/`VACUUM INTO` are the
-SQLite-safe ways to snapshot a live database.
+Cron this daily and ship the result off-box. Never `cp`/copy the live
+`twing.db` file directly while the service is running -- `.backup`/`VACUUM
+INTO` are the SQLite-safe ways to snapshot a live database.
+
+**Restore-test a backup** (never trust an unverified backup):
+
+```sh
+docker compose exec twing-serve sqlite3 /data/backup-2026-08-17.db ".tables"
+```
+
+If that lists the expected tables (`claims`, `design_statements`,
+`activity_events`, etc.) without error, the backup is structurally sound.
 
 ## Redeploy (ship a change)
 

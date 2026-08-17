@@ -25,7 +25,15 @@ COPY . .
 RUN npm ci
 RUN npm run build
 
+# sqlite3 CLI, not a Node dependency: needed so `docker compose exec
+# twing-serve sqlite3 /data/twing.db ".backup ..."` works with nothing
+# required on the host -- consistent with how deploy/docker/README.md
+# already reads the bootstrap token via `docker compose exec` rather than a
+# host-side file read. Found missing live, 2026-08-17, when the documented
+# host-side `sqlite3 ...` backup command failed on a box with neither the
+# CLI installed nor passwordless sudo to add it.
 FROM node:22-bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app /app
 WORKDIR /app/packages/server
