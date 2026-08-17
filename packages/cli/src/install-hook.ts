@@ -96,6 +96,12 @@ export async function ensureHookInstalled(): Promise<string> {
 
   if (source && goAvailable()) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
+    // stdio: "inherit" below means `go build`'s own output is the first
+    // thing printed -- which can take a real few-to-tens-of-seconds on a
+    // cold build cache, with nothing on screen until then. Without this
+    // line first, that looks indistinguishable from a hang (found live,
+    // 2026-08-17, on a machine with `twing` npm-linked to this checkout).
+    console.log(`twing init: building twing-hook from source (found ${source})...`);
     // On macOS, Go's default *internal* linker (used whenever CGO isn't
     // explicitly enabled) doesn't emit the Mach-O LC_UUID load command --
     // harmless on older macOS, but a hard dyld launch failure ("missing
