@@ -7,17 +7,48 @@
  * start the daemon. Safe to re-run.
  */
 
-import { findRepoRoot, loadManifestFromFile, twingConfigPath, upsertCoordinatorServerUrl, normalizeServerUrl, computeProjectId, authFetch, type Manifest } from "@twing/core";
+import {
+  findRepoRoot,
+  loadManifestFromFile,
+  twingConfigPath,
+  upsertCoordinatorServerUrl,
+  normalizeServerUrl,
+  computeProjectId,
+  computeDeveloperId,
+  githubBinding,
+  authFetch,
+  readConfig,
+  getServerAuth,
+  setServerAuth,
+  writeConfig,
+  type Manifest,
+} from "@twing/core";
 import { ensureHookInstalled } from "./install-hook.js";
 import { wireHooks, stripLegacyRepoLocalHooks } from "./wire-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
 import { installDaemonService, type ServiceInstallResult } from "./daemon-service.js";
-import { requireAuth } from "./auth.js";
+import { requireAuth, isReachableCoordinator } from "./auth.js";
 import { runKeygen } from "./keygen.js";
+import { runJoinGithub } from "./join.js";
+import { promptLine } from "./prompt-line.js";
 
 export interface InitOptions {
   server?: string;
   invite?: string;
+  /** §17 Phase 4: this coordinator runs with no identity verification at
+   * all -- explicit and sticky (cached on the server's `ServerAuth` entry
+   * so a later plain `twing init` against the same server doesn't need to
+   * repeat it), never inferred/probed for. Mutually exclusive with
+   * `--invite` in practice (a no_auth server never issues PATs to redeem
+   * an invite into) but not cross-validated here -- `--invite` would just
+   * mint a token nothing on the server side ever checks. */
+  noAuth?: boolean;
+  /** §17 Phase 3 GitHub-founding: opts out of the default automatic
+   * GitHub-verified join/found attempt when no token is cached and no
+   * `--invite` was given -- falls straight through to the old "no cached
+   * PAT" error instead. For a headless/CI run that can't complete a device
+   * flow, or anyone who'd rather use `--invite` explicitly. */
+  noGithub?: boolean;
   cwd: string;
 }
 
@@ -48,17 +79,18 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
 
   // §"Resolution precedence": --server flag / TWING_SERVER > repo's
-  // committed coordinator.serverUrl. Deliberately no fallback to whatever
-  // was last cached globally -- with multiple servers cacheable at once
-  // (multi-server support), guessing which one to fall back to isn't
-  // meaningful; the repo file is the source of truth once it exists.
+  // committed coordinator.serverUrl > (new) an interactive prompt, for the
+  // true cold-start case -- a repo with no committed coordinator at all and
+  // no flag/env given. Deliberately no fallback to whatever was last cached
+  // globally -- with multiple servers cacheable at once (multi-server
+  // support), guessing which one to fall back to isn't meaningful; the repo
+  // file is the source of truth once it exists.
   const explicitServer = options.server ?? process.env.TWING_SERVER;
-  const rawServerUrl = explicitServer ?? manifest.coordinator.serverUrl;
+  let rawServerUrl = explicitServer ?? manifest.coordinator.serverUrl;
+  let promptedServer = false;
   if (!rawServerUrl) {
-    throw new Error(
-      "twing init: no server URL given -- pass --server <url> once (this also writes it into " +
-        ".twing/twing.yml so your team picks it up automatically), or set TWING_SERVER for a one-off override.",
-    );
+    rawServerUrl = await promptLine("twing init: no coordinator configured for this repo -- enter the twing server URL: ");
+    promptedServer = true;
   }
   const serverUrl = normalizeServerUrl(rawServerUrl);
   if (serverUrl !== rawServerUrl) {
@@ -66,11 +98,19 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   }
   console.log(`twing init: server = ${serverUrl}`);
 
-  // Bootstrap/update the repo's committed coordinator only when the server
-  // was given explicitly (flag or env) -- never silently promote a
-  // fallback into the shared file, and never clobber a different
-  // already-committed value without an explicit, deliberate edit.
-  if (explicitServer && manifest.coordinator.serverUrl !== serverUrl) {
+  // Bootstrap/update the repo's committed coordinator whenever the server
+  // was given explicitly (flag, env, or the interactive prompt above) --
+  // never silently promote a fallback into the shared file, and never
+  // clobber a different already-committed value without an explicit,
+  // deliberate edit (that "conflicting" case, below, never writes either
+  // way -- nothing to protect, so it skips the reachability check too).
+  // Only the genuine first-write case -- nothing committed yet -- validates
+  // reachability first (the trivial unauthenticated root route), since a
+  // typo there lands in a file every teammate then inherits.
+  if ((explicitServer || promptedServer) && manifest.coordinator.serverUrl !== serverUrl) {
+    if (!manifest.coordinator.serverUrl && !(await isReachableCoordinator(serverUrl))) {
+      throw new Error(`twing init: couldn't reach a twing coordinator at ${serverUrl} -- check the URL and try again`);
+    }
     const result = upsertCoordinatorServerUrl(twingConfigPath(repoRoot), serverUrl);
     if (result.written) {
       console.log("twing init: wrote coordinator.serverUrl into .twing/twing.yml -- commit this so your team picks it up automatically");
@@ -82,11 +122,23 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     }
   }
 
-  // §17.10 hardening: `--invite <code>` folds `keygen`+redeem into this
-  // same command (decision 9) -- a brand-new contributor never needs to
-  // run `twing keygen` separately before `twing init`. Otherwise a PAT
-  // must already be cached; there's no password to prompt for anymore.
-  const authToken = options.invite ? await runKeygen({ cwd: repoRoot, serverUrl, invite: options.invite }) : requireAuth(serverUrl, "twing init");
+  // §17 Phase 4: --no-auth is explicit and sticky -- cache it on this
+  // server's ServerAuth entry now, before anything below tries to
+  // authenticate, so a later plain `twing init` (no flag) against the same
+  // server picks it back up automatically instead of erroring on "no
+  // token cached".
+  if (options.noAuth) {
+    const config = readConfig();
+    if (!getServerAuth(config, serverUrl)?.noAuth) {
+      writeConfig(setServerAuth(config, serverUrl, { ...getServerAuth(config, serverUrl), noAuth: true }));
+      console.log("twing init: cached --no-auth for this server -- every request will carry a self-declared developer id instead of a token");
+    }
+  }
+
+  const authToken = await resolveAuthToken(repoRoot, serverUrl, options);
+  // Self-declared, attribution-only (§17 Phase 4) -- only ever sent when
+  // there's no real token, i.e. only reaches the wire on a no_auth server.
+  const developerId = computeDeveloperId(repoRoot);
 
   const hookPath = await deps.ensureHookInstalled();
   console.log(`twing init: hook installed at ${hookPath}`);
@@ -125,9 +177,50 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     console.log("twing init: no persistent OS-level service on this platform -- restart-survival relies on the hook's SessionStart self-heal instead");
   }
 
-  await seedConstraints(repoRoot, manifest, serverUrl, authToken);
+  await seedConstraints(repoRoot, manifest, serverUrl, authToken, developerId);
 
   console.log("twing init: done");
+}
+
+/**
+ * §17 Phase 3 GitHub-founding (2026-08-17): the auth-resolution precedence
+ * for `init` -- unifies what used to be an inline `options.invite ? ... :
+ * requireAuth(...)` ternary that had two problems: it always re-attempted
+ * `--invite` redemption even when a token was already cached (an
+ * already-consumed invite then fails the *whole* re-run, not just this
+ * step -- a real idempotency bug), and it never tried the newer
+ * GitHub-verified path at all. Order matters:
+ *
+ *  1. `noAuth` (checked first, unconditionally) -- no identity ceremony
+ *     exists for this server at all, nothing below is even relevant.
+ *  2. An already-cached real token always wins over `--invite`/the default
+ *     GitHub attempt -- the idempotency fix: re-running plain `twing init`
+ *     (or `init --invite <code>` a second time) must never re-attempt a
+ *     credential-minting call that only succeeds once.
+ *  3. Explicit `--invite <code>` -- still fully supported, just no longer
+ *     advertised as the primary path (§17 plan, Phase 2).
+ *  4. Explicit `--no-github` opt-out -- skip straight to the old error.
+ *  5. Default: attempt GitHub-verified join/found, but only when this repo
+ *     is actually GitHub-hosted (cheap local check, no network) -- avoids
+ *     popping the device-flow browser prompt for a repo it can never work
+ *     on. A clean structural failure (no repo access, or a project that
+ *     isn't founded and this caller lacks admin/maintain to found it)
+ *     falls back to the old error rather than crashing `init` outright.
+ */
+async function resolveAuthToken(repoRoot: string, serverUrl: string, options: InitOptions): Promise<string | undefined> {
+  const auth = getServerAuth(readConfig(), serverUrl);
+  if (auth?.noAuth) return undefined;
+  if (auth?.authToken) return auth.authToken;
+  if (options.invite) return runKeygen({ cwd: repoRoot, serverUrl, invite: options.invite });
+  if (options.noGithub) return requireAuth(serverUrl, "twing init");
+  if (githubBinding(repoRoot)) {
+    try {
+      return await runJoinGithub({ cwd: repoRoot, server: serverUrl });
+    } catch (err) {
+      console.log(`twing init: automatic GitHub-verified join didn't work (${err instanceof Error ? err.message : err}) -- falling back`);
+    }
+  }
+  return requireAuth(serverUrl, "twing init");
 }
 
 /** §17.2's cold-start seed: forward this repo's local `.twing/twing.yml`
@@ -135,14 +228,24 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
  * without the server needing filesystem access to anyone's checkout.
  * Best-effort -- a server that isn't running the §17 endpoints yet (or
  * isn't reachable at all) must not fail `init`. Takes the manifest `runInit`
- * already loaded rather than re-reading the file a second time. */
-async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: string, authToken: string): Promise<void> {
+ * already loaded rather than re-reading the file a second time.
+ * `authToken` is `undefined` on a `--no-auth` server (§17 Phase 4) --
+ * `developerId` (self-declared, attribution only) travels instead. This is
+ * also the one call that forwards `githubBinding` (§17 Phase 3) -- the
+ * founding trigger, so it's the only place that needs to. */
+async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: string, authToken: string | undefined, developerId: string): Promise<void> {
   // §17.9 fix, 2026-08-11: require_human_review entries were silently never
   // forwarded here -- only `constraints:` was. That's the section meant to
   // hold rules like "packages/server/** needs sign-off," and it was never
   // reaching the live Constraint Store at all.
   const reviewRules = manifest.requireHumanReview.filter((r) => r.path || r.symbol);
-  if (manifest.constraints.length === 0 && reviewRules.length === 0) return;
+  const github = githubBinding(repoRoot);
+  // §17 Phase 3: a fresh repo with an empty twing.yml (no constraints, no
+  // require_human_review) used to skip this call entirely -- fine before
+  // this phase, since nothing else needed it to run. Now it's also the one
+  // call that establishes a project's GitHub binding at founding time, so
+  // it can't stay silent just because there's nothing else to seed.
+  if (manifest.constraints.length === 0 && reviewRules.length === 0 && !github) return;
 
   const projectId = computeProjectId(repoRoot);
   try {
@@ -153,6 +256,8 @@ async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: 
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           projectId,
+          githubOwner: github?.owner,
+          githubRepo: github?.repo,
           constraints: [
             ...manifest.constraints.map((c) => ({ statement: c.text, scope: [c.scope], type: "canonical_abstraction" })),
             ...reviewRules.map((r) => ({ statement: r.reason, scope: [(r.path ?? r.symbol)!], type: "review_required" })),
@@ -160,6 +265,7 @@ async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: 
         }),
       },
       authToken,
+      developerId,
     );
     if (res.ok) {
       const body = (await res.json()) as { seeded?: number };

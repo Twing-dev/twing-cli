@@ -154,17 +154,23 @@ type designListResponse struct {
 	} `json:"items"`
 }
 
-// setAuthHeader adds the §17.10 bearer PAT when non-empty -- a no-op when
-// this machine hasn't authenticated to the server yet (resolveServerConfig
-// has nothing cached to give), in which case every call on this path fails
-// open the same as a network error would.
-func setAuthHeader(req *http.Request, authToken string) {
+// setAuthHeader adds the §17.10 bearer PAT when non-empty. §17 Phase 4:
+// when there's no token (a --no-auth coordinator never issues one), falls
+// back to the self-declared X-Twing-Developer-Id header instead -- still a
+// no-op if developerID is also empty, in which case every call on this
+// path fails closed the same as a network error would (a full-auth
+// coordinator with no cached token, the only other way both are empty).
+func setAuthHeader(req *http.Request, authToken, developerID string) {
 	if authToken != "" {
 		req.Header.Set("authorization", "Bearer "+authToken)
+		return
+	}
+	if developerID != "" {
+		req.Header.Set("x-twing-developer-id", developerID)
 	}
 }
 
-func postJSON(targetURL string, body any, timeout time.Duration, authToken string) (*http.Response, error) {
+func postJSON(targetURL string, body any, timeout time.Duration, authToken, developerID string) (*http.Response, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -174,17 +180,17 @@ func postJSON(targetURL string, body any, timeout time.Duration, authToken strin
 		return nil, err
 	}
 	req.Header.Set("content-type", "application/json")
-	setAuthHeader(req, authToken)
+	setAuthHeader(req, authToken, developerID)
 	client := &http.Client{Timeout: timeout}
 	return client.Do(req)
 }
 
-func getJSON(targetURL string, authToken string) (*http.Response, error) {
+func getJSON(targetURL string, authToken, developerID string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	setAuthHeader(req, authToken)
+	setAuthHeader(req, authToken, developerID)
 	client := &http.Client{Timeout: designGateTimeout}
 	return client.Do(req)
 }
@@ -316,9 +322,13 @@ func handleExitPlanMode(payload hookPayload) {
 		return
 	}
 
-	if config.AuthToken == "" {
+	if config.AuthToken == "" && !config.NoAuth {
 		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
 		return
+	}
+	developerID := ""
+	if config.NoAuth {
+		developerID = computeDeveloperID(payload.Cwd)
 	}
 
 	reqBody := designCheckRequest{
@@ -327,7 +337,7 @@ func handleExitPlanMode(payload hookPayload) {
 		RawPlanText: input.Plan,
 	}
 
-	res, err := postJSON(strings.TrimRight(config.ServerURL, "/")+"/v1/designs/check", reqBody, designExtractionTimeout, config.AuthToken)
+	res, err := postJSON(strings.TrimRight(config.ServerURL, "/")+"/v1/designs/check", reqBody, designExtractionTimeout, config.AuthToken, developerID)
 	if err != nil {
 		logDesignGate("ExitPlanMode check failed (blocking): %v", err)
 		writeJSON(unreachableOutput("PreToolUse", err))
@@ -432,8 +442,8 @@ type designScopeMatchResponse struct {
 // "the session has *a* design registered" as proof enough. Same fail-closed
 // shape as checkPathConstraint -- a network/auth/parse error here returns a
 // non-empty failReason, never a silent "in_scope".
-func checkDesignScope(serverURL, authToken, projectID, sessionID, filePath string) (result designScopeMatchResponse, failReason string) {
-	res, err := getJSON(designScopeMatchURL(serverURL, projectID, sessionID, filePath), authToken)
+func checkDesignScope(serverURL, authToken, developerID, projectID, sessionID, filePath string) (result designScopeMatchResponse, failReason string) {
+	res, err := getJSON(designScopeMatchURL(serverURL, projectID, sessionID, filePath), authToken, developerID)
 	if err != nil {
 		logDesignGate("design scope check failed (blocking): %v", err)
 		return designScopeMatchResponse{}, unreachableReason(err)
@@ -545,8 +555,8 @@ const (
 // whatever the session's registered design claims to touch. Fail-closed
 // like every other check on this path -- a network/auth/parse error here
 // returns constraintCheckFailed with a reason, not a silent "clear".
-func checkPathConstraint(serverURL, authToken, projectID, filePath string) (constraintCheckResult, string) {
-	res, err := getJSON(constraintMatchURL(serverURL, projectID, filePath), authToken)
+func checkPathConstraint(serverURL, authToken, developerID, projectID, filePath string) (constraintCheckResult, string) {
+	res, err := getJSON(constraintMatchURL(serverURL, projectID, filePath), authToken, developerID)
 	if err != nil {
 		logDesignGate("constraint match check failed (blocking): %v", err)
 		return constraintCheckFailed, unreachableReason(err)
@@ -637,20 +647,24 @@ func handleEditWriteGate(payload hookPayload) {
 		return
 	}
 
-	if config.AuthToken == "" {
+	if config.AuthToken == "" && !config.NoAuth {
 		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
 		return
 	}
+	developerID := ""
+	if config.NoAuth {
+		developerID = computeDeveloperID(payload.Cwd)
+	}
 
 	if relPath != "" {
-		verdict, reason := checkPathConstraint(config.ServerURL, config.AuthToken, projectID, relPath)
+		verdict, reason := checkPathConstraint(config.ServerURL, config.AuthToken, developerID, projectID, relPath)
 		if verdict == constraintMatched || verdict == constraintCheckFailed {
 			writeJSON(denyOutput("PreToolUse", reason))
 			return
 		}
 	}
 
-	scopeMatch, failReason := checkDesignScope(config.ServerURL, config.AuthToken, projectID, payload.SessionID, relPath)
+	scopeMatch, failReason := checkDesignScope(config.ServerURL, config.AuthToken, developerID, projectID, payload.SessionID, relPath)
 	if failReason != "" {
 		writeJSON(denyOutput("PreToolUse", failReason))
 		return
@@ -691,7 +705,11 @@ func handleSessionEnd(payload hookPayload) {
 	}
 
 	projectID := computeProjectID(payload.Cwd)
-	res, err := getJSON(openDesignsURL(config.ServerURL, projectID, payload.SessionID), config.AuthToken)
+	developerID := ""
+	if config.NoAuth {
+		developerID = computeDeveloperID(payload.Cwd)
+	}
+	res, err := getJSON(openDesignsURL(config.ServerURL, projectID, payload.SessionID), config.AuthToken, developerID)
 	if err != nil {
 		return
 	}
@@ -714,7 +732,7 @@ func handleSessionEnd(payload hookPayload) {
 		if err != nil {
 			continue
 		}
-		setAuthHeader(req, config.AuthToken)
+		setAuthHeader(req, config.AuthToken, developerID)
 		if resp, err := client.Do(req); err == nil {
 			resp.Body.Close()
 		}

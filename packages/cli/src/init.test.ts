@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { runInit, type InitDeps } from "./init.js";
-import { tmpRepo, withHome, cacheToken, withMockFetch, captureConsole, jsonResponse, captureFetch, captureFetchSequence } from "./test-support.js";
+import { tmpRepo, withHome, cacheToken, withMockFetch, captureConsole, jsonResponse, textResponse, captureFetch, captureFetchSequence } from "./test-support.js";
 
 const SERVER_URL = "http://localhost:9999";
 
@@ -42,14 +42,17 @@ function fakeDeps(overrides: Partial<InitDeps> = {}): {
 }
 
 test("runInit: full flow with an already-cached PAT -- resolves the server, installs/wires/starts, no invite redemption call", async () => {
-  const { fetch, calls } = captureFetch(jsonResponse({}));
+  const { fetch, calls } = captureFetch(textResponse("twing serve"));
   const { deps, calls: depCalls } = fakeDeps();
   await withHome(async () => {
     cacheToken(SERVER_URL, "already-cached-pat");
     const repo = tmpRepo();
     const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
 
-    assert.equal(calls.length, 0, "no constraints/reviews to seed -- must not even attempt the seed call");
+    assert.ok(
+      !calls.some((c) => c.url.includes("/constraints/seed")),
+      "no constraints/reviews to seed -- must not even attempt the seed call",
+    );
     assert.equal(depCalls.wireHooks.length, 1);
     assert.equal(depCalls.wireHooks[0].hookPath, "/fake/bin/twing-hook");
     assert.ok(logs.some((l) => l.includes(`server = ${SERVER_URL}`)));
@@ -69,7 +72,7 @@ test("runInit: full flow with an already-cached PAT -- resolves the server, inst
 });
 
 test("runInit: reports when legacy repo-local hook entries were found and removed (upgrade migration)", async () => {
-  const { fetch } = captureFetch(jsonResponse({}));
+  const { fetch } = captureFetch(textResponse("twing serve"));
   const { deps } = fakeDeps({ stripLegacyRepoLocalHooks: () => true });
   await withHome(async () => {
     cacheToken(SERVER_URL, "already-cached-pat");
@@ -80,7 +83,7 @@ test("runInit: reports when legacy repo-local hook entries were found and remove
 });
 
 test("runInit: a non-fatal OS-service install failure is logged but doesn't abort init", async () => {
-  const { fetch } = captureFetch(jsonResponse({}));
+  const { fetch } = captureFetch(textResponse("twing serve"));
   const { deps } = fakeDeps({ installDaemonService: async () => "failed" });
   await withHome(async () => {
     cacheToken(SERVER_URL, "already-cached-pat");
@@ -92,7 +95,7 @@ test("runInit: a non-fatal OS-service install failure is logged but doesn't abor
 });
 
 test("runInit: an unsupported platform (e.g. Windows) logs that self-heal is the fallback, not a failure", async () => {
-  const { fetch } = captureFetch(jsonResponse({}));
+  const { fetch } = captureFetch(textResponse("twing serve"));
   const { deps } = fakeDeps({ installDaemonService: async () => "unsupported" });
   await withHome(async () => {
     cacheToken(SERVER_URL, "already-cached-pat");
@@ -107,12 +110,15 @@ test("runInit: an unsupported platform (e.g. Windows) logs that self-heal is the
 });
 
 test("runInit: --invite redeems it (via runKeygen) instead of requiring an already-cached PAT", async () => {
-  const { fetch, calls } = captureFetch(jsonResponse({ developerId: "alice@example.com" }));
+  // Two calls now: the reachability check ahead of committing a fresh
+  // coordinator.serverUrl (nothing committed yet in this tmpRepo), then the
+  // real invite redemption.
+  const { fetch, calls } = captureFetchSequence([textResponse("twing serve"), jsonResponse({ developerId: "alice@example.com" })]);
   const { deps } = fakeDeps();
   await withHome(async () => {
     const repo = tmpRepo();
     const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, invite: "invite-code" }, deps)));
-    assert.match(calls[0].url, /\/v1\/invites\/invite-code\/redeem$/);
+    assert.ok(calls.some((c) => /\/v1\/invites\/invite-code\/redeem$/.test(c.url)));
     assert.ok(logs.some((l) => l.includes("twing init: done")));
   });
 });
@@ -121,8 +127,19 @@ test("runInit: throws without a resolvable server URL, or without an invite/cach
   const { deps } = fakeDeps();
   await withHome(async () => {
     const repo = tmpRepo();
-    await assert.rejects(() => runInit({ cwd: repo }, deps), /no server URL given/);
-    await assert.rejects(() => runInit({ cwd: repo, server: SERVER_URL }, deps), /no personal access token cached/);
+    // Non-interactive (no TTY under the test runner) and nothing given at
+    // all -- can't even ask, same "how would this ever work" failure mode
+    // `promptLine`/`promptPassword` both already use.
+    await assert.rejects(() => runInit({ cwd: repo }, deps), /stdin isn't a TTY to prompt on/);
+
+    // A resolvable server, but no invite/cached token and no real GitHub
+    // remote in this bare tmp repo (githubBinding is undefined, so the
+    // default GitHub attempt is skipped rather than popping a device flow)
+    // -- falls through to the "no personal access token cached" error.
+    // Reachability of the server itself isn't what's under test here, so
+    // it's mocked to succeed.
+    const { fetch } = captureFetch(textResponse("twing serve"));
+    await withMockFetch(fetch, () => assert.rejects(() => runInit({ cwd: repo, server: SERVER_URL }, deps), /no personal access token cached/));
   });
 });
 

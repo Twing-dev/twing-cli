@@ -140,6 +140,69 @@ test("IdentityStore: foundProject attaches to the founder's org, grants them pro
   assert.equal(store.isProjectFounded("proj-1"), true);
 });
 
+// §17 Phase 3
+test("IdentityStore: foundProject persists an optional GitHub binding, retrievable via getProjectRecord", () => {
+  const dir = tmpDir();
+  const store = new IdentityStore(createDb({ dataDir: dir }), { dataDir: dir });
+  const admin = store.bootstrap(readBootstrapToken(dir), "hash-alice", "alice@example.com");
+  if ("error" in admin) throw new Error("bootstrap failed");
+
+  store.foundProject("proj-1", "alice@example.com", { owner: "twing-dev", repo: "twing-cli" });
+  const record = store.getProjectRecord("proj-1");
+  assert.equal(record?.githubOwner, "twing-dev");
+  assert.equal(record?.githubRepo, "twing-cli");
+});
+
+test("IdentityStore: foundProject without a GitHub binding leaves it undefined, not null/empty-string", () => {
+  const dir = tmpDir();
+  const store = new IdentityStore(createDb({ dataDir: dir }), { dataDir: dir });
+  const admin = store.bootstrap(readBootstrapToken(dir), "hash-alice", "alice@example.com");
+  if ("error" in admin) throw new Error("bootstrap failed");
+
+  store.foundProject("proj-1", "alice@example.com");
+  const record = store.getProjectRecord("proj-1");
+  assert.equal(record?.githubOwner, undefined);
+  assert.equal(record?.githubRepo, undefined);
+});
+
+test("IdentityStore: joinProject mints a new developer identity and grants project + org member roles", () => {
+  const dir = tmpDir();
+  const store = new IdentityStore(createDb({ dataDir: dir }), { dataDir: dir });
+  const admin = store.bootstrap(readBootstrapToken(dir), "hash-alice", "alice@example.com");
+  if ("error" in admin) throw new Error("bootstrap failed");
+  store.foundProject("proj-1", "alice@example.com", { owner: "twing-dev", repo: "twing-cli" });
+
+  const result = store.joinProject("proj-1", "member", { tokenHash: "hash-bob", label: "bob@example.com" });
+  assert.ok(!("error" in result));
+  if ("error" in result) return;
+  assert.equal(result.developerId, "bob@example.com");
+  assert.equal(store.getProjectRole("proj-1", "bob@example.com"), "member");
+  assert.equal(store.getOrgRole(admin.orgId, "bob@example.com"), "member");
+});
+
+test("IdentityStore: joinProject with an already-known developerId attaches membership without creating a duplicate identity", () => {
+  const dir = tmpDir();
+  const store = new IdentityStore(createDb({ dataDir: dir }), { dataDir: dir });
+  const admin = store.bootstrap(readBootstrapToken(dir), "hash-alice", "alice@example.com");
+  if ("error" in admin) throw new Error("bootstrap failed");
+  store.foundProject("proj-1", "alice@example.com", { owner: "twing-dev", repo: "twing-cli" });
+  store.foundProject("proj-2", "alice@example.com", { owner: "twing-dev", repo: "other-repo" });
+  store.joinProject("proj-2", "member", { tokenHash: "hash-bob", label: "bob@example.com" });
+
+  const result = store.joinProject("proj-1", "admin", { developerId: "bob@example.com" });
+  assert.ok(!("error" in result));
+  if ("error" in result) return;
+  assert.equal(result.developerId, "bob@example.com");
+  assert.equal(store.getProjectRole("proj-1", "bob@example.com"), "admin");
+});
+
+test("IdentityStore: joinProject rejects an unknown projectId", () => {
+  const dir = tmpDir();
+  const store = new IdentityStore(createDb({ dataDir: dir }), { dataDir: dir });
+  const result = store.joinProject("no-such-project", "member", { tokenHash: "hash-bob", label: "bob@example.com" });
+  assert.deepEqual(result, { error: "no such project" });
+});
+
 test("IdentityStore: founding an already-founded project fails", () => {
   const dir = tmpDir();
   const store = new IdentityStore(createDb({ dataDir: dir }), { dataDir: dir });

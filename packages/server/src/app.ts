@@ -23,6 +23,7 @@ import { findDesignDivergences } from "./design-divergence.js";
 import { AlignmentThreadStore } from "./alignment-store.js";
 import { DrizzleActivityLog } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role } from "./identity-store.js";
+import { fetchRepoPermissions } from "./github-client.js";
 
 interface ClaimsRequestBody {
   projectId?: string;
@@ -74,6 +75,25 @@ interface ResumeRequestBody {
 interface SeedRequestBody {
   projectId?: string;
   constraints?: { statement: string; scope: string[]; type?: DesignConstraintType }[];
+  /** §17 Phase 3: best-effort, computed client-side by `init.ts` from the
+   * repo's own `origin` remote -- absent for a non-GitHub-hosted repo.
+   * Only ever consulted on first founding (see authorizeProject below);
+   * never updated on a re-seed of an already-founded project. */
+  githubOwner?: string;
+  githubRepo?: string;
+}
+
+interface JoinViaGithubRequestBody {
+  githubToken?: string;
+  /** Self-attested, only consulted when the project isn't founded yet (same
+   * trust level `SeedRequestBody`'s founding path already uses) -- for an
+   * already-founded project the stored `ProjectRecord.githubOwner`/
+   * `githubRepo` is the ground truth and this is ignored, never trusted for
+   * the permission check itself. */
+  githubOwner?: string;
+  githubRepo?: string;
+  tokenHash?: string;
+  label?: string;
 }
 
 interface BootstrapRequestBody {
@@ -115,6 +135,13 @@ export interface CreateAppOptions {
   /** design-semantic-check.ts's model -- always Bedrock (see that file's
    * header comment), defaults to the model this repo's own eval settled on. */
   semanticCheckModel?: string;
+  /** §17 Phase 4: no identity verification at all -- every /v1/* request
+   * must carry a self-declared X-Twing-Developer-Id header (attribution
+   * only, never access control) instead of a bearer PAT, and every
+   * admin/membership check below no-ops. For a single developer's local
+   * agents or a small trusted team on a private network, not a public
+   * deployment. Defaults to false (full auth, unchanged). */
+  noAuth?: boolean;
 }
 
 const RAW_PLAN_EXCERPT_CHARS = 2000;
@@ -133,6 +160,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const extractProvider = options.extractProvider ?? "openrouter";
   const openRouterApiKey = options.openRouterApiKey;
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
+  const noAuth = options.noAuth ?? false;
 
   const app = new Hono<{ Variables: Variables }>();
 
@@ -144,6 +172,19 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use("/v1/*", async (c, next) => {
     if (c.req.path === "/v1/admin/bootstrap") return next();
     if (/^\/v1\/invites\/[^/]+\/redeem$/.test(c.req.path)) return next();
+    if (/^\/v1\/projects\/[^/]+\/join-via-github$/.test(c.req.path)) return next();
+    if (noAuth) {
+      // §17 Phase 4: no bearer token at all -- a self-declared developerId
+      // is still required on every request (attribution for align/§17's
+      // notices and activity log, never access control), so a missing
+      // header is a hard 400, never a silent "anonymous" default.
+      const developerId = c.req.header("x-twing-developer-id");
+      if (!developerId) {
+        return c.json({ error: "no_auth mode: missing X-Twing-Developer-Id header -- pass a self-declared developer id on every request" }, 400);
+      }
+      c.set("identity", { developerId, orgs: [], projects: [] });
+      return next();
+    }
     const header = c.req.header("authorization") ?? "";
     const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
     const identity = token ? identities.resolveToken(token) : undefined;
@@ -225,7 +266,16 @@ export function createApp(options: CreateAppOptions = {}) {
     return identities.getProjectRecord(projectId)?.orgId;
   }
 
+  /** §17 Phase 4 no_auth carve-out, shared by every membership check below:
+   * short-circuits to true rather than synthesizing a fake all-admin
+   * identity object, so what "member"/"admin" mean elsewhere in this file
+   * is untouched. */
+  function isProjectMember(identity: ResolvedIdentity, projectId: string): boolean {
+    return noAuth || identity.projects.some((p) => p.projectId === projectId);
+  }
+
   function canManageProject(identity: ResolvedIdentity, projectId: string): boolean {
+    if (noAuth) return true;
     if (identity.projects.some((p) => p.projectId === projectId && p.role === "admin")) return true;
     const orgId = projectOrgId(projectId);
     return orgId !== undefined && identity.orgs.some((o) => o.orgId === orgId && o.role === "admin");
@@ -254,7 +304,7 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!invite) return c.json({ error: "no such invite" }, 404);
     const scope = invite.scope;
     const authorized =
-      scope.kind === "org" ? identity.orgs.some((o) => o.orgId === scope.orgId && o.role === "admin") : canManageProject(identity, scope.projectId);
+      scope.kind === "org" ? noAuth || identity.orgs.some((o) => o.orgId === scope.orgId && o.role === "admin") : canManageProject(identity, scope.projectId);
     if (!authorized) return c.json({ error: "not authorized to revoke this invite" }, 403);
     identities.revokeInvite(invite.code);
     return c.json({ status: "revoked" });
@@ -263,7 +313,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.get("/v1/projects/:id/developers", (c) => {
     const identity = c.get("identity");
     const projectId = c.req.param("id");
-    if (!identity.projects.some((p) => p.projectId === projectId)) return c.json({ error: "not a member of this project" }, 403);
+    if (!isProjectMember(identity, projectId)) return c.json({ error: "not a member of this project" }, 403);
     return c.json({ items: identities.listProjectMembers(projectId) });
   });
 
@@ -306,12 +356,21 @@ export function createApp(options: CreateAppOptions = {}) {
    * member of, except founding it for the first time. This is where the
    * trust boundaries actually bind operationally -- the admin/invite
    * endpoints alone don't enforce anything by themselves. */
-  function authorizeProject(identity: ResolvedIdentity, projectId: string): { ok: true } | { ok: false; status: 403; error: string } {
+  function authorizeProject(
+    identity: ResolvedIdentity,
+    projectId: string,
+    github?: { owner: string; repo: string },
+  ): { ok: true } | { ok: false; status: 403; error: string } {
+    if (noAuth) return { ok: true };
     if (identity.projects.some((p) => p.projectId === projectId)) return { ok: true };
     if (!identities.isProjectFounded(projectId)) {
-      const founded = identities.foundProject(projectId, identity.developerId);
+      const founded = identities.foundProject(projectId, identity.developerId, github);
       if ("error" in founded) return { ok: false, status: 403, error: founded.error };
-      identity.projects.push({ projectId, orgId: founded.orgId, role: "admin" });
+      // foundProject (the invite/admin-bootstrap founding path) always sets
+      // a real orgId -- the ?? "" is only to satisfy ResolvedIdentity's
+      // contract (same "" -for-none convention resolveToken already uses),
+      // never actually hit here.
+      identity.projects.push({ projectId, orgId: founded.orgId ?? "", role: "admin" });
       return { ok: true };
     }
     return { ok: false, status: 403, error: `not a member of project ${projectId}` };
@@ -485,7 +544,7 @@ export function createApp(options: CreateAppOptions = {}) {
    * reconciliation channel between the two developers it names, not a
    * project-wide one. */
   function isThreadParty(identity: ResolvedIdentity, thread: { developerId: string; otherDeveloperId: string }): boolean {
-    return identity.developerId === thread.developerId || identity.developerId === thread.otherDeveloperId;
+    return noAuth || identity.developerId === thread.developerId || identity.developerId === thread.otherDeveloperId;
   }
 
   // Alignment threads (statefulness redesign, 2026-08): the async,
@@ -497,7 +556,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
     if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
-    if (!identity.projects.some((p) => p.projectId === projectId)) {
+    if (!isProjectMember(identity, projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
     const status = c.req.query("status") as "open" | "closed" | undefined;
@@ -652,7 +711,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const id = c.req.param("id");
     const design = designs.get(id);
     if (!design) return c.json({ error: "no such design" }, 404);
-    if (!identity.projects.some((p) => p.projectId === design.projectId)) {
+    if (!isProjectMember(identity, design.projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
 
@@ -691,7 +750,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const id = c.req.param("id");
     const design = designs.get(id);
     if (!design) return c.json({ error: "no such design" }, 404);
-    if (!identity.projects.some((p) => p.projectId === design.projectId)) {
+    if (!isProjectMember(identity, design.projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
     const closed = designs.close(id);
@@ -716,7 +775,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const id = c.req.param("id");
     const design = designs.get(id);
     if (!design) return c.json({ error: "no such design" }, 404);
-    if (!identity.projects.some((p) => p.projectId === design.projectId)) {
+    if (!isProjectMember(identity, design.projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
     if (design.status !== "open") {
@@ -777,7 +836,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const id = c.req.param("id");
     const design = designs.get(id);
     if (!design) return c.json({ error: "no such design" }, 404);
-    if (!identity.projects.some((p) => p.projectId === design.projectId)) {
+    if (!isProjectMember(identity, design.projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
     if (design.status !== "dormant") {
@@ -823,7 +882,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
     if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
-    if (!identity.projects.some((p) => p.projectId === projectId)) {
+    if (!isProjectMember(identity, projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
     const status = c.req.query("status") as DesignStatement["status"] | undefined;
@@ -902,7 +961,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
     if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
-    if (!identity.projects.some((p) => p.projectId === projectId)) {
+    if (!isProjectMember(identity, projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
     return c.json({ items: designs.listReviews(projectId) });
@@ -949,7 +1008,8 @@ export function createApp(options: CreateAppOptions = {}) {
     }
     const projectId = body.projectId;
     const alreadyFounded = identities.isProjectFounded(projectId);
-    const authz = authorizeProject(identity, projectId);
+    const github = body.githubOwner && body.githubRepo ? { owner: body.githubOwner, repo: body.githubRepo } : undefined;
+    const authz = authorizeProject(identity, projectId, github);
     if (!authz.ok) return c.json({ error: authz.error }, authz.status);
     if (alreadyFounded && !canManageProject(identity, projectId)) {
       return c.json({ error: "not an admin of this project -- constraint changes to an existing project require admin role" }, 403);
@@ -959,6 +1019,95 @@ export function createApp(options: CreateAppOptions = {}) {
       constraintStore.add(projectId, entry.statement, entry.scope, entry.type ?? "canonical_abstraction", "seeded"),
     );
     return c.json({ seeded: added.length });
+  });
+
+  // §17 Phase 3: GitHub-verified project join -- structurally independent
+  // of the invite system (no invite code, no invite table involved).
+  // Works both authenticated (an existing developer attaching a second
+  // project's membership to their already-cached PAT) and unauthenticated
+  // (a brand-new developer presenting a freshly-generated token's hash),
+  // same dual-mode shape as /v1/invites/:code/redeem above. The GitHub
+  // token itself is used exactly once, right here, to ask GitHub's own API
+  // what this developer can actually do on this repo -- never trusted as a
+  // client-supplied claim, and never persisted anywhere on this side.
+  //
+  // §17 Phase 3 GitHub-founding (2026-08-17): this route now also founds a
+  // brand-new project (no org, no invite/admin-bootstrap needed at all) the
+  // first time anyone with real `admin`/`maintain` GitHub permission on the
+  // bound repo calls it -- this is what makes plain `twing init` the only
+  // command anyone ever needs, whether they're the very first person to
+  // touch this project on this coordinator or the hundredth. `pull`/
+  // `triage`/`push`-only callers can join an already-founded project but
+  // can't found one; the founding threshold is the same `admin`/`maintain`
+  // bar that already decides who gets twing `admin` on join.
+  app.post("/v1/projects/:id/join-via-github", async (c) => {
+    const projectId = c.req.param("id");
+    const body = await c.req.json<JoinViaGithubRequestBody>().catch(() => null);
+    if (!body || !body.githubToken) {
+      return c.json({ error: "expected { githubToken, ... }" }, 400);
+    }
+
+    const project = identities.getProjectRecord(projectId);
+    let owner: string, repo: string;
+    if (project) {
+      if (!project.githubOwner || !project.githubRepo) {
+        return c.json({ error: "this project has no GitHub repo binding -- GitHub-verified join isn't available for it" }, 404);
+      }
+      // Ground truth for an already-founded project is what's on file, never
+      // a client-supplied claim -- otherwise a caller with real admin on
+      // some *other* repo they control could claim it against an unrelated
+      // project's id to phish their way into a role there.
+      owner = project.githubOwner;
+      repo = project.githubRepo;
+    } else {
+      if (!body.githubOwner || !body.githubRepo) {
+        return c.json({ error: "this project isn't founded yet -- expected { githubOwner, githubRepo } to found it" }, 400);
+      }
+      // Self-attested, same trust level /v1/constraints/seed's founding
+      // path already extends the client for exactly this reason: there's no
+      // stored binding yet for anything to check this against, and the
+      // permission check right below is what actually gates founding, not
+      // this claim by itself.
+      owner = body.githubOwner;
+      repo = body.githubRepo;
+    }
+
+    const permissions = await fetchRepoPermissions(body.githubToken, owner, repo);
+    if (!permissions || !permissions.pull) {
+      return c.json({ error: "this GitHub token doesn't have access to this repo" }, 403);
+    }
+    const role: Role = permissions.maintain || permissions.admin ? "admin" : "member";
+
+    const header = c.req.header("authorization") ?? "";
+    const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+    const existing = bearer ? identities.resolveToken(bearer) : undefined;
+
+    const params = existing
+      ? { developerId: existing.developerId }
+      : body.tokenHash && body.label
+        ? { tokenHash: body.tokenHash, label: body.label }
+        : undefined;
+    if (!params) {
+      return c.json({ error: "expected { tokenHash, label } when not already authenticated" }, 400);
+    }
+
+    if (!project) {
+      if (role !== "admin") {
+        return c.json(
+          { error: `this project isn't founded on this coordinator yet, and your GitHub permissions on ${owner}/${repo} aren't admin/maintain -- ask whoever administers that repo to run \`twing init\` first` },
+          403,
+        );
+      }
+      const founded = identities.foundProjectViaGithub(projectId, params, { owner, repo });
+      if ("error" in founded) return c.json(founded, 400);
+      console.log(`twing serve: ${founded.developerId} founded project ${projectId.slice(0, 12)} via GitHub (${owner}/${repo})`);
+      return c.json({ developerId: founded.developerId, role: "admin", founded: true });
+    }
+
+    const result = identities.joinProject(projectId, role, params);
+    if ("error" in result) return c.json(result, 400);
+    console.log(`twing serve: ${result.developerId} joined project ${projectId.slice(0, 12)} via GitHub as ${role}`);
+    return c.json({ ...result, role, founded: false });
   });
 
   // §17.9: the ground-truth backstop. Checks one literal path against the

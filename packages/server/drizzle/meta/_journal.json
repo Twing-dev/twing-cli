@@ -29,6 +29,20 @@
       "when": 1786813421800,
       "tag": "0003_round_black_knight",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1786936309460,
+      "tag": "0004_broken_paibok",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1786943588587,
+      "tag": "0005_gifted_wendell_rand",
+      "breakpoints": true
     }
   ]
 }

@@ -18,6 +18,13 @@ export interface ServerAuth {
    * `twing keygen`/`admin bootstrap` -- the server only ever sees its hash.
    * Absent when this machine hasn't authenticated to that server yet. */
   authToken?: string;
+  /** §17 Phase 4: this server is running with `--no-auth` -- no PAT is
+   * needed or expected for it. Set only by `twing init --server <url>
+   * --no-auth`, never inferred/probed for. `authToken` and `noAuth` are
+   * not mutually exclusive in the type (a server could migrate later); in
+   * practice a no_auth server never issues PATs, so callers check
+   * `noAuth` first. */
+  noAuth?: boolean;
 }
 
 export interface TwingConfig {

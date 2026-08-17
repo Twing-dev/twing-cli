@@ -54,9 +54,23 @@ export const orgMemberships = sqliteTable(
 
 export const projectRecords = sqliteTable("project_records", {
   projectId: text("project_id").primaryKey(),
-  orgId: text("org_id").notNull(),
+  // Nullable as of the GitHub-founding path (2026-08-17): a project founded
+  // via verified GitHub repo access has no twing Organization at all --
+  // access control for it is purely per-project (projectMemberships), since
+  // canManageProject/isProjectMember already check direct project
+  // membership before ever consulting orgId. Every project founded via the
+  // invite/admin-bootstrap path still gets a real orgId, unchanged.
+  orgId: text("org_id"),
   foundedBy: text("founded_by").notNull(),
   foundedAt: integer("founded_at").notNull(),
+  // §17 Phase 3: nullable, no default (follows pending_reviews.constraint_id's
+  // precedent) -- absent for every project founded before this shipped, and
+  // for any project whose remote isn't GitHub-hosted at all (non-GitHub
+  // projects stay invite-only, parked per the plan). Set once, at founding
+  // time, from the founder's own canonicalized git remote -- never updated
+  // afterward.
+  githubOwner: text("github_owner"),
+  githubRepo: text("github_repo"),
 });
 
 export const projectMemberships = sqliteTable(

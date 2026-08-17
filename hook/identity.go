@@ -76,8 +76,26 @@ func computeProjectID(cwd string) string {
 	return readOrCreatePersistedID(filepath.Join(cwd, ".git", "twing-project-id"))
 }
 
-// developerId is no longer computed on this side at all (§17.10 hardening):
-// the server resolves it from the authenticated bearer PAT, never from
-// anything the hook could compute locally. `computeDeveloperID` (which used
-// to mirror identity.ts's computeDeveloperId here) was removed along with
-// its one call site in design_gate.go.
+// developerId is no longer computed on this side at all for the full-auth
+// path (§17.10 hardening): the server resolves it from the authenticated
+// bearer PAT, never from anything the hook could compute locally. The
+// original `computeDeveloperID` was removed along with its one call site
+// in design_gate.go for exactly that reason.
+//
+// computeDeveloperID below is its reintroduction, scoped to §17 Phase 4
+// only: a --no-auth coordinator has no bearer token to resolve an identity
+// from at all, so *something* self-declared has to travel as
+// X-Twing-Developer-Id -- mirrors identity.ts's computeDeveloperId
+// (git-email-derived, falling back to a persisted random id) exactly.
+// Every call site must gate this behind config.NoAuth; it must never be
+// called on the full-auth path.
+func computeDeveloperID(cwd string) string {
+	if email, ok := gitOutput(cwd, "config", "user.email"); ok && email != "" {
+		return email
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	return readOrCreatePersistedID(filepath.Join(home, ".twing", "id"))
+}

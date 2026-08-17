@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canonicalizeRemoteUrl } from "./identity.js";
+import { canonicalizeRemoteUrl, parseGithubOwnerRepo } from "./identity.js";
 
 // Fixture table shared conceptually with hook/identity_test.go -- both must
 // canonicalize every one of these to the same string, or projectId diverges
@@ -30,4 +30,19 @@ test("canonicalizeRemoteUrl: different repos stay different", () => {
 
 test("canonicalizeRemoteUrl: self-hosted git over ssh with a custom port-like path still normalizes the scp form", () => {
   assert.equal(canonicalizeRemoteUrl("git@gitlab.example.com:group/sub/repo.git"), "gitlab.example.com/group/sub/repo");
+});
+
+// §17 Phase 3
+test("parseGithubOwnerRepo: extracts owner/repo from a canonicalized GitHub URL", () => {
+  assert.deepEqual(parseGithubOwnerRepo(canonicalizeRemoteUrl("git@github.com:Org/Repo.git")), { owner: "org", repo: "repo" });
+  assert.deepEqual(parseGithubOwnerRepo("github.com/twing-dev/twing-cli"), { owner: "twing-dev", repo: "twing-cli" });
+});
+
+test("parseGithubOwnerRepo: undefined for a non-GitHub host", () => {
+  assert.equal(parseGithubOwnerRepo(canonicalizeRemoteUrl("git@gitlab.example.com:group/repo.git")), undefined);
+});
+
+test("parseGithubOwnerRepo: undefined for a malformed/incomplete GitHub path", () => {
+  assert.equal(parseGithubOwnerRepo("github.com/just-an-org"), undefined);
+  assert.equal(parseGithubOwnerRepo("github.com/org/repo/extra"), undefined);
 });

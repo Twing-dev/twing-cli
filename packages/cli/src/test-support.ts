@@ -96,15 +96,27 @@ export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+/** For mocking `isReachableCoordinator`'s plain-text root-route check
+ * (`init.ts`, §17 Phase 3 GitHub-founding) -- `jsonResponse` bodies don't
+ * satisfy it (its exact-text match wants the literal `"twing serve"`, not
+ * a JSON blob). */
+export function textResponse(body: string, status = 200): Response {
+  return new Response(body, { status, headers: { "content-type": "text/plain" } });
+}
+
 /** Captures every fetch call's URL/method and parsed JSON body while
- * returning `response` for all of them -- the shape nearly every test
- * needs for a single-call command. For multi-call flows (e.g. list-then-act),
- * inspect `calls` directly instead of assuming `calls[0]`. */
+ * returning a fresh `.clone()` of `response` for all of them -- cloning
+ * matters now that a single test flow can make more than one call sharing
+ * this mock (e.g. `init.ts`'s reachability check ahead of the real
+ * request): a `Response` body can only be read once, and multiple calls
+ * returning the exact same instance would throw "body already used" the
+ * second time anything calls `.text()`/`.json()` on it. For multi-call
+ * flows, inspect `calls` directly rather than assuming `calls[0]`. */
 export function captureFetch(response: Response): { fetch: typeof fetch; calls: { url: string; method: string; body: unknown }[] } {
   const calls: { url: string; method: string; body: unknown }[] = [];
   const impl = (async (url: string | URL, init?: RequestInit) => {
     calls.push({ url: String(url), method: init?.method ?? "GET", body: init?.body ? JSON.parse(init.body as string) : undefined });
-    return response;
+    return response.clone();
   }) as typeof fetch;
   return { fetch: impl, calls };
 }
@@ -116,7 +128,7 @@ export function captureFetchSequence(responses: Response[]): { fetch: typeof fet
   const calls: { url: string; method: string; body: unknown }[] = [];
   const impl = (async (url: string | URL, init?: RequestInit) => {
     calls.push({ url: String(url), method: init?.method ?? "GET", body: init?.body ? JSON.parse(init.body as string) : undefined });
-    return responses[Math.min(calls.length - 1, responses.length - 1)];
+    return responses[Math.min(calls.length - 1, responses.length - 1)].clone();
   }) as typeof fetch;
   return { fetch: impl, calls };
 }

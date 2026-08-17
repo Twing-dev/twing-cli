@@ -23,15 +23,39 @@ export function resolveServerUrl(cwd: string, explicit?: string): string | undef
 }
 
 /** Returns the cached PAT for `serverUrl`, or throws with a clear "how to
- * get one" message -- there's no password to fall back to prompting for. */
-export function requireAuth(serverUrl: string, label: string): string {
-  const token = getServerAuth(readConfig(), serverUrl)?.authToken;
-  if (!token) {
+ * get one" message -- there's no password to fall back to prompting for.
+ *
+ * §17 Phase 4 carve-out: a server cached with `noAuth: true` (via `twing
+ * init --server <url> --no-auth`) never issues PATs at all, so this
+ * returns `undefined` instead of throwing -- every call site already
+ * passes its result straight into `authFetch`'s optional `token` param,
+ * which already tolerates a falsy value with zero signature change. */
+export function requireAuth(serverUrl: string, label: string): string | undefined {
+  const auth = getServerAuth(readConfig(), serverUrl);
+  if (auth?.noAuth) return undefined;
+  if (!auth?.authToken) {
     throw new Error(
-      `${label}: no personal access token cached for ${serverUrl} -- get an invite code from your project or org ` +
-        "admin and run `twing init --invite <code>` (or `twing keygen --invite <code>`), or run " +
-        "`twing admin bootstrap` if you're meant to be this server's first admin.",
+      `${label}: no personal access token cached for ${serverUrl} -- if this repo is GitHub-hosted, run ` +
+        "`twing init` again from a real GitHub login shell (it tries GitHub-verified join/founding by default); " +
+        "otherwise get an invite code from your project or org admin and run `twing init --invite <code>` " +
+        "(or `twing keygen --invite <code>`), or run `twing admin bootstrap` if you're meant to be this server's first admin.",
     );
   }
-  return token;
+  return auth.authToken;
+}
+
+/** §17 Phase 3 GitHub-founding: before ever writing a freshly-given server
+ * URL into a repo's committed `.twing/twing.yml` (whether from `--server`,
+ * `TWING_SERVER`, or `init`'s interactive prompt when neither was given),
+ * confirm it's actually a reachable twing coordinator -- a typo landing in
+ * that file silently breaks it for every teammate who inherits it. Reuses
+ * the trivial unauthenticated root route (`app.get("/", ...)`) rather than
+ * adding a dedicated health-check endpoint. */
+export async function isReachableCoordinator(serverUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${serverUrl}/`);
+    return res.ok && (await res.text()) === "twing serve";
+  } catch {
+    return false;
+  }
 }

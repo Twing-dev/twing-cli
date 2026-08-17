@@ -1221,3 +1221,340 @@ test("GET /v1/designs/scope-match: dormant state still fires even when path does
   assert.equal(body.state, "dormant", "unlike out_of_scope, a dormant nudge doesn't require the path to actually match");
   assert.equal(body.designId, designId);
 });
+
+// --- §17 Phase 4: no_auth mode ---
+
+function freshNoAuthApp() {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-app-test-"));
+  const db = createDb({ memory: true });
+  const identities = new IdentityStore(db, { dataDir });
+  const store = new Store(db);
+  const designs = new DesignRegistry(db);
+  const constraints = new ConstraintStore(db);
+  const alignmentThreads = new AlignmentThreadStore(db);
+  const app = createApp({ db, identities, store, designs, constraints, alignmentThreads, noAuth: true });
+  return { app, dataDir, identities, store, designs, constraints, alignmentThreads };
+}
+
+function developerHeader(id: string) {
+  return { "x-twing-developer-id": id };
+}
+
+test("no_auth mode: a write with no bearer token and no developer-id header is rejected with 400", async () => {
+  const { app } = freshNoAuthApp();
+  const res = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: "p1", claims: [] }),
+  });
+  assert.equal(res.status, 400, "a no_auth server must never fall back to a silent anonymous identity");
+});
+
+test("no_auth mode: a write with a self-declared X-Twing-Developer-Id header succeeds with no bearer token at all", async () => {
+  const { app } = freshNoAuthApp();
+  const res = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...developerHeader("bob@example.com") },
+    body: JSON.stringify({ projectId: "p1", claims: [] }),
+  });
+  assert.equal(res.status, 200);
+});
+
+test("no_auth mode: role-gated routes (review decide) succeed regardless of \"role\" -- no admin/membership check applies", async () => {
+  const { app } = freshNoAuthApp();
+  const dev = developerHeader("carol@example.com");
+
+  // Register a design, then flag it via a seeded constraint so there's a
+  // real pending review to decide -- same setup shape the full-auth
+  // review-decide tests use elsewhere in this file, just with the
+  // X-Twing-Developer-Id header instead of a bearer token throughout.
+  const seedRes = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...dev },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "needs review", scope: ["a.ts"], type: "review_required" }] }),
+  });
+  assert.equal(seedRes.status, 200);
+
+  const checkRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...dev },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId, verdict } = (await checkRes.json()) as { designId: string; verdict: string };
+  assert.equal(verdict, "constraint_flag");
+
+  const resolveRes = await app.request(`/v1/designs/${designId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...dev },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "testing no_auth review-decide" }),
+  });
+  const { reviewId } = (await resolveRes.json()) as { reviewId: string };
+
+  // No admin/membership of any kind was ever established for "carol" above
+  // (no_auth has no role tiers at all) -- this must still succeed.
+  const decideRes = await app.request(`/v1/reviews/${reviewId}/decide`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...dev },
+    body: JSON.stringify({ decision: "approve" }),
+  });
+  assert.equal(decideRes.status, 200, "no_auth must not require project-admin role for review decisions");
+});
+
+// --- §17 Phase 3: GitHub-verified project join ---
+
+function mockGithubRepoResponse(permissions: Record<string, boolean>): typeof fetch {
+  return (async (url: string | URL | Request) => {
+    const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    if (href === "https://api.github.com/repos/acme/widgets") {
+      return new Response(JSON.stringify({ permissions }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+  }) as typeof fetch;
+}
+
+test("POST /v1/projects/:id/join-via-github: pull/triage/push permissions grant member, unauthenticated with a fresh token", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+
+  await withMockFetch(mockGithubRepoResponse({ pull: true, triage: true, push: true, maintain: false, admin: false }), async () => {
+    const res = await app.request("/v1/projects/proj-1/join-via-github", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ githubToken: "gh-token-bob", tokenHash: sha256Hex("bobs-pat"), label: "bob@example.com" }),
+    });
+    const body = (await res.json()) as { developerId?: string; role?: string; error?: string };
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.developerId, "bob@example.com");
+    assert.equal(body.role, "member");
+    assert.equal(identities.getProjectRole("proj-1", "bob@example.com"), "member");
+  });
+});
+
+test("POST /v1/projects/:id/join-via-github: maintain permission grants admin", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+
+  await withMockFetch(mockGithubRepoResponse({ pull: true, triage: true, push: true, maintain: true, admin: false }), async () => {
+    const res = await app.request("/v1/projects/proj-1/join-via-github", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ githubToken: "gh-token-carol", tokenHash: sha256Hex("carols-pat"), label: "carol@example.com" }),
+    });
+    const body = (await res.json()) as { role?: string };
+    assert.equal(res.status, 200);
+    assert.equal(body.role, "admin");
+  });
+});
+
+test("POST /v1/projects/:id/join-via-github: admin permission also grants admin", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+
+  await withMockFetch(mockGithubRepoResponse({ pull: true, triage: true, push: true, maintain: false, admin: true }), async () => {
+    const res = await app.request("/v1/projects/proj-1/join-via-github", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ githubToken: "gh-token-dave", tokenHash: sha256Hex("daves-pat"), label: "dave@example.com" }),
+    });
+    const body = (await res.json()) as { role?: string };
+    assert.equal(res.status, 200);
+    assert.equal(body.role, "admin");
+  });
+});
+
+test("POST /v1/projects/:id/join-via-github: no repo access (GitHub 404) is rejected", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+
+  await withMockFetch(
+    (async () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404 })) as typeof fetch,
+    async () => {
+      const res = await app.request("/v1/projects/proj-1/join-via-github", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ githubToken: "gh-token-eve", tokenHash: sha256Hex("eves-pat"), label: "eve@example.com" }),
+      });
+      assert.equal(res.status, 403);
+      assert.equal(identities.getProjectRole("proj-1", "eve@example.com"), undefined);
+    },
+  );
+});
+
+test("POST /v1/projects/:id/join-via-github: a project with no GitHub binding 404s without ever calling GitHub", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId); // no github binding
+
+  await withMockFetch(
+    (async () => {
+      throw new Error("must not call GitHub for a project with no binding");
+    }) as typeof fetch,
+    async () => {
+      const res = await app.request("/v1/projects/proj-1/join-via-github", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ githubToken: "gh-token-frank", tokenHash: sha256Hex("franks-pat"), label: "frank@example.com" }),
+      });
+      assert.equal(res.status, 404);
+    },
+  );
+});
+
+test("POST /v1/projects/:id/join-via-github: already-authenticated developer attaches to their existing identity, no tokenHash/label needed", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+
+  // Gives grace a real, resolvable PAT and an *org* membership only --
+  // deliberately not proj-1 membership, so the assertion below actually
+  // proves the route grants it, not that she already had it.
+  const graceToken = "graces-pat";
+  const orgInvite = identities.createInvite({ kind: "org", orgId: admin.orgId }, "member", "grace@example.com", admin.developerId);
+  identities.redeemInvite(orgInvite.code, { tokenHash: sha256Hex(graceToken), label: "grace@example.com" });
+
+  await withMockFetch(mockGithubRepoResponse({ pull: true, triage: false, push: false, maintain: false, admin: false }), async () => {
+    const res = await app.request("/v1/projects/proj-1/join-via-github", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(graceToken) },
+      body: JSON.stringify({ githubToken: "gh-token-grace" }),
+    });
+    const body = (await res.json()) as { developerId?: string; role?: string; error?: string };
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.developerId, "grace@example.com");
+    assert.equal(identities.getProjectRole("proj-1", "grace@example.com"), "member");
+  });
+});
+
+// --- §17 Phase 3 GitHub-founding (2026-08-17): `twing init`'s default
+// path -- founding a project with no org at all, gated purely on real
+// GitHub admin/maintain access, no invite/admin-bootstrap in the loop. ---
+
+test("POST /v1/projects/:id/join-via-github: admin permission on an unfounded project founds it, no org, caller becomes project admin", async () => {
+  const { app, identities } = freshApp();
+
+  await withMockFetch(mockGithubRepoResponse({ pull: true, triage: true, push: true, maintain: false, admin: true }), async () => {
+    const res = await app.request("/v1/projects/proj-fresh/join-via-github", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ githubToken: "gh-token-alice", githubOwner: "acme", githubRepo: "widgets", tokenHash: sha256Hex("alices-pat"), label: "alice@example.com" }),
+    });
+    const body = (await res.json()) as { developerId?: string; role?: string; founded?: boolean; error?: string };
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.developerId, "alice@example.com");
+    assert.equal(body.role, "admin");
+    assert.equal(body.founded, true);
+    assert.equal(identities.getProjectRole("proj-fresh", "alice@example.com"), "admin");
+    assert.equal(identities.getProjectRecord("proj-fresh")?.orgId, undefined, "GitHub-founded project has no org at all");
+    assert.deepEqual(identities.getProjectRecord("proj-fresh")?.githubOwner, "acme");
+  });
+});
+
+test("POST /v1/projects/:id/join-via-github: maintain permission also founds an unfounded project", async () => {
+  const { app, identities } = freshApp();
+
+  await withMockFetch(mockGithubRepoResponse({ pull: true, triage: true, push: true, maintain: true, admin: false }), async () => {
+    const res = await app.request("/v1/projects/proj-fresh/join-via-github", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ githubToken: "gh-token-alice", githubOwner: "acme", githubRepo: "widgets", tokenHash: sha256Hex("alices-pat"), label: "alice@example.com" }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(identities.getProjectRole("proj-fresh", "alice@example.com"), "admin");
+  });
+});
+
+test("POST /v1/projects/:id/join-via-github: pull-only access cannot found an unfounded project", async () => {
+  const { app, identities } = freshApp();
+
+  await withMockFetch(mockGithubRepoResponse({ pull: true, triage: false, push: false, maintain: false, admin: false }), async () => {
+    const res = await app.request("/v1/projects/proj-fresh/join-via-github", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ githubToken: "gh-token-bob", githubOwner: "acme", githubRepo: "widgets", tokenHash: sha256Hex("bobs-pat"), label: "bob@example.com" }),
+    });
+    const body = (await res.json()) as { error?: string };
+    assert.equal(res.status, 403, JSON.stringify(body));
+    assert.ok(/admin\/maintain/.test(body.error ?? ""));
+    assert.equal(identities.isProjectFounded("proj-fresh"), false, "must not have founded the project");
+  });
+});
+
+test("POST /v1/projects/:id/join-via-github: an unfounded project with no githubOwner/githubRepo in the body 400s before ever calling GitHub", async () => {
+  const { app } = freshApp();
+
+  await withMockFetch(
+    (async () => {
+      throw new Error("must not call GitHub without owner/repo to check");
+    }) as typeof fetch,
+    async () => {
+      const res = await app.request("/v1/projects/proj-fresh/join-via-github", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ githubToken: "gh-token-bob", tokenHash: sha256Hex("bobs-pat"), label: "bob@example.com" }),
+      });
+      assert.equal(res.status, 400);
+    },
+  );
+});
+
+test("POST /v1/projects/:id/join-via-github: an already-founded project ignores a client-claimed githubOwner/githubRepo, checks permissions against the stored binding", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+
+  let calledUrl: string | undefined;
+  const fetchSpy = (async (url: string | URL | Request) => {
+    calledUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    return new Response(JSON.stringify({ permissions: { pull: true, triage: true, push: true, maintain: false, admin: false } }), { status: 200 });
+  }) as typeof fetch;
+
+  await withMockFetch(fetchSpy, async () => {
+    const res = await app.request("/v1/projects/proj-1/join-via-github", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // Claims a *different* repo than what proj-1 is actually bound to --
+      // must be ignored, not trusted, for the permission check.
+      body: JSON.stringify({ githubToken: "gh-token-mallory", githubOwner: "someone-elses-org", githubRepo: "unrelated-repo", tokenHash: sha256Hex("mallorys-pat"), label: "mallory@example.com" }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(calledUrl, "https://api.github.com/repos/acme/widgets", "must check permissions against the stored binding, never a client claim");
+  });
+});
+
+test("POST /v1/projects/:id/join-via-github: an already-cached token's role is re-checked (refreshed) on every join, not just the first", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+
+  const graceToken = "graces-pat";
+  const orgInvite = identities.createInvite({ kind: "org", orgId: admin.orgId }, "member", "grace@example.com", admin.developerId);
+  identities.redeemInvite(orgInvite.code, { tokenHash: sha256Hex(graceToken), label: "grace@example.com" });
+
+  await withMockFetch(mockGithubRepoResponse({ pull: true, triage: false, push: false, maintain: false, admin: false }), async () => {
+    await app.request("/v1/projects/proj-1/join-via-github", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(graceToken) },
+      body: JSON.stringify({ githubToken: "gh-token-grace" }),
+    });
+  });
+  assert.equal(identities.getProjectRole("proj-1", "grace@example.com"), "member");
+
+  // Grace was promoted to maintain on GitHub's side since -- re-running the
+  // same join call must pick that up, not leave her stuck at the role from
+  // her first join.
+  await withMockFetch(mockGithubRepoResponse({ pull: true, triage: true, push: true, maintain: true, admin: false }), async () => {
+    const res = await app.request("/v1/projects/proj-1/join-via-github", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(graceToken) },
+      body: JSON.stringify({ githubToken: "gh-token-grace" }),
+    });
+    const body = (await res.json()) as { role?: string };
+    assert.equal(res.status, 200);
+    assert.equal(body.role, "admin");
+  });
+  assert.equal(identities.getProjectRole("proj-1", "grace@example.com"), "admin");
+});

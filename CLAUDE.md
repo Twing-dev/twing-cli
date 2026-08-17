@@ -194,7 +194,21 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `/v1/*` route (bar bootstrap/invite-redemption) requires a bearer token
   `IdentityStore.resolveToken` resolves to a real, authenticated identity;
   `developerId` on every write is that resolved identity, never a
-  client-supplied field. `Organization`/`OrgMembership` and
+  client-supplied field. `--no-auth`/`TWING_AUTH_MODE=no_auth` (§17 Phase 4,
+  `main.ts`) is the opt-in exception: no identity verification at all, for a
+  single developer's local agents or a small trusted team on a private
+  network — every `/v1/*` request instead requires a self-declared
+  `X-Twing-Developer-Id` header (attribution only, a missing header is a
+  hard 400, never a silent "anonymous"), and every admin/membership check in
+  `app.ts` (`canManageProject`/`authorizeProject`/`isThreadParty`/
+  `isProjectMember`) short-circuits to always-pass rather than synthesizing
+  a fake all-admin identity. Defaults to loopback-only bind; a non-loopback
+  `--host`/`TWING_HOST` override logs a startup warning. Client side, this
+  is `twing init --server <url> --no-auth`, cached as `noAuth: true` on that
+  server's `~/.twing/config.json` entry (`ServerAuth.noAuth`, mirrored in
+  the Go hook as `serverAuth.NoAuth`) — `requireAuth`/the gate's
+  fail-closed "no cached token" checks both carve out an explicit
+  `noAuth: true`, never an absent/empty token by itself. `Organization`/`OrgMembership` and
   `ProjectRecord`/`ProjectMembership` are the tenant-isolation anchor for a
   possible future managed/billed offering — bare `{id, name}` shape only, no
   `plan`/`quota`/payment fields built yet (see
@@ -234,7 +248,19 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     freshly-generated token's hash), and identity lookup. `/v1/admin/bootstrap`
     is the one break-glass route, gated by the server's self-generated,
     single-use bootstrap token (`~/.twing/serve-data/bootstrap-token`) rather
-    than an operator-chosen password.
+    than an operator-chosen password. `/v1/projects/:id/join-via-github`
+    (§17 Phase 3) is structurally standalone from the invite system —
+    same dual authenticated/unauthenticated shape as invite redemption, but
+    role is decided server-side from `github-client.ts`'s
+    `fetchRepoPermissions` (the caller's own GitHub token, checked against
+    `projectRecords.githubOwner`/`githubRepo` — set once, best-effort, at
+    founding time from `.git`'s `origin` remote) rather than an
+    admin-issued invite: `maintain`/`admin` GitHub permissions grant twing
+    `admin`, `pull`/`triage`/`push` grant `member`, no binding is a 404.
+    Identity minting (`IdentityStore.joinProject`) still mirrors
+    `redeemInvite`'s new-developer-vs-attach-to-existing split exactly —
+    only "what role" and "which trigger" differ, not "how an identity gets
+    minted."
   - This package's own `.twing/twing.yml` in this repo flags
     `design-*.ts`, `identity-store.ts`, and the entrypoint/wiring files
     (`index.ts`/`main.ts`/`app.ts`) as `require_human_review` — narrowed
@@ -244,16 +270,25 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     an access-control hole (§17.10), or a sign of wholesale restructuring.
 
 - **`packages/cli`** — the `twing` command. `index.ts` dispatches
-  `init`/`login`/`keygen`/`whoami`/`daemon`/`align`/`design <sub>`/
+  `init`/`login`/`keygen`/`whoami`/`join`/`daemon`/`align`/`design <sub>`/
   `admin <sub>`/`project <sub>`; each subcommand is one file (`init.ts`,
-  `login.ts`, `keygen.ts`, `align.ts`, `design.ts`, `admin.ts`, `project.ts`).
-  `auth.ts` holds shared server-URL resolution (`resolveServerUrl` — flag >
-  `TWING_SERVER` > the repo's committed coordinator) and PAT lookup
-  (`requireAuth`, throws with a "how to get one" message rather than
-  prompting — there's no password to prompt for anymore, §17.10 hardening).
-  `keygen.ts` generates a PAT client-side and redeems an invite
-  (`/v1/invites/:code/redeem`) — reused by `login`'s brand-new-developer
-  path (via `init --invite`) and by `admin.ts`'s break-glass bootstrap.
+  `login.ts`, `keygen.ts`, `align.ts`, `design.ts`, `admin.ts`, `project.ts`,
+  `join.ts`). `auth.ts` holds shared server-URL resolution
+  (`resolveServerUrl` — flag > `TWING_SERVER` > the repo's committed
+  coordinator) and PAT lookup (`requireAuth`, throws with a "how to get
+  one" message rather than prompting — there's no password to prompt for
+  anymore, §17.10 hardening; returns `undefined` instead of throwing when
+  this server is cached `noAuth: true`, §17 Phase 4). `keygen.ts` generates
+  a PAT client-side and redeems an invite (`/v1/invites/:code/redeem`) —
+  reused by `login`'s brand-new-developer path (via `init --invite`) and by
+  `admin.ts`'s break-glass bootstrap. `join.ts` (`twing join --github`, §17
+  Phase 3) is deliberately *not* built on `keygen.ts`'s invite ceremony —
+  structurally standalone, reusing only `generateToken`/`hashToken` (shared
+  PAT-minting mechanics, not invite-specific) — authenticates against
+  GitHub itself via the OAuth **device flow** (no local redirect server,
+  same mechanism `gh auth login`/`docker login` use; the GitHub token is
+  used exactly once for the `join-via-github` call, then discarded, never
+  cached) and calls `/v1/projects/:id/join-via-github`.
   `login` is the cheap, repeatable subset of `init` (just cache an
   already-obtained PAT, no hook install/settings wiring/daemon
   start/constraint seed). `align.ts` falls back to computing claims

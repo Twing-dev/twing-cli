@@ -7,6 +7,14 @@ import { IdentityStore } from "./identity-store.js";
 const port = Number(process.env.PORT ?? 8787);
 const dataDirOptions = process.env.TWING_SERVE_DATA_DIR ? { dataDir: process.env.TWING_SERVE_DATA_DIR } : {};
 
+// §17 Phase 4: no identity verification at all -- opt-in, explicit, never
+// inferred. Same argv/env-var precedent as --regenerate-bootstrap-token
+// below. For a single developer's local agents or a small trusted team on
+// a private network; every /v1/* route still requires a self-declared
+// X-Twing-Developer-Id header (attribution only), and every admin/
+// membership check no-ops (see app.ts's noAuth threading).
+const noAuth = process.argv.includes("--no-auth") || process.env.TWING_AUTH_MODE === "no_auth";
+
 // Disaster-recovery maintenance path (§17.10 hardening): regenerates the
 // bootstrap token even after an org already exists. Deliberately not an
 // HTTP route -- a separate process invocation, gated by already having
@@ -58,10 +66,28 @@ const app = createApp({
   // generates its own one-time bootstrap token on first run (logged once)
   // -- there's no env var to configure here anymore.
   identities: new IdentityStore(db, dataDirOptions),
+  noAuth,
 });
 
-serve({ fetch: app.fetch, port }, (info) => {
+// §17 Phase 4: no_auth defaults to loopback-only -- an operator has to
+// explicitly opt out of that with --host/TWING_HOST, and gets a startup
+// warning when they do, since no_auth + a non-loopback bind means anyone
+// who can reach the port can write claims/designs as any developerId they
+// name.
+const explicitHost = process.env.TWING_HOST ?? (() => {
+  const i = process.argv.indexOf("--host");
+  return i !== -1 ? process.argv[i + 1] : undefined;
+})();
+const hostname = explicitHost ?? (noAuth ? "127.0.0.1" : undefined);
+
+serve({ fetch: app.fetch, port, hostname }, (info) => {
   console.log(`twing serve: listening on http://localhost:${info.port}`);
+  if (noAuth) {
+    console.log("twing serve: --no-auth is set -- every request must carry a self-declared X-Twing-Developer-Id header, no identity is verified.");
+    if (explicitHost && explicitHost !== "127.0.0.1" && explicitHost !== "localhost") {
+      console.log(`twing serve: WARNING -- bound to ${explicitHost} with --no-auth set. Anyone who can reach this port can write as any self-declared developer id. Loopback-only (127.0.0.1) is the safe default; only override this on a network you trust.`);
+    }
+  }
   if (extractProvider === "openrouter" && !process.env.OPENROUTER_API_KEY) {
     console.log("twing serve: OPENROUTER_API_KEY not set -- ExitPlanMode design checks will fail soft to 'clean'");
   } else if (extractProvider === "bedrock") {

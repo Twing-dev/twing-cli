@@ -16,6 +16,11 @@ import (
 // serverAuth mirrors ServerAuth in config.ts.
 type serverAuth struct {
 	AuthToken string `json:"authToken"`
+	// NoAuth mirrors config.ts's ServerAuth.noAuth (§17 Phase 4) -- set only
+	// by `twing init --server <url> --no-auth`, never inferred. When true,
+	// design_gate.go's fail-closed "no cached token" checks are allowed to
+	// pass instead of denying.
+	NoAuth bool `json:"noAuth"`
 }
 
 // globalConfig mirrors TwingConfig in config.ts.
@@ -96,6 +101,9 @@ func readGlobalConfig() globalConfig {
 type twingConfig struct {
 	ServerURL string
 	AuthToken string
+	// NoAuth mirrors serverAuth.NoAuth above, resolved for this specific
+	// repo's coordinator the same way AuthToken is.
+	NoAuth bool
 	// RepoRoot is cwd's resolved git repo root -- carried alongside
 	// ServerURL so callers can check a specific tool_input.file_path is
 	// actually inside this repo before applying repo-scoped gate logic to
@@ -115,5 +123,6 @@ func resolveServerConfig(cwd string) twingConfig {
 	}
 	normalized := normalizeServerURL(serverURL)
 	global := readGlobalConfig()
-	return twingConfig{ServerURL: normalized, AuthToken: global.Servers[normalized].AuthToken, RepoRoot: repoRoot}
+	auth := global.Servers[normalized]
+	return twingConfig{ServerURL: normalized, AuthToken: auth.AuthToken, NoAuth: auth.NoAuth, RepoRoot: repoRoot}
 }

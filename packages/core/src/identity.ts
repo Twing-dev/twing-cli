@@ -92,3 +92,42 @@ export function computeDeveloperId(repoRoot: string): string {
 export function computeBranch(repoRoot: string): string {
   return git(["rev-parse", "--abbrev-ref", "HEAD"], repoRoot) ?? "unknown";
 }
+
+/** §17 Phase 3: the raw `origin` remote URL, exposed separately from
+ * `computeProjectId` (which only ever needs the hashed/canonicalized form)
+ * because `init.ts` needs the canonicalized-but-unhashed string to feed
+ * `parseGithubOwnerRepo` below. `null` when there's no `origin` remote at
+ * all -- same case `computeProjectId` falls back to a persisted random id
+ * for. */
+export function getOriginRemoteUrl(repoRoot: string): string | null {
+  return git(["remote", "get-url", "origin"], repoRoot);
+}
+
+/**
+ * §17 Phase 3: extracts `{owner, repo}` from a *canonicalized* remote URL
+ * (i.e. already run through `canonicalizeRemoteUrl` above) when it's
+ * GitHub-hosted, `undefined` otherwise -- a non-GitHub host, or the
+ * no-remote random-id fallback case (never call this with anything but a
+ * real canonicalized URL). Deliberately strict: exactly two path segments
+ * after the host, or this returns `undefined` rather than guessing --
+ * `canonicalizeRemoteUrl` already stripped `.git`/trailing slashes/case, so
+ * a real GitHub repo URL always canonicalizes to exactly
+ * `github.com/owner/repo`.
+ */
+export function parseGithubOwnerRepo(canonicalRemoteUrl: string): { owner: string; repo: string } | undefined {
+  const match = canonicalRemoteUrl.match(/^github\.com\/([^/]+)\/([^/]+)$/);
+  if (!match) return undefined;
+  return { owner: match[1], repo: match[2] };
+}
+
+/** Combines `getOriginRemoteUrl` + `canonicalizeRemoteUrl` + `parseGithubOwnerRepo`
+ * -- the one call every GitHub-verified-onboarding call site needs (`init.ts`'s
+ * founding-time seed, and, as of the `init`-wired default join/found path,
+ * `join.ts` and `init.ts`'s auth resolution too). `undefined` for a repo with
+ * no `origin` remote or a non-GitHub one -- callers use that to skip the
+ * GitHub path entirely (e.g. `init.ts` avoids ever popping the device-flow
+ * browser prompt for a repo it can't possibly work on). */
+export function githubBinding(repoRoot: string): { owner: string; repo: string } | undefined {
+  const remoteUrl = getOriginRemoteUrl(repoRoot);
+  return remoteUrl ? parseGithubOwnerRepo(canonicalizeRemoteUrl(remoteUrl)) : undefined;
+}

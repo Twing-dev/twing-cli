@@ -13,6 +13,12 @@ import { readConfig, getServerAuth, findRepoRoot, loadManifestFromFile, twingCon
 interface RequiredConfig {
   serverUrl: string;
   authToken?: string;
+  /** §17 Phase 4: self-declared, attribution-only -- only ever reaches the
+   * wire when this server is cached `noAuth: true` (a `full auth` server
+   * ignores the header `authFetch` sets from it). Always computed, never
+   * branched on here, matching `http.ts`'s "harmless to pass alongside a
+   * real token" design. */
+  developerId: string;
 }
 
 /** Resolves the coordinator for `repoRoot`'s own committed `.twing/twing.yml`
@@ -26,7 +32,7 @@ function requireConfig(repoRoot: string): RequiredConfig {
     throw new Error("twing design: no coordinator configured for this repo -- run `twing init --server <url>` once to set it up");
   }
   const authToken = getServerAuth(readConfig(), serverUrl)?.authToken;
-  return { serverUrl, authToken };
+  return { serverUrl, authToken, developerId: computeDeveloperId(repoRoot) };
 }
 
 function splitList(value?: string): string[] {
@@ -99,7 +105,7 @@ export interface RegisterOptions {
  */
 export async function runDesignRegister(options: RegisterOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
   const session = options.session ?? process.env.CLAUDE_CODE_SESSION_ID;
   if (!session) {
     throw new Error(
@@ -110,7 +116,6 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
   }
 
   const projectId = computeProjectId(repoRoot);
-  const developerId = computeDeveloperId(repoRoot);
 
   const res = await authFetch(
     `${serverUrl}/v1/designs/check`,
@@ -129,6 +134,7 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
       }),
     },
     authToken,
+    developerId,
   );
   printDesignVerdict(await parseJsonOrUnauthorized<DesignCheckResponseJSON>(res));
 }
@@ -142,7 +148,7 @@ export interface ResolveOptions {
 
 export async function runDesignResolve(options: ResolveOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
   if (!options.id) {
     throw new Error("twing design resolve: --id <designId> is required");
   }
@@ -162,6 +168,7 @@ export async function runDesignResolve(options: ResolveOptions): Promise<void> {
       body: JSON.stringify(body),
     },
     authToken,
+    developerId,
   );
   console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
 }
@@ -186,7 +193,7 @@ export interface AmendOptions {
  */
 export async function runDesignAmend(options: AmendOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
   if (!options.id) {
     throw new Error("twing design amend: --id <designId> is required");
   }
@@ -206,6 +213,7 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
       }),
     },
     authToken,
+    developerId,
   );
   printDesignVerdict(await parseJsonOrUnauthorized<DesignCheckResponseJSON>(res));
 }
@@ -231,7 +239,7 @@ export interface ResumeOptions {
  */
 export async function runDesignResume(options: ResumeOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
   if (!options.id) {
     throw new Error("twing design resume: --id <designId> is required");
   }
@@ -256,6 +264,7 @@ export async function runDesignResume(options: ResumeOptions): Promise<void> {
       }),
     },
     authToken,
+    developerId,
   );
   printDesignVerdict(await parseJsonOrUnauthorized<DesignCheckResponseJSON>(res));
 }
@@ -279,13 +288,13 @@ function relativeTime(ms: number): string {
 
 export async function runDesignList(options: ListOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
   const projectId = computeProjectId(repoRoot);
 
   const params = new URLSearchParams({ projectId });
   if (options.status) params.set("status", options.status);
 
-  const res = await authFetch(`${serverUrl}/v1/designs?${params}`, {}, authToken);
+  const res = await authFetch(`${serverUrl}/v1/designs?${params}`, {}, authToken, developerId);
   if (res.status === 401) {
     console.error(`twing design list: ${UNAUTHORIZED_HINT}`);
     return;
@@ -309,7 +318,7 @@ export interface ReviewsOptions {
  * justified-divergence reviews, or decide one. */
 export async function runDesignReviews(options: ReviewsOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
   const projectId = computeProjectId(repoRoot);
 
   if (options.decide) {
@@ -324,12 +333,13 @@ export async function runDesignReviews(options: ReviewsOptions): Promise<void> {
         body: JSON.stringify({ decision: options.decision }),
       },
       authToken,
+      developerId,
     );
     console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
     return;
   }
 
-  const res = await authFetch(`${serverUrl}/v1/reviews?projectId=${encodeURIComponent(projectId)}`, {}, authToken);
+  const res = await authFetch(`${serverUrl}/v1/reviews?projectId=${encodeURIComponent(projectId)}`, {}, authToken, developerId);
   if (res.status === 401) {
     console.error(`twing design reviews: ${UNAUTHORIZED_HINT}`);
     return;

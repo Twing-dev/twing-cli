@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { startDaemon } from "./daemon/server.js";
-import { defaultSocketPath, authFetch } from "@twing/core";
+import { defaultSocketPath, authFetch, computeDeveloperId } from "@twing/core";
 import { runInit } from "./init.js";
 import { runLogin } from "./login.js";
+import { runJoinGithub } from "./join.js";
 import { runAlign, runAlignRespond, runAlignThreads, runAlignClose } from "./align.js";
 import { runKeygen } from "./keygen.js";
 import { resolveServerUrl, requireAuth } from "./auth.js";
@@ -54,10 +55,11 @@ function printUsage(): void {
   console.error(
     [
       "Usage:",
-      "  twing init [--server <url>] [--invite <code>]",
+      "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github]",
       "  twing login [--server <url>] [--token <pat>]",
       "  twing keygen --invite <code> [--server <url>] [--label <email>]",
       "  twing whoami [--server <url>]",
+      "  twing join --github [--server <url>]",
       "  twing daemon",
       "  twing align [--intent \"...\"]",
       "  twing align threads [--status open]",
@@ -212,7 +214,7 @@ async function runWhoami(options: { server?: string; cwd: string }): Promise<voi
   const serverUrl = resolveServerUrl(options.cwd, options.server);
   if (!serverUrl) throw new Error("twing whoami: no server URL given -- pass --server <url> or set TWING_SERVER.");
   const token = requireAuth(serverUrl, "twing whoami");
-  const res = await authFetch(`${serverUrl}/v1/auth/whoami`, {}, token);
+  const res = await authFetch(`${serverUrl}/v1/auth/whoami`, {}, token, computeDeveloperId(options.cwd));
   const body = await res.json().catch(() => ({}));
   console.log(JSON.stringify(body, null, 2));
 }
@@ -234,7 +236,7 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "init":
-      await runInit({ server: flags.server, invite: flags.invite, cwd: process.cwd() });
+      await runInit({ server: flags.server, invite: flags.invite, noAuth: flags["no-auth"] === "true", noGithub: flags["no-github"] === "true", cwd: process.cwd() });
       return;
     case "login":
       await runLogin({ server: flags.server, token: flags.token, cwd: process.cwd() });
@@ -248,6 +250,10 @@ async function main(): Promise<void> {
     }
     case "whoami":
       await runWhoami({ server: flags.server, cwd: process.cwd() });
+      return;
+    case "join":
+      if (flags.github !== "true") throw new Error("twing join: --github is required (the only join mechanism this command supports so far)");
+      await runJoinGithub({ server: flags.server, cwd: process.cwd() });
       return;
     case "daemon":
       await runDaemonForeground();

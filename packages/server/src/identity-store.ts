@@ -14,10 +14,21 @@
  * project's admins onboarding further contributors (invite + local
  * keygen, never admin-generates-and-hands-off).
  *
- * `Organization`/`OrgMembership` exist as a bare tenant-isolation anchor
- * for a possible future managed/billed offering -- no `plan`/`quota`/
- * payment fields, none of that is built here. In self-hosted use there is
- * exactly one org, created once by `bootstrap()`.
+ * `Organization`/`OrgMembership` exist as a bare tenant-isolation anchor for
+ * the invite/admin-bootstrap path -- no `plan`/`quota`/payment fields, none
+ * of that is built here. In self-hosted use there is exactly one org,
+ * created once by `bootstrap()`.
+ *
+ * §17 Phase 3 GitHub-founding (2026-08-17): a project founded via verified
+ * GitHub repo access has no org at all (`orgId: null` on its
+ * `ProjectRecord`) -- access control for it is purely per-project
+ * (`projectMemberships`; `canManageProject`/`isProjectMember` in `app.ts`
+ * already check that before ever consulting `orgId`). This means org is
+ * *not* the right anchor for a possible future managed/billed offering
+ * (superseding this file's older assumption to the contrary) -- `projectId`
+ * or the plain-text `githubOwner` column (aggregate at query time, no FK
+ * needed) are the natural metering keys instead, since the frictionless
+ * default onboarding path deliberately has no org to bill against.
  */
 
 import * as fs from "node:fs";
@@ -51,9 +62,18 @@ export interface OrgMembership {
 
 export interface ProjectRecord {
   projectId: string;
-  orgId: string;
+  /** Absent for a project founded via verified GitHub repo access (§17
+   * Phase 3 GitHub-founding) -- those have no twing org at all, access
+   * control is purely per-project. Always present for a project founded
+   * via the invite/admin-bootstrap path. */
+  orgId?: string;
   foundedBy: string;
   foundedAt: number;
+  /** §17 Phase 3: absent for projects founded before this shipped, or
+   * whose remote isn't GitHub-hosted at all (see schema.ts's doc comment
+   * on the underlying columns). */
+  githubOwner?: string;
+  githubRepo?: string;
 }
 
 export interface ProjectMembership {
@@ -326,7 +346,11 @@ export class IdentityStore {
     } else {
       this.grantProjectMembership(scope.projectId, developerId, invite.role);
       const project = this.getProjectRecord(scope.projectId);
-      if (project) this.grantOrgMembership(project.orgId, developerId, "member", /* onlyIfAbsent */ true);
+      // A project-scoped invite can only be created by an org/project admin
+      // (app.ts's canManageProject), which today always implies a real org
+      // -- but guard anyway since ProjectRecord.orgId is optional now (§17
+      // Phase 3 GitHub-founding can leave it unset).
+      if (project?.orgId) this.grantOrgMembership(project.orgId, developerId, "member", /* onlyIfAbsent */ true);
     }
     return { developerId };
   }
@@ -423,20 +447,114 @@ export class IdentityStore {
   }
 
   getProjectRecord(projectId: string): ProjectRecord | undefined {
-    return this.db.select().from(projectRecordsTable).where(eq(projectRecordsTable.projectId, projectId)).get();
+    const row = this.db.select().from(projectRecordsTable).where(eq(projectRecordsTable.projectId, projectId)).get();
+    if (!row) return undefined;
+    return { ...row, orgId: row.orgId ?? undefined, githubOwner: row.githubOwner ?? undefined, githubRepo: row.githubRepo ?? undefined };
   }
 
   /** §boundary-1: the first PAT-holding developer to touch a never-seen
    * `projectId` founds it, attached to their own org, and becomes its
-   * project-admin. */
-  foundProject(projectId: string, developerId: string): ProjectRecord | { error: string } {
+   * project-admin. `github` (§17 Phase 3) is best-effort, forwarded only by
+   * the one call site that computes it (`/v1/constraints/seed`, the
+   * founding trigger) -- absent for every other founding path, and for any
+   * project whose remote isn't GitHub-hosted at all. */
+  foundProject(projectId: string, developerId: string, github?: { owner: string; repo: string }): ProjectRecord | { error: string } {
     if (this.isProjectFounded(projectId)) return { error: "project already founded" };
     const orgMembership = this.db.select().from(orgMembershipsTable).where(eq(orgMembershipsTable.developerId, developerId)).get();
     if (!orgMembership) return { error: "founder has no organization membership" };
-    const record: ProjectRecord = { projectId, orgId: orgMembership.orgId, foundedBy: developerId, foundedAt: Date.now() };
-    this.db.insert(projectRecordsTable).values(record).run();
+    const record: ProjectRecord = {
+      projectId,
+      orgId: orgMembership.orgId,
+      foundedBy: developerId,
+      foundedAt: Date.now(),
+      githubOwner: github?.owner,
+      githubRepo: github?.repo,
+    };
+    this.db
+      .insert(projectRecordsTable)
+      .values({ ...record, githubOwner: github?.owner ?? null, githubRepo: github?.repo ?? null })
+      .run();
     this.db.insert(projectMembershipsTable).values({ projectId, developerId, role: "admin" }).run();
     return record;
+  }
+
+  /**
+   * §17 Phase 3: grants project (and, transitively, org `member`) access
+   * verified through GitHub repo permissions instead of an invite code --
+   * structurally independent of `redeemInvite` above (no invite object
+   * involved at all), but the identity-minting halves are intentionally
+   * identical: an already-known developer (`developerId`, resolved by the
+   * caller from an existing bearer token) attaches a new membership to
+   * their existing identity; a brand-new developer (`tokenHash` + `label`,
+   * generated client-side by their own `twing join --github`) gets a fresh
+   * one. `role` is decided entirely by the caller (`app.ts`, from the
+   * verified GitHub permissions) -- this method just grants it, the same
+   * separation `redeemInvite` keeps between "what role" and "mint/attach
+   * identity."
+   */
+  joinProject(projectId: string, role: Role, params: { developerId: string } | { tokenHash: string; label: string }): RedeemResult {
+    const project = this.getProjectRecord(projectId);
+    if (!project) return { error: "no such project" };
+
+    let developerId: string;
+    if ("developerId" in params) {
+      const known = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.developerId)).get();
+      if (!known) return { error: "unknown developer" };
+      developerId = params.developerId;
+    } else {
+      const existing = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.label)).get();
+      if (existing) {
+        return { error: `a developer identity for "${params.label}" already exists -- log in with that PAT instead of generating a new one` };
+      }
+      developerId = params.label;
+      this.db.insert(developersTable).values({ developerId, tokenHash: params.tokenHash, createdAt: Date.now() }).run();
+    }
+
+    this.grantProjectMembership(projectId, developerId, role);
+    // No org to join at all for a project founded via GitHub (orgId unset,
+    // §17 Phase 3 GitHub-founding below) -- access control for it is purely
+    // per-project.
+    if (project.orgId) this.grantOrgMembership(project.orgId, developerId, "member", /* onlyIfAbsent */ true);
+    return { developerId };
+  }
+
+  /**
+   * §17 Phase 3 GitHub-founding (2026-08-17): founds a brand-new project
+   * with no org at all -- gated entirely by the caller's real GitHub
+   * `admin`/`maintain` permission on the bound repo (checked by the route
+   * before calling this, same bar `join-via-github` already uses to grant
+   * twing `admin`), never by pre-existing org membership the way
+   * `foundProject` above requires. That's the whole point: this is the
+   * founding path for a coordinator with no admin-bootstrapped org and no
+   * invite chain at all -- `twing init` alone, for anyone with real GitHub
+   * authority over the repo. Identity minting mirrors `joinProject`'s
+   * dual-mode split exactly (this method and `joinProject` are the two
+   * halves of the same route, split apart only by "does a project record
+   * already exist").
+   */
+  foundProjectViaGithub(projectId: string, params: { developerId: string } | { tokenHash: string; label: string }, github: { owner: string; repo: string }): RedeemResult {
+    if (this.isProjectFounded(projectId)) return { error: "project already founded" };
+
+    let developerId: string;
+    if ("developerId" in params) {
+      const known = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.developerId)).get();
+      if (!known) return { error: "unknown developer" };
+      developerId = params.developerId;
+    } else {
+      const existing = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.label)).get();
+      if (existing) {
+        return { error: `a developer identity for "${params.label}" already exists -- log in with that PAT instead of generating a new one` };
+      }
+      developerId = params.label;
+      this.db.insert(developersTable).values({ developerId, tokenHash: params.tokenHash, createdAt: Date.now() }).run();
+    }
+
+    this.db
+      .insert(projectRecordsTable)
+      .values({ projectId, orgId: null, foundedBy: developerId, foundedAt: Date.now(), githubOwner: github.owner, githubRepo: github.repo })
+      .run();
+    this.db.insert(projectMembershipsTable).values({ projectId, developerId, role: "admin" }).run();
+    return { developerId };
   }
 
   getProjectRole(projectId: string, developerId: string): Role | undefined {

@@ -71,6 +71,25 @@ func setCachedToken(t *testing.T, serverURL, token string) {
 	}
 }
 
+// setCachedNoAuth is setCachedToken's §17 Phase 4 counterpart: caches
+// noAuth:true for serverURL instead of a token, same isolated-$HOME
+// mechanics. Never sets authToken -- a no_auth coordinator never issues
+// one, and the whole point of these tests is proving the gate proceeds
+// without one when (and only when) this flag is set.
+func setCachedNoAuth(t *testing.T, serverURL string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgDir := filepath.Join(home, ".twing")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := fmt.Sprintf(`{"servers":{%q:{"noAuth":true}}}`, serverURL)
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // captureStdout redirects os.Stdout for the duration of fn and returns
 // whatever it wrote -- design_gate.go's handlers write directly to
 // os.Stdout (writeJSON), same as they do for real, so this exercises the
@@ -145,6 +164,38 @@ func TestHandleEditWriteGate_NoCachedToken_DeniesWithoutNetworkCall(t *testing.T
 	}
 	if !strings.Contains(reason, "no auth token cached") {
 		t.Errorf("reason = %q, want it to mention no cached token", reason)
+	}
+}
+
+// §17 Phase 4: the one place a missing-token state now means two different
+// things -- this is the security-relevant regression to guard specifically.
+// With noAuth cached true, no cached authToken must NOT deny; the request
+// must go out carrying a self-declared X-Twing-Developer-Id header instead
+// of an Authorization bearer.
+func TestHandleEditWriteGate_NoAuthCached_NoTokenStillProceeds_SendsDeveloperIdHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("authorization") != "" {
+			t.Errorf("unexpected authorization header on a no_auth request: %q", r.Header.Get("authorization"))
+		}
+		if r.Header.Get("x-twing-developer-id") == "" {
+			t.Errorf("missing x-twing-developer-id header on a no_auth request")
+		}
+		switch r.URL.Path {
+		case "/v1/constraints/match":
+			_, _ = w.Write([]byte(`{"matched":false}`))
+		case "/v1/designs/scope-match":
+			_, _ = w.Write([]byte(`{"state":"in_scope","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedNoAuth(t, server.URL)
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "allow" {
+		t.Fatalf("decision = %q, reason = %q, want allow (a no_auth coordinator must proceed without a cached token)", decision, reason)
 	}
 }
 
@@ -447,6 +498,31 @@ func TestHandleExitPlanMode_NoCachedToken_DeniesWithoutNetworkCall(t *testing.T)
 	}
 	if !strings.Contains(reason, "no auth token cached") {
 		t.Errorf("reason = %q, want it to mention no cached token", reason)
+	}
+}
+
+// §17 Phase 4: same regression coverage as the Edit|Write gate above, for
+// the ExitPlanMode path.
+func TestHandleExitPlanMode_NoAuthCached_NoTokenStillProceeds_SendsDeveloperIdHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("authorization") != "" {
+			t.Errorf("unexpected authorization header on a no_auth request: %q", r.Header.Get("authorization"))
+		}
+		if r.Header.Get("x-twing-developer-id") == "" {
+			t.Errorf("missing x-twing-developer-id header on a no_auth request")
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedNoAuth(t, server.URL)
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "allow" {
+		t.Fatalf("decision = %q, reason = %q, want allow (a no_auth coordinator must proceed without a cached token)", decision, reason)
 	}
 }
 
