@@ -65,19 +65,21 @@ twing align
 twing align --intent "adding a retry wrapper for the payments client"
 ```
 
-`align` works even with no daemon and no hooks installed -- it falls back
-to computing claims directly from `git diff` against your branch's
-merge-base with the default branch.
+`twing align` is advisory -- it never blocks, just reports. It tells you
+whether you're touching a file flagged as critical, whether anyone else is
+actively working on the same code right now, and whether it overlaps a
+design someone else has registered. Works even with no daemon or hooks
+installed, falling back to `git diff` against your branch's merge-base
+with the default branch.
 
 ### Quick command reference
 
 | Command | What it does |
 |---|---|
 | `twing init [--server <url>]` | One-time setup per machine: discover/confirm the coordinator, authenticate, install/wire the hook, start the daemon. Safe to re-run. |
-| `twing login [--server <url>]` | Just (re)authenticate against a server -- no hook install, no daemon start. |
-| `twing join --github [--server <url>]` | Just the GitHub-verified auth step, on its own -- e.g. to re-check your role after a GitHub permissions change. |
-| `twing whoami [--server <url>]` | Prints your authenticated identity and org/project roles. |
 | `twing align [--intent "..."]` | Cross-session divergence findings (advisory, never blocks). |
+| `twing design register --summary "..." --touches a,b` | Register a design before your first edit/write (or let plan mode do it automatically). |
+| `twing design amend --id <designId> --touches c,d` | Expand an already-registered design to cover more files. |
 
 The full command list, including self-hosting/admin commands, is in
 "Modifying twing-cli itself" below.
