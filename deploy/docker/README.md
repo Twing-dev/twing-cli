@@ -13,7 +13,7 @@ directly.
 git clone git@github.com:Twing-dev/twing-cli.git
 cd twing-cli/deploy/docker
 cp .env.example .env    # fill in what you need, see comments in the file
-sudo mkdir -p /opt/twing-serve/data
+mkdir -p data            # no sudo needed -- lives inside the checkout
 ```
 
 Point `coordination-server.twing.dev` (or whatever domain you're using) at
@@ -60,12 +60,12 @@ twing admin bootstrap --server <url> --token <the new one>
 
 ## Backups
 
-The SQLite file lives at `/opt/twing-serve/data` on the host (bind-mounted
+The SQLite file lives at `deploy/docker/data` in the checkout (bind-mounted
 into the container, not a named volume, specifically so this works without
 `docker exec`):
 
 ```sh
-sqlite3 /opt/twing-serve/data/twing.db ".backup /path/to/backup-$(date +%F).db"
+sqlite3 ~/twing-cli/deploy/docker/data/twing.db ".backup /path/to/backup-$(date +%F).db"
 ```
 
 Cron this daily and ship the result off-box. Never `cp` the file directly

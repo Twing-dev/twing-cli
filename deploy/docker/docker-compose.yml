@@ -21,8 +21,10 @@ services:
     volumes:
       # Bind mount, not a named volume -- so the backup cron job (see
       # deploy/docker/README.md) can read the SQLite file straight off the
-      # host filesystem without needing `docker exec`.
-      - /opt/twing-serve/data:/data
+      # host filesystem without needing `docker exec`. Lives inside the
+      # checkout itself (not /opt) so `docker compose up` never needs root
+      # just to create its own data directory.
+      - ./data:/data
     # No `ports:` here deliberately -- this is never published to the host.
     # Only the caddy service below can reach it, container-to-container
     # over this compose project's own network (service-name DNS, hence

@@ -22,6 +22,9 @@ simulator/.workspaces/
 # deploy/docker's real secrets file -- deploy/docker/.env.example is the
 # committed template.
 /deploy/docker/.env
+# deploy/docker's runtime data (SQLite db, bootstrap token) -- created by
+# `mkdir -p data`, bind-mounted into the container, never committed.
+/deploy/docker/data/
 
 # Hook commands in here are absolute, $HOME-specific paths baked in by
 # `twing init` (hookBinaryPath()) -- committing it breaks on every machine
