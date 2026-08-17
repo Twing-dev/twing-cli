@@ -93,6 +93,18 @@ async function runDesignCommand(rest: string[]): Promise<void> {
   const flags = parseFlags(subArgs);
   const cwd = process.cwd();
 
+  // `--help` after a subcommand name (`design register --help`) used to
+  // reach the real handler like any other unrecognized flag and, for
+  // `register` specifically, silently register a real empty design against
+  // the live coordinator instead of printing usage -- found live,
+  // 2026-08-17. `design register` itself now also refuses an empty
+  // --summary as defense in depth, but every subcommand dispatcher gets
+  // this check so none of them can repeat the same mistake.
+  if (flags.help === "true") {
+    printUsage();
+    return;
+  }
+
   switch (sub) {
     case "register":
       await runDesignRegister({ cwd, session: flags.session, label: flags.label, summary: flags.summary, creates: flags.creates, touches: flags.touches, dependsOn: flags["depends-on"] });
@@ -133,23 +145,32 @@ async function runAlignCommand(rest: string[]): Promise<void> {
   const cwd = process.cwd();
   const [maybeSub, ...subArgs] = rest;
 
+  // Same dispatcher-level fix as runDesignCommand -- see its comment.
+  // `align`'s own handlers are read-only/advisory (no destructive side
+  // effect from a malformed call the way `design register` had), but a
+  // stray `--help` should still show usage, not silently run with
+  // whatever fields happened to be undefined.
   if (maybeSub === "threads") {
     const flags = parseFlags(subArgs);
+    if (flags.help === "true") return printUsage();
     await runAlignThreads({ cwd, status: flags.status });
     return;
   }
   if (maybeSub === "respond") {
     const flags = parseFlags(subArgs);
+    if (flags.help === "true") return printUsage();
     await runAlignRespond({ cwd, finding: flags.finding, message: flags.message });
     return;
   }
   if (maybeSub === "close") {
     const flags = parseFlags(subArgs);
+    if (flags.help === "true") return printUsage();
     await runAlignClose({ cwd, finding: flags.finding });
     return;
   }
 
   const flags = parseFlags(rest);
+  if (flags.help === "true") return printUsage();
   await runAlign({ intent: flags.intent, cwd });
 }
 
@@ -157,6 +178,12 @@ async function runAdminCommand(rest: string[]): Promise<void> {
   const [sub, ...subArgs] = rest;
   const flags = parseFlags(subArgs);
   const cwd = process.cwd();
+
+  // Same dispatcher-level fix as runDesignCommand -- see its comment.
+  if (flags.help === "true") {
+    printUsage();
+    return;
+  }
 
   switch (sub) {
     case "bootstrap":
@@ -187,6 +214,12 @@ async function runProjectCommand(rest: string[]): Promise<void> {
   const [sub, ...subArgs] = rest;
   const flags = parseFlags(subArgs);
   const cwd = process.cwd();
+
+  // Same dispatcher-level fix as runDesignCommand -- see its comment.
+  if (flags.help === "true") {
+    printUsage();
+    return;
+  }
 
   switch (sub) {
     case "invite":
@@ -233,6 +266,14 @@ async function runDaemonForeground(): Promise<void> {
 async function main(): Promise<void> {
   const [, , command, ...rest] = process.argv;
   const flags = parseFlags(rest);
+
+  // A bare `twing --help`/`-h` already printed usage via the "unknown
+  // command" fallback below (command === "--help" matches no case), but
+  // exited 1 like a real error -- an explicit help request should exit 0.
+  if (command === "--help" || command === "-h") {
+    printUsage();
+    return;
+  }
 
   switch (command) {
     case "init":

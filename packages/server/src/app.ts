@@ -17,7 +17,6 @@ import { runChecks } from "./checks.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
 import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
-import type { LlmProvider } from "./llm-client.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
 import { AlignmentThreadStore } from "./alignment-store.js";
@@ -128,12 +127,13 @@ export interface CreateAppOptions {
   constraints?: ConstraintStore;
   identities?: IdentityStore;
   alignmentThreads?: AlignmentThreadStore;
+  /** Bedrock model id for design-extract.ts's plan->fields extraction (see
+   * llm-client.ts's header comment) -- defaults to the same model
+   * semanticCheckModel does below, the one this repo's own eval validated
+   * against a Bedrock account with credits. */
   extractModel?: string;
-  /** Defaults to "openrouter" -- see llm-client.ts's provider seam. */
-  extractProvider?: LlmProvider;
-  openRouterApiKey?: string;
-  /** design-semantic-check.ts's model -- always Bedrock (see that file's
-   * header comment), defaults to the model this repo's own eval settled on. */
+  /** design-semantic-check.ts's model -- defaults to the model this repo's
+   * own eval settled on. */
   semanticCheckModel?: string;
   /** §17 Phase 4: no identity verification at all -- every /v1/* request
    * must carry a self-declared X-Twing-Developer-Id header (attribution
@@ -156,9 +156,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const identities = options.identities ?? new IdentityStore(db, { dataDir: options.dataDir });
   const alignmentThreads = options.alignmentThreads ?? new AlignmentThreadStore(db);
   const activityLog = new DrizzleActivityLog(db);
-  const extractModel = options.extractModel ?? "openai/gpt-oss-20b:free";
-  const extractProvider = options.extractProvider ?? "openrouter";
-  const openRouterApiKey = options.openRouterApiKey;
+  const extractModel = options.extractModel ?? "google.gemma-4-31b";
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
   const noAuth = options.noAuth ?? false;
 
@@ -620,7 +618,7 @@ export function createApp(options: CreateAppOptions = {}) {
     let summary = body.summary ?? "";
 
     if (body.rawPlanText && !hasStructured) {
-      const extracted = await extractDesign(body.rawPlanText, { model: extractModel, provider: extractProvider, apiKey: openRouterApiKey });
+      const extracted = await extractDesign(body.rawPlanText, { model: extractModel });
       creates = extracted.creates;
       touches = extracted.touches;
       dependsOn = extracted.dependsOn;
@@ -728,16 +726,28 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!body.justification) {
       return c.json({ error: "justified_divergence requires a justification" }, 400);
     }
-    // §17 review-flow fix (2026-08): if this design is currently flagged for
-    // a specific constraint, attribute the review to that constraint id --
-    // re-running the check against the design's own unchanged scope (no
-    // delta) is the cheapest way to discover it without persisting anything
-    // new on the design row just for this. Undefined for an overlap-type
-    // divergence, or a design that isn't currently constraint-flagged at
-    // all -- addReview treats that the same as before this fix.
-    const { outcome: currentOutcome } = checkAmendedScope(design, { touches: [], creates: [], dependsOn: [] });
-    const constraintId = currentOutcome.verdict === "constraint_flag" ? currentOutcome.constraint?.id : undefined;
-    const review = designs.addReview(id, design.projectId, body.justification, constraintId);
+    // §17 review-flow fix (2026-08, amended 2026-08-17): if this design's
+    // own scope matches a constraint, attribute the review to that
+    // constraint id so approving it can later exclude it from the
+    // ground-truth backstop (justifiedConstraintIds, /v1/constraints/match).
+    // Originally derived this from `checkAmendedScope`'s overall verdict --
+    // wrong, because `runDesignChecks` returns tier-1 "overlap" (a conflict
+    // against some *other* open design) before it ever reaches tier-3's
+    // constraint check, whenever both happen to be true at once. Found live
+    // 2026-08-17: this design (7d65230f) genuinely touched
+    // require_human_review paths (app.ts, hook/design_gate.go) *and*
+    // happened to overlap another open design on those same files -- the
+    // recomputed verdict came back "overlap", constraintId was silently
+    // dropped, and the approved review never populated
+    // justifiedConstraintIds, so the ground-truth check kept denying
+    // forever even after approval -- the exact bug this design was
+    // registered to fix, reproducing itself. Checking the constraint match
+    // directly against the design's own creates/touches (independent of
+    // whatever else is open) is immune to that -- it answers "does this
+    // design's scope hit a flagged path", not "what's the single top-line
+    // verdict against everything else right now".
+    const constraintHit = matchConstraintsForPaths([...design.creates, ...design.touches], constraintStore.forProject(design.projectId), design.justifiedConstraintIds);
+    const review = designs.addReview(id, design.projectId, body.justification, constraintHit?.id);
     console.log(`twing serve: design ${id.slice(0, 8)} justified divergence -> pending review ${review.id.slice(0, 8)}`);
     return c.json({ status: "pending_review", reviewId: review.id });
   });
@@ -1116,6 +1126,18 @@ export function createApp(options: CreateAppOptions = {}) {
   // happens to mention the path it's about to edit. Called by the
   // Edit|Write gate on every tool call, ahead of (and independent of) the
   // "does this session have an open design at all" check.
+  //
+  // sessionId fix (2026-08-17): found live -- a constraint already
+  // justified *and approved* for this session's own open design still
+  // denied every subsequent edit forever, because this route never
+  // consulted a design's `justifiedConstraintIds` at all. Optional
+  // sessionId lets it now exclude constraints already reviewed and
+  // approved for the caller's own currently-*open* design (matching
+  // constraintMatch's tier-3 registration-time check, design-checks.ts) --
+  // omitting it (or having no matching open design) reproduces the exact
+  // original behavior, so the anti-bypass property this route exists for
+  // is unchanged: a design that never mentions the path, or was never
+  // justified, still gets caught every time.
   app.get("/v1/constraints/match", (c) => {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
@@ -1125,7 +1147,15 @@ export function createApp(options: CreateAppOptions = {}) {
     }
     const authz = authorizeProject(identity, projectId);
     if (!authz.ok) return c.json({ error: authz.error }, authz.status);
-    const hit = matchConstraintsForPaths([path], constraintStore.forProject(projectId));
+
+    const sessionId = c.req.query("sessionId");
+    let excludeConstraintIds: string[] = [];
+    if (sessionId) {
+      const openDesigns = designs.listByProject(projectId).filter((d) => d.sessionId === sessionId && d.status === "open");
+      excludeConstraintIds = [...new Set(openDesigns.flatMap((d) => d.justifiedConstraintIds))];
+    }
+
+    const hit = matchConstraintsForPaths([path], constraintStore.forProject(projectId), excludeConstraintIds);
     if (hit) {
       console.log(`twing serve: constraint match on ${path} (project ${projectId.slice(0, 12)}) -- ${hit.type}: ${hit.statement}`);
     }

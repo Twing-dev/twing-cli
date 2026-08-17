@@ -1,19 +1,23 @@
 /**
  * `rawPlanText` -> structured design fields, via one LLM chat-completion
- * call (design doc §17.3) -- OpenRouter or Bedrock (via bedrock-mantle, see
- * `llm-client.ts`'s provider seam and its header comment for why that's not
- * the standard Bedrock Runtime API), (statefulness/eval work, 2026-08; same
- * driver-seam pattern as `db/client.ts`'s SQLite/Postgres choice). Same
- * prompt/parsing shape as `simulator/src/drivers/openrouter-driver.ts`,
- * duplicated rather than imported -- the server package shouldn't depend on
- * the simulator.
+ * call to Bedrock (design doc §17.3, statefulness/eval work 2026-08; see
+ * `llm-client.ts`'s header comment for why that's bedrock-mantle rather
+ * than the standard Bedrock Runtime API). Same prompt/parsing shape as
+ * `simulator/src/drivers/bedrock-driver.ts`, duplicated rather than
+ * imported -- the server package shouldn't depend on the simulator.
  *
  * Fails soft: any error, or malformed JSON surviving one retry, returns
  * empty fields rather than throwing. Degrading a blocking gate to "no
- * check ran" is the right failure mode; "deny everyone" is not.
+ * check ran" is the right failure mode; "deny everyone" is not. Unlike the
+ * old OpenRouter path (removed 2026-08-17), there's no upfront
+ * credential-presence check to skip on -- Bedrock's `AWS_BEARER_TOKEN_BEDROCK`
+ * is read ambiently by `llm-client.ts`, so a misconfigured server finds out
+ * the same way any other failure does: the real call throws, retries once,
+ * then falls soft. See main.ts's startup check for the one place this is
+ * still flagged proactively (a log line, not a precheck here).
  */
 
-import { callLlm, type LlmProvider } from "./llm-client.js";
+import { callLlm } from "./llm-client.js";
 
 const MAX_ATTEMPTS = 2;
 const MAX_PLAN_CHARS = 8000;
@@ -63,37 +67,17 @@ function parseExtraction(text: string): ExtractedDesign | undefined {
 }
 
 async function callOnce(planText: string, options: ExtractOptions): Promise<string> {
-  return callLlm(SYSTEM_PROMPT, planText.slice(0, MAX_PLAN_CHARS), {
-    provider: options.provider ?? "openrouter",
-    model: options.model,
-    apiKey: options.apiKey,
-    region: options.region,
-  });
+  return callLlm(SYSTEM_PROMPT, planText.slice(0, MAX_PLAN_CHARS), { model: options.model, region: options.region });
 }
 
 export interface ExtractOptions {
   model: string;
-  /** Defaults to "openrouter" -- every existing caller that omits this
-   * keeps today's exact behavior. */
-  provider?: LlmProvider;
-  /** OpenRouter only. */
-  apiKey?: string;
-  /** Bedrock only; omit to fall back to AWS_REGION/AWS_DEFAULT_REGION
-   * (llm-client.ts's ambient resolution). */
+  /** Omit to fall back to AWS_REGION/AWS_DEFAULT_REGION (llm-client.ts's
+   * ambient resolution). */
   region?: string;
 }
 
 export async function extractDesign(planText: string, options: ExtractOptions): Promise<ExtractedDesign> {
-  // The upfront skip-and-warn precheck is OpenRouter-specific: Bedrock has
-  // no equivalent single-secret presence check (AWS credential resolution
-  // is ambient/lazy, not a string to check for up front). A misconfigured
-  // Bedrock call just fails the real call below and falls into the same
-  // retry-then-fail-soft path as any other error -- no new failure mode.
-  if ((options.provider ?? "openrouter") === "openrouter" && !options.apiKey) {
-    console.warn("twing serve: no OPENROUTER_API_KEY set -- design extraction skipped, treating plan as clean");
-    return EMPTY_EXTRACTION;
-  }
-
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const text = await callOnce(planText, options);

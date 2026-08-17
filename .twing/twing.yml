@@ -36,4 +36,4 @@ triggers:
     reason: "possible duplicate of packages/core's socket protocol (protocol.ts,
       framing.ts) — check before building another"
 coordinator:
-  serverUrl: http://localhost:8787
+  serverUrl: https://coordination-server.twing.dev

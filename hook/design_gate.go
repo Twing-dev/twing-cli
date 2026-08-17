@@ -528,9 +528,15 @@ func dormantDesignReason(designID, summary string, dormantSinceMs int64) string 
 	)
 }
 
-func constraintMatchURL(serverURL, projectID, path string) string {
-	return fmt.Sprintf("%s/v1/constraints/match?projectId=%s&path=%s",
+// sessionID is optional (empty string omits the query param entirely) --
+// see checkPathConstraint's comment for why it's passed at all now.
+func constraintMatchURL(serverURL, projectID, path, sessionID string) string {
+	u := fmt.Sprintf("%s/v1/constraints/match?projectId=%s&path=%s",
 		strings.TrimRight(serverURL, "/"), url.QueryEscape(projectID), url.QueryEscape(path))
+	if sessionID != "" {
+		u += "&sessionId=" + url.QueryEscape(sessionID)
+	}
+	return u
 }
 
 type constraintMatchResponse struct {
@@ -555,8 +561,17 @@ const (
 // whatever the session's registered design claims to touch. Fail-closed
 // like every other check on this path -- a network/auth/parse error here
 // returns constraintCheckFailed with a reason, not a silent "clear".
-func checkPathConstraint(serverURL, authToken, developerID, projectID, filePath string) (constraintCheckResult, string) {
-	res, err := getJSON(constraintMatchURL(serverURL, projectID, filePath), authToken, developerID)
+//
+// sessionID (added 2026-08-17, fixing a live-reproduced bug): lets the
+// server exclude a constraint already justified-and-approved for this
+// session's own *open* design, so an approved justification actually
+// unblocks future edits instead of denying identically forever. The
+// original anti-bypass property this check exists for is unchanged -- a
+// session with no design, an unrelated design, or an unjustified
+// constraint still gets denied exactly as before; only the
+// already-reviewed-and-approved case behaves differently now.
+func checkPathConstraint(serverURL, authToken, developerID, projectID, sessionID, filePath string) (constraintCheckResult, string) {
+	res, err := getJSON(constraintMatchURL(serverURL, projectID, filePath, sessionID), authToken, developerID)
 	if err != nil {
 		logDesignGate("constraint match check failed (blocking): %v", err)
 		return constraintCheckFailed, unreachableReason(err)
@@ -587,7 +602,7 @@ func checkPathConstraint(serverURL, authToken, developerID, projectID, filePath 
 		"twing design coordinator: %s is covered by an existing %s rule: %q. This applies regardless of what your "+
 			"registered design claims to touch. If this is intentional and reviewed, record it as a justified "+
 			"divergence: `twing design resolve --id <your-design-id> --justify \"<reason>\"` (queues for human "+
-			"review, does not itself unblock you).",
+			"review -- an admin approving it is what unblocks you, not the justify call itself).",
 		filePath, result.Constraint.Type, result.Constraint.Statement,
 	)
 }
@@ -657,7 +672,7 @@ func handleEditWriteGate(payload hookPayload) {
 	}
 
 	if relPath != "" {
-		verdict, reason := checkPathConstraint(config.ServerURL, config.AuthToken, developerID, projectID, relPath)
+		verdict, reason := checkPathConstraint(config.ServerURL, config.AuthToken, developerID, projectID, payload.SessionID, relPath)
 		if verdict == constraintMatched || verdict == constraintCheckFailed {
 			writeJSON(denyOutput("PreToolUse", reason))
 			return

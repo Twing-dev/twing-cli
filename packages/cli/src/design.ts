@@ -115,6 +115,18 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
     );
   }
 
+  // The only field genuinely required to make a registration meaningful --
+  // found live, 2026-08-17: `register` was the one subcommand in this file
+  // with no required-arg check at all (every sibling -- resolve/amend/
+  // resume -- already validates), so a malformed call (e.g. `--help`
+  // mis-parsed as a real invocation, see runDesignCommand's own fix) fell
+  // through with `summary: options.summary ?? ""` and silently registered
+  // a real, empty, unrecoverable-looking design against the live
+  // coordinator instead of failing loudly.
+  if (!options.summary) {
+    throw new Error('twing design register: --summary "..." is required');
+  }
+
   const projectId = computeProjectId(repoRoot);
 
   const res = await authFetch(

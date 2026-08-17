@@ -4,36 +4,31 @@
  * serve `design-semantic-check.ts`'s async comparator, which needs real
  * few-shot conversation turns (system + example user/assistant pairs + the
  * real user turn), not just a single system+user exchange. This module owns
- * provider dispatch only; retry policy, parsing, and fail-soft behavior stay
- * in whichever caller has an opinion about them -- neither branch here
- * catches its own errors, both throw on failure.
+ * the Bedrock call only; retry policy, parsing, and fail-soft behavior stay
+ * in whichever caller has an opinion about them -- this file doesn't catch
+ * its own errors, it throws on failure.
  *
- * `"openrouter"` is the original call `design-extract.ts` used to make
- * directly. `"bedrock"` talks to `bedrock-mantle`, an OpenAI-compatible
- * chat-completions shim -- *not* the standard Bedrock Runtime `Converse`
- * API this file used to call via `@aws-sdk/client-bedrock-runtime`. That
- * SDK path doesn't actually work for the models this system uses on the
- * account we have credits on: `google.gemma-4-31b` isn't in
- * `ListFoundationModels`' catalog at all, and `zai.glm-5` (which is listed)
- * returns "Operation not allowed" on `ConverseCommand` -- both are only
- * reachable through this separate shim, confirmed live (2026-08). Since
- * bedrock-mantle is a plain Bearer-token HTTPS API, there's no AWS SigV4/
- * SDK involved at all -- same shape as the OpenRouter branch, just a
- * different URL/auth header, so the SDK dependency is gone entirely.
+ * Bedrock-only (OpenRouter support removed 2026-08-17 -- see git history if
+ * it's ever needed again; the org standardized on AWS Bedrock and doesn't
+ * want a second LLM vendor in the loop at all). Talks to `bedrock-mantle`,
+ * an OpenAI-compatible chat-completions shim -- *not* the standard Bedrock
+ * Runtime `Converse` API. That SDK path doesn't actually work for the
+ * models this system uses on the account we have credits on:
+ * `google.gemma-4-31b` isn't in `ListFoundationModels`' catalog at all, and
+ * `zai.glm-5` (which is listed) returns "Operation not allowed" on
+ * `ConverseCommand` -- both are only reachable through this separate shim,
+ * confirmed live (2026-08). Since bedrock-mantle is a plain Bearer-token
+ * HTTPS API, there's no AWS SigV4/SDK involved at all.
  * Per-model path differs (`gemma-4-31b` needs `/openai/v1`, everything else
  * defaults to plain `/v1`) -- same pattern as TwingMail's own
  * `packages/core/src/lib/ai.ts` `BEDROCK_MODEL_MAP`, which solves this
  * exact routing problem for its own Gemma usage.
  *
- * Credentials are never plumbed through explicitly the way OpenRouter's
- * `apiKey` is -- read ambiently from the environment (`AWS_BEARER_TOKEN_BEDROCK`
- * for auth, `region` falling back to `AWS_REGION`/`AWS_DEFAULT_REGION` when
- * unset). Nothing here reinvents that.
+ * Credentials are read ambiently from the environment
+ * (`AWS_BEARER_TOKEN_BEDROCK` for auth, `region` falling back to
+ * `AWS_REGION`/`AWS_DEFAULT_REGION` when unset) -- there's no explicit
+ * caller-supplied secret the way an API key would be.
  */
-
-export type LlmProvider = "openrouter" | "bedrock";
-
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 // gemma-4-31b is only reachable via bedrock-mantle's OpenAI-compat route,
 // not its plain-Bedrock-model route -- everything else (glm-5, and per
@@ -48,28 +43,10 @@ export interface ChatMessage {
 }
 
 export interface LlmCallOptions {
-  provider: LlmProvider;
-  /** Provider-specific model id string -- e.g. "openai/gpt-oss-20b:free"
-   * for OpenRouter, "google.gemma-4-31b" / "zai.glm-5" for Bedrock. */
+  /** Bedrock model id -- e.g. "google.gemma-4-31b", "zai.glm-5". */
   model: string;
-  /** OpenRouter only; ignored for Bedrock. */
-  apiKey?: string;
-  /** Bedrock only; omit to fall back to AWS_REGION/AWS_DEFAULT_REGION. */
+  /** Omit to fall back to AWS_REGION/AWS_DEFAULT_REGION. */
   region?: string;
-}
-
-async function callOpenRouter(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
-  const res = await fetch(OPENROUTER_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${options.apiKey}` },
-    body: JSON.stringify({ model: options.model, messages }),
-  });
-
-  const body = (await res.json()) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } };
-  if (!res.ok) {
-    throw new Error(`OpenRouter request failed (${res.status}): ${body.error?.message ?? JSON.stringify(body)}`);
-  }
-  return body.choices?.[0]?.message?.content?.trim() ?? "";
 }
 
 async function callBedrock(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
@@ -101,7 +78,7 @@ async function callBedrock(messages: ChatMessage[], options: LlmCallOptions): Pr
  * convenience wrapper for the common single-system-message-plus-user-turn
  * case. */
 export async function callLlmMessages(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
-  return options.provider === "bedrock" ? callBedrock(messages, options) : callOpenRouter(messages, options);
+  return callBedrock(messages, options);
 }
 
 export async function callLlm(systemPrompt: string, userPrompt: string, options: LlmCallOptions): Promise<string> {

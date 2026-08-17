@@ -36,30 +36,22 @@ if (process.argv.includes("--regenerate-bootstrap-token")) {
 const db = createDb(dataDirOptions);
 
 // §17.3/§17.6: design-gate extraction and constraint persistence config.
-// TWING_EXTRACT_PROVIDER=openrouter|bedrock (default openrouter), same
-// explicit-env-var/no-auto-detection precedent as TWING_DB_DRIVER
-// (db/client.ts). With the default provider, no OPENROUTER_API_KEY means
-// extraction is skipped and every ExitPlanMode check fails soft to "clean"
-// (logged) -- the gate still enforces the Edit|Write "must have a
-// registered design" rule either way. Bedrock needs no equivalent key here
-// -- it reads AWS credentials/region from the environment (AWS_REGION,
-// ~/.aws/credentials, IAM role) via the SDK's own resolution, same as any
-// other AWS-authenticated process.
-const extractProvider = process.env.TWING_EXTRACT_PROVIDER === "bedrock" ? "bedrock" : "openrouter";
+// Bedrock-only (OpenRouter support removed 2026-08-17 -- the org
+// standardized on AWS Bedrock and never wants a second LLM vendor in this
+// loop). No API-key precheck the way OpenRouter needed: Bedrock reads
+// AWS_BEARER_TOKEN_BEDROCK/AWS_REGION ambiently from the environment
+// (llm-client.ts), same as any other AWS-authenticated process -- a
+// misconfigured deployment finds out when the real call fails and falls
+// soft, not from a separate presence check.
+const extractModel = process.env.TWING_EXTRACT_MODEL ?? "google.gemma-4-31b";
 
-// design-semantic-check.ts's async comparator -- always Bedrock (see that
-// file's header comment for why: gemma-4-31b/glm-5 are only reachable via
-// bedrock-mantle, not OpenRouter, on the account this was validated
-// against). Same ambient-credential resolution as TWING_EXTRACT_PROVIDER=
-// bedrock: AWS_BEARER_TOKEN_BEDROCK/AWS_REGION read directly from the
-// environment by llm-client.ts, nothing plumbed through here.
+// design-semantic-check.ts's async comparator -- same ambient-credential
+// resolution, same model default (this repo's own eval settled on it).
 const semanticCheckModel = process.env.TWING_SEMANTIC_CHECK_MODEL ?? "google.gemma-4-31b";
 
 const app = createApp({
   db,
-  extractModel: process.env.TWING_EXTRACT_MODEL,
-  extractProvider,
-  openRouterApiKey: process.env.OPENROUTER_API_KEY,
+  extractModel,
   semanticCheckModel,
   constraints: new ConstraintStore(db),
   // §17.10: per-developer PATs, not a shared password. `IdentityStore`
@@ -88,14 +80,13 @@ serve({ fetch: app.fetch, port, hostname }, (info) => {
       console.log(`twing serve: WARNING -- bound to ${explicitHost} with --no-auth set. Anyone who can reach this port can write as any self-declared developer id. Loopback-only (127.0.0.1) is the safe default; only override this on a network you trust.`);
     }
   }
-  if (extractProvider === "openrouter" && !process.env.OPENROUTER_API_KEY) {
-    console.log("twing serve: OPENROUTER_API_KEY not set -- ExitPlanMode design checks will fail soft to 'clean'");
-  } else if (extractProvider === "bedrock") {
-    console.log("twing serve: TWING_EXTRACT_PROVIDER=bedrock -- using AWS credentials/region from the environment");
-  }
   if (!process.env.AWS_BEARER_TOKEN_BEDROCK) {
-    console.log(`twing serve: AWS_BEARER_TOKEN_BEDROCK not set -- async semantic-conflict checks (model ${semanticCheckModel}) will fail soft to 'no conflict'`);
+    console.log(
+      `twing serve: AWS_BEARER_TOKEN_BEDROCK not set -- ExitPlanMode design extraction (model ${extractModel}) will fail soft to 'clean', ` +
+        `and async semantic-conflict checks (model ${semanticCheckModel}) will fail soft to 'no conflict'. The gate still enforces the ` +
+        "Edit|Write \"must have a registered design\" rule either way.",
+    );
   } else {
-    console.log(`twing serve: async semantic-conflict comparator using Bedrock model ${semanticCheckModel} (region from the environment)`);
+    console.log(`twing serve: using Bedrock for design extraction (model ${extractModel}) and semantic-conflict checks (model ${semanticCheckModel}), region from the environment`);
   }
 });

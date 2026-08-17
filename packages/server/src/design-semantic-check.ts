@@ -53,8 +53,7 @@ export interface SemanticConflictResult {
 
 export interface SemanticCheckOptions {
   /** Bedrock model id, e.g. "google.gemma-4-31b" -- see llm-client.ts's
-   * bedrock-mantle routing. This module is fixed to provider "bedrock": no
-   * OpenRouter flexibility needed here, production runs on Bedrock credits. */
+   * bedrock-mantle routing (the only provider llm-client.ts speaks now). */
   model: string;
   region?: string;
 }
@@ -201,7 +200,7 @@ export async function checkSemanticConflict(candidate: DesignStatement, other: D
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const text = await callLlmMessages(messages, { provider: "bedrock", model: options.model, region: options.region });
+      const text = await callLlmMessages(messages, { model: options.model, region: options.region });
       const parsed = parseResult(text);
       if (parsed) return parsed;
       console.warn(`twing serve: semantic conflict check returned malformed JSON (attempt ${attempt}/${MAX_ATTEMPTS})`);
