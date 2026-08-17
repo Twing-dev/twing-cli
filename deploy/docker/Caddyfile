@@ -1,10 +1,27 @@
 # Automatic HTTPS (Let's Encrypt, HTTP-01/TLS-ALPN-01) -- Caddy is the only
 # thing in this deployment that binds a host port, so it's the only piece
 # that needs a real domain pointed at the box's public IP first.
-coordination-server.twing.dev {
-    reverse_proxy twing-serve:8787
+{
+	order rate_limit before reverse_proxy
 }
 
-# Rate limiting on the abuse-prone routes (auth, invite-redemption,
-# join-via-github) is a deliberate follow-up, not done in this pass -- see
-# deploy/docker/README.md.
+coordination-server.twing.dev {
+	# Rate limiting on the abuse-prone, pre-authentication routes: the
+	# break-glass bootstrap token, invite redemption, and GitHub-founding/
+	# joining -- all reachable without a cached token, so all brute-forceable
+	# by IP. Deliberately *not* applied to the rest of /v1/* (claims,
+	# notices, designs, etc.) -- that's normal per-session traffic from
+	# active daemons/hooks and shouldn't share a budget with the auth
+	# surface. Per-remote-IP (not per-identity) since these routes are
+	# reached by callers who don't have an identity yet.
+	@auth_sensitive path /v1/admin/bootstrap /v1/invites/*/redeem /v1/projects/*/join-via-github
+	rate_limit @auth_sensitive {
+		zone auth_sensitive {
+			key {remote_host}
+			events 10
+			window 1m
+		}
+	}
+
+	reverse_proxy twing-serve:8787
+}

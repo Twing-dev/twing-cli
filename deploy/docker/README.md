@@ -92,15 +92,26 @@ cd deploy/docker && docker compose up -d --build
 ```
 
 Rebuilds the `twing-serve` image from the updated source and replaces the
-container; `caddy` is untouched (and keeps its already-issued cert, since
-that lives in the `caddy-data` named volume, not something a rebuild
-touches).
+container; `caddy` also gets rebuilt on `--build` (its own image now bakes
+in the `caddy-ratelimit` module, see below), but keeps its already-issued
+cert either way, since that lives in the `caddy-data` named volume, not
+something a rebuild touches.
+
+## Rate limiting
+
+`Caddyfile` rate-limits the pre-authentication, brute-forceable routes
+(`/v1/admin/bootstrap`, `/v1/invites/*/redeem`, `/v1/projects/*/join-via-github`)
+by remote IP -- 10 requests/minute per IP, well above real usage (each of
+those is a one-time-per-machine call) but low enough to blunt a scripted
+brute force. The rest of `/v1/*` (claims, notices, designs -- normal
+per-session daemon/hook traffic) is deliberately not limited here. Requires
+the `caddy-ratelimit` module (`Caddyfile.Dockerfile`, built via
+`caddy:2-builder`/xcaddy since it's not in the stock `caddy:2` image) --
+already wired into `docker-compose.yml`, nothing extra needed to build it.
+Retune the `events`/`window` values directly in `Caddyfile` and redeploy.
 
 ## Not done here yet
 
-- **Rate limiting** at the Caddy layer, scoped to the auth/invite-redemption/
-  `join-via-github` routes -- deliberately left for a follow-up pass, not
-  part of the initial TLS/container setup.
 - **Off-box shipping** of the backup file above -- the cron/`.backup` step
   is described, but wiring it to rsync/rclone/object storage isn't done
   here.

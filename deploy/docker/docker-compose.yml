@@ -31,7 +31,9 @@ services:
     # "twing-serve:8787" in Caddyfile rather than an IP or localhost).
 
   caddy:
-    image: caddy:2
+    build:
+      context: .
+      dockerfile: Caddyfile.Dockerfile
     restart: unless-stopped
     ports:
       - "80:80"
