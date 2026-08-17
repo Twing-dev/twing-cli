@@ -96,7 +96,19 @@ export async function ensureHookInstalled(): Promise<string> {
 
   if (source && goAvailable()) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    execFileSync("go", ["build", "-o", target, "."], { cwd: source, stdio: "inherit" });
+    // On macOS, Go's default *internal* linker (used whenever CGO isn't
+    // explicitly enabled) doesn't emit the Mach-O LC_UUID load command --
+    // harmless on older macOS, but a hard dyld launch failure ("missing
+    // LC_UUID load command") on newer ones, found live 2026-08-17 (same bug
+    // hit the CI-built prebuilt release binary, fixed the same way in
+    // release-hook.yml). Forcing the external linker (via cgo + the
+    // system's real `cc`/`ld`) produces a properly-formed binary. Mach-O-only
+    // concept -- ELF/PE builds (Linux/Windows) never needed this.
+    const buildArgs =
+      process.platform === "darwin"
+        ? ["build", "-ldflags=-linkmode=external", "-o", target, "."]
+        : ["build", "-o", target, "."];
+    execFileSync("go", buildArgs, { cwd: source, stdio: "inherit", env: { ...process.env, CGO_ENABLED: process.platform === "darwin" ? "1" : process.env.CGO_ENABLED } });
     return target;
   }
 

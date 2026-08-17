@@ -44,12 +44,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: hook/go.mod
+      # CGO_ENABLED=1 + -linkmode=external forces Go to hand Mach-O
+      # generation to the system's real `cc`/`ld` instead of Go's own
+      # internal linker -- found live 2026-08-17: the internal linker
+      # doesn't emit the LC_UUID load command, which is harmless on older
+      # macOS but a hard dyld launch failure ("missing LC_UUID load
+      # command") on newer ones. install-hook.ts's build-from-source
+      # fallback got the same fix. Mach-O-only concept, doesn't apply to
+      # the Linux/Windows build job at all.
       - name: Build darwin/amd64, darwin/arm64
         working-directory: hook
+        env:
+          CGO_ENABLED: "1"
         run: |
           mkdir -p dist
-          GOOS=darwin GOARCH=amd64 go build -o dist/twing-hook-darwin-amd64 .
-          GOOS=darwin GOARCH=arm64 go build -o dist/twing-hook-darwin-arm64 .
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-linkmode=external" -o dist/twing-hook-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-linkmode=external" -o dist/twing-hook-darwin-arm64 .
       # Ad-hoc signing, not notarization: free, no Apple Developer account,
       # no registration -- required for the arm64 binary to execute at all
       # on Apple Silicon (a hard OS requirement since Big Sur, separate

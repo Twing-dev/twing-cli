@@ -252,15 +252,32 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     (§17 Phase 3) is structurally standalone from the invite system —
     same dual authenticated/unauthenticated shape as invite redemption, but
     role is decided server-side from `github-client.ts`'s
-    `fetchRepoPermissions` (the caller's own GitHub token, checked against
-    `projectRecords.githubOwner`/`githubRepo` — set once, best-effort, at
-    founding time from `.git`'s `origin` remote) rather than an
-    admin-issued invite: `maintain`/`admin` GitHub permissions grant twing
-    `admin`, `pull`/`triage`/`push` grant `member`, no binding is a 404.
-    Identity minting (`IdentityStore.joinProject`) still mirrors
-    `redeemInvite`'s new-developer-vs-attach-to-existing split exactly —
-    only "what role" and "which trigger" differ, not "how an identity gets
-    minted."
+    `fetchRepoPermissions` (the caller's own GitHub token; for an
+    already-founded project checked against the stored
+    `projectRecords.githubOwner`/`githubRepo` — never a client-supplied
+    claim, closing a phishing-a-role-on-an-unrelated-project bypass) rather
+    than an admin-issued invite: `maintain`/`admin` GitHub permissions grant
+    twing `admin`, `pull`/`triage`/`push` grant `member`. Identity minting
+    (`IdentityStore.joinProject`) still mirrors `redeemInvite`'s
+    new-developer-vs-attach-to-existing split exactly — only "what role" and
+    "which trigger" differ, not "how an identity gets minted."
+    **GitHub-founding (2026-08-17):** this route now also *founds* a
+    brand-new project — no org, no invite/admin-bootstrap needed at all —
+    the first time anyone with real `admin`/`maintain` GitHub permission on
+    the (self-attested, since there's no stored binding yet) repo calls it;
+    `pull`/`triage`/`push`-only callers can join an already-founded project
+    but can't found one (403). This is what makes plain `twing init` the
+    only command anyone needs, whether the project's ever been touched on
+    this coordinator before or not. A GitHub-founded project has no org at
+    all — `projectRecords.orgId` is nullable now specifically for this
+    (`canManageProject`/`isProjectMember` in `app.ts` already checked direct
+    project membership before ever consulting org, so this needed no other
+    change) — access control for it is purely per-project, mirroring
+    GitHub's own permission model rather than a synthesized cross-repo
+    grouping. `Organization`/`OrgMembership` still exist (the invite/
+    admin-bootstrap path still uses them, and they're `identity-store.ts`'s
+    documented future billing/tenant-isolation anchor) but are no longer
+    the default onboarding path's concern.
   - This package's own `.twing/twing.yml` in this repo flags
     `design-*.ts`, `identity-store.ts`, and the entrypoint/wiring files
     (`index.ts`/`main.ts`/`app.ts`) as `require_human_review` — narrowed
