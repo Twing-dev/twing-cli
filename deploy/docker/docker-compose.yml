@@ -1,0 +1,51 @@
+# Deploys `twing serve` as a container behind Caddy for TLS -- the Docker
+# counterpart to deploy/'s native systemd path (deploy/README.md), used
+# instead of it on boxes that are already Docker-oriented. See
+# deploy/docker/README.md for why/when to pick this one.
+#
+# Run from this directory (`docker compose up -d --build`) -- the build
+# context is the repo root (../..), not here, since packages/server can
+# only build correctly inside the npm-workspaces monorepo (see
+# packages/server/Dockerfile's header comment).
+
+services:
+  twing-serve:
+    build:
+      context: ../..
+      dockerfile: packages/server/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TWING_SERVE_DATA_DIR: /data
+    volumes:
+      # Bind mount, not a named volume -- so the backup cron job (see
+      # deploy/docker/README.md) can read the SQLite file straight off the
+      # host filesystem without needing `docker exec`.
+      - /opt/twing-serve/data:/data
+    # No `ports:` here deliberately -- this is never published to the host.
+    # Only the caddy service below can reach it, container-to-container
+    # over this compose project's own network (service-name DNS, hence
+    # "twing-serve:8787" in Caddyfile rather than an IP or localhost).
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Named volumes, not bind mounts -- this is Caddy's own state
+      # (issued certs, its internal config), not something the host needs
+      # to read directly. Persists across `docker compose up`/`down` as
+      # long as `-v` is never passed to `down` -- avoid that, re-issuing a
+      # cert unnecessarily runs into Let's Encrypt's rate limits.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - twing-serve
+
+volumes:
+  caddy-data:
+  caddy-config:

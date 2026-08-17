@@ -5,6 +5,11 @@ SSH logout, with logs you can actually get to. No sudo needed for any of
 this -- run it entirely as whatever user you're SSH'd in as (e.g. an
 isolated, unprivileged service user on a shared machine).
 
+This is the native path (bare Node + systemd). If the box is already
+Docker-oriented, see `deploy/docker/` instead -- same end result (TLS,
+persistent restart-on-crash/reboot), packaged as containers rather than
+installed onto the host directly.
+
 ## Setup (once)
 
 ```sh

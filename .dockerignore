@@ -1,0 +1,21 @@
+# Keep the Docker build context (repo root -- see
+# packages/server/Dockerfile's header comment) small and, more importantly,
+# make sure the container's own `npm ci` builds native modules
+# (better-sqlite3) fresh against its own OS/arch rather than reusing a
+# host-built node_modules/dist that might not match.
+node_modules
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+
+.git
+.github
+hook
+docs
+deploy
+simulator/.workspaces
+
+.claude
+.twing
+openrouter_key.txt
+*.log

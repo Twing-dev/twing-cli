@@ -1,0 +1,10 @@
+# Automatic HTTPS (Let's Encrypt, HTTP-01/TLS-ALPN-01) -- Caddy is the only
+# thing in this deployment that binds a host port, so it's the only piece
+# that needs a real domain pointed at the box's public IP first.
+coordination-server.twing.dev {
+    reverse_proxy twing-serve:8787
+}
+
+# Rate limiting on the abuse-prone routes (auth, invite-redemption,
+# join-via-github) is a deliberate follow-up, not done in this pass -- see
+# deploy/docker/README.md.
