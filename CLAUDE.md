@@ -21,9 +21,13 @@ source comments do this constantly and expect you to know what they mean)
 and `docs/verification-layer-strategy-memo_6.md`.
 `docs/design-conflict-coordinator-spec.md` is the spec that became §17.
 
-Pre-release: no npm package is published, so getting the `twing` CLI itself
-still means cloning and building this repo. `twing-hook` is different --
-`twing init` fetches a prebuilt release binary for the platform
+`@twing/core`/`@twing/cli` are published to npm (`npm install -g @twing/cli`,
+trusted-publishing via `.github/workflows/release-npm.yml`, tag-triggered) --
+an end user never needs to clone this repo. Working *on* twing-cli itself
+still means cloning and building it, and the `node packages/cli/dist/index.js
+...` invocations below are how you run your own local build rather than the
+npm-published one. `twing-hook` is different from either -- `twing init`
+fetches a prebuilt release binary for the platform
 (`.github/workflows/release-hook.yml`) before falling back to building from
 Go source (only reached in a twing-cli checkout with Go on `PATH` — a
 contributor's own uncommitted `hook/` changes always take priority over a

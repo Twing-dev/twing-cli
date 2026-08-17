@@ -4,21 +4,30 @@ Task-time coordination and change-time evidence for multi-agent codebases.
 See `docs/orchestrator-and-verification-design-doc_v1.md` for the full design
 and `docs/verification-layer-strategy-memo_6.md` for the strategy behind it.
 
-Pre-release: no npm package is published yet, so you still need to clone
-and build this repo to get the `twing` CLI itself. `twing-hook` is
-different -- `twing init` fetches a prebuilt release binary for your
-platform automatically (see `.github/workflows/release-hook.yml`); Go is
-only needed if you're a twing-cli contributor building `hook/` from source.
+## Install
+
+```sh
+npm install -g @twing/cli
+```
+
+That's it -- `twing` is a real npm package now. `twing-hook` (the Go
+binary the hooks actually invoke) isn't on npm itself; `twing init` fetches
+a prebuilt release binary for your platform automatically the first time
+it needs one (see `.github/workflows/release-hook.yml`). No Go toolchain,
+no clone, nothing else to install.
 
 ## Prerequisites
 
 - Node.js >= 20
-- Go -- only if you're working on `hook/` itself (a twing-cli source
-  checkout with a Go toolchain on `PATH` builds from source instead of
-  fetching; everyone else doesn't need this)
 - git
+- Go -- only if you're a twing-cli *contributor* building `hook/` from
+  source (a checkout of this repo with Go on `PATH` builds from source
+  instead of fetching a release, so your own uncommitted `hook/` changes
+  always take priority); everyone else doesn't need this at all
 
-## Setup
+## Working on twing-cli itself
+
+Only relevant if you're contributing to this repo, not to use `twing`:
 
 ```sh
 git clone git@github.com:Twing-dev/twing-cli.git
@@ -28,7 +37,8 @@ npm run build
 ```
 
 This builds every package (`packages/core`, `packages/cli`, `packages/server`)
-via TypeScript project references.
+via TypeScript project references. `npm link` in `packages/cli` gives you a
+`twing` command that runs your local build instead of the npm-published one.
 
 ## Starting `twing serve`
 
@@ -49,8 +59,11 @@ PORT=9000 npm run start --workspace packages/server
 It prints the URL it's listening on at startup -- that's what you hand to
 `twing init --server <url>` below. It also generates a one-time **bootstrap
 token** on first run and logs where to find it (`~/.twing/serve-data/bootstrap-token`
-by default) -- whoever reads that off the machine claims the first admin
-identity via `twing admin bootstrap`. See "Onboarding a team" below.
+by default) -- only relevant for a non-GitHub-hosted project, where whoever
+reads that off the machine claims the first admin identity via `twing admin
+bootstrap` (see "Non-GitHub-hosted projects, and account recovery" below).
+A GitHub-hosted project never needs this -- `twing init` founds/joins it
+directly.
 
 **Running it on a shared machine** (e.g. one that also hosts other
 services) as a plain foreground command means it dies when your SSH session
@@ -60,30 +73,47 @@ systemd service under an isolated, unprivileged user instead -- see
 
 ## `twing init` on your own project
 
-`twing` isn't installed globally by default. Run it directly from this
-clone's build output, from inside whatever project you want it wired into
-(not from inside `twing-cli` itself):
+Run it from inside whatever project you want it wired into (not from
+inside `twing-cli` itself):
 
 ```sh
 cd ~/path/to/some-other-repo
-node /path/to/twing-cli/packages/cli/dist/index.js init --server http://localhost:8787
+twing init
 ```
 
-That one command:
+For a GitHub-hosted repo, that one command is the *entire* onboarding
+story -- there's nothing else to run, whether you're the first person ever
+to touch this project on this coordinator or the hundredth. `init`:
 
-1. Writes `coordinator.serverUrl` into that repo's `.twing/twing.yml` --
-   **commit this file** so the rest of your team never has to pass
-   `--server` themselves; their `twing init` (or `twing login`) picks it up
-   automatically. Skipped if the file already declares a different
-   coordinator -- `init` warns and leaves it untouched rather than silently
-   repointing your whole team; edit `.twing/twing.yml` directly if that's
-   what you actually want.
-2. **Authenticates using a personal access token (§17.10 hardening)** --
-   either one already cached in `~/.twing/config.json` from a previous
-   `twing login`/`init`/`keygen`, or one redeemed right there via
-   `--invite <code>` (see "Onboarding a team" below). There's no password
-   prompt anymore: a PAT is generated on your own machine, never typed in,
-   and the server never sees anything but its hash.
+1. Resolves the coordinator: the repo's committed `.twing/twing.yml` if one
+   exists, else `--server`/`TWING_SERVER`, else it prompts you for a URL
+   interactively and checks it's actually reachable before writing it into
+   `.twing/twing.yml` -- **commit that file** so the rest of your team never
+   has to think about which server to use.
+2. **Authenticates by verifying your GitHub permissions on this repo** --
+   the default, no flag needed. Reuses a PAT already cached in
+   `~/.twing/config.json` if one exists; otherwise walks you through
+   GitHub's OAuth device flow (same mechanism `gh auth login` uses -- it
+   prints a short code, you approve it at a URL, no browser redirect needed
+   back to your terminal), then mints a personal access token locally and
+   checks your GitHub role on the repo:
+   - Real `admin`/`maintain` permission on a project nobody's touched on
+     this coordinator before **founds** it and makes you its admin --
+     nobody needs to invite you into a project that doesn't exist yet.
+   - Any of `pull`/`triage`/`push`/`maintain`/`admin` on an
+     already-founded project **joins** it, with `maintain`/`admin` mapping
+     to twing `admin` and the rest to `member` -- your role tracks your
+     GitHub permissions, so it's rechecked (and can change) on every
+     `twing init`/`twing join --github`, not fixed at first join.
+   - `pull`/`triage`/`push`-only permission can't found a brand-new
+     project (403) -- founding requires real admin/maintain access, same
+     as GitHub's own model for who can configure a repo.
+
+   The GitHub token itself is used once for that check and immediately
+   discarded -- never cached, never written to disk. See `twing join
+   --github` in the command reference below if you want to run just this
+   step on its own (e.g. to re-verify your role after a GitHub permissions
+   change, without repeating the rest of `init`).
 3. Installs `twing-hook` to `~/.twing/bin/twing-hook` -- fetches a prebuilt
    release binary for your platform if one's published, falls back to
    building from source if this is a twing-cli checkout with Go on `PATH`
@@ -104,13 +134,9 @@ That one command:
    fails, the hook's `SessionStart` self-heal brings it back the next time
    you start a session instead.
 
-Re-running `twing init --server <url>` is safe -- it re-points an existing
-install rather than duplicating anything. Once a repo's `.twing/twing.yml`
-already declares a coordinator (because someone committed it, per step 1
-above), everyone else can just run `twing init` with **no `--server` flag at
-all** -- it's discovered from the repo. `TWING_SERVER` still works as a
-one-off override (e.g. pointing at a staging coordinator) without touching
-the committed file.
+Re-running `twing init` is always safe -- it re-points an existing install
+rather than duplicating anything, and an already-cached token is reused
+rather than re-verified against GitHub every time.
 
 **In practice, once you've run `init` anywhere on a machine, you rarely
 need to run it again.** Auth, the hook binary, hook wiring, and the daemon
@@ -118,7 +144,7 @@ are all machine-global now -- `cd` into a *different* repo that someone
 else already `init`'d (its `.twing/twing.yml` already has a coordinator
 committed) and capture/the design gate are already active there, with zero
 extra setup. The one exception: founding a brand-new project is still a
-real, one-time act someone has to do (step 2 below).
+real, one-time act someone has to do, same as above.
 
 A machine can have cached tokens for several different coordinators at
 once -- `~/.twing/config.json` is a map, not a single slot, so switching
@@ -128,24 +154,34 @@ on its own to (re)authenticate against a server without repeating the rest
 of `init`'s setup -- useful for a second repo on a new coordinator, or a
 token that's gone stale.
 
-### Optional: a global `twing` command
+## Self-hosting for one person or a small trusted team (`--no-auth`)
 
-If typing the full `node .../dist/index.js` path is annoying, link it once:
+If everyone who can reach `twing serve` is already trusted -- your own
+local agents, or a small team on a private network -- you don't need any
+identity ceremony at all:
 
 ```sh
-cd /path/to/twing-cli/packages/cli
-npm link
+npm run start --workspace packages/server -- --no-auth
+# elsewhere:
+twing init --server <url> --no-auth
 ```
 
-Then `twing init --server <url>` works from anywhere. (Not required --
-everything in this doc works with the direct `node` invocation too.)
+Every request just carries a self-declared developer id (derived from your
+git email) for attribution in claims/findings -- there's no token, no
+admin/member distinction, every check that would otherwise be role-gated
+no-ops. `--no-auth` is sticky once cached: later plain `twing init` runs
+against that server pick it back up automatically. The server still binds
+to loopback only by default; passing a non-default `--host` logs a startup
+warning, since a non-loopback bind plus `--no-auth` means anyone who can
+reach the port can write claims as any developer id they name.
 
-## Onboarding a team (§17.10 hardening)
+## Non-GitHub-hosted projects, and account recovery
 
-There are three trust boundaries, and each has its own command rather than
-one shared secret covering all of them: the server admitting a project, a
-developer authenticating, and a project's admins onboarding further
-contributors to that project specifically.
+The GitHub-verified path above needs a GitHub-hosted repo. For anything
+else -- GitLab, self-hosted git, no remote at all -- there's an
+invite-based fallback using the same three trust boundaries any coordinator
+needs: the server admitting a project, a developer authenticating, and a
+project's admins onboarding further contributors.
 
 **1. Claim the first admin identity**, once per server, from whoever has
 shell access to the machine `twing serve` runs on:
@@ -159,9 +195,9 @@ This generates your personal access token **on your own machine** -- the
 server only ever sees its hash, not even at bootstrap time -- and prints it
 once. It's cached locally; nothing else to do.
 
-**2. Found a project.** The first person to run `twing init` against a repo
-the server has never seen founds it automatically and becomes its admin --
-no separate admission step:
+**2. Found the project**, same as any project -- just run `twing init` (add
+`--no-github` to skip straight past the GitHub-verified attempt if this
+repo happens to have a GitHub remote you don't want used):
 
 ```sh
 cd ~/path/to/some-repo
@@ -195,6 +231,32 @@ Already authenticated to this server from another project? Redeeming an
 invite reuses your existing PAT instead of minting a second identity --
 you just pick up the new membership.
 
+**Account recovery.** A developer identity (the row behind your PAT) is
+never silently duplicated -- if you lose your local `~/.twing/config.json`
+but the server still remembers a developer under your label (email), both
+the invite-redeem path and `twing join --github`'s new-developer path
+refuse to mint a second one under the same label rather than quietly
+forking your identity. Recovering it is the same disaster-recovery path
+regardless of which onboarding path you originally used, and it's
+deliberately not an HTTP route -- it's gated by already having filesystem
+access to the server's data directory (the real root of trust for a
+self-hosted deployment), not by a second network-reachable secret:
+
+```sh
+# on the machine running twing serve:
+npm run start --workspace packages/server -- --regenerate-bootstrap-token
+# -> prints a fresh bootstrap token
+twing admin bootstrap --server <url> --token <that> --label you@example.com   # same label as before
+```
+
+`IdentityStore.bootstrap()` rotates the existing identity under that label
+rather than creating a new one, so you get your project memberships back
+under the same identity, just a fresh token.
+
+**Not sure who to ask, or which project id to use?** Ask whoever founded
+the project, or run `twing project list-developers` from inside the repo
+(defaults to that repo's project id) to see current admins/members.
+
 ## Using it
 
 Once `twing init` has run once on this machine (hooks wired globally,
@@ -204,7 +266,7 @@ daemon running), just work normally in Claude Code in any repo whose
 request, from inside that repo:
 
 ```sh
-twing align                          # or: node .../packages/cli/dist/index.js align
+twing align
 twing align --intent "adding a retry wrapper for the payments client"
 ```
 
@@ -217,8 +279,9 @@ checks and how the report is built.
 
 | Command | What it does |
 |---|---|
-| `twing init [--server <url>] [--invite <code>]` | One-time setup per machine: discovers/bootstraps the coordinator, authenticates (redeeming `--invite` in the same step if given), hook install, hook wiring (including the design gate below), daemon start. Safe to re-run. |
+| `twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github]` | One-time setup per machine: discovers/bootstraps the coordinator, authenticates (GitHub-verified join/found by default for a GitHub-hosted repo; `--invite` to redeem one instead; `--no-github` to skip straight to the old "no cached PAT" error; `--no-auth` to declare this coordinator has no identity verification at all), hook install, hook wiring (including the design gate below), daemon start. Safe to re-run. |
 | `twing login [--server <url>] [--token <pat>]` | Just cache an already-generated PAT for a server -- no hook install, no settings wiring, no daemon start. For a second machine, or a stale local config. |
+| `twing join --github [--server <url>]` | Just the GitHub-verified authentication step `init` does by default -- generates/reuses a PAT and (re-)checks your GitHub role on this repo, without the rest of `init`. Useful to re-verify after a GitHub permissions change. |
 | `twing keygen --invite <code> [--server <url>]` | Just the authentication part of redeeming an invite -- generates a PAT locally (or reuses an existing one for this server) without the rest of `init`. |
 | `twing whoami [--server <url>]` | Prints your authenticated identity and org/project roles. |
 | `twing admin bootstrap --token <bootstrap-token>` | Break-glass: claims the server's one-time bootstrap token, creating the first org and its admin. |
