@@ -70,6 +70,11 @@ jobs:
     needs: [build-linux-windows, build-darwin]
     runs-on: ubuntu-latest
     steps:
+      # --generate-notes below needs a real git checkout to diff against
+      # the previous tag -- this job otherwise only downloads artifacts, so
+      # without this it fails outright ("not a git repository"), found live
+      # on the v0.2.0 release.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
