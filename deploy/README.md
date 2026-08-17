@@ -70,11 +70,12 @@ twing admin bootstrap --server <url> --token <that>
 That mints a personal access token for you (shown once, cached locally),
 creates the organization, and makes you its admin. From there, onboard
 everyone else via invites, never by generating and handing off tokens
-yourself -- see the main README's "Non-GitHub-hosted projects, and account
-recovery" section for the full flow (this bootstrap-token path is only
-needed for a non-GitHub-hosted project; a GitHub-hosted one just runs
-`twing init`, no admin bootstrap involved). This travels over plain HTTP
-unless you've put TLS in front (see the main design doc's §9) -- fine on a
+yourself -- see the main README's "Self-hosting your own coordinator ->
+Your own public, full-auth server" section for the full flow (this
+bootstrap-token path is only needed for a non-GitHub-hosted project; a
+GitHub-hosted one just runs `twing init`, no admin bootstrap involved).
+This travels over plain HTTP unless you've put TLS in front (see the
+main design doc's §9) -- fine on a
 trusted network, not a substitute for TLS on an open one.
 
 **Lost all admin tokens?** Regenerate the bootstrap token even after the org
