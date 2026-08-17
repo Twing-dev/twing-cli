@@ -1,23 +1,11 @@
 # twing-cli
 
-twing-cli has two parts that work together:
+twing helps multiple coding agents on a developer team coordinate with
+each other instead of quietly stepping on the same work. It's a CLI +
+hook for your coding agent (Claude Code today, others planned) plus a
+small server every agent's client talks to.
 
-- **A client** -- the `twing` CLI, plus a small hook binary (`twing-hook`)
-  that wires into your coding agent's session. It captures what you're
-  touching as you work and enforces the one thing that actually blocks
-  (see "The design-conflict gate" below) before an edit lands. **Claude
-  Code is the only supported coding agent today** -- hooks wire into
-  Claude Code's own hook system (`~/.claude/settings.json`); support for
-  other coding agents is planned, not built yet.
-- **A server** -- `twing serve`, the coordinator every client in a project
-  talks to. It's what makes this coordination happen *across* sessions and
-  developers instead of each agent only ever seeing its own working tree:
-  advisory cross-session findings (`twing align`) and the design-conflict
-  gate's registry both live here.
-
-See `docs/orchestrator-and-verification-design-doc_v1.md` for the full
-design and `docs/verification-layer-strategy-memo_6.md` for the strategy
-behind it.
+Full design: `docs/orchestrator-and-verification-design-doc_v1.md`.
 
 ## Getting started
 
@@ -38,104 +26,48 @@ cd ~/path/to/some-repo
 twing init --server https://coordination-server.twing.dev
 ```
 
-`coordination-server.twing.dev` is twing's own hosted coordinator, so you
-don't need to run a server yourself to try this out. **Not live yet as of
-this writing** -- until it is, either self-host (see "Self-hosting your
-own coordinator" below) or use whichever coordinator your team already
-set up.
+`coordination-server.twing.dev` is twing's own hosted coordinator --
+**not live yet as of this writing**; until it is, self-host (see below)
+or use your team's existing coordinator. Once one person's run this, the
+server URL is committed to `.twing/twing.yml`, so everyone else afterward
+just runs plain `twing init`.
 
-Once someone's run this once in a repo, its `.twing/twing.yml` has the
-server URL committed -- everyone else just runs `twing init` with **no
-flag at all**; it's discovered from the repo.
+`init` does three things:
 
-For a GitHub-hosted repo, that one command is the *entire* onboarding
-story -- there's nothing else to run, whether you're the first person ever
-to touch this project on this coordinator or the hundredth. `init`:
+1. **Resolves the coordinator** -- from the repo's committed
+   `.twing/twing.yml`, `--server`/`TWING_SERVER`, or an interactive prompt
+   if neither exists yet.
+2. **Authenticates** -- verifies your GitHub permissions on this repo via
+   an OAuth device flow and mints a local PAT (only its hash reaches the
+   server). Admin/maintain access founds an untouched project and makes
+   you its admin; any other repo access just joins it. Non-GitHub repos
+   use a separate auth path -- see "Self-hosting your own coordinator"
+   below.
+3. **Sets up the local pieces** -- installs `twing-hook`, wires it into
+   Claude Code's hooks (once per machine), and starts a background daemon.
+   The daemon exists because each hook invocation is a fresh, stateless
+   process; the daemon is the long-running piece that actually watches
+   your edits and syncs them to the server in the background.
 
-1. Resolves the coordinator: the repo's committed `.twing/twing.yml` if one
-   exists, else `--server`/`TWING_SERVER`, else it prompts you for a URL
-   interactively and checks it's actually reachable before writing it into
-   `.twing/twing.yml` -- **commit that file** so the rest of your team never
-   has to think about which server to use.
-2. **Authenticates by verifying your GitHub permissions on this repo** --
-   the default, no flag needed. Reuses a PAT already cached in
-   `~/.twing/config.json` if one exists; otherwise walks you through
-   GitHub's OAuth device flow (same mechanism `gh auth login` uses -- it
-   prints a short code, you approve it at a URL, no browser redirect needed
-   back to your terminal), then mints a personal access token locally and
-   checks your GitHub role on the repo:
-   - Real `admin`/`maintain` permission on a project nobody's touched on
-     this coordinator before **founds** it and makes you its admin --
-     nobody needs to invite you into a project that doesn't exist yet.
-   - Any of `pull`/`triage`/`push`/`maintain`/`admin` on an
-     already-founded project **joins** it, with `maintain`/`admin` mapping
-     to twing `admin` and the rest to `member` -- your role tracks your
-     GitHub permissions, so it's rechecked (and can change) on every
-     `twing init`/`twing join --github`, not fixed at first join.
-   - `pull`/`triage`/`push`-only permission can't found a brand-new
-     project (403) -- founding requires real admin/maintain access, same
-     as GitHub's own model for who can configure a repo.
-
-   The GitHub token itself is used once for that check and immediately
-   discarded -- never cached, never written to disk. `twing join --github`
-   on its own re-runs just this step (e.g. to re-verify your role after a
-   GitHub permissions change) without repeating the rest of `init`.
-3. Installs `twing-hook` to `~/.twing/bin/twing-hook` -- fetches a prebuilt
-   release binary for your platform if one's published, falls back to
-   building from source if this is a twing-cli checkout with Go on `PATH`
-   (a contributor's own uncommitted `hook/` changes always win over a
-   possibly-stale release), falls back to reusing whatever's already
-   installed.
-4. Merges hook entries into the **user-level** `~/.claude/settings.json` --
-   global, not per-repo, so this step only ever needs to happen once per
-   machine; every repo you work in afterward already has hooks active with
-   no further `init` needed there.
-5. Starts the daemon (`~/.twing/daemon.sock`), or reuses one that's already
-   running -- one daemon per machine, shared across every repo you `init`.
-   Also installs it as a persistent OS-level service where possible
-   (a macOS `launchd` agent, a Linux `systemd --user` unit) so it survives
-   a machine restart on its own; on Windows, or if the service install
-   fails, the hook's `SessionStart` self-heal brings it back the next time
-   you start a session instead.
-
-Re-running `twing init` is always safe -- it re-points an existing install
-rather than duplicating anything, and an already-cached token is reused
-rather than re-verified against GitHub every time.
-
-**In practice, once you've run `init` anywhere on a machine, you rarely
-need to run it again.** Auth, the hook binary, hook wiring, and the daemon
-are all machine-global -- `cd` into a *different* repo that someone else
-already `init`'d (its `.twing/twing.yml` already has a coordinator
-committed) and capture/the design gate are already active there, with zero
-extra setup. The one exception: founding a brand-new project is still a
-real, one-time act someone has to do, same as above.
-
-A machine can have cached tokens for several different coordinators at
-once -- `~/.twing/config.json` is a map, not a single slot, so switching
-between repos pointed at different `twing serve` instances doesn't require
-re-authenticating every time you switch. Use `twing login [--server <url>]`
-on its own to (re)authenticate against a server without repeating the rest
-of `init`'s setup -- useful for a second repo on a new coordinator, or a
-token that's gone stale.
+Safe to re-run any time -- later runs just re-verify and re-point rather
+than duplicating anything.
 
 ### 3. Using it day to day
 
-Once `twing init` has run once on this machine (hooks wired globally,
-daemon running), just work normally in Claude Code in any repo whose
-`.twing/twing.yml` declares a coordinator -- `PostToolUse`/`SessionStart`/
-`UserPromptSubmit` hooks capture claims automatically in the background.
-Edits also pass through the design-conflict gate, covered next. On
-request, from inside that repo:
+Once `twing init` has run once on this machine, just work normally in
+Claude Code in any repo whose `.twing/twing.yml` declares a coordinator --
+hooks capture claims automatically in the background, and edits pass
+through the design-conflict gate (below). On request, from inside that
+repo:
 
 ```sh
 twing align
 twing align --intent "adding a retry wrapper for the payments client"
 ```
 
-`align` works even with no daemon and no hooks installed -- it falls back to
-computing claims directly from `git diff` against your branch's merge-base
-with the default branch. See §6 of the design doc for exactly what it
-checks and how the report is built.
+`align` works even with no daemon and no hooks installed -- it falls back
+to computing claims directly from `git diff` against your branch's
+merge-base with the default branch.
 
 ### Quick command reference
 
@@ -150,53 +82,29 @@ checks and how the report is built.
 The full command list, including self-hosting/admin commands, is in
 "Modifying twing-cli itself" below.
 
-## The design-conflict gate (§17 of the design doc)
+## The design-conflict gate
 
-Unlike `align` above (which is advisory -- it only reports findings), this is the
-one part of `twing` that actually blocks: before an agent's first `Edit`/`Write`
-in a session, it needs a registered design. If that design overlaps another
-currently-open one, or matches a ratified constraint, the agent must adopt the
-existing approach or record a justified divergence -- which queues for you to
-approve or reject.
+Unlike `align`, which is advisory, this is the one part of `twing` that
+actually blocks: before an agent's first `Edit`/`Write` in a session, it
+needs a registered design. An overlapping or constraint-violating design
+gets denied until it's adopted or justified.
 
-`twing init` wires this in by default, alongside the existing hooks. It's a
-`PreToolUse` hook, so it needs `twing serve` reachable synchronously; if the
-coordinator is unreachable, unauthenticated, or returns something the hook
-can't use, it **fails closed** -- the write is blocked, with a message that
-says exactly why (no cached token / rejected token / coordinator
-unreachable), not a generic error. This project doesn't treat coordinator
-uptime as something to gracefully degrade around, so there's no silent
-"gate didn't run" case to stumble into -- set `TWING_DESIGN_GATE=off` in the
-environment Claude Code runs hooks in if you need to work offline, or run
-`twing design disable-gate` in a repo to unwire it there entirely. (A repo
-with no coordinator configured at all behaves the same as
-`TWING_DESIGN_GATE=off` -- the gate simply isn't set up there.) Every deny
-is also logged to `~/.twing/design-coordinator.log`.
+`twing init` wires this in automatically. It's a synchronous check against
+the coordinator, so an unreachable coordinator or a rejected token **fails
+closed** -- the edit is blocked, with a message saying exactly why, rather
+than silently letting it through. Turn it off deliberately with
+`TWING_DESIGN_GATE=off` or `twing design disable-gate`.
 
 ```sh
-twing design register --summary "adds a retry wrapper" \
-  --creates RetryPolicy --touches src/net/retry.ts --depends-on PaymentsClient
-twing design resolve --id <designId> --adopt <otherDesignId>
-twing design resolve --id <designId> --justify "streaming needs a different backoff shape"
-twing design reviews                                    # list pending justified divergences
-twing design reviews --decide <reviewId> --decision approve
+twing design register --summary "adds a retry wrapper" --touches src/net/retry.ts
+twing design amend --id <designId> --touches src/net/retry-config.ts
 ```
 
-`register` needs Claude Code's real session id -- the `Edit`|`Write` gate looks
-open designs up by exact session id. It defaults to the `CLAUDE_CODE_SESSION_ID`
-env var, which Claude Code sets for Bash tool calls and which matches what the
-hook receives (confirmed live against a real gated session, 2026-08-11); pass
-`--session <id>` explicitly for callers/harnesses where that isn't set. When in
-doubt, plan mode works unconditionally: `ExitPlanMode` registers a design
-automatically with the real session id.
-
-Design checks made from plan text (`ExitPlanMode`) need an LLM call on the
-*server* side to turn the plan into structured fields -- see "Modifying
-twing-cli itself" below if you're running your own coordinator and want
-that enabled. No key set there means those checks fail soft to "clean"
-(logged) rather than deny an agent over a missing key -- the `Edit`/`Write`
-"you need a registered design" check still works either way, since it
-doesn't need extraction.
+A deny message always names the exact command to run next (`register`,
+`amend`, `resume`, or `resolve --justify`) -- follow it, then retry. This
+repo dogfoods its own gate against a real coordinator; see its own
+`.twing/twing.yml` for a live example of the constraints it's checked
+against.
 
 ### For agents: handling a design-gate deny
 
