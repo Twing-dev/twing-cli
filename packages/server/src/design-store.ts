@@ -23,13 +23,22 @@ import {
 import type { Db } from "./db/client.js";
 import { designs as designsTable, pendingReviews as reviewsTable, constraints as constraintsTable } from "./db/schema.js";
 import { DrizzleActivityLog, type ActivityLogWriter } from "./activity-log.js";
-import { mergeDesignScope } from "./design-checks.js";
+import { mergeDesignScope, overlapWaiverKey } from "./design-checks.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
 
 export type NewDesignInput = Omit<
   DesignStatement,
-  "id" | "status" | "createdAt" | "closedAt" | "ttlMs" | "reviewDecision" | "scopeVersion" | "lastActivityAt" | "justifiedConstraintIds"
+  | "id"
+  | "status"
+  | "createdAt"
+  | "closedAt"
+  | "ttlMs"
+  | "reviewDecision"
+  | "scopeVersion"
+  | "lastActivityAt"
+  | "justifiedConstraintIds"
+  | "justifiedOverlaps"
 > & {
   ttlMs?: number;
 };
@@ -53,6 +62,7 @@ interface DesignRow {
   scopeVersion: number;
   lastActivityAt: number;
   justifiedConstraintIds: string;
+  justifiedOverlaps: string;
 }
 
 function fromDesignRow(row: DesignRow): DesignStatement {
@@ -75,6 +85,7 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     scopeVersion: row.scopeVersion,
     lastActivityAt: row.lastActivityAt,
     justifiedConstraintIds: JSON.parse(row.justifiedConstraintIds),
+    justifiedOverlaps: JSON.parse(row.justifiedOverlaps),
   };
 }
 
@@ -86,9 +97,11 @@ interface ReviewRow {
   createdAt: number;
   decision: string | null;
   constraintId: string | null;
+  overlapWaivers: string;
 }
 
 function fromReviewRow(row: ReviewRow): PendingReview {
+  const overlapWaivers = JSON.parse(row.overlapWaivers) as { conflictingDesignId: string; paths: string[] }[];
   return {
     id: row.id,
     designId: row.designId,
@@ -97,6 +110,7 @@ function fromReviewRow(row: ReviewRow): PendingReview {
     createdAt: row.createdAt,
     decision: (row.decision as PendingReview["decision"]) ?? undefined,
     constraintId: row.constraintId ?? undefined,
+    overlapWaivers: overlapWaivers.length > 0 ? overlapWaivers : undefined,
   };
 }
 
@@ -131,6 +145,7 @@ export class DesignRegistry {
       scopeVersion: 1,
       lastActivityAt: now,
       justifiedConstraintIds: [],
+      justifiedOverlaps: [],
     };
     this.db
       .insert(designsTable)
@@ -153,6 +168,7 @@ export class DesignRegistry {
         scopeVersion: design.scopeVersion,
         lastActivityAt: design.lastActivityAt,
         justifiedConstraintIds: JSON.stringify([] as string[]),
+        justifiedOverlaps: JSON.stringify([] as string[]),
       })
       .run();
     this.activityLog.append({
@@ -506,8 +522,14 @@ export class DesignRegistry {
     return open.length;
   }
 
-  addReview(designId: string, projectId: string, justification: string, constraintId?: string): PendingReview {
-    const review: PendingReview = { id: crypto.randomUUID(), designId, projectId, justification, createdAt: Date.now(), constraintId };
+  addReview(
+    designId: string,
+    projectId: string,
+    justification: string,
+    constraintId?: string,
+    overlapWaivers?: { conflictingDesignId: string; paths: string[] }[],
+  ): PendingReview {
+    const review: PendingReview = { id: crypto.randomUUID(), designId, projectId, justification, createdAt: Date.now(), constraintId, overlapWaivers };
     this.db
       .insert(reviewsTable)
       .values({
@@ -518,6 +540,7 @@ export class DesignRegistry {
         createdAt: review.createdAt,
         decision: null,
         constraintId: constraintId ?? null,
+        overlapWaivers: JSON.stringify(overlapWaivers ?? []),
       })
       .run();
     this.activityLog.append({
@@ -525,7 +548,7 @@ export class DesignRegistry {
       kind: "review_created",
       relatedId: review.id,
       ts: review.createdAt,
-      payload: { designId, justification, constraintId },
+      payload: { designId, justification, constraintId, overlapWaivers },
     });
     return review;
   }
@@ -587,12 +610,27 @@ export class DesignRegistry {
       decision === "approve" && review.constraintId && design && !design.justifiedConstraintIds.includes(review.constraintId)
         ? [...design.justifiedConstraintIds, review.constraintId]
         : undefined;
+    // Item 7's fix (2026-08-18): same append-on-approve-only shape as
+    // justifiedConstraintIds above, for structural design-vs-design overlap
+    // instead of constraint matches -- see DesignStatement.justifiedOverlaps'
+    // own doc comment for why this is keyed per (conflictingDesignId, path)
+    // rather than per design pair.
+    const justifiedOverlaps =
+      decision === "approve" && design && review.overlapWaivers && review.overlapWaivers.length > 0
+        ? [
+            ...new Set([
+              ...design.justifiedOverlaps,
+              ...review.overlapWaivers.flatMap((w) => w.paths.map((p) => overlapWaiverKey(w.conflictingDesignId, p))),
+            ]),
+          ]
+        : undefined;
     this.db
       .update(designsTable)
       .set({
         reviewDecision: decision,
         ...(decision === "approve" ? { status: "open" } : { status: "closed", closedAt: Date.now() }),
         ...(justifiedConstraintIds ? { justifiedConstraintIds: JSON.stringify(justifiedConstraintIds) } : {}),
+        ...(justifiedOverlaps ? { justifiedOverlaps: JSON.stringify(justifiedOverlaps) } : {}),
       })
       .where(eq(designsTable.id, review.designId))
       .run();

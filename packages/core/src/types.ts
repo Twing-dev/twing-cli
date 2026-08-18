@@ -168,6 +168,24 @@ export interface DesignStatement {
    * different review_required match still flags normally -- this waives one
    * specific constraint, not "never check constraints again." */
   justifiedConstraintIds: string[];
+  /** Structural design-vs-design overlap's counterpart to
+   * `justifiedConstraintIds` above (2026-08-18) -- `exactOverlap`/
+   * `dependencyCollision` (design-checks.ts) had no approval memory at all
+   * before this: an already-justified-and-approved overlap between two
+   * designs re-flagged identically on every retry, forever, even with zero
+   * scope change (confirmed live validating the ExitPlanMode retry-dedup
+   * fix). Entries are composite keys, `${conflictingDesignId}::${path}`
+   * (`overlapWaiverKey` in design-checks.ts) -- deliberately keyed per
+   * *specific overlapping path*, not per design pair: waiving one file's
+   * collision must not silently swallow a different, later-added
+   * overlapping file between the same two designs. Appended (never
+   * removed) by `DesignRegistry.decideReview` when a review carrying
+   * `overlapWaivers` is approved -- see `PendingReview.overlapWaivers`.
+   * Deliberately one-directional: this design's owner choosing to proceed
+   * despite another design's claim on a path says nothing about whether
+   * the *other* design's own checks should waive that same path -- that's
+   * a separate decision on that design's own row, if it ever comes up. */
+  justifiedOverlaps: string[];
 }
 
 export type DesignConstraintType = "canonical_abstraction" | "domain_fact" | "review_required";
@@ -194,6 +212,14 @@ export interface DesignConflict {
   overlapKind: DesignOverlapKind;
   overlapDetail: string;
   conflictingSummary: string;
+  /** The specific colliding path(s) `overlapDetail` describes in prose,
+   * structured (2026-08-18) so a caller can act on them programmatically --
+   * originally only ever rendered into the human-readable `overlapDetail`
+   * string. Empty for `summarySimilarity`'s tier-4 fallback, which has no
+   * specific path(s) to name. Used by `/v1/designs/:id/resolve`'s
+   * overlap-waiver recompute (see `DesignStatement.justifiedOverlaps`) to
+   * know exactly which paths a justified-divergence review should cover. */
+  overlapPaths: string[];
 }
 
 export interface DesignCheckResult {
@@ -215,4 +241,15 @@ export interface PendingReview {
    * Recorded so an approval can be attributed to the *specific* constraint
    * it settled -- see DesignStatement.justifiedConstraintIds. */
   constraintId?: string;
+  /** Set only when this design currently has real structural overlap(s)
+   * against other open designs at justify-time (2026-08-18) -- independent
+   * of `constraintId`, a review can carry both at once. Recomputed fresh by
+   * `/v1/designs/:id/resolve` against the design's *current* scope (same
+   * "trust current state, not the original verdict" reasoning that
+   * `constraintId`'s own recompute already established), not trusted from
+   * whatever verdict originally flagged this design. One entry per
+   * conflicting design, each naming the specific paths that overlap it --
+   * see DesignStatement.justifiedOverlaps for how an approval consumes
+   * this. */
+  overlapWaivers?: { conflictingDesignId: string; paths: string[] }[];
 }

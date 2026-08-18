@@ -934,6 +934,51 @@ test("POST /v1/designs/:id/amend: an approved review waives only that specific c
   assert.equal((await thirdAmend.json() as { verdict: string }).verdict, "constraint_flag", "b/** was never justified -- approving a/** must not waive it too");
 });
 
+test("POST /v1/designs/:id/resolve: an approved structural overlap on one path doesn't re-flag on a later amend, but a newly-added overlapping path on the same pair still flags fresh (item 7's fix)", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  // The other design claims both file1.ts and file2.ts from the start.
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["file1.ts", "file2.ts"], dependsOn: [] }),
+  });
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["file1.ts"], dependsOn: [] }),
+  });
+  const { verdict: firstVerdict, designId } = (await registerRes.json()) as { verdict: string; designId: string };
+  assert.equal(firstVerdict, "overlap", "sanity: file1.ts overlap must be caught first");
+
+  const resolveRes = await app.request(`/v1/designs/${designId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "proceeding on file1.ts despite the overlap" }),
+  });
+  const { reviewId } = (await resolveRes.json()) as { reviewId: string };
+  await app.request(`/v1/reviews/${reviewId}/decide`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ decision: "approve" }),
+  });
+
+  // Amending to also touch file2.ts re-runs the check against the design's
+  // *entire* merged scope (file1.ts + file2.ts), not just the delta -- if
+  // file1.ts's approval weren't remembered, this would report both paths
+  // as conflicts, not just the genuinely new one.
+  const amendRes = await app.request(`/v1/designs/${designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ addTouches: ["file2.ts"] }),
+  });
+  const amendBody = (await amendRes.json()) as { verdict: string; conflicts: { overlapPaths: string[] }[] };
+  assert.equal(amendBody.verdict, "overlap", "file2.ts was never justified -- approving file1.ts must not waive it too");
+  assert.deepEqual(amendBody.conflicts[0].overlapPaths, ["file2.ts"], "file1.ts's already-approved overlap must not resurface");
+});
+
 test("POST /v1/designs/:id/resolve: attributes constraintId even when the design *also* overlaps another open design on the same path", async () => {
   // Regression test for a real bug found live, 2026-08-17: resolve() used
   // to derive constraintId by re-running the *overall* verdict check

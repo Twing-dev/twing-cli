@@ -49,15 +49,34 @@ function normalize(s: string): string {
   return s.trim().toLowerCase();
 }
 
+/** Composite key for `DesignStatement.justifiedOverlaps` (2026-08-18) --
+ * shared between `exactOverlap`/`dependencyCollision` (consuming it) and
+ * `app.ts`'s `/v1/designs/:id/resolve` (producing it at justify-time), so
+ * the key format only ever lives in one place. Keyed per specific
+ * overlapping path, not per design pair -- see the field's own doc comment
+ * (core/types.ts) for why a coarser pair-level waiver would be wrong. */
+export function overlapWaiverKey(conflictingDesignId: string, path: string): string {
+  return `${conflictingDesignId}::${normalize(path)}`;
+}
+
 function intersects(a: string[], b: string[]): string[] {
   const bSet = new Set(b.map(normalize));
   return a.filter((x) => bSet.has(normalize(x)));
 }
 
+/** Drops any path in `paths` already waived (`justifiedOverlaps`) for this
+ * specific `otherId` -- item 7's fix (2026-08-18): a path *not* in the list
+ * still flags normally, so this only ever narrows an already-detected
+ * overlap down to its unwaived remainder, never widens what counts as an
+ * overlap in the first place. */
+function withoutJustified(candidate: DesignStatement, otherId: string, paths: string[]): string[] {
+  return paths.filter((p) => !candidate.justifiedOverlaps.includes(overlapWaiverKey(otherId, p)));
+}
+
 /** Tier 1: exact `creates`/`touches` intersection. */
 function exactOverlap(candidate: DesignStatement, other: DesignStatement): DesignConflict | undefined {
-  const createsHit = intersects(candidate.creates, other.creates);
-  const touchesHit = intersects(candidate.touches, other.touches);
+  const createsHit = withoutJustified(candidate, other.id, intersects(candidate.creates, other.creates));
+  const touchesHit = withoutJustified(candidate, other.id, intersects(candidate.touches, other.touches));
   if (createsHit.length === 0 && touchesHit.length === 0) return undefined;
   const hit = [...createsHit, ...touchesHit];
   return {
@@ -66,6 +85,7 @@ function exactOverlap(candidate: DesignStatement, other: DesignStatement): Desig
     overlapKind: createsHit.length > 0 ? "creates" : "touches",
     overlapDetail: `both ${createsHit.length > 0 ? "create" : "touch"} ${hit.join(", ")}`,
     conflictingSummary: other.summary,
+    overlapPaths: hit,
   };
 }
 
@@ -73,8 +93,8 @@ function exactOverlap(candidate: DesignStatement, other: DesignStatement): Desig
  * direction) -- catches "two agents each build their own retry helper" even
  * when file paths never literally collide. */
 function dependencyCollision(candidate: DesignStatement, other: DesignStatement): DesignConflict | undefined {
-  const candidateBuildsWhatOtherAssumes = intersects(candidate.creates, other.dependsOn);
-  const otherBuildsWhatCandidateAssumes = intersects(other.creates, candidate.dependsOn);
+  const candidateBuildsWhatOtherAssumes = withoutJustified(candidate, other.id, intersects(candidate.creates, other.dependsOn));
+  const otherBuildsWhatCandidateAssumes = withoutJustified(candidate, other.id, intersects(other.creates, candidate.dependsOn));
   const hit = [...candidateBuildsWhatOtherAssumes, ...otherBuildsWhatCandidateAssumes];
   if (hit.length === 0) return undefined;
   return {
@@ -83,6 +103,7 @@ function dependencyCollision(candidate: DesignStatement, other: DesignStatement)
     overlapKind: "depends_on",
     overlapDetail: `one design creates what the other depends on: ${hit.join(", ")}`,
     conflictingSummary: other.summary,
+    overlapPaths: hit,
   };
 }
 
@@ -186,6 +207,7 @@ function summarySimilarity(candidate: DesignStatement, other: DesignStatement): 
     overlapKind: "touches",
     overlapDetail: `summaries are ${Math.round(score * 100)}% similar by keyword overlap (fallback signal, low confidence)`,
     conflictingSummary: other.summary,
+    overlapPaths: [], // no specific path -- this tier flags on summary text, not scope
   };
 }
 
@@ -246,6 +268,28 @@ export function appendSummaryUpdate(existingSummary: string, update: string): st
   return `${existingSummary}\n\nUpdate (${date}): ${update}`;
 }
 
+/** Tiers 1+2 together (exact overlap, then dependency collision) -- exported
+ * (2026-08-18) so `/v1/designs/:id/resolve` can recompute the *current* set
+ * of structural conflicts independently at justify-time, the same "trust
+ * current state, not the original verdict" reasoning `constraintId`'s own
+ * recompute already established, needed to know which specific paths a
+ * justified-divergence review should waive (see
+ * DesignStatement.justifiedOverlaps). */
+export function structuralOverlaps(candidate: DesignStatement, others: DesignStatement[]): DesignConflict[] {
+  const conflicts: DesignConflict[] = [];
+  for (const other of others) {
+    if (other.id === candidate.id) continue;
+    const exact = exactOverlap(candidate, other);
+    if (exact) {
+      conflicts.push(exact);
+      continue;
+    }
+    const dep = dependencyCollision(candidate, other);
+    if (dep) conflicts.push(dep);
+  }
+  return conflicts;
+}
+
 export function runDesignChecks(
   candidate: DesignStatement,
   openDesigns: DesignStatement[],
@@ -253,16 +297,7 @@ export function runDesignChecks(
 ): DesignCheckOutcome {
   const others = openDesigns.filter((d) => d.id !== candidate.id);
 
-  const structuralConflicts: DesignConflict[] = [];
-  for (const other of others) {
-    const exact = exactOverlap(candidate, other);
-    if (exact) {
-      structuralConflicts.push(exact);
-      continue;
-    }
-    const dep = dependencyCollision(candidate, other);
-    if (dep) structuralConflicts.push(dep);
-  }
+  const structuralConflicts = structuralOverlaps(candidate, others);
   if (structuralConflicts.length > 0) {
     return { verdict: "overlap", conflicts: structuralConflicts };
   }

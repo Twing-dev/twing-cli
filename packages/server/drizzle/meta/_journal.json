@@ -43,6 +43,13 @@
       "when": 1786943588587,
       "tag": "0005_gifted_wendell_rand",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787057942850,
+      "tag": "0006_exotic_nomad",
+      "breakpoints": true
     }
   ]
 }

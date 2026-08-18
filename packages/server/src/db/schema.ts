@@ -141,6 +141,13 @@ export const designs = sqliteTable(
      * comment (core/types.ts) for why this exists. JSON string[], defaults
      * to "[]" for pre-existing rows via the migration. */
     justifiedConstraintIds: text("justified_constraint_ids").notNull().default("[]"),
+    /** Item 7's fix (2026-08-18): structural design-vs-design overlap's
+     * counterpart to `justifiedConstraintIds` above -- see
+     * `DesignStatement.justifiedOverlaps`'s own doc comment (@twing/core)
+     * for the full reasoning. JSON string[] of
+     * `${conflictingDesignId}::${path}` keys, defaults to "[]" for
+     * pre-existing rows via the migration. */
+    justifiedOverlaps: text("justified_overlaps").notNull().default("[]"),
   },
   (t) => [index("designs_project_id_idx").on(t.projectId), index("designs_session_id_idx").on(t.sessionId)],
 );
@@ -157,6 +164,14 @@ export const pendingReviews = sqliteTable(
     /** Set only for a review created against a `constraint_flag` verdict --
      * see PendingReview's doc comment (core/types.ts). */
     constraintId: text("constraint_id"),
+    /** Item 7's fix (2026-08-18): the structural overlap(s) this design had
+     * against other open designs at justify-time, recomputed fresh rather
+     * than trusted from whatever verdict originally flagged it -- same
+     * reasoning as `constraintId` above. JSON
+     * `{conflictingDesignId, paths}[]` (a list, not a single id, since one
+     * review can span multiple conflicting designs), defaults to "[]". See
+     * PendingReview.overlapWaivers. */
+    overlapWaivers: text("overlap_waivers").notNull().default("[]"),
   },
   (t) => [index("pending_reviews_project_id_idx").on(t.projectId)],
 );

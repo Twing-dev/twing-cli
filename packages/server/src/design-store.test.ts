@@ -468,6 +468,35 @@ test("DesignRegistry: reregisterFromPlan preserves justifiedConstraintIds -- a p
   registry.stop();
 });
 
+test("DesignRegistry: decideReview approve populates justifiedOverlaps from the review's overlapWaivers, reject leaves it untouched", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
+  const b = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s2", summary: "", creates: [], touches: [], dependsOn: [] });
+
+  const rejected = registry.addReview(a.id, "p1", "nope", undefined, [{ conflictingDesignId: b.id, paths: ["file1.ts"] }]);
+  registry.decideReview(rejected.id, "reject");
+  assert.deepEqual(registry.get(a.id)?.justifiedOverlaps, [], "rejection settles nothing");
+
+  const approved = registry.addReview(a.id, "p1", "fine, proceeding despite the overlap", undefined, [
+    { conflictingDesignId: b.id, paths: ["file1.ts", "file2.ts"] },
+  ]);
+  registry.decideReview(approved.id, "approve");
+  assert.deepEqual(registry.get(a.id)?.justifiedOverlaps.sort(), [`${b.id}::file1.ts`, `${b.id}::file2.ts`].sort());
+  registry.stop();
+});
+
+test("DesignRegistry: reregisterFromPlan preserves justifiedOverlaps -- a prior overlap approval survives the retry", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text" });
+  const b = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s2", summary: "", creates: [], touches: [], dependsOn: [] });
+  const review = registry.addReview(a.id, "p1", "justified", undefined, [{ conflictingDesignId: b.id, paths: ["file1.ts"] }]);
+  registry.decideReview(review.id, "approve");
+  assert.deepEqual(registry.get(a.id)?.justifiedOverlaps, [`${b.id}::file1.ts`]);
+  const reregistered = registry.reregisterFromPlan(a.id, { summary: "s", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text 2" });
+  assert.deepEqual(reregistered?.justifiedOverlaps, [`${b.id}::file1.ts`]);
+  registry.stop();
+});
+
 test("DesignRegistry: reregisterFromPlan returns undefined for a nonexistent id", () => {
   const registry = freshRegistry();
   const result = registry.reregisterFromPlan("no-such-id", { summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text" });

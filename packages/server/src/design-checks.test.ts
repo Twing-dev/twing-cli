@@ -1,6 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope, appendSummaryUpdate, jaccard, PLAN_RETRY_SIMILARITY_THRESHOLD } from "./design-checks.js";
+import {
+  runDesignChecks,
+  matchConstraintsForPaths,
+  pathInDesignScope,
+  mergeDesignScope,
+  appendSummaryUpdate,
+  jaccard,
+  PLAN_RETRY_SIMILARITY_THRESHOLD,
+  overlapWaiverKey,
+} from "./design-checks.js";
 import type { DesignStatement, DesignConstraint } from "@twing/core";
 
 function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
@@ -18,6 +27,7 @@ function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
     ttlMs: 60_000,
     scopeVersion: 1,
     justifiedConstraintIds: [],
+    justifiedOverlaps: [],
     lastActivityAt: Date.now(),
     ...overrides,
   };
@@ -60,6 +70,51 @@ test("tier 2: dependency collision -- other direction", () => {
   const other = design({ id: "b", sessionId: "s2", creates: ["Logger"] });
   const outcome = runDesignChecks(candidate, [other], []);
   assert.equal(outcome.verdict, "overlap");
+});
+
+// Item 7's fix (2026-08-18): structural overlap approval memory --
+// justifiedOverlaps, keyed per (conflictingDesignId, path), not per design
+// pair. See design-store.test.ts for decideReview populating this field,
+// and app.test.ts for the end-to-end justify->approve->retry flow.
+
+// Every candidate/other pair below uses non-overlapping `summary` text
+// (same "totally unrelated" pairing the file's very first test uses) --
+// the default fixture's identical "does something" summary on both sides
+// would otherwise itself trip tier 4's similarity fallback once tiers 1/2
+// are correctly silenced, masking what these tests are actually checking.
+
+test("tier 1: a waived path stays quiet, but a second, different path on the same pair still flags", () => {
+  const other = design({ id: "b", sessionId: "s2", creates: ["file1.ts"], summary: "totally unrelated" });
+  const waivedOnly = design({ id: "a", creates: ["file1.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
+  assert.equal(runDesignChecks(waivedOnly, [other], []).verdict, "clean");
+
+  const otherWithBoth = design({ id: "b", sessionId: "s2", creates: ["file1.ts", "file2.ts"], summary: "totally unrelated" });
+  const waivedOnlyFile1 = design({ id: "a", creates: ["file1.ts", "file2.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
+  const outcome = runDesignChecks(waivedOnlyFile1, [otherWithBoth], []);
+  assert.equal(outcome.verdict, "overlap");
+  assert.deepEqual(outcome.conflicts[0].overlapPaths, ["file2.ts"]);
+});
+
+test("tier 1: a waiver against design B doesn't leak to design C sharing the same path", () => {
+  const candidate = design({ id: "a", creates: ["file1.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
+  const designC = design({ id: "c", sessionId: "s3", creates: ["file1.ts"], summary: "totally unrelated" });
+  const outcome = runDesignChecks(candidate, [designC], []);
+  assert.equal(outcome.verdict, "overlap");
+  assert.equal(outcome.conflicts[0].conflictingDesignId, "c");
+});
+
+test("tier 2: a waived dependency collision stays quiet, unwaived one still flags", () => {
+  const other = design({ id: "b", sessionId: "s2", dependsOn: ["Logger"], summary: "totally unrelated" });
+  const candidate = design({ id: "a", creates: ["Logger"], justifiedOverlaps: [overlapWaiverKey("b", "Logger")] });
+  assert.equal(runDesignChecks(candidate, [other], []).verdict, "clean");
+
+  // Candidate now also creates Cache, which the other design also depends
+  // on -- a genuinely new collision Logger's waiver must not swallow.
+  const otherTwoDeps = design({ id: "b", sessionId: "s2", dependsOn: ["Logger", "Cache"], summary: "totally unrelated" });
+  const candidateTwoCreates = design({ id: "a", creates: ["Logger", "Cache"], justifiedOverlaps: [overlapWaiverKey("b", "Logger")] });
+  const outcome = runDesignChecks(candidateTwoCreates, [otherTwoDeps], []);
+  assert.equal(outcome.verdict, "overlap");
+  assert.deepEqual(outcome.conflicts[0].overlapPaths, ["Cache"]);
 });
 
 test("tier 3: constraint scope match -> constraint_flag", () => {

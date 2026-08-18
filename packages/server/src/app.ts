@@ -15,7 +15,16 @@ import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
 import { runChecks } from "./checks.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
-import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope, appendSummaryUpdate, jaccard, PLAN_RETRY_SIMILARITY_THRESHOLD } from "./design-checks.js";
+import {
+  runDesignChecks,
+  matchConstraintsForPaths,
+  pathInDesignScope,
+  mergeDesignScope,
+  appendSummaryUpdate,
+  jaccard,
+  PLAN_RETRY_SIMILARITY_THRESHOLD,
+  structuralOverlaps,
+} from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
@@ -792,7 +801,16 @@ export function createApp(options: CreateAppOptions = {}) {
     // design's scope hit a flagged path", not "what's the single top-line
     // verdict against everything else right now".
     const constraintHit = matchConstraintsForPaths([...design.creates, ...design.touches], constraintStore.forProject(design.projectId), design.justifiedConstraintIds);
-    const review = designs.addReview(id, design.projectId, body.justification, constraintHit?.id);
+    // Item 7's fix (2026-08-18): same "recompute against current state at
+    // justify-time" reasoning as constraintHit above, applied to structural
+    // design-vs-design overlap -- the top-line verdict that originally
+    // flagged this design isn't trusted here either. Only ever narrows to
+    // the *unwaived* remainder (structuralOverlaps already excludes
+    // anything in design.justifiedOverlaps), so an already-approved path
+    // never re-appears in a fresh review; a genuinely new one still does.
+    const structuralConflicts = structuralOverlaps(design, designs.openDesigns(design.projectId, Date.now(), design.id));
+    const overlapWaivers = structuralConflicts.map((c) => ({ conflictingDesignId: c.conflictingDesignId, paths: c.overlapPaths }));
+    const review = designs.addReview(id, design.projectId, body.justification, constraintHit?.id, overlapWaivers);
     console.log(`twing serve: design ${id.slice(0, 8)} justified divergence -> pending review ${review.id.slice(0, 8)}`);
     return c.json({ status: "pending_review", reviewId: review.id });
   });
