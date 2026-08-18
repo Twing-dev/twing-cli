@@ -123,10 +123,31 @@ func logDesignGate(format string, args ...any) {
 // developerId is deliberately not part of this shape (§17.10 hardening) --
 // the server resolves it from the authenticated bearer token, not a
 // client-supplied field.
+//
+// The structured fields (Creates/Touches/DependsOn/Summary) mirror
+// app.ts's DesignCheckRequestBody -- added 2026-08-18 for
+// handleExitPlanModeMultiCandidate, which already has a plan pre-extracted
+// (via /v1/designs/extract) and partitioned per candidate repo, so it must
+// skip server-side extraction the same way `twing design register` already
+// does. RawPlanText and the structured fields are mutually exclusive, same
+// as the server route's own contract.
 type designCheckRequest struct {
-	ProjectID   string `json:"projectId"`
-	SessionID   string `json:"sessionId"`
-	RawPlanText string `json:"rawPlanText,omitempty"`
+	ProjectID   string   `json:"projectId"`
+	SessionID   string   `json:"sessionId"`
+	RawPlanText string   `json:"rawPlanText,omitempty"`
+	Creates     []string `json:"creates,omitempty"`
+	Touches     []string `json:"touches,omitempty"`
+	DependsOn   []string `json:"dependsOn,omitempty"`
+	Summary     string   `json:"summary,omitempty"`
+}
+
+// designExtractResponse mirrors ExtractedDesign (design-extract.ts), the
+// response shape of the new project-agnostic POST /v1/designs/extract.
+type designExtractResponse struct {
+	Creates   []string `json:"creates"`
+	Touches   []string `json:"touches"`
+	DependsOn []string `json:"dependsOn"`
+	Summary   string   `json:"summary"`
 }
 
 type designConflict struct {
@@ -303,12 +324,20 @@ func handlePreToolUse(payload hookPayload) {
 	}
 }
 
+// handleExitPlanMode dispatches on whether cwd resolves to a single repo
+// (the common case, unchanged logic) or not. The multi-candidate fallback
+// (fix, 2026-08-18) is for cwd being a shared parent of several
+// independently onboarded repos -- see discoverChildCoordinators's doc
+// comment (manifest.go).
 func handleExitPlanMode(payload hookPayload) {
-	config := resolveServerConfig(payload.Cwd)
-	if config.ServerURL == "" {
+	if config := resolveServerConfig(payload.Cwd); config.ServerURL != "" {
+		handleExitPlanModeSingle(payload, config)
 		return
 	}
+	handleExitPlanModeMultiCandidate(payload)
+}
 
+func handleExitPlanModeSingle(payload hookPayload, config twingConfig) {
 	var input struct {
 		Plan string `json:"plan"`
 	}
@@ -316,7 +345,7 @@ func handleExitPlanMode(payload hookPayload) {
 		return
 	}
 
-	projectID := computeProjectID(payload.Cwd)
+	projectID := computeProjectID(config.RepoRoot)
 
 	if isGateDisabled(projectID) {
 		return
@@ -328,7 +357,7 @@ func handleExitPlanMode(payload hookPayload) {
 	}
 	developerID := ""
 	if config.NoAuth {
-		developerID = computeDeveloperID(payload.Cwd)
+		developerID = computeDeveloperID(config.RepoRoot)
 	}
 
 	reqBody := designCheckRequest{
@@ -337,34 +366,9 @@ func handleExitPlanMode(payload hookPayload) {
 		RawPlanText: input.Plan,
 	}
 
-	res, err := postJSON(strings.TrimRight(config.ServerURL, "/")+"/v1/designs/check", reqBody, designExtractionTimeout, config.AuthToken, developerID)
-	if err != nil {
-		logDesignGate("ExitPlanMode check failed (blocking): %v", err)
-		writeJSON(unreachableOutput("PreToolUse", err))
-		return
-	}
-	defer res.Body.Close()
-	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
-		logDesignGate("ExitPlanMode check returned status %d (blocking)", res.StatusCode)
-		writeJSON(authRejectedOutput("PreToolUse"))
-		return
-	}
-	if res.StatusCode != http.StatusOK {
-		logDesignGate("ExitPlanMode check returned status %d (blocking)", res.StatusCode)
-		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unexpected status %d", res.StatusCode)))
-		return
-	}
-
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		logDesignGate("ExitPlanMode check: failed reading response body (blocking): %v", err)
-		writeJSON(coordinatorErrorOutput("PreToolUse", "failed reading response body"))
-		return
-	}
-	var result designCheckResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		logDesignGate("ExitPlanMode check: malformed response (blocking): %v", err)
-		writeJSON(coordinatorErrorOutput("PreToolUse", "malformed response"))
+	result, failReason := postDesignCheck(config.ServerURL, config.AuthToken, developerID, reqBody)
+	if failReason != "" {
+		writeJSON(denyOutput("PreToolUse", failReason))
 		return
 	}
 
@@ -379,6 +383,231 @@ func handleExitPlanMode(payload hookPayload) {
 		logDesignGate("ExitPlanMode check: unknown verdict %q (blocking)", result.Verdict)
 		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown verdict %q", result.Verdict)))
 	}
+}
+
+// handleExitPlanModeMultiCandidate is the fallback when cwd itself isn't
+// inside any git repo (fix, 2026-08-18). Extracts the plan once per
+// distinct coordinator among the candidates found -- not once per
+// candidate, since extraction is a real Bedrock call (§17.3) and every
+// candidate sharing one coordinator (the common case: several repos owned
+// by the same team, one shared coordinator) would otherwise register
+// subtly different extractions of the same plan -- then partitions the
+// extracted creates/touches by which candidate's directory name prefixes
+// each path (the plan was written with cwd as its reference frame, so a
+// path belonging to a specific child repo naturally appears prefixed with
+// that repo's directory name), registering via /v1/designs/check's
+// structured, pre-extracted path only in the candidate(s) that actually
+// match. A plan matching two candidates registers in both.
+func handleExitPlanModeMultiCandidate(payload hookPayload) {
+	candidates := discoverChildCoordinators(payload.Cwd)
+	if len(candidates) == 0 {
+		// Genuinely nothing configured anywhere reachable from cwd -- same
+		// "not wired up here" allow as the single-repo case.
+		return
+	}
+
+	var input struct {
+		Plan string `json:"plan"`
+	}
+	if err := json.Unmarshal(payload.ToolInput, &input); err != nil || input.Plan == "" {
+		return
+	}
+
+	type group struct {
+		config     twingConfig
+		candidates []childCoordinator
+	}
+	groups := map[string]*group{}
+	var order []string
+	for _, cand := range candidates {
+		cfg := resolveConfigForCandidate(cand)
+		g, ok := groups[cfg.ServerURL]
+		if !ok {
+			g = &group{config: cfg}
+			groups[cfg.ServerURL] = g
+			order = append(order, cfg.ServerURL)
+		}
+		g.candidates = append(g.candidates, cand)
+	}
+
+	var denyReasons []string
+	matchedAny := false
+
+	for _, key := range order {
+		g := groups[key]
+		cfg := g.config
+
+		if cfg.AuthToken == "" && !cfg.NoAuth {
+			writeJSON(authRequiredOutput("PreToolUse", cfg.ServerURL))
+			return
+		}
+		developerID := ""
+		if cfg.NoAuth {
+			developerID = computeDeveloperID(g.candidates[0].RepoRoot)
+		}
+
+		extracted, failReason := postDesignExtract(cfg.ServerURL, cfg.AuthToken, developerID, input.Plan)
+		if failReason != "" {
+			writeJSON(denyOutput("PreToolUse", failReason))
+			return
+		}
+
+		for _, cand := range g.candidates {
+			projectID := computeProjectID(cand.RepoRoot)
+			if isGateDisabled(projectID) {
+				continue
+			}
+			prefix := cand.DirName + "/"
+			creates := filterAndStripPrefix(extracted.Creates, prefix)
+			touches := filterAndStripPrefix(extracted.Touches, prefix)
+			if len(creates) == 0 && len(touches) == 0 {
+				continue // this plan doesn't touch this candidate at all
+			}
+			matchedAny = true
+
+			reqBody := designCheckRequest{
+				ProjectID: projectID,
+				SessionID: payload.SessionID,
+				Creates:   creates,
+				Touches:   touches,
+				DependsOn: extracted.DependsOn,
+				Summary:   extracted.Summary,
+			}
+			result, failReason := postDesignCheck(cfg.ServerURL, cfg.AuthToken, developerID, reqBody)
+			if failReason != "" {
+				writeJSON(denyOutput("PreToolUse", failReason))
+				return
+			}
+			switch result.Verdict {
+			case "clean":
+				// no-op -- allowed overall unless something else denies
+			case "overlap":
+				denyReasons = append(denyReasons, fmt.Sprintf("[%s] %s", cand.DirName, overlapReason(result)))
+			case "constraint_flag":
+				denyReasons = append(denyReasons, fmt.Sprintf("[%s] %s", cand.DirName, constraintReason(result)))
+			default:
+				logDesignGate("ExitPlanMode multi-candidate check: unknown verdict %q for %s (blocking)", result.Verdict, cand.DirName)
+				writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown verdict %q", result.Verdict)))
+				return
+			}
+		}
+	}
+
+	if !matchedAny {
+		// The plan mentions no concrete path inside any onboarded candidate
+		// -- deliberately not a guess-and-register-everywhere: this gate
+		// doesn't fail open, and registering in every candidate unfiltered
+		// would be exactly that.
+		writeJSON(denyOutput("PreToolUse", ambiguousMultiRepoReason(candidates)))
+		return
+	}
+	if len(denyReasons) > 0 {
+		writeJSON(denyOutput("PreToolUse", strings.Join(denyReasons, "\n\n")))
+		return
+	}
+	writeJSON(allowOutput("PreToolUse"))
+}
+
+// postDesignCheck posts to /v1/designs/check (structured or rawPlanText,
+// per reqBody) and parses the verdict response, applying the same
+// fail-closed status handling every check on this path uses. Shared by
+// handleExitPlanModeSingle and handleExitPlanModeMultiCandidate so the two
+// don't duplicate this boilerplate.
+func postDesignCheck(serverURL, authToken, developerID string, reqBody designCheckRequest) (designCheckResponse, string) {
+	res, err := postJSON(strings.TrimRight(serverURL, "/")+"/v1/designs/check", reqBody, designExtractionTimeout, authToken, developerID)
+	if err != nil {
+		logDesignGate("designs/check failed (blocking): %v", err)
+		return designCheckResponse{}, unreachableReason(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		logDesignGate("designs/check returned status %d (blocking)", res.StatusCode)
+		return designCheckResponse{}, authRejectedReason()
+	}
+	if res.StatusCode != http.StatusOK {
+		logDesignGate("designs/check returned status %d (blocking)", res.StatusCode)
+		return designCheckResponse{}, coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		logDesignGate("designs/check: failed reading response body (blocking): %v", err)
+		return designCheckResponse{}, coordinatorErrorReason("failed reading response body")
+	}
+	var result designCheckResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		logDesignGate("designs/check: malformed response (blocking): %v", err)
+		return designCheckResponse{}, coordinatorErrorReason("malformed response")
+	}
+	return result, ""
+}
+
+// postDesignExtract posts to the project-agnostic POST /v1/designs/extract
+// (extraction only, no registration -- app.ts) used by
+// handleExitPlanModeMultiCandidate to extract a plan once before deciding
+// which candidate repo(s) it belongs to. Same fail-closed status handling
+// as postDesignCheck.
+func postDesignExtract(serverURL, authToken, developerID, planText string) (designExtractResponse, string) {
+	reqBody := struct {
+		RawPlanText string `json:"rawPlanText"`
+	}{RawPlanText: planText}
+	res, err := postJSON(strings.TrimRight(serverURL, "/")+"/v1/designs/extract", reqBody, designExtractionTimeout, authToken, developerID)
+	if err != nil {
+		logDesignGate("designs/extract failed (blocking): %v", err)
+		return designExtractResponse{}, unreachableReason(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		logDesignGate("designs/extract returned status %d (blocking)", res.StatusCode)
+		return designExtractResponse{}, authRejectedReason()
+	}
+	if res.StatusCode != http.StatusOK {
+		logDesignGate("designs/extract returned status %d (blocking)", res.StatusCode)
+		return designExtractResponse{}, coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		logDesignGate("designs/extract: failed reading response body (blocking): %v", err)
+		return designExtractResponse{}, coordinatorErrorReason("failed reading response body")
+	}
+	var result designExtractResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		logDesignGate("designs/extract: malformed response (blocking): %v", err)
+		return designExtractResponse{}, coordinatorErrorReason("malformed response")
+	}
+	return result, ""
+}
+
+// filterAndStripPrefix keeps only entries beginning with prefix, stripped
+// of that prefix -- e.g. "TwingMail/packages/api/mailbox.ts" with prefix
+// "TwingMail/" becomes "packages/api/mailbox.ts", matching what that
+// repo's own designs/constraints declare (repo-relative, never prefixed
+// with the repo's own directory name).
+func filterAndStripPrefix(paths []string, prefix string) []string {
+	var out []string
+	for _, p := range paths {
+		if strings.HasPrefix(p, prefix) {
+			out = append(out, strings.TrimPrefix(p, prefix))
+		}
+	}
+	return out
+}
+
+// ambiguousMultiRepoReason is handleExitPlanModeMultiCandidate's deny
+// message for the residual case: a plan that mentions no concrete file
+// path inside any onboarded candidate repo, so there's nothing to
+// partition on. Deliberately a deny, not a guess.
+func ambiguousMultiRepoReason(candidates []childCoordinator) string {
+	names := make([]string, len(candidates))
+	for i, c := range candidates {
+		names[i] = c.DirName
+	}
+	return fmt.Sprintf(
+		"twing design coordinator: this session's working directory isn't itself a git repo, and spans multiple "+
+			"onboarded repos (%s), but the plan doesn't mention a concrete file path inside any of them, so twing "+
+			"can't tell which project(s) to register it against. Either mention concrete paths in the plan (e.g. "+
+			"\"%s/path/to/file.ts\"), or re-run ExitPlanMode from inside the specific repo this work belongs to.",
+		strings.Join(names, ", "), names[0],
+	)
 }
 
 func overlapReason(result designCheckResponse) string {
@@ -621,15 +850,20 @@ func checkPathConstraint(serverURL, authToken, developerID, projectID, sessionID
 // own verdict flagged a conflict" -- previously indistinguishable from a
 // clean design as far as this gate was concerned.
 func handleEditWriteGate(payload hookPayload) {
-	config := resolveServerConfig(payload.Cwd)
-	if config.ServerURL == "" {
-		return
-	}
-
 	var input struct {
 		FilePath string `json:"file_path"`
 	}
 	_ = json.Unmarshal(payload.ToolInput, &input)
+
+	// Resolved from the file's own path, not cwd (fix, 2026-08-18): a
+	// session whose cwd is a shared parent of several independently
+	// onboarded repos (e.g. a backend + its separate UI repo) previously
+	// resolved no coordinator at all here, since cwd itself wasn't inside
+	// any git repo -- see resolveServerConfigForFile's own doc comment.
+	config := resolveServerConfigForFile(payload.Cwd, input.FilePath)
+	if config.ServerURL == "" {
+		return
+	}
 
 	// Resolve once, use everywhere below -- both the constraint check and
 	// the scope-match check compare against repo-relative declarations
@@ -653,7 +887,12 @@ func handleEditWriteGate(payload hookPayload) {
 		relPath = rel
 	}
 
-	projectID := computeProjectID(payload.Cwd)
+	// config.RepoRoot (not payload.Cwd) -- it's already the resolved,
+	// canonical repo root at this point (guaranteed non-empty once
+	// config.ServerURL != ""), so this avoids a second, potentially
+	// divergent `git` shell-out against cwd, and stays correct when cwd
+	// itself isn't the repo the edited file lives in.
+	projectID := computeProjectID(config.RepoRoot)
 
 	// Per-repo override (`twing design disable-gate`) -- silent allow, same
 	// category as "no coordinator configured": this machine has
@@ -668,7 +907,7 @@ func handleEditWriteGate(payload hookPayload) {
 	}
 	developerID := ""
 	if config.NoAuth {
-		developerID = computeDeveloperID(payload.Cwd)
+		developerID = computeDeveloperID(config.RepoRoot)
 	}
 
 	if relPath != "" {

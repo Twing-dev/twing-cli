@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -46,4 +47,47 @@ func readCoordinatorServerURL(cwd string) (serverURL string, repoRoot string, ok
 		return "", "", false
 	}
 	return parsed.Coordinator.ServerURL, repoRoot, true
+}
+
+// childCoordinator is one candidate project found by discoverChildCoordinators.
+type childCoordinator struct {
+	// DirName is cwd's immediate child directory name (not a full path) --
+	// this is what a plan's own extracted paths get matched against, since
+	// the plan was written with cwd as its reference frame (e.g.
+	// "TwingMail/packages/api/mailbox.ts").
+	DirName   string
+	ServerURL string
+	RepoRoot  string
+}
+
+// discoverChildCoordinators is the multi-repo ExitPlanMode fallback (fix,
+// 2026-08-18): when cwd itself isn't inside any git repo -- the real case
+// this was found from is a shared parent directory of several
+// independently onboarded repos, e.g. a backend and its separate UI repo,
+// worked on together with cwd set to their parent -- readCoordinatorServerURL(cwd)
+// fails outright and the gate previously went silently inert for the whole
+// session. This instead treats cwd's immediate child directories as
+// candidate projects: any child that is itself a git repo with a committed
+// .twing/twing.yml is a candidate. Deliberately one level deep only, not a
+// recursive walk -- see design_gate.go's handleExitPlanModeMultiCandidate
+// for how candidates get narrowed down to the one(s) an actual plan
+// belongs to.
+func discoverChildCoordinators(cwd string) []childCoordinator {
+	entries, err := os.ReadDir(cwd)
+	if err != nil {
+		return nil
+	}
+	var out []childCoordinator
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		childPath := filepath.Join(cwd, entry.Name())
+		serverURL, repoRoot, ok := readCoordinatorServerURL(childPath)
+		if !ok {
+			continue
+		}
+		out = append(out, childCoordinator{DirName: entry.Name(), ServerURL: serverURL, RepoRoot: repoRoot})
+	}
+	return out
 }

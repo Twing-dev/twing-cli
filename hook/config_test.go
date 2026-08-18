@@ -211,3 +211,72 @@ func TestResolveServerConfig_NoCoordinatorConfigured(t *testing.T) {
 		t.Errorf("resolveServerConfig(...) = %+v, want empty ServerURL for a repo with no .twing/twing.yml", cfg)
 	}
 }
+
+// resolveServerConfigForFile coverage -- the Edit/Write fix (2026-08-18)
+// for the ambiguous/multi-repo cwd gap: resolve from the edited file's own
+// path, not cwd, mirroring claims.ts's extractClaim on the capture side.
+
+func TestResolveServerConfigForFile_CwdIsParentOfRepo_ResolvesFromFilePath(t *testing.T) {
+	withFakeHome(t)
+	writeGlobalConfig(t, os.Getenv("HOME"), `{"servers":{"http://localhost:8787":{"authToken":"tok-a"}}}`)
+
+	parent := t.TempDir() // not itself a git repo
+	repoRoot := filepath.Join(parent, "TwingMail")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initTempGitRepoAt(t, repoRoot)
+	writeTwingYAML(t, repoRoot, "coordinator:\n  serverUrl: http://localhost:8787\n")
+	fileDir := filepath.Join(repoRoot, "packages", "api")
+	if err := os.MkdirAll(fileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(fileDir, "mailbox.ts")
+
+	cfg := resolveServerConfigForFile(parent, filePath)
+	if cfg.ServerURL != "http://localhost:8787" || cfg.AuthToken != "tok-a" {
+		t.Errorf("resolveServerConfigForFile(...) = %+v, want ServerURL http://localhost:8787 and AuthToken tok-a", cfg)
+	}
+	wantRoot := repoRoot
+	if r, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		wantRoot = r
+	}
+	if cfg.RepoRoot != wantRoot {
+		t.Errorf("resolveServerConfigForFile(...) RepoRoot = %q, want %q", cfg.RepoRoot, wantRoot)
+	}
+}
+
+func TestResolveServerConfigForFile_RelativeFilePathResolvedAgainstCwd(t *testing.T) {
+	withFakeHome(t)
+	writeGlobalConfig(t, os.Getenv("HOME"), `{"servers":{"http://localhost:8787":{"authToken":"tok-a"}}}`)
+	repoRoot := initTempGitRepo(t)
+	writeTwingYAML(t, repoRoot, "coordinator:\n  serverUrl: http://localhost:8787\n")
+
+	cfg := resolveServerConfigForFile(repoRoot, "foo.go")
+	if cfg.ServerURL != "http://localhost:8787" {
+		t.Errorf("resolveServerConfigForFile(...) = %+v, want ServerURL http://localhost:8787", cfg)
+	}
+}
+
+func TestResolveServerConfigForFile_EmptyFilePathFallsBackToCwd(t *testing.T) {
+	withFakeHome(t)
+	writeGlobalConfig(t, os.Getenv("HOME"), `{"servers":{"http://localhost:8787":{"authToken":"tok-a"}}}`)
+	repoRoot := initTempGitRepo(t)
+	writeTwingYAML(t, repoRoot, "coordinator:\n  serverUrl: http://localhost:8787\n")
+
+	cfg := resolveServerConfigForFile(repoRoot, "")
+	if cfg.ServerURL != "http://localhost:8787" {
+		t.Errorf("resolveServerConfigForFile(repoRoot, \"\") = %+v, want ServerURL http://localhost:8787 (cwd fallback)", cfg)
+	}
+}
+
+func TestResolveServerConfigForFile_FileOutsideAnyRepo_EmptyConfig(t *testing.T) {
+	withFakeHome(t)
+	parent := t.TempDir()
+	filePath := filepath.Join(parent, "plan.md")
+
+	cfg := resolveServerConfigForFile(parent, filePath)
+	if cfg.ServerURL != "" {
+		t.Errorf("resolveServerConfigForFile(...) = %+v, want empty ServerURL when the file isn't inside any repo", cfg)
+	}
+}

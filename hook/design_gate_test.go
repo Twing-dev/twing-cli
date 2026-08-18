@@ -560,6 +560,237 @@ func TestHandleExitPlanMode_CleanVerdict_Allows(t *testing.T) {
 	}
 }
 
+// --- multi-repo cwd fix (2026-08-18): Edit/Write resolves from the file
+// path, not cwd; ExitPlanMode falls back to multi-candidate discovery ---
+
+// Reproduces the real gap this fix closes: cwd is a shared parent of
+// several independently onboarded repos (the TwingMail/twinmail-ui
+// workflow), not a repo itself -- previously a silent no-op for every
+// Edit/Write in that setup. Resolving from the file's own path instead
+// must make the gate fire exactly as it would from inside the repo.
+func TestHandleEditWriteGate_CwdIsParentOfRepo_ResolvesFromFilePath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/constraints/match":
+			_, _ = w.Write([]byte(`{"matched":false}`))
+		case "/v1/designs/scope-match":
+			if r.URL.Query().Get("path") != "packages/api/mailbox.ts" {
+				t.Errorf("scope-match path = %q, want packages/api/mailbox.ts", r.URL.Query().Get("path"))
+			}
+			_, _ = w.Write([]byte(`{"state":"in_scope","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	parent := t.TempDir() // not itself a git repo
+	repo := newTestRepo(t, server.URL)
+	movedRepo := filepath.Join(parent, "TwingMail")
+	if err := os.Rename(repo, movedRepo); err != nil {
+		t.Fatal(err)
+	}
+	fileDir := filepath.Join(movedRepo, "packages", "api")
+	if err := os.MkdirAll(fileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setCachedToken(t, server.URL, "some-token")
+
+	payload := hookPayload{
+		SessionID: "sess1",
+		Cwd:       parent,
+		ToolName:  "Write",
+		ToolInput: json.RawMessage(fmt.Sprintf(`{"file_path":%q}`, filepath.Join(fileDir, "mailbox.ts"))),
+	}
+	stdout := captureStdout(t, func() { handleEditWriteGate(payload) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "allow" {
+		t.Fatalf("decision = %q, reason = %q, want allow", decision, reason)
+	}
+}
+
+// Same ambiguous-cwd setup, but nothing onboarded under cwd at all --
+// must stay a silent no-op, same as "no coordinator configured".
+func TestHandleEditWriteGate_CwdIsParentWithNoOnboardedRepo_SilentNoOp(t *testing.T) {
+	parent := t.TempDir()
+	sub := filepath.Join(parent, "SomeProject")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setCachedToken(t, "http://unused.invalid", "")
+
+	payload := hookPayload{
+		SessionID: "sess1",
+		Cwd:       parent,
+		ToolName:  "Write",
+		ToolInput: json.RawMessage(fmt.Sprintf(`{"file_path":%q}`, filepath.Join(sub, "foo.go"))),
+	}
+	stdout := captureStdout(t, func() { handleEditWriteGate(payload) })
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+}
+
+// setupMultiRepoCwd creates two independently onboarded repos under one
+// non-repo parent directory, both pointing at the same coordinator --
+// the common case (one team, several repos, one coordinator) that lets
+// handleExitPlanModeMultiCandidate extract the plan just once.
+func setupMultiRepoCwd(t *testing.T, serverURL string) (parent, repoA, repoB string) {
+	t.Helper()
+	parent = t.TempDir()
+	repoA = filepath.Join(parent, "TwingMail")
+	repoB = filepath.Join(parent, "twinmail-ui")
+	for _, dir := range []string{repoA, repoB} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTempGitRepoAt(t, dir)
+		writeTwingYAML(t, dir, fmt.Sprintf("coordinator:\n  serverUrl: %s\n", serverURL))
+	}
+	return parent, repoA, repoB
+}
+
+func TestHandleExitPlanMode_MultiCandidate_PlanTouchesOnlyOneCandidate_RegistersThereOnly(t *testing.T) {
+	var checkCalls, extractCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/designs/extract":
+			extractCalls++
+			_, _ = w.Write([]byte(`{"creates":[],"touches":["TwingMail/packages/api/mailbox.ts"],"dependsOn":[],"summary":"fix mailbox parsing"}`))
+		case "/v1/designs/check":
+			checkCalls++
+			var body designCheckRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if len(body.Touches) != 1 || body.Touches[0] != "packages/api/mailbox.ts" {
+				t.Errorf("designs/check touches = %v, want [packages/api/mailbox.ts] (prefix stripped)", body.Touches)
+			}
+			_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	parent, _, _ := setupMultiRepoCwd(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(parent, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "allow" {
+		t.Fatalf("decision = %q, reason = %q, want allow", decision, reason)
+	}
+	if extractCalls != 1 {
+		t.Errorf("extract calls = %d, want 1 (one coordinator shared by both candidates)", extractCalls)
+	}
+	if checkCalls != 1 {
+		t.Errorf("check calls = %d, want 1 -- only the matching candidate should register", checkCalls)
+	}
+}
+
+func TestHandleExitPlanMode_MultiCandidate_PlanSpansBothCandidates_RegistersInBoth(t *testing.T) {
+	var checkedProjects []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/designs/extract":
+			_, _ = w.Write([]byte(`{"creates":[],"touches":["TwingMail/packages/api/mailbox.ts","twinmail-ui/src/Inbox.tsx"],"dependsOn":[],"summary":"full-stack change"}`))
+		case "/v1/designs/check":
+			var body designCheckRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			checkedProjects = append(checkedProjects, body.ProjectID)
+			_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	parent, _, _ := setupMultiRepoCwd(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(parent, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "allow" {
+		t.Fatalf("decision = %q, reason = %q, want allow", decision, reason)
+	}
+	if len(checkedProjects) != 2 || checkedProjects[0] == checkedProjects[1] {
+		t.Errorf("checked projects = %v, want two distinct project ids -- one design registered per repo", checkedProjects)
+	}
+}
+
+// The residual ambiguous case: the plan mentions no concrete path inside
+// either candidate. Must deny, not guess-and-register-everywhere.
+func TestHandleExitPlanMode_MultiCandidate_NoPathMatchesAnyCandidate_DeniesAmbiguous(t *testing.T) {
+	var checkCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/designs/extract":
+			_, _ = w.Write([]byte(`{"creates":[],"touches":[],"dependsOn":[],"summary":"a vague plan with no concrete paths"}`))
+		case "/v1/designs/check":
+			checkCalls++
+		}
+	}))
+	defer server.Close()
+
+	parent, _, _ := setupMultiRepoCwd(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(parent, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+	if !strings.Contains(reason, "TwingMail") || !strings.Contains(reason, "twinmail-ui") {
+		t.Errorf("reason = %q, want it to name both candidates", reason)
+	}
+	if checkCalls != 0 {
+		t.Errorf("check calls = %d, want 0 -- nothing should register when nothing matched", checkCalls)
+	}
+}
+
+// No onboarded repo anywhere under cwd at all -- silent allow, same
+// category as the single-repo "no coordinator configured" case.
+func TestHandleExitPlanMode_MultiCandidate_NoCandidatesAtAll_SilentNoOp(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(parent, "plain-folder"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(parent, "sess1")) })
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+}
+
+// A denial from one matched candidate must still surface, naming which repo
+// it came from, even though the other candidate came back clean.
+func TestHandleExitPlanMode_MultiCandidate_OneCandidateDenies_OverallDenies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/designs/extract":
+			_, _ = w.Write([]byte(`{"creates":[],"touches":["TwingMail/packages/api/mailbox.ts","twinmail-ui/src/Inbox.tsx"],"dependsOn":[],"summary":"full-stack change"}`))
+		case "/v1/designs/check":
+			var body designCheckRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if len(body.Touches) == 1 && body.Touches[0] == "src/Inbox.tsx" {
+				_, _ = w.Write([]byte(`{"verdict":"overlap","designId":"d2","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"exact_overlap","overlapDetail":"src/Inbox.tsx","conflictingSummary":"another session's inbox work"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	parent, _, _ := setupMultiRepoCwd(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(parent, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+	if !strings.Contains(reason, "twinmail-ui") || !strings.Contains(reason, "d-other") {
+		t.Errorf("reason = %q, want it to name twinmail-ui and the conflicting design", reason)
+	}
+}
+
 // --- kill switch, unaffected by the fail-closed change ---
 
 func TestHandlePreToolUse_DesignGateOff_NoOp(t *testing.T) {

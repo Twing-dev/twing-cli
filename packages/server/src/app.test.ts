@@ -1883,3 +1883,66 @@ test("POST /v1/projects/:id/join-via-github: an already-cached token's role is r
   });
   assert.equal(identities.getProjectRole("proj-1", "grace@example.com"), "admin");
 });
+
+// POST /v1/designs/extract -- the multi-repo ExitPlanMode fallback's
+// extraction-only endpoint (2026-08-18 fix, hook/design_gate.go's
+// handleExitPlanModeMultiCandidate). No projectId, no registration: just
+// runs extractDesign() and hands back the structured result so the hook
+// can decide which candidate repo(s) a plan actually belongs to before
+// ever calling /v1/designs/check.
+function mockBedrockExtraction(extracted: { creates: string[]; touches: string[]; dependsOn: string[]; summary: string }): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(extracted) } }] }), { status: 200 })) as typeof fetch;
+}
+
+test("POST /v1/designs/extract: returns the structured extraction with no project and no registration side effects", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const extracted = {
+    creates: [],
+    touches: ["TwingMail/packages/api/mailbox.ts", "twinmail-ui/src/Inbox.tsx"],
+    dependsOn: [],
+    summary: "fix mailbox parsing and its UI display",
+  };
+
+  const res = await withBedrockEnv(() =>
+    withMockFetch(mockBedrockExtraction(extracted), async () =>
+      app.request("/v1/designs/extract", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...bearer(admin.token) },
+        body: JSON.stringify({ rawPlanText: "Fix mailbox parsing in the backend and its display in the UI." }),
+      }),
+    ),
+  );
+  const body = (await res.json()) as { creates: string[]; touches: string[]; dependsOn: string[]; summary: string };
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.deepEqual(body.touches, extracted.touches);
+  assert.equal(body.summary, extracted.summary);
+
+  // No project was ever named, so nothing should have registered anywhere.
+  assert.equal(designs.openDesigns("proj-1", Date.now()).length, 0);
+});
+
+test("POST /v1/designs/extract: rejects a request with no rawPlanText", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/designs/extract", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({}),
+  });
+  assert.equal(res.status, 400);
+});
+
+test("POST /v1/designs/extract: still requires authentication, same as every other /v1/* route", async () => {
+  const { app } = freshApp();
+
+  const res = await app.request("/v1/designs/extract", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rawPlanText: "do the thing" }),
+  });
+  assert.equal(res.status, 401);
+});

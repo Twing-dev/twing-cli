@@ -613,6 +613,26 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ status: closed?.status });
   });
 
+  // Multi-repo ExitPlanMode fallback (2026-08-18): extraction only, no
+  // registration. When the hook's cwd isn't itself a git repo (a shared
+  // parent of several independently-onboarded repos -- see
+  // handleExitPlanModeMultiCandidate in design_gate.go), it doesn't yet
+  // know which candidate project(s) a plan belongs to, so it can't call
+  // /v1/designs/check (which always registers). It extracts once here,
+  // partitions the resulting creates/touches by which candidate repo's
+  // directory name prefixes each path, then calls /v1/designs/check's
+  // structured (pre-extracted) path per matching candidate. No projectId:
+  // extraction itself touches no project data, so this needs only the
+  // standard /v1/* identity middleware, not authorizeProject.
+  app.post("/v1/designs/extract", async (c) => {
+    const body = await c.req.json<{ rawPlanText?: string }>().catch(() => null);
+    if (!body || typeof body.rawPlanText !== "string" || !body.rawPlanText) {
+      return c.json({ error: "expected { rawPlanText }" }, 400);
+    }
+    const extracted = await extractDesign(body.rawPlanText, { model: extractModel });
+    return c.json(extracted);
+  });
+
   // §17.2: the one call twing-hook makes. Accepts either rawPlanText
   // (extraction runs here) or pre-structured fields (agent-supplied via
   // `twing design register`, extraction skipped). Registers the design and
