@@ -120,6 +120,18 @@ export interface DesignStatement {
   creates: string[];
   touches: string[];
   dependsOn: string[];
+  /** The full `rawPlanText` an `ExitPlanMode` registration sent (§17.2),
+   * verbatim -- despite the name, no longer truncated (was capped at 2000
+   * chars via app.ts's `RAW_PLAN_EXCERPT_CHARS` until that cap was dropped,
+   * 2026-08-18: it was silently truncating both the semantic comparator's
+   * input, design-semantic-check.ts's `planTextFor`, and the ExitPlanMode
+   * retry-dedup Jaccard check, design-checks.ts's
+   * `PLAN_RETRY_SIMILARITY_THRESHOLD`, for any plan longer than 2000 chars
+   * -- not worth keeping a `-Excerpt` name around for what's now the full
+   * text, but renaming the field would touch every call site for no
+   * behavioral gain). Never set on a structured `twing design register`
+   * call (CLI always sends structured fields, never `rawPlanText`) -- this
+   * is the one reliable signal a design row came from `ExitPlanMode`. */
   rawPlanExcerpt?: string;
   /** Active-inactivity threshold (§17 design lifecycle, 2026-08): how long
    * this design can go with no activity before going dormant. Refreshed on

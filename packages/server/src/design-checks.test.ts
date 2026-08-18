@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope, appendSummaryUpdate } from "./design-checks.js";
+import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope, appendSummaryUpdate, jaccard, PLAN_RETRY_SIMILARITY_THRESHOLD } from "./design-checks.js";
 import type { DesignStatement, DesignConstraint } from "@twing/core";
 
 function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
@@ -247,4 +247,52 @@ test("appendSummaryUpdate: two successive amends both survive, in order", () => 
   const firstIndex = second.indexOf("first update");
   const secondIndex = second.indexOf("second update");
   assert.ok(originalIndex >= 0 && firstIndex > originalIndex && secondIndex > firstIndex, "expected original, then first update, then second update, in that order");
+});
+
+// -- jaccard / PLAN_RETRY_SIMILARITY_THRESHOLD ------------------------------
+// Real empirical values this threshold was picked from (see the constant's
+// own doc comment): identical text scores 1.0; a real plan substantively
+// revised between two ExitPlanMode retries scored 0.815; unrelated plans
+// scored 0.03-0.14. These tests don't reproduce that exact data (it lived in
+// a live coordinator DB, not a fixture), but pin the same qualitative shape
+// so a future change to the algorithm or the threshold has to notice it's
+// crossing these lines.
+
+test("jaccard: identical text scores 1.0", () => {
+  const text = "Add a RetryPolicy class implementing exponential backoff with jitter for outbound HTTP calls.";
+  assert.equal(jaccard(text, text), 1);
+});
+
+test("jaccard: completely disjoint vocabulary scores 0", () => {
+  assert.equal(jaccard("alpha beta gamma delta", "epsilon zeta eta theta"), 0);
+});
+
+test("jaccard: empty string on either side scores 0, never divides by zero", () => {
+  assert.equal(jaccard("", "some real plan text here"), 0);
+  assert.equal(jaccard("some real plan text here", ""), 0);
+  assert.equal(jaccard("", ""), 0);
+});
+
+test("jaccard: a substantively revised plan (real shape: ~40% growth, matching the real revised-retry sample this threshold was tuned from) clears PLAN_RETRY_SIMILARITY_THRESHOLD", () => {
+  const before = [
+    "Fix ExitPlanMode's duplicate-design-registration loop.",
+    "Context: retrying ExitPlanMode within one plan-mode pass registers a brand-new design row every single time instead of updating the one from the previous attempt.",
+    "Root cause: hook/design_gate.go's handleExitPlanMode unconditionally posts a fresh rawPlanText to POST /v1/designs/check on every call, with no local cache of a previously-registered design id for this session.",
+    "POST /v1/designs/check calls DesignRegistry.register unconditionally, a plain crypto.randomUUID plus INSERT, never an upsert or a does-this-session-already-have-one lookup.",
+    "The fix: repurpose the dead hasOpenForSession lookup into a real openPlanModeDesignForSession method, and add a full-replace reregisterFromPlan method that bumps scopeVersion and resets status to open.",
+    "Wire this into POST /v1/designs/check: when rawPlanText is present, look up the existing candidate for this session first, and reregister in place rather than always inserting a new row.",
+  ].join(" ");
+  const addition =
+    " Correctness note added after review: session id alone is not a reliable same-plan-retry signal, a session can legitimately register two different plan-mode designs back to back, " +
+    "so the lookup needs a Jaccard similarity gate against the candidate's stored plan text before treating it as a match, otherwise a genuinely different later plan could silently overwrite an earlier unrelated design's content.";
+  const after = before + addition;
+  const similarity = jaccard(before, after);
+  assert.ok(similarity >= PLAN_RETRY_SIMILARITY_THRESHOLD, `expected a substantively-revised-but-same plan (${similarity}) to clear the threshold (${PLAN_RETRY_SIMILARITY_THRESHOLD})`);
+});
+
+test("jaccard: two different plans that happen to share domain vocabulary stay below PLAN_RETRY_SIMILARITY_THRESHOLD", () => {
+  const planA = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls, depending on the existing Clock abstraction.";
+  const planB = "Add a debounce helper to src/ui/search-box.ts so keystrokes don't trigger a network call on every character, using the existing Clock abstraction for timing.";
+  const similarity = jaccard(planA, planB);
+  assert.ok(similarity < PLAN_RETRY_SIMILARITY_THRESHOLD, `expected two different plans (${similarity}) to stay below the threshold (${PLAN_RETRY_SIMILARITY_THRESHOLD})`);
 });

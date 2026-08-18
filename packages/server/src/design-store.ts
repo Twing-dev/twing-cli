@@ -348,13 +348,99 @@ export class DesignRegistry {
     return rows.map(fromDesignRow);
   }
 
-  hasOpenForSession(sessionId: string, now: number = Date.now()): boolean {
+  /** ExitPlanMode retry dedup (§17, 2026-08-18): the candidate lookup for
+   * "did this session already register a plan-mode design we should update
+   * in place instead of duplicating." Scoped to `rawPlanExcerpt IS NOT
+   * NULL` -- the one reliable signal that a row came from `ExitPlanMode`'s
+   * `rawPlanText` path rather than a structured `twing design register`
+   * call (which never sets it) -- so this never touches a developer's
+   * genuine manual registrations. `status IN ('open', 'flagged')`, not just
+   * `'open'`: a design flagged by the *previous* retry (denied, awaiting
+   * justification) is exactly the row a follow-up retry needs to find and
+   * update, not skip past. `dormant` is deliberately excluded -- reviving a
+   * dormant design is `resume`'s explicit job, not something a new
+   * `ExitPlanMode` call should do silently. Most-recent-first so a session
+   * with (legitimately) more than one candidate still picks the freshest.
+   *
+   * Returns only a *candidate* -- the caller (`POST /v1/designs/check`)
+   * still has to clear the Jaccard similarity gate
+   * (`PLAN_RETRY_SIMILARITY_THRESHOLD`, design-checks.ts) against this
+   * row's `rawPlanExcerpt` before treating it as an actual match; session id
+   * alone isn't enough; see that constant's doc comment for why. */
+  openPlanModeDesignForSession(projectId: string, sessionId: string): DesignStatement | undefined {
     const row = this.db
       .select()
       .from(designsTable)
-      .where(and(eq(designsTable.sessionId, sessionId), eq(designsTable.status, "open"), sql`${designsTable.createdAt} + ${designsTable.ttlMs} > ${now}`))
-      .get();
-    return row !== undefined;
+      .where(
+        and(
+          eq(designsTable.projectId, projectId),
+          eq(designsTable.sessionId, sessionId),
+          sql`${designsTable.status} IN ('open', 'flagged')`,
+          sql`${designsTable.rawPlanExcerpt} IS NOT NULL`,
+        ),
+      )
+      .orderBy(sql`${designsTable.createdAt} DESC`)
+      .get() as DesignRow | undefined;
+    return row ? fromDesignRow(row) : undefined;
+  }
+
+  /** ExitPlanMode retry dedup, the persist half of
+   * `openPlanModeDesignForSession` above: once the caller has confirmed
+   * (via the Jaccard gate) that an incoming `ExitPlanMode` plan is the same
+   * plan as an existing candidate, just revised, this replaces that row's
+   * scope in place rather than inserting a new one -- the direct fix for
+   * the duplicate-registration loop.
+   *
+   * A **full replace**, deliberately not `mergeDesignScope`'s additive
+   * union (unlike `amend`): a fresh plan extraction is the authoritative
+   * current state of the plan, not a delta to union with the old one -- if
+   * a file genuinely dropped out of the plan between retries, the stale
+   * touch shouldn't linger forever the way an amend's addition would.
+   * Bumps `scopeVersion` and `lastActivityAt` (same as `amend`/`resume`),
+   * and resets `status` to `"open"` -- a candidate found via
+   * `openPlanModeDesignForSession` may have been `"flagged"` by the retry
+   * this is replacing, and the caller re-runs the full conflict check
+   * against the new scope before calling this, same contract as
+   * `amend`/`resume`.
+   *
+   * Critically, because this updates the *same row* rather than inserting a
+   * new one, `justifiedConstraintIds` carries over for free -- a constraint
+   * already justified and approved on a prior retry does not need
+   * re-justifying on the next one, only genuinely new scope trips a fresh
+   * constraint match. Returns `undefined` if `id` no longer exists (should
+   * not happen in practice -- the caller just looked it up -- but mirrors
+   * every other store method's contract here). */
+  reregisterFromPlan(
+    id: string,
+    args: { summary: string; creates: string[]; touches: string[]; dependsOn: string[]; rawPlanExcerpt: string },
+  ): DesignStatement | undefined {
+    const existing = this.get(id);
+    if (!existing) return undefined;
+    const now = Date.now();
+    this.db
+      .update(designsTable)
+      .set({
+        status: "open",
+        summary: args.summary,
+        creates: JSON.stringify(args.creates),
+        touches: JSON.stringify(args.touches),
+        dependsOn: JSON.stringify(args.dependsOn),
+        rawPlanExcerpt: args.rawPlanExcerpt,
+        scopeVersion: existing.scopeVersion + 1,
+        lastActivityAt: now,
+      })
+      .where(eq(designsTable.id, id))
+      .run();
+    this.activityLog.append({
+      projectId: existing.projectId,
+      developerId: existing.developerId,
+      sessionId: existing.sessionId,
+      kind: "design_registered",
+      relatedId: id,
+      ts: now,
+      payload: { summary: args.summary, creates: args.creates, touches: args.touches, dependsOn: args.dependsOn, reregistered: true },
+    });
+    return this.get(id);
   }
 
   /** §17.5: the agent abandons its own design and adopts the existing one. */

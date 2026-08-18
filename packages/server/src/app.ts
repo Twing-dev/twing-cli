@@ -15,7 +15,7 @@ import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
 import { runChecks } from "./checks.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
-import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope, appendSummaryUpdate } from "./design-checks.js";
+import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope, appendSummaryUpdate, jaccard, PLAN_RETRY_SIMILARITY_THRESHOLD } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
@@ -149,8 +149,6 @@ export interface CreateAppOptions {
    * deployment. Defaults to false (full auth, unchanged). */
   noAuth?: boolean;
 }
-
-const RAW_PLAN_EXCERPT_CHARS = 2000;
 
 type Variables = { identity: ResolvedIdentity };
 
@@ -637,7 +635,40 @@ export function createApp(options: CreateAppOptions = {}) {
       summary = extracted.summary;
     }
 
-    const design = designs.register({
+    // ExitPlanMode retry dedup (§17, 2026-08-18): `handleExitPlanMode`
+    // (hook/design_gate.go) has no client-side memory of a prior
+    // registration and POSTs fresh `rawPlanText` on every single retry --
+    // without this, every retry within one plan-mode pass registered a
+    // brand-new design that structurally overlapped every prior one from
+    // the same loop, needing its own human-approved justification, forever
+    // (unbounded). Scoped to exactly the `rawPlanText` path -- a structured
+    // `twing design register` call always creates a new row, correctly, a
+    // developer registering two genuinely separate tasks in one session
+    // still gets two rows and a real overlap check between them.
+    //
+    // Session id alone isn't a safe "same plan, retried" signal -- a
+    // session can legitimately register two different plan-mode designs
+    // back to back, and keying purely on sessionId would silently overwrite
+    // the first one's content the moment the second's ExitPlanMode fires.
+    // openPlanModeDesignForSession narrows to a *candidate* by session id;
+    // the Jaccard gate below decides whether it's actually the same plan.
+    let design: DesignStatement | undefined;
+    let reregistered = false;
+    if (body.rawPlanText) {
+      const candidate = designs.openPlanModeDesignForSession(body.projectId, body.sessionId);
+      if (candidate?.rawPlanExcerpt) {
+        const similarity = jaccard(candidate.rawPlanExcerpt, body.rawPlanText);
+        console.log(
+          `twing serve: design ${candidate.id.slice(0, 8)} plan-retry similarity to session ${body.sessionId.slice(0, 12)}'s new ExitPlanMode call: ${similarity.toFixed(3)}` +
+            (similarity >= PLAN_RETRY_SIMILARITY_THRESHOLD ? " -- reregistering in place" : " -- below threshold, registering fresh"),
+        );
+        if (similarity >= PLAN_RETRY_SIMILARITY_THRESHOLD) {
+          design = designs.reregisterFromPlan(candidate.id, { summary, creates, touches, dependsOn, rawPlanExcerpt: body.rawPlanText });
+          reregistered = design !== undefined;
+        }
+      }
+    }
+    design ??= designs.register({
       projectId: body.projectId,
       developerId: identity.developerId,
       sessionId: body.sessionId,
@@ -646,7 +677,9 @@ export function createApp(options: CreateAppOptions = {}) {
       creates,
       touches,
       dependsOn,
-      rawPlanExcerpt: body.rawPlanText?.slice(0, RAW_PLAN_EXCERPT_CHARS),
+      // No truncation (dropped 2026-08-18, was capped at 2000 chars) -- see
+      // DesignStatement.rawPlanExcerpt's doc comment in @twing/core for why.
+      rawPlanExcerpt: body.rawPlanText,
       ttlMs: body.ttlMs,
     });
 
@@ -665,7 +698,7 @@ export function createApp(options: CreateAppOptions = {}) {
       kind: "design_checked",
       relatedId: design.id,
       ts: Date.now(),
-      payload: { verdict: outcome.verdict, conflictCount: outcome.conflicts.length },
+      payload: { verdict: outcome.verdict, conflictCount: outcome.conflicts.length, reregistered },
     });
 
     // §17 scope enforcement (2026-08): a non-clean verdict demotes the

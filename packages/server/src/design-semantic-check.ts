@@ -142,8 +142,9 @@ const FEW_SHOT: { user: string; assistant: string }[] = [
   },
 ];
 
-/** `rawPlanExcerpt` if the design was registered from a real plan (up to
- * 2000 chars, app.ts's RAW_PLAN_EXCERPT_CHARS) *and hasn't been amended
+/** `rawPlanExcerpt` if the design was registered from a real plan (the
+ * full `rawPlanText`, untruncated as of 2026-08-18 -- see
+ * `DesignStatement.rawPlanExcerpt`'s doc comment) *and hasn't been amended
  * since* (`scopeVersion <= 1`); otherwise synthesized from the structured
  * fields (a manually-registered design has nothing else). Found live,
  * 2026-08-18 (task #98): `rawPlanExcerpt` is captured once, at

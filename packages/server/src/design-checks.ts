@@ -16,6 +16,35 @@ export interface DesignCheckOutcome {
 
 const SUMMARY_SIMILARITY_THRESHOLD = 0.5;
 
+/** ExitPlanMode retry dedup (design-store.ts's `openPlanModeDesignForSession`
+ * / `reregisterFromPlan`, wired in app.ts's `POST /v1/designs/check`):
+ * how similar an incoming `rawPlanText` needs to be to a candidate's stored
+ * `rawPlanExcerpt` before being treated as "the same plan, retried" (update
+ * in place) rather than a genuinely different plan that happens to share a
+ * session id (register as a new row, leaving the candidate untouched).
+ * Deliberately a separate, independent constant from
+ * `SUMMARY_SIMILARITY_THRESHOLD` above, not a reuse of it -- that one gates
+ * a low-stakes advisory flag for a human to look at; a false positive here
+ * would silently overwrite a different design's content, so a false match
+ * is a correctness bug, not just a missed hint, and needs a different risk
+ * calculus.
+ *
+ * 0.7 -- tested empirically against real data rather than picked blind (see
+ * the plan this shipped from): full, untruncated plan text on both sides
+ * (`rawPlanExcerpt` stopped being 2000-char-truncated the same day this
+ * shipped, precisely because it was distorting this comparison -- see
+ * `DesignStatement.rawPlanExcerpt`'s doc comment). Unrelated plans scored
+ * 0.03-0.14; a real plan substantively revised between two ExitPlanMode
+ * retries (the realistic case -- a byte-identical retry is the easy case
+ * any threshold catches) scored 0.815. 0.7 sits with comfortable headroom
+ * on both sides: ~5x the unrelated ceiling, safely below the one real
+ * revised-retry sample. A first guess of ~0.9 (before the truncation bug
+ * was found and fixed) would have missed that same revised-retry case
+ * entirely. Treat as a starting point -- the route logs the actual score on
+ * every check so this can be recalibrated from real traffic, not just this
+ * small sample. */
+export const PLAN_RETRY_SIMILARITY_THRESHOLD = 0.7;
+
 function normalize(s: string): string {
   return s.trim().toLowerCase();
 }
@@ -130,7 +159,13 @@ function keywordSet(s: string): Set<string> {
   return new Set(s.toLowerCase().split(/\W+/).filter((w) => w.length > 2));
 }
 
-function jaccard(a: string, b: string): number {
+/** Word-overlap similarity, 0-1, over unique lowercased keywords (length >
+ * 2, so short stopwords like "a"/"in"/"is" fall out but common ones like
+ * "the"/"and" don't -- doesn't materially inflate scores for unrelated
+ * English text in practice, see `PLAN_RETRY_SIMILARITY_THRESHOLD`'s empirical
+ * notes). Exported for reuse by the ExitPlanMode retry-dedup check
+ * (design-store.ts / app.ts) as well as `summarySimilarity` below. */
+export function jaccard(a: string, b: string): number {
   const setA = keywordSet(a);
   const setB = keywordSet(b);
   if (setA.size === 0 || setB.size === 0) return 0;

@@ -1333,6 +1333,175 @@ test("GET /v1/designs/scope-match: dormant state still fires even when path does
   assert.equal(body.designId, designId);
 });
 
+// --- ExitPlanMode retry dedup (§17, 2026-08-18) ---
+// hook/design_gate.go's handleExitPlanMode has no client-side memory of a
+// prior registration and resends rawPlanText fresh on every retry; these
+// tests exercise the server-side dedup that fixes the resulting unbounded
+// duplicate-registration loop. Every case here sends `rawPlanText` *and*
+// structured fields together so `hasStructured` is true and the LLM
+// extraction branch is skipped (matching every other /v1/designs/check test
+// in this file) -- `rawPlanText`'s presence alone is what drives the dedup
+// lookup/Jaccard gate, independent of where creates/touches/summary come
+// from.
+
+test("POST /v1/designs/check: a near-identical rawPlanText retry for the same session reregisters in place instead of duplicating", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const planText = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls.";
+
+  const first = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
+  });
+  const firstBody = (await first.json()) as { designId: string; verdict: string };
+  assert.equal(first.status, 200);
+  assert.equal(firstBody.verdict, "clean");
+
+  // A retry: same plan text, byte-identical -- the easy case.
+  const second = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
+  });
+  const secondBody = (await second.json()) as { designId: string; verdict: string };
+  assert.equal(second.status, 200);
+  assert.equal(secondBody.verdict, "clean", "reregistering in place must not overlap itself");
+  assert.equal(secondBody.designId, firstBody.designId, "same row updated, not a new one");
+  assert.equal(designs.get(firstBody.designId)?.scopeVersion, 2, "reregisterFromPlan bumps scopeVersion same as amend/resume");
+
+  // Exactly one live design for this session/project, not two.
+  assert.equal(designs.openDesigns("proj-1").length, 1);
+});
+
+test("POST /v1/designs/check: a substantively different rawPlanText for the same session registers a new row and leaves the candidate untouched", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const first = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      projectId: "proj-1",
+      sessionId: "s-plan",
+      rawPlanText: "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls, depending on the existing Clock abstraction.",
+      summary: "add retry policy",
+      creates: [],
+      touches: ["src/net/retry.ts"],
+      dependsOn: [],
+    }),
+  });
+  const firstBody = (await first.json()) as { designId: string };
+
+  // A genuinely different plan (per the module's own jaccard test fixture --
+  // shares "existing Clock abstraction" vocabulary but is otherwise
+  // unrelated), same session id, later in the same conversation.
+  const second = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      projectId: "proj-1",
+      sessionId: "s-plan",
+      rawPlanText: "Add a debounce helper to src/ui/search-box.ts so keystrokes don't trigger a network call on every character, using the existing Clock abstraction for timing.",
+      summary: "add debounce helper",
+      creates: [],
+      touches: ["src/ui/search-box.ts"],
+      dependsOn: [],
+    }),
+  });
+  const secondBody = (await second.json()) as { designId: string; verdict: string };
+  assert.equal(second.status, 200);
+  assert.notEqual(secondBody.designId, firstBody.designId, "a genuinely different plan must get its own row");
+
+  const first_ = designs.get(firstBody.designId);
+  assert.equal(first_?.scopeVersion, 1, "the earlier candidate must be left completely untouched");
+  assert.deepEqual(first_?.touches, ["src/net/retry.ts"]);
+});
+
+test("POST /v1/designs/check: a rawPlanText registration under a *different* session id never reregisters another session's design", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const planText = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls.";
+
+  const first = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-one", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
+  });
+  const firstBody = (await first.json()) as { designId: string };
+
+  const second = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-two", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
+  });
+  const secondBody = (await second.json()) as { designId: string; verdict: string };
+  assert.equal(second.status, 200);
+  assert.notEqual(secondBody.designId, firstBody.designId, "a different session must not reregister another session's design");
+  assert.equal(secondBody.verdict, "overlap", "and correctly conflicts with it, same as any other pair of unrelated open designs");
+});
+
+test("POST /v1/designs/check: a structured (twing design register-style) call with no rawPlanText always creates a new row, even repeated in the same session", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const first = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-cli", summary: "task one", creates: ["A"], touches: [], dependsOn: [] }),
+  });
+  const firstBody = (await first.json()) as { designId: string };
+
+  const second = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-cli", summary: "task one", creates: ["A"], touches: [], dependsOn: [] }),
+  });
+  const secondBody = (await second.json()) as { designId: string; verdict: string };
+  assert.equal(second.status, 200);
+  assert.notEqual(secondBody.designId, firstBody.designId, "structured register calls are never deduped -- only ExitPlanMode's rawPlanText path is");
+  assert.equal(secondBody.verdict, "overlap");
+});
+
+test("POST /v1/designs/check: a reregistered design keeps its justifiedConstraintIds -- an approved review survives the retry", async () => {
+  const { app, dataDir, designs, constraints } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  constraints.add("proj-1", "review required for retry.ts", ["src/net/retry.ts"], "review_required", "seeded");
+  const planText = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls.";
+
+  const first = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
+  });
+  const firstBody = (await first.json()) as { designId: string; verdict: string };
+  assert.equal(firstBody.verdict, "constraint_flag");
+
+  const resolveRes = await app.request(`/v1/designs/${firstBody.designId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "reviewed, fine" }),
+  });
+  const { reviewId } = (await resolveRes.json()) as { reviewId: string };
+  const decideRes = await app.request(`/v1/reviews/${reviewId}/decide`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ decision: "approve" }),
+  });
+  assert.equal(decideRes.status, 200, await decideRes.text());
+  assert.ok(designs.get(firstBody.designId)?.justifiedConstraintIds.length, "sanity: the approval populated justifiedConstraintIds before the retry");
+
+  // Retry: same plan text -- reregisters in place rather than duplicating.
+  const second = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
+  });
+  const secondBody = (await second.json()) as { designId: string; verdict: string };
+  assert.equal(secondBody.designId, firstBody.designId, "same row reregistered");
+  assert.equal(secondBody.verdict, "clean", "already-justified constraint must not be re-flagged after a mere retry");
+});
+
 // --- §17 Phase 4: no_auth mode ---
 
 function freshNoAuthApp() {
