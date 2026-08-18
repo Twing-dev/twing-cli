@@ -196,6 +196,40 @@ test("IdentityStore: joinProject with an already-known developerId attaches memb
   assert.equal(store.getProjectRole("proj-1", "bob@example.com"), "admin");
 });
 
+test("IdentityStore: redeemInvite/joinProject/foundProjectViaGithub all point at the real recovery path when a label collides with an existing identity", () => {
+  const dir = tmpDir();
+  const store = new IdentityStore(createDb({ dataDir: dir }), { dataDir: dir });
+  const admin = store.bootstrap(readBootstrapToken(dir), "hash-alice", "alice@example.com");
+  if ("error" in admin) throw new Error("bootstrap failed");
+  store.foundProject("proj-1", "alice@example.com", { owner: "twing-dev", repo: "twing-cli" });
+
+  // join-via-github joining an already-founded project, under a label that
+  // already has an identity (lost/never-had PAT is the realistic case) --
+  // the scenario task #93 is specifically about.
+  const joinResult = store.joinProject("proj-1", "member", { tokenHash: "hash-new", label: "alice@example.com" });
+  assert.ok("error" in joinResult);
+  if (!("error" in joinResult)) return;
+  assert.match(joinResult.error, /already exists/);
+  assert.match(joinResult.error, /twing serve --regenerate-bootstrap-token/);
+  assert.match(joinResult.error, /twing admin bootstrap --token/);
+
+  // join-via-github *founding* a brand-new project, same label collision.
+  const foundResult = store.foundProjectViaGithub("proj-2", { tokenHash: "hash-new2", label: "alice@example.com" }, { owner: "twing-dev", repo: "other-repo" });
+  assert.ok("error" in foundResult);
+  if (!("error" in foundResult)) return;
+  assert.match(foundResult.error, /already exists/);
+  assert.match(foundResult.error, /twing serve --regenerate-bootstrap-token/);
+
+  // Same collision via the older invite-redemption path -- shares the exact
+  // same underlying problem and fix, so it gets the same message.
+  const invite = store.createInvite({ kind: "org", orgId: admin.orgId }, "member", "alice@example.com", "alice@example.com");
+  const inviteResult = store.redeemInvite(invite.code, { tokenHash: "hash-new3", label: "alice@example.com" });
+  assert.ok("error" in inviteResult);
+  if (!("error" in inviteResult)) return;
+  assert.match(inviteResult.error, /already exists/);
+  assert.match(inviteResult.error, /twing serve --regenerate-bootstrap-token/);
+});
+
 test("IdentityStore: joinProject rejects an unknown projectId", () => {
   const dir = tmpDir();
   const store = new IdentityStore(createDb({ dataDir: dir }), { dataDir: dir });

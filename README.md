@@ -195,11 +195,12 @@ scripts for running it as a systemd service under an isolated,
 unprivileged user instead -- see `deploy/README.md`.
 
 **Design checks made from plan text** (`ExitPlanMode`) need an LLM call to
-turn the plan into structured fields, so wherever this runs needs an
-OpenRouter key:
+turn the plan into structured fields, so wherever this runs needs Bedrock
+credentials (the sole LLM provider):
 
 ```sh
-export OPENROUTER_API_KEY=$(cat openrouter_key.txt)   # or your own key
+export AWS_BEARER_TOKEN_BEDROCK=...
+export AWS_REGION=us-east-1
 npm run start --workspace packages/server
 ```
 

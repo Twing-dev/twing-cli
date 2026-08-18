@@ -12,7 +12,15 @@ import * as os from "node:os";
 
 function git(args: string[], cwd: string): string | null {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+    // stdio: pipe stdout (we read it), discard stderr -- every call site here
+    // treats a git failure (no such remote, not a git repo, no commits yet)
+    // as an expected, silent `null`, not a real error; without this override
+    // git's own "fatal: ..." lands on our stderr anyway even though we
+    // already handle the failure, e.g. a fresh repo with no `origin` remote
+    // printing "fatal: No such remote 'origin'" on every getOriginRemoteUrl
+    // call despite that being a normal, handled case (§17 Phase 3's no-remote
+    // fallback).
+    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   } catch {
     return null;
   }

@@ -243,7 +243,7 @@ export class DesignRegistry {
    * been superseded. Returns `undefined` if the design isn't currently
    * `"open"` (flagged/closed/superseded/expired designs can't be amended --
    * resolve or re-register instead). */
-  amend(id: string, delta: { touches?: string[]; creates?: string[]; dependsOn?: string[] }): DesignStatement | undefined {
+  amend(id: string, delta: { touches?: string[]; creates?: string[]; dependsOn?: string[]; summary?: string }): DesignStatement | undefined {
     const existing = this.get(id);
     if (!existing || existing.status !== "open") return undefined;
     const merged = mergeDesignScope(existing, delta);
@@ -254,6 +254,9 @@ export class DesignRegistry {
         touches: JSON.stringify(merged.touches),
         creates: JSON.stringify(merged.creates),
         dependsOn: JSON.stringify(merged.dependsOn),
+        // summary replaces rather than merges -- see AmendRequestBody's own
+        // doc comment (app.ts) for why free text has no sensible "add".
+        ...(delta.summary !== undefined ? { summary: delta.summary } : {}),
         scopeVersion,
         lastActivityAt: Date.now(), // §17 design lifecycle: amending is itself real activity
       })
@@ -266,7 +269,12 @@ export class DesignRegistry {
       kind: "design_amended",
       relatedId: id,
       ts: Date.now(),
-      payload: { addedTouches: delta.touches ?? [], addedCreates: delta.creates ?? [], addedDependsOn: delta.dependsOn ?? [] },
+      payload: {
+        addedTouches: delta.touches ?? [],
+        addedCreates: delta.creates ?? [],
+        addedDependsOn: delta.dependsOn ?? [],
+        ...(delta.summary !== undefined ? { newSummary: delta.summary } : {}),
+      },
     });
     return this.get(id);
   }

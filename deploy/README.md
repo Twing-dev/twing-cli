@@ -35,16 +35,18 @@ build yet.
 
 `start-server.sh` just inherits whatever's already in your shell's
 environment, so export these first if you want the design-conflict gate's
-plan-text extraction working:
+plan-text extraction working. Bedrock is the sole LLM provider (OpenRouter
+support was removed 2026-08-17):
 
 ```sh
-export OPENROUTER_API_KEY=$(cat openrouter_key.txt)   # or your own key
-export TWING_EXTRACT_MODEL=openai/gpt-oss-20b:free    # optional, this is the default
-export TWING_SERVE_DATA_DIR=~/.twing/serve-data        # optional, this is the default -- where ratified constraints persist
+export AWS_BEARER_TOKEN_BEDROCK=...
+export AWS_REGION=us-east-1
+export TWING_EXTRACT_MODEL=google.gemma-4-31b   # optional, this is the default
+export TWING_SERVE_DATA_DIR=~/.twing/serve-data  # optional, this is the default -- where ratified constraints persist
 deploy/start-server.sh
 ```
 
-None of these are required to start the server -- without `OPENROUTER_API_KEY`,
+None of these are required to start the server -- without `AWS_BEARER_TOKEN_BEDROCK`,
 `ExitPlanMode` checks fail soft to "clean" (logged), and the `Edit`/`Write`
 "you need a registered design" check still works either way, since it doesn't
 need extraction.

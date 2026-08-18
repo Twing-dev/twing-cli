@@ -106,6 +106,58 @@ interface JoinViaGithubResponseJSON {
   error?: string;
 }
 
+export const JOIN_VIA_GITHUB_MAX_ATTEMPTS = 3;
+
+/**
+ * Retries the `/v1/projects/:id/join-via-github` call itself (coordinator
+ * hiccup / transient network failure) without ever re-running the device
+ * flow -- the already-obtained `githubToken` is reused across attempts
+ * within this one call, since it's still valid for however long GitHub's
+ * OAuth app grants it, and re-prompting the user to re-approve on GitHub
+ * for what might just be a dropped connection would be needless friction.
+ * A real 4xx (bad request, rejected/expired GitHub token, "already exists")
+ * is not transient -- retrying it three times would just repeat the same
+ * rejection, so only a 5xx or a network-level failure (`fetch` itself
+ * throwing) triggers a retry.
+ */
+export async function postJoinViaGithub(
+  normalizedServer: string,
+  projectId: string,
+  body: Record<string, string>,
+  existingToken: string | undefined,
+): Promise<{ res: Response; result: JoinViaGithubResponseJSON }> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= JOIN_VIA_GITHUB_MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await authFetch(
+        `${normalizedServer}/v1/projects/${projectId}/join-via-github`,
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+        existingToken,
+      );
+      if (res.status < 500) {
+        const result = (await res.json().catch(() => ({}))) as JoinViaGithubResponseJSON;
+        return { res, result };
+      }
+      lastError = new Error(`coordinator returned ${res.status}`);
+    } catch (err) {
+      lastError = err;
+    }
+    if (attempt < JOIN_VIA_GITHUB_MAX_ATTEMPTS) {
+      const backoffMs = 500 * 2 ** (attempt - 1); // 500ms, then 1000ms
+      console.log(
+        `twing join: join-via-github call failed (attempt ${attempt}/${JOIN_VIA_GITHUB_MAX_ATTEMPTS}), retrying in ${backoffMs}ms...`,
+      );
+      await sleep(backoffMs);
+    }
+  }
+  throw new Error(
+    `twing join: join-via-github failed after ${JOIN_VIA_GITHUB_MAX_ATTEMPTS} attempts -- ` +
+      `${lastError instanceof Error ? lastError.message : String(lastError)}. Your GitHub authorization already ` +
+      "succeeded; this is the coordinator call failing, not the device flow -- check the coordinator is reachable " +
+      "and run `twing join --github` again.",
+  );
+}
+
 /**
  * Returns the resulting PAT (freshly minted, an already-cached one that was
  * just reused, or one attached to via an existing session) -- `init.ts`'s
@@ -149,12 +201,7 @@ export async function runJoinGithub(options: JoinOptions): Promise<string> {
     body.label = computeDeveloperId(repoRoot);
   }
 
-  const res = await authFetch(
-    `${normalizedServer}/v1/projects/${projectId}/join-via-github`,
-    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
-    existingToken,
-  );
-  const result = (await res.json().catch(() => ({}))) as JoinViaGithubResponseJSON;
+  const { res, result } = await postJoinViaGithub(normalizedServer, projectId, body, existingToken);
   if (!res.ok || !result.developerId) {
     throw new Error(`twing join: failed -- ${result.error ?? res.statusText}`);
   }

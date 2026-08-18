@@ -697,8 +697,10 @@ func handleEditWriteGate(payload hookPayload) {
 	case "no_design":
 		writeJSON(denyOutput("PreToolUse",
 			"twing design coordinator: no design registered for this session yet. Either enter plan mode "+
-				"(ExitPlanMode registers one automatically), or run `twing design register --summary \"...\" "+
-				"--creates a,b --touches c,d --depends-on e,f` directly, then retry this edit.",
+				"(ExitPlanMode registers one automatically), or run `twing design register --summary "+
+				"\"<what you are trying to achieve in this session, concretely>\" --creates a,b --touches c,d "+
+				"--depends-on e,f` directly, then retry this edit. The summary is what other sessions and human "+
+				"reviewers see when your work overlaps theirs -- describe the actual goal, not a placeholder.",
 		))
 	default:
 		logDesignGate("design scope check: unknown state %q (blocking)", scopeMatch.State)

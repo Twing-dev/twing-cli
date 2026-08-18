@@ -58,7 +58,7 @@ test("runDesignRegister: falls back to CLAUDE_CODE_SESSION_ID when --session is 
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
     await withEnv({ CLAUDE_CODE_SESSION_ID: "env-session" }, () =>
-      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, summary: "" })),
+      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, summary: "test summary" })),
     );
     assert.equal((calls[0].body as { sessionId: string }).sessionId, "env-session");
   });
@@ -69,7 +69,7 @@ test("runDesignRegister: throws when neither --session nor CLAUDE_CODE_SESSION_I
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
     await withEnv({ CLAUDE_CODE_SESSION_ID: undefined }, async () => {
-      await assert.rejects(() => runDesignRegister({ cwd: repo, summary: "" }), /no session id/);
+      await assert.rejects(() => runDesignRegister({ cwd: repo, summary: "test summary" }), /no session id/);
     });
   });
 });
@@ -77,7 +77,7 @@ test("runDesignRegister: throws when neither --session nor CLAUDE_CODE_SESSION_I
 test("runDesignRegister: throws when the repo has no coordinator configured", async () => {
   await withHome(async () => {
     const repo = tmpRepo(); // no .twing/twing.yml at all
-    await assert.rejects(() => runDesignRegister({ cwd: repo, session: "s1", summary: "" }), /no coordinator configured/);
+    await assert.rejects(() => runDesignRegister({ cwd: repo, session: "s1", summary: "test summary" }), /no coordinator configured/);
   });
 });
 
@@ -86,7 +86,7 @@ test("runDesignRegister: a 401 response prints the unauthorized hint instead of 
   await withHome(async () => {
     cacheToken(SERVER_URL, "stale-token");
     const repo = tmpRepo(SERVER_URL);
-    const { errors } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "s1", summary: "" })));
+    const { errors } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "s1", summary: "test summary" })));
     assert.ok(errors.some((e) => e.includes("unauthorized") && e.includes("twing login")));
   });
 });
@@ -144,12 +144,32 @@ test("runDesignAmend: sends the split scope delta and prints conflict detail on 
   });
 });
 
-test("runDesignAmend: throws without --id, or without any of --touches/--creates/--depends-on", async () => {
+test("runDesignAmend: throws without --id, or without any of --touches/--creates/--depends-on/--summary", async () => {
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
     await assert.rejects(() => runDesignAmend({ cwd: repo, touches: "a.ts" }), /--id/);
-    await assert.rejects(() => runDesignAmend({ cwd: repo, id: "d1" }), /--touches.*--creates.*--depends-on/);
+    await assert.rejects(() => runDesignAmend({ cwd: repo, id: "d1" }), /--touches.*--creates.*--depends-on.*--summary/);
+  });
+});
+
+test("runDesignAmend: --summary alone (no touches/creates/depends-on) sends just the summary", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await withMockFetch(fetch, () => runDesignAmend({ cwd: repo, id: "d1", summary: "the corrected summary" }));
+    assert.deepEqual(calls[0].body, { addTouches: [], addCreates: [], addDependsOn: [], summary: "the corrected summary" });
+  });
+});
+
+test("runDesignAmend: --summary alongside --touches sends both", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await withMockFetch(fetch, () => runDesignAmend({ cwd: repo, id: "d1", touches: "b.ts", summary: "the corrected summary" }));
+    assert.deepEqual(calls[0].body, { addTouches: ["b.ts"], addCreates: [], addDependsOn: [], summary: "the corrected summary" });
   });
 });
 

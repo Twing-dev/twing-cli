@@ -6,9 +6,9 @@ import { runTwingInit, runTwingAlign, runTwingDesignDisableGate } from "./twing-
 import { ClaudeSession } from "./claude-session.js";
 import type { Driver } from "./drivers/driver.js";
 import { HumanDriver, closeHumanInput } from "./drivers/human-driver.js";
-import { OpenRouterDriver, readOpenRouterKey } from "./drivers/openrouter-driver.js";
+import { BedrockDriver } from "./drivers/bedrock-driver.js";
 
-export type DriverKind = "human" | "openrouter";
+export type DriverKind = "human" | "bedrock";
 
 export interface RunOptions {
   scenario: Scenario;
@@ -16,8 +16,8 @@ export interface RunOptions {
   driverA: DriverKind;
   driverB: DriverKind;
   claudeModel: string;
-  openrouterModel: string;
-  openrouterKeyFile: string;
+  bedrockModel: string;
+  bedrockRegion?: string;
   serverPort: number;
   workspacesRoot: string;
   /** §17: leaves the design gate wired (init's new default) instead of
@@ -37,7 +37,7 @@ function sleep(ms: number): Promise<void> {
 
 function createDriver(kind: DriverKind, options: RunOptions): Driver {
   if (kind === "human") return new HumanDriver();
-  return new OpenRouterDriver(readOpenRouterKey(options.openrouterKeyFile), options.openrouterModel);
+  return new BedrockDriver(options.bedrockModel, options.bedrockRegion);
 }
 
 function truncate(text: string, max = 300): string {

@@ -23,8 +23,8 @@ function parseFlags(args: string[]): Record<string, string> {
 }
 
 function asDriverKind(value: string, flagName: string): DriverKind {
-  if (value === "human" || value === "openrouter") return value;
-  throw new Error(`--${flagName} must be "human" or "openrouter", got "${value}"`);
+  if (value === "human" || value === "bedrock") return value;
+  throw new Error(`--${flagName} must be "human" or "bedrock", got "${value}"`);
 }
 
 function asMode(value: string): WorkspaceMode {
@@ -39,11 +39,11 @@ function printUsage(): void {
       "",
       "  --scenario <name-or-path>     default: retry-duplicate",
       "  --mode worktree|clones        default: worktree",
-      "  --driver-a human|openrouter   default: openrouter",
-      "  --driver-b human|openrouter   default: openrouter",
+      "  --driver-a human|bedrock      default: bedrock",
+      "  --driver-b human|bedrock      default: bedrock",
       "  --claude-model <model>        default: haiku",
-      "  --openrouter-model <model>    default: openai/gpt-oss-20b:free",
-      "  --openrouter-key-file <path>  default: <repo root>/openrouter_key.txt",
+      "  --bedrock-model <model>       default: google.gemma-4-31b",
+      "  --bedrock-region <region>     default: AWS_REGION/AWS_DEFAULT_REGION env",
       "  --server-port <port>          default: 8790",
       "  --enable-design-gate          leave the §17 PreToolUse gate wired (default: off)",
     ].join("\n"),
@@ -57,17 +57,16 @@ async function main(): Promise<void> {
     return;
   }
 
-  const repoRoot = path.join(SIMULATOR_ROOT, "..");
   const scenario = loadScenario(flags.scenario ?? "retry-duplicate");
 
   await run({
     scenario,
     mode: asMode(flags.mode ?? "worktree"),
-    driverA: asDriverKind(flags["driver-a"] ?? "openrouter", "driver-a"),
-    driverB: asDriverKind(flags["driver-b"] ?? "openrouter", "driver-b"),
+    driverA: asDriverKind(flags["driver-a"] ?? "bedrock", "driver-a"),
+    driverB: asDriverKind(flags["driver-b"] ?? "bedrock", "driver-b"),
     claudeModel: flags["claude-model"] ?? "haiku",
-    openrouterModel: flags["openrouter-model"] ?? "openai/gpt-oss-20b:free",
-    openrouterKeyFile: flags["openrouter-key-file"] ?? path.join(repoRoot, "openrouter_key.txt"),
+    bedrockModel: flags["bedrock-model"] ?? "google.gemma-4-31b",
+    bedrockRegion: flags["bedrock-region"],
     serverPort: Number(flags["server-port"] ?? 8790),
     workspacesRoot: path.join(SIMULATOR_ROOT, ".workspaces"),
     enableDesignGate: flags["enable-design-gate"] === "true",

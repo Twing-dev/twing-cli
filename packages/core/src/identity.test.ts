@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canonicalizeRemoteUrl, parseGithubOwnerRepo } from "./identity.js";
+import { execFileSync, spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { canonicalizeRemoteUrl, parseGithubOwnerRepo, getOriginRemoteUrl } from "./identity.js";
 
 // Fixture table shared conceptually with hook/identity_test.go -- both must
 // canonicalize every one of these to the same string, or projectId diverges
@@ -45,4 +49,33 @@ test("parseGithubOwnerRepo: undefined for a non-GitHub host", () => {
 test("parseGithubOwnerRepo: undefined for a malformed/incomplete GitHub path", () => {
   assert.equal(parseGithubOwnerRepo("github.com/just-an-org"), undefined);
   assert.equal(parseGithubOwnerRepo("github.com/org/repo/extra"), undefined);
+});
+
+// A repo with no `origin` remote is a normal, handled case (§17 Phase 3's
+// no-remote fallback) -- git's own "fatal/error: No such remote 'origin'"
+// isn't a real error here and shouldn't leak anywhere just because we
+// happen to shell out to git to find that out (found live, 2026-08-18).
+// This has to run getOriginRemoteUrl in a *child* process and inspect
+// *that* child's stderr fd -- `execFileSync`'s default stdio duplicates the
+// grandchild git process's stderr straight onto our fd 2, bypassing
+// `process.stderr.write()`/anything else at the JS layer entirely, so
+// nothing short of a real subprocess boundary can observe (or fail to
+// observe) the leak this test exists to catch.
+test("getOriginRemoteUrl: returns null and leaks nothing onto stderr for a repo with no origin remote", () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "twing-identity-test-"));
+  try {
+    execFileSync("git", ["init", "--quiet"], { cwd: repoRoot });
+    const distDir = path.dirname(new URL(import.meta.url).pathname); // this test file's own compiled location, dist/ (tests run against dist, not src)
+    const modulePath = path.join(distDir, "identity.js");
+    const script = `
+      import(${JSON.stringify(modulePath)}).then(({ getOriginRemoteUrl }) => {
+        process.stdout.write(JSON.stringify(getOriginRemoteUrl(${JSON.stringify(repoRoot)})));
+      });
+    `;
+    const child = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
+    assert.equal(child.stderr, "");
+    assert.equal(child.stdout.trim(), "null");
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+  }
 });

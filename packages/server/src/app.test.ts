@@ -743,6 +743,57 @@ test("POST /v1/designs/:id/amend: a clean amendment persists, bumps scopeVersion
   assert.deepEqual(listBody.items.find((d) => d.id === designId)?.touches, ["a.ts", "b.ts"]);
 });
 
+test("POST /v1/designs/:id/amend: a summary-only amendment replaces (not merges) the summary and leaves touches/creates/dependsOn untouched", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "placeholder", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      (async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: false, kind: null, reason: "" }) } }] }), { status: 200 })) as typeof fetch,
+      async () => {
+        const amendRes = await app.request(`/v1/designs/${designId}/amend`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ summary: "the corrected summary" }),
+        });
+        assert.deepEqual(await amendRes.json(), { verdict: "clean", designId });
+      },
+    ),
+  );
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
+  const listBody = (await listRes.json()) as { items: { id: string; summary: string; touches: string[] }[] };
+  const amended = listBody.items.find((d) => d.id === designId);
+  assert.equal(amended?.summary, "the corrected summary");
+  assert.deepEqual(amended?.touches, ["a.ts"], "amend --summary alone must not touch the existing scope");
+});
+
+test("POST /v1/designs/:id/amend: neither a scope delta nor a summary is a 400, not a silent no-op", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "x", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  const amendRes = await app.request(`/v1/designs/${designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({}),
+  });
+  assert.equal(amendRes.status, 400);
+});
+
 test("POST /v1/designs/:id/amend: a conflicting amendment persists the merged scope and flags the design, instead of silently discarding it", async () => {
   // Found live (2026-08): this used to leave the design's row completely
   // untouched on a non-clean verdict, unlike a fresh /v1/designs/check
@@ -881,6 +932,66 @@ test("POST /v1/designs/:id/amend: an approved review waives only that specific c
     body: JSON.stringify({ addTouches: ["b/one.ts"] }),
   });
   assert.equal((await thirdAmend.json() as { verdict: string }).verdict, "constraint_flag", "b/** was never justified -- approving a/** must not waive it too");
+});
+
+test("POST /v1/designs/:id/resolve: attributes constraintId even when the design *also* overlaps another open design on the same path", async () => {
+  // Regression test for a real bug found live, 2026-08-17: resolve() used
+  // to derive constraintId by re-running the *overall* verdict check
+  // (checkAmendedScope) and only attributing a constraint when that
+  // recomputed verdict came back exactly "constraint_flag". But
+  // runDesignChecks returns tier-1 "overlap" before it ever reaches
+  // tier-3's constraint match, so a design that both touches a flagged
+  // path *and* happens to overlap some other open design on that same
+  // path got constraintId silently dropped -- the approved review then had
+  // nothing to add to justifiedConstraintIds, so the ground-truth
+  // /v1/constraints/match backstop kept denying identically forever, even
+  // after approval. The fix matches constraints directly against the
+  // design's own scope, independent of whatever else is open.
+  const { app, dataDir, constraints } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const constraint = constraints.add("proj-1", "needs review", ["shared.ts"], "review_required", "seeded");
+
+  // A second open design that also touches shared.ts -- this is what
+  // creates the overlap tier-1 hit alongside the constraint match.
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+  const { verdict, designId } = (await registerRes.json()) as { verdict: string; designId: string };
+  assert.equal(verdict, "overlap", "sanity check: registration itself must see the overlap, not the constraint, since tier 1 wins");
+
+  const resolveRes = await app.request(`/v1/designs/${designId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "both legitimately touch shared.ts, and it's a reviewed path" }),
+  });
+  const { reviewId } = (await resolveRes.json()) as { reviewId: string };
+
+  await app.request(`/v1/reviews/${reviewId}/decide`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ decision: "approve" }),
+  });
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
+  const listBody = (await listRes.json()) as { items: { id: string; justifiedConstraintIds: string[] }[] };
+  const design = listBody.items.find((d) => d.id === designId);
+  assert.deepEqual(
+    design?.justifiedConstraintIds,
+    [constraint.id],
+    "the constraint must be attributed and recorded despite the concurrent overlap -- this is the actual bug",
+  );
+
+  // And the ground-truth backstop must now actually honor it.
+  const matchRes = await app.request(`/v1/constraints/match?projectId=proj-1&path=shared.ts&sessionId=s1`, { headers: bearer(admin.token) });
+  assert.deepEqual(await matchRes.json(), { matched: false }, "an approved, attributed constraint must be excluded from the ground-truth check");
 });
 
 test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator pass from the prior registration (kill stale, retain findings, start fresh)", async () => {

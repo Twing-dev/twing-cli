@@ -130,6 +130,31 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+/** Shared "already exists" collision message for `redeemInvite`/
+ * `joinProject`/`foundProjectViaGithub`'s identical new-developer branch --
+ * `label` collided with an already-registered `developerId` (almost always
+ * the same git email showing up on a second machine/session that never had
+ * or has since lost its original PAT). Names the *actual* recovery path
+ * rather than just "log in instead" -- that's only actionable if you still
+ * have the PAT, which is exactly the case this error means you don't.
+ * `bootstrap()` above already special-cases an existing label as a token
+ * *rotation* rather than a second error (see its own doc comment), so the
+ * real fix is regenerating a bootstrap token and re-bootstrapping under the
+ * same label -- gated by filesystem access to the coordinator's own data
+ * dir (`regenerateBootstrapToken`'s doc comment), i.e. this is the
+ * coordinator operator's call to make, not a self-service action from here.
+ * On the shared public coordinator that means asking whoever operates it,
+ * same as any other lost-credential recovery. */
+function identityAlreadyExistsError(label: string): string {
+  return (
+    `a developer identity for "${label}" already exists -- if you still have its PAT, run \`twing login ` +
+    `--token <that pat>\` instead of generating a new one. If you lost it, this needs the coordinator's ` +
+    `operator: they run \`twing serve --regenerate-bootstrap-token\` on the server itself, then you (or they) ` +
+    `run \`twing admin bootstrap --token <that token> --label "${label}"\` -- bootstrap rotates an existing ` +
+    `identity's token under the same label rather than erroring, so this doesn't create a duplicate identity.`
+  );
+}
+
 function inviteScopeOf(row: { scopeKind: string; scopeOrgId: string | null; scopeProjectId: string | null }): InviteScope {
   return row.scopeKind === "org" ? { kind: "org", orgId: row.scopeOrgId! } : { kind: "project", projectId: row.scopeProjectId! };
 }
@@ -332,7 +357,7 @@ export class IdentityStore {
     } else {
       const existing = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.label)).get();
       if (existing) {
-        return { error: `a developer identity for "${params.label}" already exists -- log in with that PAT instead of generating a new one` };
+        return { error: identityAlreadyExistsError(params.label) };
       }
       developerId = params.label;
       this.db.insert(developersTable).values({ developerId, tokenHash: params.tokenHash, createdAt: Date.now() }).run();
@@ -504,7 +529,7 @@ export class IdentityStore {
     } else {
       const existing = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.label)).get();
       if (existing) {
-        return { error: `a developer identity for "${params.label}" already exists -- log in with that PAT instead of generating a new one` };
+        return { error: identityAlreadyExistsError(params.label) };
       }
       developerId = params.label;
       this.db.insert(developersTable).values({ developerId, tokenHash: params.tokenHash, createdAt: Date.now() }).run();
@@ -543,7 +568,7 @@ export class IdentityStore {
     } else {
       const existing = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.label)).get();
       if (existing) {
-        return { error: `a developer identity for "${params.label}" already exists -- log in with that PAT instead of generating a new one` };
+        return { error: identityAlreadyExistsError(params.label) };
       }
       developerId = params.label;
       this.db.insert(developersTable).values({ developerId, tokenHash: params.tokenHash, createdAt: Date.now() }).run();

@@ -53,11 +53,16 @@ interface ResolveRequestBody {
 }
 
 // §17 scope enforcement (2026-08): "add" fields only -- amend expands an
-// open design's declared scope, it never removes from it.
+// open design's declared scope, it never removes from it. `summary`
+// (2026-08-17) is the one exception: free text has no sensible "add" merge,
+// so a provided summary replaces the existing one outright rather than
+// appending -- the escape hatch for a design mis-registered with an empty
+// or garbage summary (found live).
 interface AmendRequestBody {
   addTouches?: string[];
   addCreates?: string[];
   addDependsOn?: string[];
+  summary?: string;
 }
 
 // §17 design lifecycle (2026-08): sessionId is required -- resume
@@ -436,9 +441,13 @@ export function createApp(options: CreateAppOptions = {}) {
    * Callers persist (`designs.amend`/`designs.resume`) only on a clean
    * verdict; `open` is returned too since a clean persist also needs it for
    * `runSemanticComparatorPass`. */
-  function checkAmendedScope(design: DesignStatement, delta: { touches?: string[]; creates?: string[]; dependsOn?: string[] }) {
+  function checkAmendedScope(design: DesignStatement, delta: { touches?: string[]; creates?: string[]; dependsOn?: string[]; summary?: string }) {
     const merged = mergeDesignScope(design, delta);
-    const candidate: DesignStatement = { ...design, ...merged };
+    // summary replaces rather than merges (see AmendRequestBody's doc
+    // comment) -- but still needs to flow into the re-check candidate,
+    // since design-checks.ts's Jaccard summary-similarity overlap tier
+    // reads it same as any other field.
+    const candidate: DesignStatement = { ...design, ...merged, ...(delta.summary !== undefined ? { summary: delta.summary } : {}) };
     const open = designs.openDesigns(design.projectId, Date.now(), design.id);
     const constraints = constraintStore.forProject(design.projectId);
     const outcome = runDesignChecks(candidate, open, constraints);
@@ -793,9 +802,9 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     const body = await c.req.json<AmendRequestBody>().catch(() => null);
-    const delta = { touches: body?.addTouches ?? [], creates: body?.addCreates ?? [], dependsOn: body?.addDependsOn ?? [] };
-    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0) {
-      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn" }, 400);
+    const delta = { touches: body?.addTouches ?? [], creates: body?.addCreates ?? [], dependsOn: body?.addDependsOn ?? [], summary: body?.summary };
+    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined) {
+      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary" }, 400);
     }
 
     const { outcome, open } = checkAmendedScope(design, delta);

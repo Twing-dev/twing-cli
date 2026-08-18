@@ -122,9 +122,22 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
   // mis-parsed as a real invocation, see runDesignCommand's own fix) fell
   // through with `summary: options.summary ?? ""` and silently registered
   // a real, empty, unrecoverable-looking design against the live
-  // coordinator instead of failing loudly.
+  // coordinator instead of failing loudly. The error text itself was
+  // widened the same day (still found live -- this was the "just throwing
+  // might not be enough" follow-up): an agent hitting this for the first
+  // time, usually from the hook's own "no design registered" deny, has no
+  // other cue about what a summary is *for* -- it's the one field every
+  // other session and human reviewer sees when work overlaps theirs, not
+  // free-form scratch text, so a generic "field required" message invites
+  // a generic filler value instead of a real answer.
   if (!options.summary) {
-    throw new Error('twing design register: --summary "..." is required');
+    throw new Error(
+      'twing design register: --summary "..." is required -- describe the concrete thing you are trying to ' +
+        "achieve in this session (not a placeholder or restatement of the command). This is what shows up to " +
+        "other sessions and human reviewers when your work overlaps theirs, so it needs to actually say what " +
+        'you\'re building: e.g. --summary "Add exponential backoff with jitter to RetryPolicy so outbound HTTP ' +
+        'calls survive transient failures" rather than --summary "make changes" or --summary "fix bug".',
+    );
   }
 
   const projectId = computeProjectId(repoRoot);
@@ -191,17 +204,25 @@ export interface AmendOptions {
   touches?: string;
   creates?: string;
   dependsOn?: string;
+  /** Replaces (not merges -- there's no sensible merge for free text) the
+   * design's summary. The one field `amend` couldn't touch before this --
+   * found live, 2026-08-17: a design mis-registered with an empty or
+   * garbage summary had no recovery path at all short of abandoning it. */
+  summary?: string;
 }
 
 /**
  * §17 scope enforcement (2026-08): the escape hatch for legitimately
- * touching a file that wasn't declared at registration time. The server
- * re-runs the full syntactic check against the *merged* scope before
- * persisting anything -- this can't be used to silently launder a scope
- * expansion past overlap/constraint detection, it can only be rejected the
- * same way initial registration can. Response shape matches
- * `/v1/designs/check`'s, so `printDesignVerdict`'s existing "adopt the
- * existing design, or run twing design resolve ..." hint applies unchanged.
+ * touching a file that wasn't declared at registration time, or (2026-08-17)
+ * fixing up a bad summary. The server re-runs the full syntactic check
+ * against the *merged* scope (and the new summary, if given -- it feeds
+ * design-checks.ts's Jaccard summary-similarity overlap tier same as any
+ * other field) before persisting anything -- this can't be used to
+ * silently launder a scope expansion past overlap/constraint detection, it
+ * can only be rejected the same way initial registration can. Response
+ * shape matches `/v1/designs/check`'s, so `printDesignVerdict`'s existing
+ * "adopt the existing design, or run twing design resolve ..." hint
+ * applies unchanged.
  */
 export async function runDesignAmend(options: AmendOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
@@ -209,8 +230,8 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
   if (!options.id) {
     throw new Error("twing design amend: --id <designId> is required");
   }
-  if (!options.touches && !options.creates && !options.dependsOn) {
-    throw new Error("twing design amend: pass at least one of --touches, --creates, --depends-on");
+  if (!options.touches && !options.creates && !options.dependsOn && !options.summary) {
+    throw new Error("twing design amend: pass at least one of --touches, --creates, --depends-on, --summary");
   }
 
   const res = await authFetch(
@@ -222,6 +243,7 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
         addTouches: splitList(options.touches),
         addCreates: splitList(options.creates),
         addDependsOn: splitList(options.dependsOn),
+        ...(options.summary ? { summary: options.summary } : {}),
       }),
     },
     authToken,

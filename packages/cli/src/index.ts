@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { startDaemon } from "./daemon/server.js";
 import { defaultSocketPath, authFetch, computeDeveloperId } from "@twing/core";
 import { runInit } from "./init.js";
@@ -33,6 +36,20 @@ import {
   runDesignDisableGate,
 } from "./design.js";
 
+/** Reads this package's own `package.json` version directly -- always exactly
+ * one directory up from wherever this module itself is running (`dist/` in
+ * the built/npm-installed form, `packages/cli/` for its `package.json`),
+ * whether that's a global npm install or a contributor's own monorepo
+ * checkout. Deliberately not `npm list -g @twing/cli`/similar shell-out:
+ * that reports what's installed globally, not what binary is actually
+ * executing right now (e.g. `node packages/cli/dist/index.js` against a
+ * local build while some other version is npm-installed globally). */
+function getVersion(): string {
+  const packageJsonPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+  const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as { version?: string };
+  return pkg.version ?? "unknown";
+}
+
 function parseFlags(args: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
   for (let i = 0; i < args.length; i++) {
@@ -55,6 +72,7 @@ function printUsage(): void {
   console.error(
     [
       "Usage:",
+      "  twing --version | -v",
       "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github]",
       "  twing login [--server <url>] [--token <pat>]",
       "  twing keygen --invite <code> [--server <url>] [--label <email>]",
@@ -78,7 +96,7 @@ function printUsage(): void {
       "  twing project list-developers [--project <id>] [--server <url>]",
       "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f",
       "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
-      "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f]",
+      "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f] [--summary \"...\"]",
       "  twing design resume --id <designId> [--session <id>] [--touches a,b] [--creates c,d] [--depends-on e,f]",
       "  twing design list [--status open]",
       "  twing design reviews [--decide <reviewId> --decision approve|reject]",
@@ -113,7 +131,7 @@ async function runDesignCommand(rest: string[]): Promise<void> {
       await runDesignResolve({ cwd, id: flags.id, adopt: flags.adopt, justify: flags.justify });
       return;
     case "amend":
-      await runDesignAmend({ cwd, id: flags.id, touches: flags.touches, creates: flags.creates, dependsOn: flags["depends-on"] });
+      await runDesignAmend({ cwd, id: flags.id, touches: flags.touches, creates: flags.creates, dependsOn: flags["depends-on"], summary: flags.summary });
       return;
     case "resume":
       await runDesignResume({ cwd, id: flags.id, session: flags.session, touches: flags.touches, creates: flags.creates, dependsOn: flags["depends-on"] });
@@ -272,6 +290,11 @@ async function main(): Promise<void> {
   // exited 1 like a real error -- an explicit help request should exit 0.
   if (command === "--help" || command === "-h") {
     printUsage();
+    return;
+  }
+
+  if (command === "--version" || command === "-v") {
+    console.log(getVersion());
     return;
   }
 

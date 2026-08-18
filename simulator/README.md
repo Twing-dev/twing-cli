@@ -13,8 +13,10 @@ gitignored).
 
 - The `claude` CLI installed and authenticated (`claude --version`).
 - Go installed (needed the first time `twing init` builds `twing-hook`).
-- An OpenRouter API key in `openrouter_key.txt` at the repo root (gitignored),
-  if you want an automated driver rather than answering prompts yourself.
+- AWS Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, region from
+  `AWS_REGION`/`AWS_DEFAULT_REGION` or `--bedrock-region`) in the environment,
+  if you want an automated driver rather than answering prompts yourself --
+  same ambient-credential resolution `twing serve` itself uses.
 
 ## Usage
 
@@ -24,18 +26,18 @@ node simulator/dist/index.js
 ```
 
 Defaults: scenario `retry-duplicate`, `worktree` mode, both sessions driven
-by OpenRouter (`openai/gpt-oss-20b:free`), Claude sessions on `haiku`.
+by Bedrock (`google.gemma-4-31b`), Claude sessions on `haiku`.
 
 ```
 Usage: twing-simulator [options]
 
   --scenario <name-or-path>     default: retry-duplicate
   --mode worktree|clones        default: worktree
-  --driver-a human|openrouter   default: openrouter
-  --driver-b human|openrouter   default: openrouter
+  --driver-a human|bedrock      default: bedrock
+  --driver-b human|bedrock      default: bedrock
   --claude-model <model>        default: haiku
-  --openrouter-model <model>    default: openai/gpt-oss-20b:free
-  --openrouter-key-file <path>  default: <repo root>/openrouter_key.txt
+  --bedrock-model <model>       default: google.gemma-4-31b
+  --bedrock-region <region>     default: AWS_REGION/AWS_DEFAULT_REGION env
   --server-port <port>          default: 8790
   --enable-design-gate          leave the §17 PreToolUse gate wired (default: off)
 ```
@@ -51,11 +53,13 @@ disables the gate again right after `init` **unless** you pass
 denied for having no registered design, breaking scenarios that have nothing
 to do with this feature.
 
-With the flag on, export `OPENROUTER_API_KEY` first (the ephemeral server
-needs it for `ExitPlanMode`'s ~structured-field extraction, §17.3):
+With the flag on, export `AWS_BEARER_TOKEN_BEDROCK` (and `AWS_REGION` if not
+already set) first -- the ephemeral server needs it for `ExitPlanMode`'s
+structured-field extraction (§17.3):
 
 ```sh
-export OPENROUTER_API_KEY=$(cat openrouter_key.txt)
+export AWS_BEARER_TOKEN_BEDROCK=...
+export AWS_REGION=us-east-1
 node simulator/dist/index.js --enable-design-gate
 ```
 
@@ -70,7 +74,7 @@ should be able to self-serve past it without needing `--session` at all --
 worth watching whether the agent actually does that, since it still has to
 notice and act on the instruction.
 
-Example: drive session A yourself, let OpenRouter drive session B, and use
+Example: drive session A yourself, let Bedrock drive session B, and use
 two independent clones instead of worktrees:
 
 ```sh
@@ -92,7 +96,7 @@ node simulator/dist/index.js --mode clones --driver-a human
    hooks into each session's `.claude/settings.json`, starts/reuses the
    daemon).
 3. Sends each session's scenario `goal` to a real `claude -p` session, then
-   loops: the configured driver (human or OpenRouter) looks at what the
+   loops: the configured driver (human or Bedrock) looks at what the
    agent just did and either gives it another instruction or ends the
    session. Both sessions run concurrently the whole time.
 4. Once both sessions finish, waits ~10s for the daemon's background sync
