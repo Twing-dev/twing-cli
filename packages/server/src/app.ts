@@ -15,7 +15,7 @@ import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
 import { runChecks } from "./checks.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
-import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope } from "./design-checks.js";
+import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope, appendSummaryUpdate } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
@@ -54,10 +54,11 @@ interface ResolveRequestBody {
 
 // §17 scope enforcement (2026-08): "add" fields only -- amend expands an
 // open design's declared scope, it never removes from it. `summary`
-// (2026-08-17) is the one exception: free text has no sensible "add" merge,
-// so a provided summary replaces the existing one outright rather than
-// appending -- the escape hatch for a design mis-registered with an empty
-// or garbage summary (found live).
+// (2026-08-17) is no exception to that anymore either: a provided summary
+// is appended as a dated `Update:` entry (design-checks.ts's
+// `appendSummaryUpdate`, reversed from the original replace-outright design
+// 2026-08-18 -- a scope-only amend that just wanted to explain *why* was
+// silently destroying the design's entire original context).
 interface AmendRequestBody {
   addTouches?: string[];
   addCreates?: string[];
@@ -443,10 +444,12 @@ export function createApp(options: CreateAppOptions = {}) {
    * `runSemanticComparatorPass`. */
   function checkAmendedScope(design: DesignStatement, delta: { touches?: string[]; creates?: string[]; dependsOn?: string[]; summary?: string }) {
     const merged = mergeDesignScope(design, delta);
-    // summary replaces rather than merges (see AmendRequestBody's doc
-    // comment) -- but still needs to flow into the re-check candidate,
-    // since design-checks.ts's Jaccard summary-similarity overlap tier
-    // reads it same as any other field.
+    // `delta.summary`, if present, is already the final appended text by
+    // the time it gets here (the route computes it once via
+    // appendSummaryUpdate, before calling both this check and the actual
+    // persist -- see AmendRequestBody's doc comment) -- still needs to flow
+    // into the re-check candidate, since design-checks.ts's Jaccard
+    // summary-similarity overlap tier reads it same as any other field.
     const candidate: DesignStatement = { ...design, ...merged, ...(delta.summary !== undefined ? { summary: delta.summary } : {}) };
     const open = designs.openDesigns(design.projectId, Date.now(), design.id);
     const constraints = constraintStore.forProject(design.projectId);
@@ -802,7 +805,13 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     const body = await c.req.json<AmendRequestBody>().catch(() => null);
-    const delta = { touches: body?.addTouches ?? [], creates: body?.addCreates ?? [], dependsOn: body?.addDependsOn ?? [], summary: body?.summary };
+    // Computed once, here -- not inside checkAmendedScope/designs.amend
+    // individually -- so the pre-persist check and the actual persist act
+    // on the exact same final string rather than each independently calling
+    // appendSummaryUpdate (which embeds the current date) and risking a
+    // divergent result between "what got checked" and "what got saved".
+    const summary = body?.summary !== undefined ? appendSummaryUpdate(design.summary, body.summary) : undefined;
+    const delta = { touches: body?.addTouches ?? [], creates: body?.addCreates ?? [], dependsOn: body?.addDependsOn ?? [], summary };
     if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined) {
       return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary" }, 400);
     }

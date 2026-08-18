@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope } from "./design-checks.js";
+import { runDesignChecks, matchConstraintsForPaths, pathInDesignScope, mergeDesignScope, appendSummaryUpdate } from "./design-checks.js";
 import type { DesignStatement, DesignConstraint } from "@twing/core";
 
 function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
@@ -232,4 +232,19 @@ test("mergeDesignScope: empty delta returns the design's existing scope unchange
   const d = design({ touches: ["a.ts"], creates: ["Foo"], dependsOn: ["Bar"] });
   const merged = mergeDesignScope(d, {});
   assert.deepEqual(merged, { touches: ["a.ts"], creates: ["Foo"], dependsOn: ["Bar"] });
+});
+
+test("appendSummaryUpdate: appends as an Update entry, never drops the original text", () => {
+  const result = appendSummaryUpdate("Add retry logic to the HTTP client.", "Also touches src/net/timeout.ts to share the same backoff config.");
+  assert.match(result, /^Add retry logic to the HTTP client\./);
+  assert.match(result, /Update \(\d{4}-\d{2}-\d{2}\): Also touches src\/net\/timeout\.ts to share the same backoff config\.$/);
+});
+
+test("appendSummaryUpdate: two successive amends both survive, in order", () => {
+  const first = appendSummaryUpdate("original summary", "first update");
+  const second = appendSummaryUpdate(first, "second update");
+  const originalIndex = second.indexOf("original summary");
+  const firstIndex = second.indexOf("first update");
+  const secondIndex = second.indexOf("second update");
+  assert.ok(originalIndex >= 0 && firstIndex > originalIndex && secondIndex > firstIndex, "expected original, then first update, then second update, in that order");
 });

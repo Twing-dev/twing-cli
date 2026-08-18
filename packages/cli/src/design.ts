@@ -204,10 +204,13 @@ export interface AmendOptions {
   touches?: string;
   creates?: string;
   dependsOn?: string;
-  /** Replaces (not merges -- there's no sensible merge for free text) the
-   * design's summary. The one field `amend` couldn't touch before this --
-   * found live, 2026-08-17: a design mis-registered with an empty or
-   * garbage summary had no recovery path at all short of abandoning it. */
+  /** Appended onto the design's existing summary as a dated `Update:` entry
+   * (server-side, design-checks.ts's `appendSummaryUpdate`) -- not a
+   * replace. Originally a full replace (2026-08-17, the escape hatch for a
+   * design mis-registered with an empty/garbage summary), reversed
+   * 2026-08-18: a plain replace meant a scope-only amend that just wanted
+   * to explain *why* silently destroyed the design's entire original
+   * context instead. */
   summary?: string;
 }
 

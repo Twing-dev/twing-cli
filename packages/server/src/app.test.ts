@@ -743,7 +743,7 @@ test("POST /v1/designs/:id/amend: a clean amendment persists, bumps scopeVersion
   assert.deepEqual(listBody.items.find((d) => d.id === designId)?.touches, ["a.ts", "b.ts"]);
 });
 
-test("POST /v1/designs/:id/amend: a summary-only amendment replaces (not merges) the summary and leaves touches/creates/dependsOn untouched", async () => {
+test("POST /v1/designs/:id/amend: a summary-only amendment appends an Update entry (never drops the original) and leaves touches/creates/dependsOn untouched", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
 
@@ -771,7 +771,7 @@ test("POST /v1/designs/:id/amend: a summary-only amendment replaces (not merges)
   const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
   const listBody = (await listRes.json()) as { items: { id: string; summary: string; touches: string[] }[] };
   const amended = listBody.items.find((d) => d.id === designId);
-  assert.equal(amended?.summary, "the corrected summary");
+  assert.match(amended?.summary ?? "", /^placeholder\n\nUpdate \(\d{4}-\d{2}-\d{2}\): the corrected summary$/, "original summary must survive, new text appended as a dated Update entry");
   assert.deepEqual(amended?.touches, ["a.ts"], "amend --summary alone must not touch the existing scope");
 });
 

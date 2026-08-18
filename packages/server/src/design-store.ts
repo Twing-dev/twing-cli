@@ -254,8 +254,11 @@ export class DesignRegistry {
         touches: JSON.stringify(merged.touches),
         creates: JSON.stringify(merged.creates),
         dependsOn: JSON.stringify(merged.dependsOn),
-        // summary replaces rather than merges -- see AmendRequestBody's own
-        // doc comment (app.ts) for why free text has no sensible "add".
+        // `delta.summary`, if present, already IS the final text to persist
+        // -- the caller (app.ts's amend route) has already appended it onto
+        // the original via design-checks.ts's appendSummaryUpdate before
+        // calling here, so this is a plain assignment, not a merge decision
+        // made at this layer.
         ...(delta.summary !== undefined ? { summary: delta.summary } : {}),
         scopeVersion,
         lastActivityAt: Date.now(), // §17 design lifecycle: amending is itself real activity

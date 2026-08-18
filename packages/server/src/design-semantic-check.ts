@@ -143,12 +143,23 @@ const FEW_SHOT: { user: string; assistant: string }[] = [
 ];
 
 /** `rawPlanExcerpt` if the design was registered from a real plan (up to
- * 2000 chars, app.ts's RAW_PLAN_EXCERPT_CHARS); otherwise synthesized from
- * the structured fields a manually-registered design has instead. Exported
- * so an eval harness constructs input identically to production, rather
- * than drifting from it. */
+ * 2000 chars, app.ts's RAW_PLAN_EXCERPT_CHARS) *and hasn't been amended
+ * since* (`scopeVersion <= 1`); otherwise synthesized from the structured
+ * fields (a manually-registered design has nothing else). Found live,
+ * 2026-08-18 (task #98): `rawPlanExcerpt` is captured once, at
+ * registration, and never updated -- once `summary` starts accumulating
+ * `Update:` entries via `amend --summary` (design-checks.ts's
+ * `appendSummaryUpdate`), it's the more complete, more current text, and
+ * unconditionally preferring the frozen `rawPlanExcerpt` snapshot meant the
+ * semantic comparator kept reasoning over stale content even after a
+ * session explicitly told the design coordinator its plan had changed.
+ * `scopeVersion` starts at 1 on registration and is bumped by every
+ * amend/resume, so `> 1` is exactly "has been amended at least once" --
+ * see design-store.ts's `register`/`amend`. Exported so an eval harness
+ * constructs input identically to production, rather than drifting from
+ * it. */
 export function planTextFor(design: DesignStatement): string {
-  if (design.rawPlanExcerpt) return design.rawPlanExcerpt;
+  if (design.rawPlanExcerpt && design.scopeVersion <= 1) return design.rawPlanExcerpt;
   const lines = [`Summary: ${design.summary}`];
   if (design.creates.length > 0) lines.push(`Creates: ${design.creates.join(", ")}`);
   if (design.touches.length > 0) lines.push(`Touches: ${design.touches.join(", ")}`);

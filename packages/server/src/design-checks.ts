@@ -188,6 +188,29 @@ export function mergeDesignScope(
   };
 }
 
+/**
+ * Appends an amendment's summary as a dated `Update:` entry rather than
+ * replacing the original outright (reversed 2026-08-18 -- the original
+ * replace-not-merge design meant *any* summary amend, including one that
+ * only meant to explain a scope-only delta like "also touches X because Y",
+ * silently destroyed the design's entire original context: what a human
+ * reviewer sees, what design-checks.ts's Jaccard summary-similarity tier
+ * compares against, and (once `planTextFor` below stopped preferring a
+ * stale `rawPlanExcerpt` snapshot over it) what the semantic comparator
+ * reasons over. Free text still has no sensible word-level "union" the way
+ * touches/creates/dependsOn do -- this doesn't attempt one, it just never
+ * throws the old text away. `app.ts`'s amend route calls this exactly once,
+ * before either the pre-persist check or the actual persist see the
+ * result, so both act on the identical final string -- computing it twice
+ * (once per call site) would risk each getting a different embedded date,
+ * the same "checked one thing, persisted another" shape as the constraintId
+ * attribution bug found earlier this session.
+ */
+export function appendSummaryUpdate(existingSummary: string, update: string): string {
+  const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD -- sortable, no sub-day precision needed for an amend log
+  return `${existingSummary}\n\nUpdate (${date}): ${update}`;
+}
+
 export function runDesignChecks(
   candidate: DesignStatement,
   openDesigns: DesignStatement[],

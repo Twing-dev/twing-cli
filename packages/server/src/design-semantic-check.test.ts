@@ -47,6 +47,17 @@ test("planTextFor: omits empty structured-field lines", () => {
   assert.equal(planTextFor(d), "Summary: does a thing");
 });
 
+// Task #98: rawPlanExcerpt is a one-shot registration-time snapshot that
+// never updates, but `amend --summary` (design-checks.ts's
+// appendSummaryUpdate) keeps summary current -- once a design has actually
+// been amended (scopeVersion > 1), summary is the fresher, more complete
+// text and should win, even though a never-amended ExitPlanMode
+// registration still prefers rawPlanExcerpt (previous test).
+test("planTextFor: prefers the (updated) summary over a stale rawPlanExcerpt once the design has been amended", () => {
+  const d = design({ rawPlanExcerpt: "stale plan text from registration", summary: "original summary\n\nUpdate (2026-08-18): now also touches src/net/timeout.ts", scopeVersion: 2 });
+  assert.equal(planTextFor(d), `Summary: ${d.summary}`);
+});
+
 // -- checkSemanticConflict --------------------------------------------------
 
 test("checkSemanticConflict: conflict:true parses kind/reason, sends system+few-shot+real turn", async () => {
