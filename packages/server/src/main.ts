@@ -49,6 +49,14 @@ const extractModel = process.env.TWING_EXTRACT_MODEL ?? "google.gemma-4-31b";
 // resolution, same model default (this repo's own eval settled on it).
 const semanticCheckModel = process.env.TWING_SEMANTIC_CHECK_MODEL ?? "google.gemma-4-31b";
 
+// twing-monitor v1: comma-separated browser-origin allowlist, e.g.
+// "https://app.twing.dev,http://localhost:5173". Unset/empty -- the
+// default for every existing self-hosted deployment -- mounts no CORS
+// middleware at all (see app.ts's corsOrigins doc comment).
+const corsOrigins = process.env.TWING_SERVE_CORS_ORIGINS?.split(",")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
+
 const app = createApp({
   db,
   extractModel,
@@ -59,6 +67,7 @@ const app = createApp({
   // -- there's no env var to configure here anymore.
   identities: new IdentityStore(db, dataDirOptions),
   noAuth,
+  corsOrigins,
 });
 
 // §17 Phase 4: no_auth defaults to loopback-only -- an operator has to
@@ -74,6 +83,9 @@ const hostname = explicitHost ?? (noAuth ? "127.0.0.1" : undefined);
 
 serve({ fetch: app.fetch, port, hostname }, (info) => {
   console.log(`twing serve: listening on http://localhost:${info.port}`);
+  if (corsOrigins && corsOrigins.length > 0) {
+    console.log(`twing serve: CORS enabled for browser origins: ${corsOrigins.join(", ")}`);
+  }
   if (noAuth) {
     console.log("twing serve: --no-auth is set -- every request must carry a self-declared X-Twing-Developer-Id header, no identity is verified.");
     if (explicitHost && explicitHost !== "127.0.0.1" && explicitHost !== "localhost") {

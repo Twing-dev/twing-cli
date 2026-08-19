@@ -209,13 +209,15 @@ export const EVAL_CASES: EvalCase[] = [
   },
   {
     id: "obvious-03-dependency-collision-invoicevalidator",
-    bucket: "obvious_conflict",
+    bucket: "semantic_gap",
     category: "dependency_collision",
     source: "manual",
     rationale:
-      "Zero file/creates overlap (src/billing/validator.ts vs src/billing/invoice.ts) -- a tier-1-only checker would " +
-      "miss this. Session A assumes InvoiceValidator exists; Session B is about to build it. This is tier 2's entire " +
-      "reason to exist.",
+      "Zero file/creates overlap (src/billing/validator.ts vs src/billing/invoice.ts) -- a tier-1-only checker " +
+      "misses this. Session A assumes InvoiceValidator exists; Session B is about to build it. This used to be " +
+      "tier 2's entire reason to exist; tier 2 (dependencyCollision) was removed 2026-08-19 -- see " +
+      "design-checks.ts's header comment -- so this moved from obvious_conflict to semantic_gap: sync now " +
+      "structurally can't catch it, only the future LLM path could.",
     candidate: design({
       id: "candidate",
       sessionId: "s-validator-build",
@@ -232,8 +234,7 @@ export const EVAL_CASES: EvalCase[] = [
         summary: "Wire invoice submission to a shared InvoiceValidator that checks required fields before persisting",
       }),
     ],
-    expectedVerdict: "overlap",
-    expectedOverlapKind: "depends_on",
+    expectedVerdict: "clean",
     futureLlmExpectation: "should_flag_as_conflict",
   },
   {
@@ -565,13 +566,15 @@ export const EVAL_CASES: EvalCase[] = [
   },
   {
     id: "obvious-13-planmode-vs-planmode-dependency-collision",
-    bucket: "obvious_conflict",
+    bucket: "semantic_gap",
     category: "dependency_collision",
     source: "plan_mode",
     rationale:
       "Both sides real plan-mode-style prose: one session's plan builds AuditLogger, the unrelated-looking other " +
       "session's plan wires into 'the existing AuditLogger' -- a legitimate but fragile ordering assumption tier 2 " +
-      "is built to surface, not necessarily wrong (the agent may justify it), but worth flagging either way.",
+      "used to surface (not necessarily wrong -- the agent may justify it -- but worth flagging either way). " +
+      "Tier 2 (dependencyCollision) was removed 2026-08-19 -- see design-checks.ts's header comment -- so this " +
+      "moved from obvious_conflict to semantic_gap.",
     candidate: design({
       id: "candidate",
       sessionId: "s-admin-actions",
@@ -588,8 +591,7 @@ export const EVAL_CASES: EvalCase[] = [
         summary: "Create an AuditLogger module with a record() method for compliance logging of admin actions.",
       }),
     ],
-    expectedVerdict: "overlap",
-    expectedOverlapKind: "depends_on",
+    expectedVerdict: "clean",
     futureLlmExpectation: "should_flag_as_conflict",
     otherPlanModeProvenance: {
       rawPlanText:
@@ -840,9 +842,11 @@ export const EVAL_CASES: EvalCase[] = [
     category: "multi_design_accumulation",
     source: "manual",
     rationale:
-      "3 open designs: one exact-touches overlap (tier 1), one dependency collision only (tier 2, no tier-1 match), " +
-      "one fully unrelated. Asserts conflicts.length === 2 -- both real hits present, the unrelated third contributes " +
-      "nothing, and the tier-1 continue for the first other doesn't suppress the tier-2 check running for the second.",
+      "3 open designs: one exact-touches overlap (tier 1), one dependency-only relationship (what tier 2 used to " +
+      "catch, before it was removed 2026-08-19 -- see design-checks.ts's header comment), one fully unrelated. " +
+      "Asserts conflicts.length === 1: the tier-1 hit is still caught correctly, and the now-uncaught dependency " +
+      "relationship on the second design contributes nothing -- it doesn't inflate the count or get treated as a " +
+      "hit by accident.",
     candidate: design({ id: "candidate", creates: ["Foo"], touches: ["src/a.ts"], dependsOn: ["Bar"] }),
     openDesigns: [
       design({ id: "open-tier1", touches: ["src/a.ts"], summary: "Unrelated work that happens to touch src/a.ts" }),
@@ -850,7 +854,7 @@ export const EVAL_CASES: EvalCase[] = [
       design({ id: "open-unrelated", creates: ["Zzz"], touches: ["src/z.ts"], summary: "Genuinely unrelated third design" }),
     ],
     expectedVerdict: "overlap",
-    expectedConflictCount: 2,
+    expectedConflictCount: 1,
     futureLlmExpectation: "should_flag_as_conflict",
   },
   {

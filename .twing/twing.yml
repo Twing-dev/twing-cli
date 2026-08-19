@@ -29,11 +29,5 @@ constraints:
       a second wire format"
     scope: "packages/core/src/framing.ts"
 
-triggers:
-  - id: "new-socket-protocol"
-    pattern: "(?i)socket|protocol|frame"
-    match: "new-symbol-name"
-    reason: "possible duplicate of packages/core's socket protocol (protocol.ts,
-      framing.ts) — check before building another"
 coordinator:
   serverUrl: https://coordination-server.twing.dev

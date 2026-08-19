@@ -20,8 +20,6 @@ export interface Claim {
   signatureChanged?: boolean;
   oldSignature?: string;
   newSignature?: string;
-  /** Trigger ids only, never the pattern text (§10). */
-  triggerMatches?: string[];
   constraintIds?: string[];
   ts: number;
   /** Default 6h, refreshed on session activity. */
@@ -48,7 +46,7 @@ export interface Notice {
  * `align`/`review` (§6) can print "the symbol, the other party
  * involved, and why it was flagged" from a POST /v1/claims response (§7).
  */
-export type FindingKind = "textual_overlap" | "contract_divergence" | "trigger_duplication" | "design_divergence" | "design_semantic_conflict";
+export type FindingKind = "textual_overlap" | "contract_divergence" | "design_divergence" | "design_semantic_conflict";
 
 export interface Finding {
   kind: FindingKind;
@@ -169,10 +167,10 @@ export interface DesignStatement {
    * specific constraint, not "never check constraints again." */
   justifiedConstraintIds: string[];
   /** Structural design-vs-design overlap's counterpart to
-   * `justifiedConstraintIds` above (2026-08-18) -- `exactOverlap`/
-   * `dependencyCollision` (design-checks.ts) had no approval memory at all
-   * before this: an already-justified-and-approved overlap between two
-   * designs re-flagged identically on every retry, forever, even with zero
+   * `justifiedConstraintIds` above (2026-08-18) -- `exactOverlap`
+   * (design-checks.ts) had no approval memory at all before this: an
+   * already-justified-and-approved overlap between two designs re-flagged
+   * identically on every retry, forever, even with zero
    * scope change (confirmed live validating the ExitPlanMode retry-dedup
    * fix). Entries are composite keys, `${conflictingDesignId}::${path}`
    * (`overlapWaiverKey` in design-checks.ts) -- deliberately keyed per
@@ -204,7 +202,20 @@ export interface DesignConstraint {
 
 export type DesignVerdict = "clean" | "overlap" | "constraint_flag";
 
-export type DesignOverlapKind = "creates" | "touches" | "depends_on" | "constraint";
+/** 2026-08-19: an `overlap`/`constraint_flag` verdict is no longer
+ * uniformly blocking -- `severity` says which of the two it is. `"warning"`
+ * is display-only: the conflict is recorded (activity feed, design detail)
+ * but the design stays `"open"` and no gate denies anything. `"error"` is
+ * today's original behavior, unchanged: the design gets demoted to
+ * `"flagged"` (design-store.ts's `flag()`), which is what the Edit/Write
+ * gate's `/v1/designs/scope-match` and ExitPlanMode's registration-time
+ * check both key off to deny. Currently `exactOverlap` (tier 1) is the only
+ * `"warning"` source -- `summarySimilarity` (tier 4) and `constraintMatch`
+ * (tier 3) both stay `"error"`. Absent/undefined on a `"clean"` verdict,
+ * where severity is moot. */
+export type DesignSeverity = "warning" | "error";
+
+export type DesignOverlapKind = "creates" | "touches" | "constraint";
 
 export interface DesignConflict {
   conflictingDesignId: string;
@@ -227,6 +238,8 @@ export interface DesignCheckResult {
   designId: string;
   conflicts?: DesignConflict[];
   constraint?: { id: string; statement: string; type: DesignConstraintType };
+  /** See DesignSeverity. Undefined for `"clean"`. */
+  severity?: DesignSeverity;
 }
 
 export interface PendingReview {

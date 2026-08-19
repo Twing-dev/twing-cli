@@ -136,16 +136,42 @@ test("DesignRegistry: durable across two instances pointed at the same database 
 
 // --- §17 scope enforcement (2026-08): flag / amend / broadened "live" queries ---
 
-test("DesignRegistry: flag demotes an open design to flagged and logs the verdict", () => {
+test("DesignRegistry: flag demotes an open design to flagged and logs the verdict + the design's own summary", () => {
   const db = createDb({ memory: true });
   const log = new DrizzleActivityLog(db);
   const registry = new DesignRegistry(db);
-  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "retry helper", creates: [], touches: [], dependsOn: [] });
   const flagged = registry.flag(a.id, "overlap");
   assert.equal(flagged?.status, "flagged");
   const events = log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_flagged");
   assert.equal(events.length, 1);
-  assert.deepEqual(events[0].payload, { verdict: "overlap" });
+  assert.deepEqual(events[0].payload, { verdict: "overlap", summary: "retry helper" });
+  registry.stop();
+});
+
+test("DesignRegistry: flag's optional detail persists the full conflicts/constraint onto the event, not just the bare verdict", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "retry helper", creates: [], touches: [], dependsOn: [] });
+
+  const conflicts = [{ conflictingDesignId: "other-id", overlapKind: "touches" as const, overlapDetail: "both touch a.ts", conflictingSummary: "other design", overlapPaths: ["a.ts"] }];
+  registry.flag(a.id, "overlap", { conflicts });
+  const events = log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_flagged");
+  assert.deepEqual(events[0].payload, { verdict: "overlap", summary: "retry helper", conflicts });
+  registry.stop();
+});
+
+test("DesignRegistry: flag's optional detail persists a constraint match, and omits an empty conflicts array rather than logging []", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "retry helper", creates: [], touches: [], dependsOn: [] });
+
+  const constraint = { id: "c1", statement: "use pkg/retry", type: "canonical_abstraction" as const };
+  registry.flag(a.id, "constraint_flag", { conflicts: [], constraint });
+  const events = log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_flagged");
+  assert.deepEqual(events[0].payload, { verdict: "constraint_flag", summary: "retry helper", constraint });
   registry.stop();
 });
 

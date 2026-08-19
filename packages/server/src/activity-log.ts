@@ -15,7 +15,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { and, eq, gt, asc } from "drizzle-orm";
+import { and, eq, gt, lt, asc, desc, inArray } from "drizzle-orm";
 import type { Db } from "./db/client.js";
 import { activityEvents } from "./db/schema.js";
 
@@ -141,5 +141,55 @@ export class DrizzleActivityLog implements ActivityLogWriter {
   eventsForProject(projectId: string, since?: number): ActivityEvent[] {
     const where = since !== undefined ? and(eq(activityEvents.projectId, projectId), gt(activityEvents.ts, since)) : eq(activityEvents.projectId, projectId);
     return this.db.select().from(activityEvents).where(where).orderBy(asc(activityEvents.ts)).all().map(fromRow);
+  }
+
+  /** twing-monitor v1: newest-first page for the dashboard's activity feed
+   * (unlike `eventsForProject`'s oldest-first audit-trail read above).
+   * `before` (ms epoch, exclusive) is the "load older" cursor; `kinds`
+   * narrows to an allowlist. `activity_events_project_ts_idx` (db/schema.ts)
+   * already covers the (projectId, ts) half of this query. Fetches one row
+   * past `limit` purely to know whether a `nextBefore` cursor is worth
+   * returning -- that extra row is never included in `items`.
+   *
+   * No secondary tiebreaker on `ts` ties (accepted v1 gap): two events in
+   * the exact same millisecond that straddle a page boundary could see one
+   * silently excluded by the next page's `before=` (exclusive) cursor.
+   * Real activity is seconds/minutes apart, not synchronous sub-millisecond
+   * bursts, so this isn't expected to matter in practice -- revisit with a
+   * compound (ts, id) cursor if it ever does.
+   *
+   * `developerId` (twing-monitor, 2026-08-19): lets the dashboard's
+   * activity feed narrow to one developer's own events -- e.g. clicking a
+   * developer name on one row to see just their history -- without pulling
+   * a whole project's feed client-side just to filter it.
+   *
+   * `relatedId` (twing-monitor, 2026-08-19): lets a caller ask "what
+   * happened to this one design/thread/constraint" -- the design detail
+   * panel's "why was this flagged" section uses it to fetch just that
+   * design's own `design_checked`/`design_flagged` history instead of
+   * scanning the whole project feed for it. Distinct from
+   * `eventsForRelatedId` above: that one is oldest-first and unpaginated
+   * (built for "replay a thread's full message history"), this stays
+   * newest-first/paginated/kind-filterable like the rest of this method. */
+  eventsForProjectPage(
+    projectId: string,
+    options: { before?: number; limit?: number; kinds?: ActivityEventKind[]; developerId?: string; relatedId?: string } = {},
+  ): { items: ActivityEvent[]; nextBefore?: number } {
+    const limit = Math.min(options.limit ?? 50, 200);
+    const conditions = [eq(activityEvents.projectId, projectId)];
+    if (options.before !== undefined) conditions.push(lt(activityEvents.ts, options.before));
+    if (options.kinds && options.kinds.length > 0) conditions.push(inArray(activityEvents.kind, options.kinds));
+    if (options.developerId) conditions.push(eq(activityEvents.developerId, options.developerId));
+    if (options.relatedId) conditions.push(eq(activityEvents.relatedId, options.relatedId));
+    const rows = this.db
+      .select()
+      .from(activityEvents)
+      .where(and(...conditions))
+      .orderBy(desc(activityEvents.ts))
+      .limit(limit + 1)
+      .all() as ActivityEventRow[];
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit).map(fromRow);
+    return { items, nextBefore: hasMore ? items[items.length - 1].ts : undefined };
   }
 }

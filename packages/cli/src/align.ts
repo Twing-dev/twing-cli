@@ -1,14 +1,18 @@
 /**
- * `twing align` (§6): design/coordination check -- constraint and trigger
- * matches (local), cross-session divergence (server round-trip).
+ * `twing align` (§6): design/coordination check -- constraint matches
+ * (local), cross-session divergence (server round-trip).
  *
  * `respond`/`threads`/`close` (statefulness redesign, 2026-08) are the CLI
  * side of alignment threads (`alignment-store.ts` server-side) -- the async
  * reply channel a `design_divergence` finding opens. Same shape as
  * `design.ts`'s commands: a thin wrapper over one server call each.
+ *
+ * (2026-08-19: dropped `--intent`, which surfaced trigger matches against
+ * free-text narration -- it was entirely built on the now-removed
+ * `triggers`/`matchTriggers` mechanism, see manifest.ts's header comment.)
  */
 
-import { readConfig, getServerAuth, findRepoRoot, computeProjectId, computeDeveloperId, loadManifestFromFile, twingConfigPath, matchTriggers, authFetch, type Finding } from "@twing/core";
+import { readConfig, getServerAuth, findRepoRoot, computeProjectId, computeDeveloperId, loadManifestFromFile, twingConfigPath, authFetch, type Finding } from "@twing/core";
 import { gatherClaims } from "./gather-claims.js";
 import { queryDaemonNotices } from "./daemon-client.js";
 import { printReport } from "./report.js";
@@ -38,7 +42,6 @@ function requireCoordinator(repoRoot: string): RequiredConfig {
 }
 
 export interface AlignOptions {
-  intent?: string;
   cwd: string;
 }
 
@@ -48,11 +51,6 @@ export async function runAlign(options: AlignOptions): Promise<void> {
   const projectId = computeProjectId(repoRoot);
 
   const gathered = await gatherClaims(options.cwd);
-
-  // §6: intent is low-confidence, narration-only -- it only narrows which
-  // triggers get surfaced when there's not yet a diff to inspect. Never
-  // treated as evidence, never suppresses a diff-based finding.
-  const intentHits = options.intent ? matchTriggers(manifest, options.intent) : [];
 
   // Resolve serverUrl from the repo's own committed coordinator, not a
   // single global slot -- this repo is the source of truth for which
@@ -100,7 +98,7 @@ export async function runAlign(options: AlignOptions): Promise<void> {
     if (notices && notices.length > 0) daemonNotices = notices.map((n) => n.message);
   }
 
-  printReport({ gathered, manifest, intentHits, findings, serverUrl, serverError, daemonNotices });
+  printReport({ gathered, manifest, findings, serverUrl, serverError, daemonNotices });
 }
 
 export interface AlignRespondOptions {

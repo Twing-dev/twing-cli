@@ -91,41 +91,12 @@ function contractDivergence(claim: Claim, active: Claim[], edges: CallEdge[], no
   return findings;
 }
 
-/** Check 4: two active claims from different developers share a trigger id
- * on genuinely different symbols (same-symbol case is already textual
- * overlap, so it's excluded structurally by the symbolId inequality below). */
-function triggerDuplication(claim: Claim, active: Claim[], now: number): Finding[] {
-  if (!claim.triggerMatches?.length) return [];
-  const findings: Finding[] = [];
-  for (const other of active) {
-    if (other === claim) continue;
-    if (other.developerId === claim.developerId) continue;
-    if (other.symbolId === claim.symbolId) continue;
-    const shared = other.triggerMatches?.filter((id) => claim.triggerMatches?.includes(id)) ?? [];
-    for (const triggerId of shared) {
-      findings.push(
-        finding(
-          "trigger_duplication",
-          claim.projectId,
-          claim.symbolId,
-          claim.developerId,
-          other.developerId,
-          `Your new symbol ${claim.symbolId} and developer ${other.developerId}'s ${other.symbolId} both match trigger "${triggerId}".`,
-          now,
-        ),
-      );
-    }
-  }
-  return findings;
-}
-
 export function runChecks(newClaims: Claim[], active: Claim[], edges: CallEdge[]): Finding[] {
   const now = Date.now();
   const findings: Finding[] = [];
   for (const claim of newClaims) {
     findings.push(...textualOverlap(claim, active, now));
     findings.push(...contractDivergence(claim, active, edges, now));
-    findings.push(...triggerDuplication(claim, active, now));
   }
   return findings;
 }

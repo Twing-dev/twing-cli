@@ -1,17 +1,25 @@
 /**
  * `.twing/twing.yml` manifest parser (§3, §10; file renamed from
  * `verify.yml` -- its scope grew beyond verification policy to include
- * `coordinator`, below). `requireHumanReview`/`constraints`/`triggers` are
- * evaluated locally; only the *results* of evaluating them (constraintIds,
- * triggerMatches) transit as part of a Claim. `constraints`/
- * `requireHumanReview` text itself is also, separately, uploaded verbatim
- * by `init`'s cold-start seed (`seedConstraints` -> `POST
- * /v1/constraints/seed`) so the §17 design gate has real statement text to
- * enforce and display -- "never uploaded" was true for the advisory/align
- * path but stale for that seeding path, so don't take it as a blanket
- * guarantee. `coordinator` is different in kind from all of the above: it
- * is never uploaded anywhere, it's read purely locally to know where to
- * send everything else.
+ * `coordinator`, below). `requireHumanReview`/`constraints` are evaluated
+ * locally; only the *results* of evaluating them (constraintIds) transit as
+ * part of a Claim. `constraints`/`requireHumanReview` text itself is also,
+ * separately, uploaded verbatim by `init`'s cold-start seed
+ * (`seedConstraints` -> `POST /v1/constraints/seed`) so the §17 design gate
+ * has real statement text to enforce and display -- "never uploaded" was
+ * true for the advisory/align path but stale for that seeding path, so
+ * don't take it as a blanket guarantee. `coordinator` is different in kind
+ * from all of the above: it is never uploaded anywhere, it's read purely
+ * locally to know where to send everything else.
+ *
+ * (2026-08-19: dropped a `triggers`/`TriggerRule`/`matchTriggers` section
+ * that used to live here -- symbol-name-regex duplicate-work detection,
+ * requiring two developers' claims to coincidentally match a
+ * pre-anticipated pattern at the same time. Evaluated and removed rather
+ * than kept as a weak stopgap: its realistic catch rate was near zero, and
+ * an explicit gap is more honest than a mechanism that rarely fires
+ * correctly. No replacement yet -- a future ground-truth/semantic-code
+ * comparison is a separate, larger initiative.)
  */
 
 import { parse as parseYaml, parseDocument, Document } from "yaml";
@@ -36,13 +44,6 @@ export interface ConstraintRule {
   scope: string;
 }
 
-export interface TriggerRule {
-  id: string;
-  pattern: string;
-  match: string;
-  reason: string;
-}
-
 /** Where this repo's coordinator lives -- not uploaded anywhere (unlike
  * `constraints`/`requireHumanReview`, see the file-level comment above),
  * read purely locally by `init`/`login`/`align`/`design *` and by the Go
@@ -54,11 +55,10 @@ export interface CoordinatorConfig {
 export interface Manifest {
   requireHumanReview: RequireHumanReviewRule[];
   constraints: ConstraintRule[];
-  triggers: TriggerRule[];
   coordinator: CoordinatorConfig;
 }
 
-const EMPTY_MANIFEST: Manifest = { requireHumanReview: [], constraints: [], triggers: [], coordinator: {} };
+const EMPTY_MANIFEST: Manifest = { requireHumanReview: [], constraints: [], coordinator: {} };
 
 export function parseManifest(yamlText: string): Manifest {
   const doc = (parseYaml(yamlText) ?? {}) as Record<string, unknown>;
@@ -72,12 +72,6 @@ export function parseManifest(yamlText: string): Manifest {
     constraints: asArray(doc.constraints).map((c) => ({
       text: String(c.text ?? ""),
       scope: String(c.scope ?? ""),
-    })),
-    triggers: asArray(doc.triggers).map((t) => ({
-      id: String(t.id ?? ""),
-      pattern: String(t.pattern ?? ""),
-      match: String(t.match ?? ""),
-      reason: String(t.reason ?? ""),
     })),
     coordinator: {
       serverUrl: typeof coordinator.serverUrl === "string" ? coordinator.serverUrl : undefined,
@@ -130,18 +124,6 @@ export function upsertCoordinatorServerUrl(filePath: string, serverUrl: string):
   return { written: true };
 }
 
-/**
- * `(?i)pattern` is the doc's own example syntax (§10) for a case-insensitive
- * match — not valid JS RegExp literal syntax, so it's translated here rather
- * than invented ad hoc.
- */
-function compileTriggerPattern(pattern: string): RegExp {
-  if (pattern.startsWith("(?i)")) {
-    return new RegExp(pattern.slice(4), "i");
-  }
-  return new RegExp(pattern);
-}
-
 export interface ConstraintMatch {
   constraintId: string;
   text: string;
@@ -157,28 +139,6 @@ export function matchConstraints(manifest: Manifest, relPath: string): Constrain
       hits.push({ constraintId: `constraint:${index}`, text: constraint.text });
     }
   });
-  return hits;
-}
-
-export interface TriggerMatch {
-  triggerId: string;
-  reason: string;
-}
-
-/**
- * §12: "New symbol matches a triggers pattern." Only meaningful for symbols
- * that didn't exist before this edit — the daemon decides "new" (§5 step 7)
- * by diffing against its last-known parse of the file; this function only
- * does the pattern match itself, against whatever name it's handed.
- */
-export function matchTriggers(manifest: Manifest, newSymbolName: string): TriggerMatch[] {
-  const hits: TriggerMatch[] = [];
-  for (const trigger of manifest.triggers) {
-    if (trigger.match !== "new-symbol-name") continue; // v0 supports only this mode (§10)
-    if (compileTriggerPattern(trigger.pattern).test(newSymbolName)) {
-      hits.push({ triggerId: trigger.id, reason: trigger.reason });
-    }
-  }
   return hits;
 }
 

@@ -167,6 +167,19 @@ type designCheckResponse struct {
 	DesignID   string                `json:"designId"`
 	Conflicts  []designConflict      `json:"conflicts,omitempty"`
 	Constraint *designConstraintInfo `json:"constraint,omitempty"`
+	// Severity (2026-08-19, design-checks.ts's severity split): "warning" |
+	// "error" | "" (empty on a "clean" verdict, where it's moot). Only an
+	// "error" verdict denies here -- a "warning" (currently tier 1's
+	// exactOverlap only) is display-only, same as "clean" as far as this
+	// gate is concerned. See DesignSeverity's doc comment in core/types.ts.
+	Severity string `json:"severity,omitempty"`
+}
+
+// blocksGate reports whether this response's verdict should deny the tool
+// call. "clean" never blocks; a non-clean verdict blocks unless it's been
+// explicitly demoted to "warning" severity.
+func (r designCheckResponse) blocksGate() bool {
+	return r.Verdict != "clean" && r.Severity != "warning"
 }
 
 type designListResponse struct {
@@ -372,12 +385,19 @@ func handleExitPlanModeSingle(payload hookPayload, config twingConfig) {
 		return
 	}
 
-	switch result.Verdict {
-	case "clean":
+	switch {
+	case result.Verdict == "clean":
 		writeJSON(allowOutput("PreToolUse"))
-	case "overlap":
+	case !result.blocksGate():
+		// 2026-08-19, severity split: an "overlap" verdict demoted to
+		// "warning" (tier 1's exactOverlap only, currently) registers and
+		// allows same as clean -- the conflict is still recorded server-side
+		// for display, just not gate-relevant. Only "overlap"/"error" and
+		// "constraint_flag" (always "error") reach the deny branch below.
+		writeJSON(allowOutput("PreToolUse"))
+	case result.Verdict == "overlap":
 		writeJSON(denyOutput("PreToolUse", overlapReason(result)))
-	case "constraint_flag":
+	case result.Verdict == "constraint_flag":
 		writeJSON(denyOutput("PreToolUse", constraintReason(result)))
 	default:
 		logDesignGate("ExitPlanMode check: unknown verdict %q (blocking)", result.Verdict)
@@ -478,12 +498,16 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 				writeJSON(denyOutput("PreToolUse", failReason))
 				return
 			}
-			switch result.Verdict {
-			case "clean":
-				// no-op -- allowed overall unless something else denies
-			case "overlap":
+			switch {
+			case result.Verdict == "clean", !result.blocksGate():
+				// no-op -- allowed overall unless something else denies.
+				// The second case is 2026-08-19's severity split: a
+				// "warning"-severity "overlap" (tier 1 only) registers and
+				// allows same as clean, same reasoning as the single-repo
+				// path above.
+			case result.Verdict == "overlap":
 				denyReasons = append(denyReasons, fmt.Sprintf("[%s] %s", cand.DirName, overlapReason(result)))
-			case "constraint_flag":
+			case result.Verdict == "constraint_flag":
 				denyReasons = append(denyReasons, fmt.Sprintf("[%s] %s", cand.DirName, constraintReason(result)))
 			default:
 				logDesignGate("ExitPlanMode multi-candidate check: unknown verdict %q for %s (blocking)", result.Verdict, cand.DirName)

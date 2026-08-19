@@ -1,7 +1,7 @@
 /**
  * Claim extraction pipeline (§5, steps 1-8). Triggered by an `enqueue`
  * message; turns a raw hook event into a real `Claim` — symbolId, signature
- * diff, constraint/trigger hits, call-graph edges — all computed locally.
+ * diff, constraint hits, call-graph edges — all computed locally.
  */
 
 import * as fs from "node:fs";
@@ -15,7 +15,6 @@ import {
   loadManifestFromFile,
   twingConfigPath,
   matchConstraints,
-  matchTriggers,
   stageForTool,
   findRepoRoot,
   computeProjectId,
@@ -184,8 +183,6 @@ export async function extractClaim(input: ExtractionInput): Promise<ExtractionRe
 
   const symbolId = computeSymbolId(relPath, scopePath);
   const constraintHits = matchConstraints(state.manifest, relPath);
-  const isNewSymbol = isWrite && scopePath !== null && !previousSymbols.some((s) => s.scopePath === scopePath);
-  const triggerHits = isNewSymbol && scopePath ? matchTriggers(state.manifest, leafName(scopePath)) : [];
 
   const claim: Claim = {
     projectId: state.projectId,
@@ -198,7 +195,6 @@ export async function extractClaim(input: ExtractionInput): Promise<ExtractionRe
     ...(signatureChanged !== undefined ? { signatureChanged } : {}),
     ...(oldSignature !== undefined ? { oldSignature } : {}),
     ...(newSignature !== undefined ? { newSignature } : {}),
-    ...(triggerHits.length > 0 ? { triggerMatches: triggerHits.map((t) => t.triggerId) } : {}),
     ...(constraintHits.length > 0 ? { constraintIds: constraintHits.map((c) => c.constraintId) } : {}),
     ts: Date.now(),
     ttlMs: DEFAULT_CLAIM_TTL_MS,

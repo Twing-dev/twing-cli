@@ -1,17 +1,16 @@
 /**
- * §6 step 4: "Print a combined, ranked report — local constraint/trigger
- * hits first (cheapest, most certain), then server-side divergence
- * findings, each with the symbol, the other party involved (if any), and
- * why it was flagged."
+ * §6 step 4: "Print a combined, ranked report — local constraint hits
+ * first (cheapest, most certain), then server-side divergence findings,
+ * each with the symbol, the other party involved (if any), and why it was
+ * flagged."
  */
 
-import type { Claim, Finding, Manifest, TriggerMatch } from "@twing/core";
+import type { Claim, Finding, Manifest } from "@twing/core";
 import type { GatheredClaims } from "./gather-claims.js";
 
 export interface ReportInput {
   gathered: GatheredClaims;
   manifest: Manifest;
-  intentHits: TriggerMatch[];
   findings: Finding[];
   serverUrl?: string;
   serverError?: string;
@@ -32,10 +31,6 @@ function constraintText(manifest: Manifest, id: string): string {
   return manifest.constraints[index]?.text ?? id;
 }
 
-function triggerReason(manifest: Manifest, id: string): string {
-  return manifest.triggers.find((t) => t.id === id)?.reason ?? id;
-}
-
 function claimSourceLine(gathered: GatheredClaims): string {
   const n = gathered.claims.length;
   if (gathered.source === "daemon") {
@@ -48,20 +43,18 @@ function claimSourceLine(gathered: GatheredClaims): string {
 }
 
 export function printReport(input: ReportInput): void {
-  const { gathered, manifest, intentHits, findings, serverUrl, serverError, daemonNotices } = input;
+  const { gathered, manifest, findings, serverUrl, serverError, daemonNotices } = input;
 
   console.log("twing align");
   console.log(claimSourceLine(gathered));
   console.log("");
 
   const constraintHits: { claim: Claim; id: string }[] = [];
-  const triggerHits: { claim: Claim; id: string }[] = [];
   for (const claim of gathered.claims) {
     for (const id of claim.constraintIds ?? []) constraintHits.push({ claim, id });
-    for (const id of claim.triggerMatches ?? []) triggerHits.push({ claim, id });
   }
 
-  const localCount = constraintHits.length + triggerHits.length;
+  const localCount = constraintHits.length;
   console.log(`Local checks (${localCount} hit${plural(localCount)}):`);
   if (localCount === 0) {
     console.log("  none");
@@ -69,10 +62,6 @@ export function printReport(input: ReportInput): void {
   for (const { claim, id } of constraintHits) {
     console.log(`  [constraint] ${claim.symbolId}`);
     console.log(`    ${constraintText(manifest, id)}`);
-  }
-  for (const { claim, id } of triggerHits) {
-    console.log(`  [trigger: ${id}] ${claim.symbolId} (new symbol)`);
-    console.log(`    ${triggerReason(manifest, id)}`);
   }
   console.log("");
 
@@ -92,14 +81,6 @@ export function printReport(input: ReportInput): void {
     for (const f of findings) {
       console.log(`  [${f.kind}] ${f.symbolId} -- other developer: ${f.otherDeveloperId}`);
       console.log(`    ${f.reason}`);
-    }
-  }
-
-  if (intentHits.length > 0) {
-    console.log("");
-    console.log(`Intent-matched triggers (narration-only, not evidence -- ${intentHits.length}):`);
-    for (const hit of intentHits) {
-      console.log(`  [${hit.triggerId}] ${hit.reason}`);
     }
   }
 }

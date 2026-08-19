@@ -133,7 +133,7 @@ function handleMessage(
         callEdges.push(...result.newCallEdges);
         developerBySession.set(result.claim.sessionId, result.claim.developerId);
         // extractClaim already had this repo's manifest loaded (per-repo
-        // cache in claims.ts) to check constraints/triggers -- reusing its
+        // cache in claims.ts) to check constraints -- reusing its
         // `coordinator.serverUrl` here is free, and keeps the capture path
         // (this handler) untouched by multi-server support: the hook still
         // does zero interpretation, exactly as §4 intends. Absent when the
@@ -146,7 +146,6 @@ function handleMessage(
         console.log(
           `twing daemon: ${result.claim.stage} claim on ${result.claim.symbolId}` +
             (result.claim.signatureChanged ? " (signature changed)" : "") +
-            (result.claim.triggerMatches?.length ? ` [triggers: ${result.claim.triggerMatches.join(", ")}]` : "") +
             (result.claim.constraintIds?.length ? ` [constraints: ${result.claim.constraintIds.join(", ")}]` : "") +
             (result.newCallEdges.length ? ` [+${result.newCallEdges.length} call edges]` : ""),
         );

@@ -560,6 +560,46 @@ func TestHandleExitPlanMode_CleanVerdict_Allows(t *testing.T) {
 	}
 }
 
+// 2026-08-19 severity split (design-checks.ts): a "warning"-severity
+// "overlap" verdict (tier 1's exactOverlap only, currently) registers and
+// allows same as clean -- the conflict is still recorded server-side for
+// display, just not gate-relevant.
+func TestHandleExitPlanMode_OverlapWarningSeverity_Allows(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"verdict":"overlap","severity":"warning","designId":"d1","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"touches","overlapDetail":"both touch shared.ts","conflictingSummary":"another session's work"}]}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "allow" {
+		t.Fatalf("decision = %q, reason = %q, want allow", decision, reason)
+	}
+}
+
+// Companion to the warning-severity test above -- an "overlap" verdict with
+// no severity field at all (today's original response shape, still valid
+// for tier 4/constraint_flag, and any coordinator not yet upgraded) must
+// still deny, same as before this split.
+func TestHandleExitPlanMode_OverlapNoSeverity_StillDenies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"verdict":"overlap","designId":"d1","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"touches","overlapDetail":"summaries are 80% similar","conflictingSummary":"another session's work"}]}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(repo, "sess1")) })
+	decision, _ := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+}
+
 // --- multi-repo cwd fix (2026-08-18): Edit/Write resolves from the file
 // path, not cwd; ExitPlanMode falls back to multi-candidate discovery ---
 
@@ -788,6 +828,38 @@ func TestHandleExitPlanMode_MultiCandidate_OneCandidateDenies_OverallDenies(t *t
 	}
 	if !strings.Contains(reason, "twinmail-ui") || !strings.Contains(reason, "d-other") {
 		t.Errorf("reason = %q, want it to name twinmail-ui and the conflicting design", reason)
+	}
+}
+
+// 2026-08-19 severity split, multi-candidate counterpart to
+// TestHandleExitPlanMode_OverlapWarningSeverity_Allows: one candidate comes
+// back "overlap"/"warning" -- must not deny overall, same as if it had come
+// back clean.
+func TestHandleExitPlanMode_MultiCandidate_OneCandidateWarningSeverity_OverallAllows(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/designs/extract":
+			_, _ = w.Write([]byte(`{"creates":[],"touches":["TwingMail/packages/api/mailbox.ts","twinmail-ui/src/Inbox.tsx"],"dependsOn":[],"summary":"full-stack change"}`))
+		case "/v1/designs/check":
+			var body designCheckRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if len(body.Touches) == 1 && body.Touches[0] == "src/Inbox.tsx" {
+				_, _ = w.Write([]byte(`{"verdict":"overlap","severity":"warning","designId":"d2","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"touches","overlapDetail":"src/Inbox.tsx","conflictingSummary":"another session's inbox work"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	parent, _, _ := setupMultiRepoCwd(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(parent, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "allow" {
+		t.Fatalf("decision = %q, reason = %q, want allow", decision, reason)
 	}
 }
 

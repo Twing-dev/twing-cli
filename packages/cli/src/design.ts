@@ -58,6 +58,10 @@ interface DesignCheckResponseJSON {
   designId?: string;
   conflicts?: DesignConflictJSON[];
   constraint?: { statement: string; type: string };
+  /** 2026-08-19 severity split -- "warning" (tier 1's exactOverlap only,
+   * currently) is display-only, undefined/"error" means today's original
+   * blocking behavior. See DesignSeverity's doc comment in core/types.ts. */
+  severity?: "warning" | "error";
 }
 
 async function parseJsonOrUnauthorized<T>(res: Response): Promise<T | { error: string }> {
@@ -70,8 +74,16 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
     console.error(`twing design: ${result.error}`);
     return;
   }
-  console.log(`verdict: ${result.verdict}  design: ${result.designId}`);
-  if (result.verdict === "overlap") {
+  console.log(`verdict: ${result.verdict}${result.severity ? ` (${result.severity})` : ""}  design: ${result.designId}`);
+  if (result.verdict === "overlap" && result.severity === "warning") {
+    // Display-only (2026-08-19 severity split): recorded for visibility,
+    // design stays open, no action required.
+    for (const c of result.conflicts ?? []) {
+      console.log(`  [${c.overlapKind}] conflicts with ${c.conflictingDesignId}: ${c.overlapDetail}`);
+      console.log(`    their summary: ${c.conflictingSummary}`);
+    }
+    console.log(`  (warning only -- no action needed; visible in the dashboard's design detail/activity feed)`);
+  } else if (result.verdict === "overlap") {
     for (const c of result.conflicts ?? []) {
       console.log(`  [${c.overlapKind}] conflicts with ${c.conflictingDesignId}: ${c.overlapDetail}`);
       console.log(`    their summary: ${c.conflictingSummary}`);

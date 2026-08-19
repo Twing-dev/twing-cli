@@ -88,20 +88,6 @@ test("runAlign: a 401 from the server is reported as unauthorized rather than th
   });
 });
 
-test("runAlign: --intent surfaces matched triggers as narration-only, separate from real findings", async () => {
-  await withHome(async () => {
-    const repo = tmpRepo();
-    fs.mkdirSync(path.join(repo, ".twing"), { recursive: true });
-    fs.writeFileSync(
-      path.join(repo, ".twing", "twing.yml"),
-      "triggers:\n  - id: retry-work\n    match: new-symbol-name\n    pattern: retry\n    reason: someone else already owns retry logic\n",
-    );
-    const { logs } = await captureConsole(() => runAlign({ cwd: repo, intent: "I'm about to add retry logic" }));
-    assert.ok(logs.some((l) => l.includes("Intent-matched triggers")));
-    assert.ok(logs.some((l) => l.includes("retry-work") && l.includes("someone else already owns retry logic")));
-  });
-});
-
 // --- runAlignRespond / runAlignThreads / runAlignClose ------------------------
 
 test("runAlignRespond: posts the message to the thread", async () => {

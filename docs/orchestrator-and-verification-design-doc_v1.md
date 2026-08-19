@@ -41,7 +41,7 @@ writing — confirm against current docs before implementing, hook schemas evolv
 | Command | What it does | Who/what runs it | Needs daemon? | Needs network? |
 |---|---|---|---|---|
 | `twing init --server <url>` | One-shot onboarding: stores the server URL, ensures the `twing-hook` binary is installed, merges hook entries into `.claude/settings.json`, and starts the daemon as a persistent background service. See §6. | Developer, once per machine (not per clone — see §6) | Starts it | No — just stores config; the daemon connects afterward |
-| `twing align [--intent "..."]` | Design/coordination check: constraint and trigger matches, cross-session divergence. | Developer or agent, on request, any time | Optional — richer if running | Yes |
+| `twing align` | Design/coordination check: constraint matches, cross-session divergence. | Developer or agent, on request, any time | Optional — richer if running | Yes |
 | `twing review` | Everything `align` does, plus test-delta integrity analysis over the diff. Run after code exists. | Developer or agent, on request, typically pre-commit | Optional | Yes |
 | `twing daemon` | Long-running local process, started by `init`. Rarely invoked directly. | Auto (started by `init`) | — | Yes (async) |
 | `twing-hook <event>` | Not a human-facing command, and not a process that "starts" — spawned fresh per event by Claude Code, exits immediately. `init` only ensures the binary is present. On `PreToolUse` it can now deny (§17); on every other event it stays advisory (§4). | Claude Code | Yes (fails silently if absent) | No |
@@ -182,8 +182,8 @@ writes the hook entries pointing at its path.
 3. Extract claims: parse the affected file with Tree-sitter, diff old vs. new to find
    which symbol(s) changed, compute `path::symbol` (§11).
 4. Maintain a local call graph for each repo it's seen (§11), updated incrementally.
-5. Evaluate the claim against `.twing/verify.yml` locally — constraint hits and trigger
-   matches (§10, §12) — entirely on-machine, no network needed for this step.
+5. Evaluate the claim against `.twing/verify.yml` locally — constraint hits (§10, §12)
+   — entirely on-machine, no network needed for this step.
 6. Batch and push claims to `twing serve` on a short debounce (every 5–10s of activity,
    not per-edit) — this is the fire-and-forget async part; nothing waits on it.
 7. Poll `twing serve` for notices relevant to this developer and cache them locally, so
@@ -214,8 +214,7 @@ writes the hook entries pointing at its path.
 6. Update the local call graph: re-run a call-expression query over the changed file,
    resolve call targets to `symbolId`s within the repo, diff against the previously
    known edges for this file.
-7. Evaluate `.twing/verify.yml` (§10) against this `symbolId`/path → `constraintIds`,
-   and against new-symbol patterns → `triggerMatches`.
+7. Evaluate `.twing/verify.yml` (§10) against this `symbolId`/path → `constraintIds`.
 8. Write the resulting `Claim` (§11) to the local claim store, queued for the next sync.
 
 **Lifecycle:** started by `twing init` (§6), not left to happen lazily. `init` installs a
@@ -269,7 +268,7 @@ already-running daemon):
 
 No `.twing/config.yml` or project-registration step — see §8 for why none is needed.
 
-### `twing align [--intent "..."]`
+### `twing align`
 
 1. **Gather current claims.** If the daemon is running and has data for this
    repo/session, ask it for the live claim set (richer — reflects everything touched
@@ -278,20 +277,18 @@ No `.twing/config.yml` or project-registration step — see §8 for why none is 
    parsed the same way the daemon would (§5 steps 2–7), run synchronously in the CLI
    process. This fallback is what makes the command work with no daemon and no hooks
    installed at all.
-2. **Local checks** — no network yet. Evaluate the gathered claims' `constraintIds` and
-   `triggerMatches` against `.twing/verify.yml` directly (§10, §12).
+2. **Local checks** — no network yet. Evaluate the gathered claims' `constraintIds`
+   against `.twing/verify.yml` directly (§10, §12).
 3. **Server round-trip.** `POST /v1/claims` (§9) with the gathered claims and any new
    call-graph edges. The server upserts them and returns divergence findings involving
-   *this developer's* claims (textual overlap, contract divergence, trigger-duplication
-   — §12).
-4. **Print a combined, ranked report** — local constraint/trigger hits first (cheapest,
+   *this developer's* claims (textual overlap, contract divergence — §12).
+4. **Print a combined, ranked report** — local constraint hits first (cheapest,
    most certain), then server-side divergence findings, each with the symbol, the other
    party involved (if any), and why it was flagged.
 
-`--intent` is optional, low-confidence, narration-only input (memo §4's Stage 1) — used
-only to narrow which trigger rules get surfaced when there's not yet a diff to inspect
-(e.g., run before writing any code). It is never treated as evidence and never
-suppresses a finding the diff-based checks would otherwise surface.
+**(2026-08-19: `--intent`, previously documented here as low-confidence narration-only
+input used to surface trigger matches ahead of a diff, was removed along with the
+`triggers` mechanism itself — see §10's note.)**
 
 ### `twing review`
 
@@ -481,12 +478,6 @@ require_human_review:
 constraints:
   - text: "use the existing retry helper in net/retry.ts; do not add another"
     scope: "src/net/**"
-
-triggers:
-  - id: "new-retry-abstraction"
-    pattern: "(?i)retry|backoff"
-    match: "new-symbol-name"
-    reason: "possible duplicate of net/retry.ts — check before building another"
 ```
 
 - **`require_human_review`** — always flagged in `review`'s output, regardless of
@@ -494,14 +485,30 @@ triggers:
 - **`constraints`** — ratified, durable facts (memo §5's fast-loop output lands here).
   `scope` is a path glob; a claim touching a matching path is flagged with the
   constraint's text.
-- **`triggers`** — patterns matched against *new* symbol names/paths. A match produces a
-  `triggerMatches` entry (the trigger's `id`, not its pattern text) on the claim, which
-  is what the server correlates across developers (§12, check 4) — this is how
-  independent duplicate construction gets caught without ever comparing file contents.
 
 Parsed and evaluated entirely locally, by the daemon or the CLI — never uploaded, never
-sent to the server. Only the *results* of evaluating it (`constraintIds`,
-`triggerMatches`) transit, consistent with the payload boundary below.
+sent to the server. Only the *results* of evaluating it (`constraintIds`) transit,
+consistent with the payload boundary below.
+
+**(2026-08-19, removed: `triggers`.)** A third section used to live here — patterns
+matched against *new* symbol names/paths, producing a `triggerMatches` entry the server
+correlated across developers (the old check 4 in §12) to catch independent duplicate
+construction without comparing file contents. Dropped after evaluating it critically
+against the user's proposal to replace it with fuzzy/semantic matching at the design
+layer instead: its actual catch rate was near zero (it only ever fired when two
+developers' *concurrently active* claims happened to match a *pre-anticipated* regex on
+a symbol's literal name — no coverage at all for the far more common case of one
+developer not knowing something was already built weeks earlier), and a bare
+name-pattern match is both too coarse (false positives on any shared word) and too
+narrow (false negatives on any synonym the pattern's author didn't anticipate) to be
+worth the false confidence of keeping it. No replacement mechanism shipped in its place
+— an explicit gap here is more honest than a rule that rarely fires correctly. A real
+replacement would need to compare against actual code (ground truth), not just other
+designs' self-reported intent — `design-semantic-check.ts`'s LLM comparator already
+does the latter for currently-open designs, and widening it to closed/historical
+designs was considered and rejected as not a meaningfully better signal (still
+comparing declared intent to declared intent). A ground-truth/semantic-code comparison
+is out of scope here, a separate future initiative.
 
 ---
 
@@ -519,7 +526,6 @@ interface Claim {
   signatureChanged?: boolean;
   oldSignature?: string;
   newSignature?: string;
-  triggerMatches?: string[];     // trigger ids only, never the pattern
   constraintIds?: string[];
   ts: number;
   ttlMs: number;                 // default 6h, refreshed on session activity
@@ -553,15 +559,17 @@ real rather than aspirational:
 | # | Check | Where | Detection |
 |---|---|---|---|
 | — | Constraint hit | **Local** (daemon/CLI, reads `.twing/verify.yml` directly) | Path/symbol matches a `constraints` entry's scope |
-| — | Trigger match | **Local** (same) | New symbol matches a `triggers` pattern → produces a `triggerMatches` id, which *does* transit |
 | 1 | Textual overlap | Server | Another active claim (different `developerId`/`sessionId`), same `symbolId`, `kind: write` |
 | 2 | Contract divergence | Server | This claim has `signatureChanged: true`; call graph has an edge `caller → thisSymbolId`; the caller symbol has an active claim from a different developer/session within a recent window |
-| 4 | Trigger-duplication | Server | Two active claims from different developers share a `triggerMatches` id and neither has a `textual_overlap` finding already (i.e., they're genuinely different symbols, not the same one) |
 
 Row 3 in the memo's original divergence table (opposite-direction design — A centralises
 what B decomposes) has no tractable deterministic detection method yet and is explicitly
 **out of scope for v0**. Don't build a similarity/embedding path for it without a
 separate design pass — the memo's own open question (§13 Q5) on this is still open.
+
+**(2026-08-19, removed: check 4, "trigger-duplication"** — two active claims from
+different developers sharing a `triggerMatches` id on genuinely different symbols. Went
+with the rest of the `triggers` mechanism; see §10's note for why.)
 
 **Server-side pseudocode for check 2, the flagship:**
 
@@ -601,7 +609,7 @@ evidence record:**
 
 ```
 change_id
-align   → constraint hits, trigger-duplication, contract-divergence findings
+align   → constraint hits, contract-divergence findings
 test_integrity  → assertion deltas, deletions, skips, mock substitutions,
                   tolerance/timeout widening, snapshot regeneration
 review_surface  → ranked list: what a human should look at, and why
@@ -646,7 +654,7 @@ boot once and run for hours.
    `projectId` derivation, developer-identity derivation (§8), daemon sync (push claims,
    poll notices), the `SessionStart`/`UserPromptSubmit` nudge working end to end through
    a real Claude Code session.
-5. **`twing align`.** Local constraint/trigger checks + the server round-trip +
+5. **`twing align`.** Local constraint checks + the server round-trip +
    report printing. **This is the dogfood-ready milestone** — it's what produces the
    memo §14 signal (does knowing what another session touched change what you build).
 6. **`twing review`.** Add the local test-delta AST analysis, merge into the ranked
@@ -668,11 +676,14 @@ boot once and run for hours.
 - **Persistence across restarts** — in-memory only for v0 (§7). A periodic JSON snapshot
   is the cheapest upgrade path if restarts turn out to lose meaningful in-flight state in
   practice. Not worth building until it's an actual problem.
-- **Trigger precision** (memo §13 Q2) — still the single highest-risk unknown in the
-  whole product. `align`'s local trigger-matching is deterministic pattern
-  matching against a human-authored file, which sidesteps precision risk on the
-  detection side, but doesn't resolve whether the *patterns people write* end up firing
-  usefully often vs. constantly vs. never. Only real usage will show this.
+- **Trigger precision** (memo §13 Q2) — **resolved 2026-08-19 by removing `triggers`
+  entirely**, rather than by refining it: real usage showed the risk this question
+  anticipated actually materialized — a bare symbol-name-regex match against a
+  human-authored file rarely fired usefully (either too coarse, matching any shared
+  word, or too narrow, missing any synonym the pattern's author didn't anticipate), and
+  it structurally could only catch duplication between two *concurrently active*
+  claims, missing the more common case of unknowingly rebuilding something that already
+  shipped. See §10's note.
 
 ---
 
@@ -680,8 +691,8 @@ boot once and run for hours.
 
 **Merged in from `design-conflict-coordinator-spec.md`, August 2026.** That file specs
 "item 1 of a three-part oracle: design conflicts / merge issues / compound memory."
-Merge issues are §§1–16 above (`align`'s textual-overlap/contract-divergence/
-trigger-duplication checks) — unchanged, still advisory. Compound memory is unbuilt.
+Merge issues are §§1–16 above (`align`'s textual-overlap/contract-divergence
+checks) — unchanged, still advisory. Compound memory is unbuilt.
 This section is design conflicts: the one piece of this product that deliberately
 blocks, per the revised guardrail in memo §4 Point 1.
 
@@ -755,18 +766,31 @@ degrading to "no check ran" is the right failure mode for a blocking gate — de
 
 ### 17.4 Overlap detection
 
-Same four tiers as the spec, in the same cheapest-first order, run in
-`packages/server/src/design-checks.ts`:
+Same tiers as the spec, in the same cheapest-first order, run in
+`packages/server/src/design-checks.ts` — numbered 1/3/4, tier 2 deliberately skipped
+rather than renumbered (matches the code's own tier-numbered comments/test names, which
+weren't renumbered either — see the note below):
 
 1. Exact `creates`/`touches` intersection against every other `open` design, same
    `projectId`.
-2. `creates` ∩ `depends_on` collision (either direction) — the "two agents each build
-   their own retry helper" case.
 3. `creates`/`touches` against `DesignConstraint.scope` (reused `minimatch`, already a
    `@twing/core` dependency) — a `canonical_abstraction` hit or `review_required` scope
    hit is `constraint_flag`, independent of any agent-vs-agent overlap.
-4. Jaccard keyword-set similarity over `summary`, only if 1–3 found nothing — a
+4. Jaccard keyword-set similarity over `summary`, only if 1/3 found nothing — a
    deliberately weak fallback net, not the primary signal.
+
+**(2026-08-19, removed: tier 2, the spec's step 2, `creates` ∩ `depends_on` collision.)** Same
+call as `triggers` above, for the same underlying reason: it only ever matched an exact
+string in both designs' free-text fields, so it caught "A creates `pkg/retry.ts`, B
+depends on `pkg/retry.ts`" but missed "A creates `RetryPolicy`, B depends on `Retrier`"
+— the same idea, worded differently, invisible to it. Deleted rather than left running
+unused/undocumented: this repo is open source, so a mechanism nobody's told about is
+still fully visible in the source, and a doc that undersells what the code does is worse
+than one that's honest about a smaller set of checks. The async semantic comparator
+(`design-semantic-check.ts`, the LLM-based "detailed path" alongside this file's sync
+tiers — not otherwise numbered/sectioned in this doc, see the module's own header
+comment) is the intended home for anything needing to catch that case now — it compares
+what each design actually says, not an exact string in a structured field.
 
 ### 17.5 Resolution flow
 

@@ -79,7 +79,7 @@ function printUsage(): void {
       "  twing whoami [--server <url>]",
       "  twing join --github [--server <url>]",
       "  twing daemon",
-      "  twing align [--intent \"...\"]",
+      "  twing align",
       "  twing align threads [--status open]",
       "  twing align respond --finding <threadId> --message \"...\"",
       "  twing align close --finding <threadId>",
@@ -154,11 +154,9 @@ async function runDesignCommand(rest: string[]): Promise<void> {
   }
 }
 
-/** Bare `twing align [--intent "..."]` is unchanged; `threads`/`respond`/
- * `close` are the alignment-thread subcommands (statefulness redesign,
- * 2026-08) -- same dispatch shape as `runDesignCommand` below. A bare
- * `--intent` flag (no subcommand word) still falls through to `runAlign`,
- * same as before this existed. */
+/** Bare `twing align` is unchanged; `threads`/`respond`/`close` are the
+ * alignment-thread subcommands (statefulness redesign, 2026-08) -- same
+ * dispatch shape as `runDesignCommand` below. */
 async function runAlignCommand(rest: string[]): Promise<void> {
   const cwd = process.cwd();
   const [maybeSub, ...subArgs] = rest;
@@ -189,7 +187,7 @@ async function runAlignCommand(rest: string[]): Promise<void> {
 
   const flags = parseFlags(rest);
   if (flags.help === "true") return printUsage();
-  await runAlign({ intent: flags.intent, cwd });
+  await runAlign({ cwd });
 }
 
 async function runAdminCommand(rest: string[]): Promise<void> {

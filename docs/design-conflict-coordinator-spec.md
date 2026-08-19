@@ -145,7 +145,7 @@ Response, overlap case:
     {
       "conflicting_design_id": "uuid",
       "agent_label": "agent-1 / ticket-108",
-      "overlap_kind": "creates | touches | depends_on | constraint",
+      "overlap_kind": "creates | touches | constraint",
       "overlap_detail": "both define a RetryPolicy in pkg/retry",
       "conflicting_summary": "one-paragraph summary of the other design",
       "instruction": "adopt_or_justify"
@@ -210,10 +210,11 @@ Run in this order, cheapest/highest-precision first:
 1. **Exact path/symbol overlap**: intersect `touches` and `creates` arrays (normalized:
    lowercase, strip extensions where relevant) against every other `open` design's
    `touches`/`creates` for the same `repo_id`. Any non-empty intersection = overlap.
-2. **Dependency collision**: if design A's `creates` intersects design B's
+2. ~~**Dependency collision**: if design A's `creates` intersects design B's
    `depends_on` (A is building something B already assumes exists, or vice versa),
    flag it — this is the "two agents each build their own retry helper" case even
-   when file paths don't literally collide.
+   when file paths don't literally collide.~~ **Removed 2026-08-19** — see the note
+   below the numbered list.
 3. **Constraint match**: check `creates` and `touches` against the Constraint Store.
    A `canonical_abstraction` constraint whose `scope` intersects `creates` is a
    `constraint_flag`. A `review_required` constraint whose `scope` intersects `touches`
@@ -225,6 +226,20 @@ Run in this order, cheapest/highest-precision first:
    gives false positives" conclusion. Don't reach for embeddings in v1; the structured
    fields should catch the cases that matter, and false positives here train the person
    to ignore the tool.
+
+**Why step 2 was removed:** it only ever matched on an
+exact string in both designs' free-text `creates`/`depends_on` arrays, so it caught "A
+creates `pkg/retry.ts`, B depends on `pkg/retry.ts`" but missed "A creates
+`RetryPolicy`, B depends on `Retrier`" — the same idea worded differently. Deleted
+outright rather than left in place unused: this repo is open source, so an unused
+mechanism is visible in the source regardless of whether any doc still describes it as
+live, and a doc that oversells what the code does is worse than a doc that's honest
+about a narrower set of checks. `depends_on` still exists as a field on `DesignStatement`
+(still useful as declared, human-readable scope, and still checked by the design-scope
+gate that forces an amend on undeclared edits — design doc §17.4/§10) — only the
+cross-design collision check that read it is gone. Anything needing to catch "A depends
+on what B is about to build, worded differently" is the semantic comparator's job now
+(design doc §17.4's note on the async LLM-based path), not this exact-match tier's.
 
 This whole check is a handful of set operations plus one cheap-model extraction call —
 milliseconds of compute against a design registry that's realistically tens of rows per

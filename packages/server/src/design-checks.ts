@@ -1,17 +1,44 @@
 /**
  * Overlap detection (design doc §17.4 / spec §6) -- cheapest, highest-
- * precision first: exact overlap, then dependency collision, then
- * constraint match, then a Jaccard summary-similarity fallback that only
- * runs if the first three found nothing.
+ * precision first: exact overlap, then constraint match, then a Jaccard
+ * summary-similarity fallback that only runs if those found nothing.
+ *
+ * (2026-08-19, removed: a "dependency collision" tier that used to sit
+ * between exact overlap and constraint match -- one design's `creates`
+ * intersecting another's `dependsOn`. Deleted rather than left in place
+ * unused/undocumented: this repo is open source, so an unused mechanism
+ * is visible in the source regardless of whether it's mentioned in any
+ * customer-facing docs, and a docs page that undersells what the code
+ * actually does is worse than not having the code. It also only ever
+ * matched on an exact string in both designs' free-text `creates`/
+ * `dependsOn` arrays -- the same brittleness as `triggers` (see
+ * manifest.ts's note), just on a different field pair: catches "A creates
+ * `packages/net/retry.ts`, B depends on `packages/net/retry.ts`" but
+ * misses "A creates `RetryPolicy`, B depends on `Retrier`" (same idea,
+ * different name). Kept for now: `exactOverlap` below (creates/touches
+ * exact-match, the same brittleness, but a strictly more common phrasing
+ * choice -- a file path is close to canonical even before it exists,
+ * unlike a not-yet-decided symbol name) and the summary-similarity/
+ * semantic-comparator layers, which are the intended home for anything
+ * needing real conceptual matching rather than exact-string matching.
+ *
+ * (2026-08-19, severity split: `exactOverlap` (tier 1) demoted from
+ * blocking to `severity: "warning"` -- a same-file coincidence flags for
+ * display (design detail, activity feed) but no longer demotes the design
+ * to `"flagged"` or denies the Edit/Write gate. `constraintMatch` (tier 3)
+ * and `summarySimilarity` (tier 4) are unchanged, still `severity: "error"`,
+ * still blocking. See DesignSeverity's doc comment in core/types.ts.)
  */
 
 import { minimatch } from "minimatch";
-import type { DesignStatement, DesignConstraint, DesignConflict, DesignVerdict, DesignConstraintType } from "@twing/core";
+import type { DesignStatement, DesignConstraint, DesignConflict, DesignVerdict, DesignConstraintType, DesignSeverity } from "@twing/core";
 
 export interface DesignCheckOutcome {
   verdict: DesignVerdict;
   conflicts: DesignConflict[];
   constraint?: ConstraintHit;
+  /** See DesignSeverity (core/types.ts). Undefined for `"clean"`. */
+  severity?: DesignSeverity;
 }
 
 const SUMMARY_SIMILARITY_THRESHOLD = 0.5;
@@ -50,8 +77,8 @@ function normalize(s: string): string {
 }
 
 /** Composite key for `DesignStatement.justifiedOverlaps` (2026-08-18) --
- * shared between `exactOverlap`/`dependencyCollision` (consuming it) and
- * `app.ts`'s `/v1/designs/:id/resolve` (producing it at justify-time), so
+ * shared between `exactOverlap` (consuming it) and `app.ts`'s
+ * `/v1/designs/:id/resolve` (producing it at justify-time), so
  * the key format only ever lives in one place. Keyed per specific
  * overlapping path, not per design pair -- see the field's own doc comment
  * (core/types.ts) for why a coarser pair-level waiver would be wrong. */
@@ -84,24 +111,6 @@ function exactOverlap(candidate: DesignStatement, other: DesignStatement): Desig
     agentLabel: other.agentLabel,
     overlapKind: createsHit.length > 0 ? "creates" : "touches",
     overlapDetail: `both ${createsHit.length > 0 ? "create" : "touch"} ${hit.join(", ")}`,
-    conflictingSummary: other.summary,
-    overlapPaths: hit,
-  };
-}
-
-/** Tier 2: one design creates what the other assumes already exists (either
- * direction) -- catches "two agents each build their own retry helper" even
- * when file paths never literally collide. */
-function dependencyCollision(candidate: DesignStatement, other: DesignStatement): DesignConflict | undefined {
-  const candidateBuildsWhatOtherAssumes = withoutJustified(candidate, other.id, intersects(candidate.creates, other.dependsOn));
-  const otherBuildsWhatCandidateAssumes = withoutJustified(candidate, other.id, intersects(other.creates, candidate.dependsOn));
-  const hit = [...candidateBuildsWhatOtherAssumes, ...otherBuildsWhatCandidateAssumes];
-  if (hit.length === 0) return undefined;
-  return {
-    conflictingDesignId: other.id,
-    agentLabel: other.agentLabel,
-    overlapKind: "depends_on",
-    overlapDetail: `one design creates what the other depends on: ${hit.join(", ")}`,
     conflictingSummary: other.summary,
     overlapPaths: hit,
   };
@@ -268,11 +277,11 @@ export function appendSummaryUpdate(existingSummary: string, update: string): st
   return `${existingSummary}\n\nUpdate (${date}): ${update}`;
 }
 
-/** Tiers 1+2 together (exact overlap, then dependency collision) -- exported
- * (2026-08-18) so `/v1/designs/:id/resolve` can recompute the *current* set
- * of structural conflicts independently at justify-time, the same "trust
- * current state, not the original verdict" reasoning `constraintId`'s own
- * recompute already established, needed to know which specific paths a
+/** Tier 1 (exact overlap) -- exported (2026-08-18) so
+ * `/v1/designs/:id/resolve` can recompute the *current* set of structural
+ * conflicts independently at justify-time, the same "trust current state,
+ * not the original verdict" reasoning `constraintId`'s own recompute
+ * already established, needed to know which specific paths a
  * justified-divergence review should waive (see
  * DesignStatement.justifiedOverlaps). */
 export function structuralOverlaps(candidate: DesignStatement, others: DesignStatement[]): DesignConflict[] {
@@ -280,12 +289,7 @@ export function structuralOverlaps(candidate: DesignStatement, others: DesignSta
   for (const other of others) {
     if (other.id === candidate.id) continue;
     const exact = exactOverlap(candidate, other);
-    if (exact) {
-      conflicts.push(exact);
-      continue;
-    }
-    const dep = dependencyCollision(candidate, other);
-    if (dep) conflicts.push(dep);
+    if (exact) conflicts.push(exact);
   }
   return conflicts;
 }
@@ -299,7 +303,14 @@ export function runDesignChecks(
 
   const structuralConflicts = structuralOverlaps(candidate, others);
   if (structuralConflicts.length > 0) {
-    return { verdict: "overlap", conflicts: structuralConflicts };
+    // 2026-08-19: demoted to "warning" -- a same-file coincidence between
+    // two designs' self-reported creates/touches isn't itself evidence of a
+    // real merge conflict (a design can decline to actually write to a path
+    // it named, or write something that doesn't collide with what the
+    // other one wrote). Still worth surfacing before either writes code --
+    // that's the one thing this tier can do that claims (§4) can't, since
+    // claims don't exist until code does -- just not worth blocking on.
+    return { verdict: "overlap", conflicts: structuralConflicts, severity: "warning" };
   }
 
   // §17 review-flow fix (2026-08): a constraint already justified and
@@ -310,7 +321,7 @@ export function runDesignChecks(
   // flags normally; this waives one specific match, not "skip all checks."
   const constraintHit = constraintMatch(candidate, constraints);
   if (constraintHit) {
-    return { verdict: "constraint_flag", conflicts: [], constraint: constraintHit };
+    return { verdict: "constraint_flag", conflicts: [], constraint: constraintHit, severity: "error" };
   }
 
   const similarityConflicts: DesignConflict[] = [];
@@ -319,7 +330,12 @@ export function runDesignChecks(
     if (sim) similarityConflicts.push(sim);
   }
   if (similarityConflicts.length > 0) {
-    return { verdict: "overlap", conflicts: similarityConflicts };
+    // Unchanged, deliberately not demoted alongside tier 1 -- this is a
+    // conceptual-overlap fallback with no specific colliding path to point
+    // at (see summarySimilarity's own comment), so it stays the one thing
+    // standing in for real conceptual conflict detection until the
+    // semantic comparator's own severity is revisited.
+    return { verdict: "overlap", conflicts: similarityConflicts, severity: "error" };
   }
 
   return { verdict: "clean", conflicts: [] };

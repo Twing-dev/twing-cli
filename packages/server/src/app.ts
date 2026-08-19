@@ -10,6 +10,7 @@
  */
 
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import type { Claim, CallEdge, DesignStatement, DesignConstraintType, Finding } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
@@ -29,7 +30,7 @@ import { extractDesign } from "./design-extract.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
 import { AlignmentThreadStore } from "./alignment-store.js";
-import { DrizzleActivityLog } from "./activity-log.js";
+import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role } from "./identity-store.js";
 import { fetchRepoPermissions } from "./github-client.js";
 
@@ -157,6 +158,15 @@ export interface CreateAppOptions {
    * agents or a small trusted team on a private network, not a public
    * deployment. Defaults to false (full auth, unchanged). */
   noAuth?: boolean;
+  /** twing-monitor v1: explicit browser-origin allowlist for the `/v1/*`
+   * API (`TWING_SERVE_CORS_ORIGINS`, comma-separated, wired in main.ts).
+   * Undefined/empty mounts no CORS middleware at all -- zero behavior
+   * change for existing self-hosted deployments that only ever talk to
+   * this server from the CLI/hook (neither is a browser, neither needs
+   * CORS headers). Never `*` -- a PAT rides as a real bearer credential
+   * on these routes, not public data, so the allowlist has to be explicit
+   * origins a self-hosted operator opts in by name. */
+  corsOrigins?: string[];
 }
 
 type Variables = { identity: ResolvedIdentity };
@@ -174,6 +184,16 @@ export function createApp(options: CreateAppOptions = {}) {
   const noAuth = options.noAuth ?? false;
 
   const app = new Hono<{ Variables: Variables }>();
+
+  // twing-monitor v1: mounted before the auth middleware below (source
+  // order matters in Hono) so a browser's `OPTIONS` preflight -- which
+  // never carries an `Authorization` header -- gets its CORS headers
+  // without first hitting the 401 path. Only controls whether a browser
+  // may attach the header cross-origin; the auth mechanism itself is
+  // unchanged, an actual request still needs a real bearer token.
+  if (options.corsOrigins && options.corsOrigins.length > 0) {
+    app.use("/v1/*", cors({ origin: options.corsOrigins, allowHeaders: ["Content-Type", "Authorization", "X-Twing-Developer-Id"] }));
+  }
 
   // §17.10: every /v1/* route requires a valid bearer PAT, except the two
   // that can't assume one exists yet -- bootstrap (nobody has a PAT before
@@ -211,6 +231,31 @@ export function createApp(options: CreateAppOptions = {}) {
   // §17.10: who am I, and what am I a member of -- what `twing whoami` and
   // `twing login`'s validation step both call.
   app.get("/v1/auth/whoami", (c) => c.json(c.get("identity")));
+
+  // twing-monitor v1: "list my repos" for the dashboard's landing view. A
+  // dedicated route rather than folding this into whoami's response --
+  // whoami is a CLI/hook-consumed identity primitive (small, stable
+  // shape), not a UI listing endpoint. Merges each of the caller's
+  // memberships (already resolved on the identity, §17.10) with that
+  // project's own record for the fields a dashboard actually wants
+  // (githubOwner/githubRepo/foundedBy/foundedAt) -- no new IdentityStore
+  // method needed, getProjectRecord already exists.
+  app.get("/v1/projects", (c) => {
+    const identity = c.get("identity");
+    const items = identity.projects.map((membership) => {
+      const record = identities.getProjectRecord(membership.projectId);
+      return {
+        projectId: membership.projectId,
+        orgId: membership.orgId,
+        role: membership.role,
+        foundedBy: record?.foundedBy,
+        foundedAt: record?.foundedAt,
+        githubOwner: record?.githubOwner,
+        githubRepo: record?.githubRepo,
+      };
+    });
+    return c.json({ items });
+  });
 
   // Break-glass: the one-time bootstrap token (never a human-chosen
   // password) authorizes creating the first org + its admin. The
@@ -539,6 +584,26 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ findings: allFindings });
   });
 
+  // Read-only visibility into the live, in-memory claim set (§4/§11) --
+  // added for twing-monitor's design-detail view, so a session's declared
+  // scope (DesignStatement.creates/touches) can be shown next to what its
+  // claims actually say it touched. `store.activeClaims` already walks
+  // every claim in the project; `sessionId` filtering happens here rather
+  // than client-side so the dashboard never has to pull a whole project's
+  // claim set just to look at one session's slice of it.
+  app.get("/v1/claims", (c) => {
+    const identity = c.get("identity");
+    const projectId = c.req.query("projectId");
+    if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
+    if (!isProjectMember(identity, projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
+    const sessionId = c.req.query("sessionId");
+    let items = store.activeClaims(projectId);
+    if (sessionId) items = items.filter((claim) => claim.sessionId === sessionId);
+    return c.json({ items });
+  });
+
   // §7: findings generated after the daemon's last push, including ones
   // triggered by another developer's later activity. Scoped to the
   // authenticated identity -- no longer an arbitrary query param, so one
@@ -727,16 +792,36 @@ export function createApp(options: CreateAppOptions = {}) {
       kind: "design_checked",
       relatedId: design.id,
       ts: Date.now(),
-      payload: { verdict: outcome.verdict, conflictCount: outcome.conflicts.length, reregistered },
+      // `summary`/`conflicts`/`constraint` (twing-monitor, 2026-08-19): the
+      // dashboard's activity feed used to show only a bare "overlap"/
+      // "constraint_flag" string here with no way to tell *what* it
+      // overlapped or *which* constraint -- this is the one place
+      // `outcome`'s full detail is in scope, so it rides along on the event
+      // rather than being lost the moment this response is sent.
+      payload: {
+        verdict: outcome.verdict,
+        severity: outcome.severity,
+        conflictCount: outcome.conflicts.length,
+        reregistered,
+        summary: design.summary,
+        ...(outcome.conflicts.length > 0 ? { conflicts: outcome.conflicts } : {}),
+        ...(outcome.constraint ? { constraint: outcome.constraint } : {}),
+      },
     });
 
-    // §17 scope enforcement (2026-08): a non-clean verdict demotes the
-    // design out of "open" immediately -- before this response is ever
-    // sent -- so it stops counting as a usable open design for the
+    // §17 scope enforcement (2026-08): a non-clean, error-severity verdict
+    // demotes the design out of "open" immediately -- before this response
+    // is ever sent -- so it stops counting as a usable open design for the
     // Edit/Write gate's own-session check (`/v1/designs/scope-match`
     // below), rather than staying "open" until someone resolves it.
-    if (outcome.verdict !== "clean") {
-      designs.flag(design.id, outcome.verdict);
+    //
+    // 2026-08-19, severity split: a `"warning"` verdict (tier 1's
+    // exactOverlap only, currently) deliberately skips this -- the design
+    // stays "open" so nothing downstream blocks. The conflict is still
+    // fully recorded above (activity log) and in the response below; it's
+    // display-only, not gate-relevant.
+    if (outcome.verdict !== "clean" && outcome.severity === "error") {
+      designs.flag(design.id, outcome.verdict, { conflicts: outcome.conflicts, constraint: outcome.constraint });
     }
 
     // §17 design lifecycle (2026-08): registering a new design is a much
@@ -771,9 +856,9 @@ export function createApp(options: CreateAppOptions = {}) {
       return c.json({ verdict: "clean", designId: design.id });
     }
     if (outcome.verdict === "constraint_flag") {
-      return c.json({ verdict: "constraint_flag", designId: design.id, constraint: outcome.constraint });
+      return c.json({ verdict: "constraint_flag", designId: design.id, constraint: outcome.constraint, severity: outcome.severity });
     }
-    return c.json({ verdict: "overlap", designId: design.id, conflicts: outcome.conflicts });
+    return c.json({ verdict: "overlap", designId: design.id, conflicts: outcome.conflicts, severity: outcome.severity });
   });
 
   // §17.5: adopt the conflicting design (superseded), or justify diverging
@@ -906,10 +991,39 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!amended) return c.json({ error: `design is ${design.status}, not open -- can't amend` }, 409);
 
     if (outcome.verdict !== "clean") {
-      console.log(`twing serve: design ${id.slice(0, 8)} amend rejected -> ${outcome.verdict}`);
-      designs.flag(id, outcome.verdict);
+      // 2026-08-19, severity split: only an error-severity verdict flags the
+      // design out of "open" -- a warning (tier 1 only) stays open, already
+      // persisted above via designs.amend, surfaced here for display only.
+      const action = outcome.severity === "error" ? "rejected" : "flagged (warning only)";
+      console.log(`twing serve: design ${id.slice(0, 8)} amend ${action} -> ${outcome.verdict}`);
+      // Found while updating twing-monitor for the severity split: a
+      // warning-severity amend previously left *no* activity record at all
+      // -- designs.flag()'s design_flagged event (the only place this
+      // outcome ever got logged) is now skipped for a warning on purpose,
+      // and designs.amend()'s own design_amended event only ever carries
+      // the scope delta, never the check outcome. Logged here unconditionally
+      // (matching registration's own design_checked, which fires regardless
+      // of verdict) so both severities leave a "why" a viewer can find.
+      activityLog.append({
+        projectId: design.projectId,
+        developerId: identity.developerId,
+        sessionId: design.sessionId,
+        kind: "design_checked",
+        relatedId: id,
+        ts: Date.now(),
+        payload: {
+          verdict: outcome.verdict,
+          severity: outcome.severity,
+          summary: amended.summary,
+          ...(outcome.conflicts.length > 0 ? { conflicts: outcome.conflicts } : {}),
+          ...(outcome.constraint ? { constraint: outcome.constraint } : {}),
+        },
+      });
+      if (outcome.severity === "error") {
+        designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraint: outcome.constraint });
+      }
       runSemanticComparatorPass(id, open);
-      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraint: outcome.constraint });
+      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraint: outcome.constraint, severity: outcome.severity });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} amended -> scopeVersion ${amended.scopeVersion}`);
@@ -962,10 +1076,34 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!resumed) return c.json({ error: `design is ${design.status}, not dormant -- can't resume` }, 409);
 
     if (outcome.verdict !== "clean") {
-      console.log(`twing serve: design ${id.slice(0, 8)} resume rejected -> ${outcome.verdict}`);
-      designs.flag(id, outcome.verdict);
+      // Same severity split as amend above -- a warning stays "open"
+      // (designs.resume already persisted it above), only an error flags.
+      const action = outcome.severity === "error" ? "rejected" : "flagged (warning only)";
+      console.log(`twing serve: design ${id.slice(0, 8)} resume ${action} -> ${outcome.verdict}`);
+      // Same activity-trail gap as amend above -- a warning-severity resume
+      // previously left no record at all of what it found, since
+      // design_flagged is skipped and design_resume's own event (below)
+      // doesn't carry verdict/conflicts.
+      activityLog.append({
+        projectId: resumed.projectId,
+        developerId: resumed.developerId,
+        sessionId: resumed.sessionId,
+        kind: "design_checked",
+        relatedId: id,
+        ts: Date.now(),
+        payload: {
+          verdict: outcome.verdict,
+          severity: outcome.severity,
+          summary: resumed.summary,
+          ...(outcome.conflicts.length > 0 ? { conflicts: outcome.conflicts } : {}),
+          ...(outcome.constraint ? { constraint: outcome.constraint } : {}),
+        },
+      });
+      if (outcome.severity === "error") {
+        designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraint: outcome.constraint });
+      }
       runSemanticComparatorPass(id, open);
-      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraint: outcome.constraint });
+      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraint: outcome.constraint, severity: outcome.severity });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} resumed by ${identity.developerId.slice(0, 12)}/${body.sessionId.slice(0, 12)}`);
@@ -1056,6 +1194,9 @@ export function createApp(options: CreateAppOptions = {}) {
   });
 
   // §17.5: the human-facing queue -- justified divergences pending sign-off.
+  // twing-monitor v1: ?status= (pending/decided/all, defaults to pending --
+  // unchanged from before this query param existed) lets ReviewsView also
+  // show decided history, not just the live queue.
   app.get("/v1/reviews", (c) => {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
@@ -1063,7 +1204,52 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!isProjectMember(identity, projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
-    return c.json({ items: designs.listReviews(projectId) });
+    const status = c.req.query("status") ?? "pending";
+    if (status !== "pending" && status !== "decided" && status !== "all") {
+      return c.json({ error: "expected ?status= to be pending, decided, or all" }, 400);
+    }
+    return c.json({ items: designs.listReviews(projectId, status) });
+  });
+
+  // twing-monitor v1: the dashboard's ActivityView -- newest-first,
+  // paginated via ?before= (ms epoch, exclusive), ?limit= (default 50, hard
+  // cap 200 -- enforced in eventsForProjectPage), and an optional
+  // comma-separated ?kind= allowlist. `nextBefore` in the response is the
+  // oldest returned event's `ts`, present only when there may be more
+  // history past this page.
+  app.get("/v1/activity", (c) => {
+    const identity = c.get("identity");
+    const projectId = c.req.query("projectId");
+    if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
+    if (!isProjectMember(identity, projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
+    const beforeParam = c.req.query("before");
+    const before = beforeParam !== undefined ? Number(beforeParam) : undefined;
+    if (before !== undefined && !Number.isFinite(before)) return c.json({ error: "invalid ?before=" }, 400);
+    const limitParam = c.req.query("limit");
+    const limit = limitParam !== undefined ? Number(limitParam) : undefined;
+    if (limit !== undefined && !Number.isFinite(limit)) return c.json({ error: "invalid ?limit=" }, 400);
+    const kindParam = c.req.query("kind");
+    const kinds = kindParam ? (kindParam.split(",") as ActivityEventKind[]) : undefined;
+    const developerId = c.req.query("developerId") || undefined;
+    const relatedId = c.req.query("relatedId") || undefined;
+    const { items, nextBefore } = activityLog.eventsForProjectPage(projectId, { before, limit, kinds, developerId, relatedId });
+    return c.json({ items, nextBefore });
+  });
+
+  // twing-monitor v1: the dashboard's ConstraintsView -- read-only reference
+  // for "what canonical_abstraction/review_required rules exist here."
+  // Thin wrapper: `ConstraintStore.forProject` already existed (used
+  // internally by the check/match tiers), just never had a route of its own.
+  app.get("/v1/constraints", (c) => {
+    const identity = c.get("identity");
+    const projectId = c.req.query("projectId");
+    if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
+    if (!isProjectMember(identity, projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
+    return c.json({ items: constraintStore.forProject(projectId) });
   });
 
   // §17.10 hardening: deciding a review requires being that project's

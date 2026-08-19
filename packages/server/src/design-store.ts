@@ -10,13 +10,14 @@
  */
 
 import * as crypto from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, isNotNull, sql } from "drizzle-orm";
 import {
   DEFAULT_DESIGN_ACTIVE_TTL_MS,
   DEFAULT_DESIGN_DORMANT_TTL_MS,
   type DesignStatement,
   type DesignConstraint,
   type DesignConstraintType,
+  type DesignConflict,
   type DesignVerdict,
   type PendingReview,
 } from "@twing/core";
@@ -224,8 +225,22 @@ export class DesignRegistry {
    * verdict wasn't `clean` -- demote it out of "open" so it stops counting
    * as a usable design for the Edit/Write gate, without losing its id
    * (`resolve`/`amend` still address it). No-op (returns the design
-   * unchanged) if it isn't currently `"open"`. */
-  flag(id: string, verdict: DesignVerdict): DesignStatement | undefined {
+   * unchanged) if it isn't currently `"open"`.
+   *
+   * `detail` (twing-monitor, 2026-08-19): every call site already has the
+   * full `runDesignChecks` outcome in scope the moment it calls this --
+   * without capturing it here, "why was this flagged" was unrecoverable
+   * after the fact (the synchronous HTTP response that carried
+   * `outcome.conflicts`/`outcome.constraint` was the only place it ever
+   * existed; `design_flagged`'s activity event logged just the bare
+   * `verdict` string). Also stamps the design's own `summary` onto the
+   * event so a later reader doesn't need a second lookup just to know
+   * which design this was. */
+  flag(
+    id: string,
+    verdict: DesignVerdict,
+    detail?: { conflicts?: DesignConflict[]; constraint?: { id: string; statement: string; type: DesignConstraintType } },
+  ): DesignStatement | undefined {
     const existing = this.get(id);
     if (!existing || existing.status !== "open") return existing;
     this.db.update(designsTable).set({ status: "flagged" }).where(eq(designsTable.id, id)).run();
@@ -236,7 +251,12 @@ export class DesignRegistry {
       kind: "design_flagged",
       relatedId: id,
       ts: Date.now(),
-      payload: { verdict },
+      payload: {
+        verdict,
+        summary: existing.summary,
+        ...(detail?.conflicts && detail.conflicts.length > 0 ? { conflicts: detail.conflicts } : {}),
+        ...(detail?.constraint ? { constraint: detail.constraint } : {}),
+      },
     });
     return this.get(id);
   }
@@ -353,6 +373,17 @@ export class DesignRegistry {
     return this.get(id);
   }
 
+  /** Newest-first (`createdAt DESC`) -- this is the dashboard's own listing
+   * query (`GET /v1/designs`, DesignsView.tsx), and a plain unordered SQLite
+   * scan isn't reliably insertion-order, so this needs an explicit ORDER BY
+   * rather than relying on incidental row order (found live, 2026-08-19:
+   * newly-registered designs were appearing at the bottom of the list
+   * instead of the top). `rowid DESC` is the tiebreaker for two rows
+   * registered in the same millisecond (`id` is a random UUID, so it can't
+   * serve as one) -- SQLite gives every rowid table (this one isn't
+   * declared WITHOUT ROWID) an implicit, monotonically-increasing rowid for
+   * free, so this is a true insertion-order tiebreaker, not just "some
+   * deterministic order." */
   listByProject(projectId: string, status?: DesignStatement["status"]): DesignStatement[] {
     const conditions = [eq(designsTable.projectId, projectId)];
     if (status) conditions.push(eq(designsTable.status, status));
@@ -360,6 +391,7 @@ export class DesignRegistry {
       .select()
       .from(designsTable)
       .where(and(...conditions))
+      .orderBy(sql`${designsTable.createdAt} DESC, rowid DESC`)
       .all() as DesignRow[];
     return rows.map(fromDesignRow);
   }
@@ -558,9 +590,15 @@ export class DesignRegistry {
     return row ? fromReviewRow(row) : undefined;
   }
 
-  listReviews(projectId: string, pendingOnly = true): PendingReview[] {
+  /** twing-monitor v1: `filter` used to be a `pendingOnly` boolean --
+   * widened so the dashboard's ReviewsView can also show decided history,
+   * not just the live queue. Default unchanged (`"pending"` behaves
+   * exactly like the old `pendingOnly = true`), so `twing design reviews`
+   * and the design gate's own pending-review checks need no changes. */
+  listReviews(projectId: string, filter: "pending" | "decided" | "all" = "pending"): PendingReview[] {
     const conditions = [eq(reviewsTable.projectId, projectId)];
-    if (pendingOnly) conditions.push(isNull(reviewsTable.decision));
+    if (filter === "pending") conditions.push(isNull(reviewsTable.decision));
+    else if (filter === "decided") conditions.push(isNotNull(reviewsTable.decision));
     const rows = this.db
       .select()
       .from(reviewsTable)

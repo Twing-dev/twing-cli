@@ -18,7 +18,6 @@ import {
   loadManifestFromFile,
   twingConfigPath,
   matchConstraints,
-  matchTriggers,
   languageForPath,
   computeProjectId,
   computeDeveloperId,
@@ -129,7 +128,7 @@ export async function gatherFromDiff(repoRoot: string): Promise<DiffClaims | nul
   const parsedFiles: { relPath: string; rootNode: Node }[] = [];
   const nameIndex = new Map<string, Set<string>>();
 
-  function baseClaim(symbolId: string, constraintIds: string[], triggerMatches: string[]): Claim {
+  function baseClaim(symbolId: string, constraintIds: string[]): Claim {
     return {
       projectId,
       developerId,
@@ -141,7 +140,6 @@ export async function gatherFromDiff(repoRoot: string): Promise<DiffClaims | nul
       ts: now,
       ttlMs: DEFAULT_CLAIM_TTL_MS,
       ...(constraintIds.length > 0 ? { constraintIds } : {}),
-      ...(triggerMatches.length > 0 ? { triggerMatches } : {}),
     };
   }
 
@@ -161,7 +159,7 @@ export async function gatherFromDiff(repoRoot: string): Promise<DiffClaims | nul
     if (!languageForPath(file.relPath)) {
       // Outside v0's TS/JS scope (§15) -- still worth a file-level claim so
       // path-glob constraints fire regardless of language.
-      if (newContent !== oldContent) claims.push(baseClaim(file.relPath, constraintHits, []));
+      if (newContent !== oldContent) claims.push(baseClaim(file.relPath, constraintHits));
       continue;
     }
 
@@ -188,13 +186,11 @@ export async function gatherFromDiff(repoRoot: string): Promise<DiffClaims | nul
       if (!touched) continue;
 
       emittedSymbolClaim = true;
-      const isNew = !oldMatch;
       const symbolId = computeSymbolId(file.relPath, newSym.scopePath);
       const signatureChanged = oldMatch ? oldMatch.signature !== newSym.signature : false;
-      const triggerHits = isNew ? matchTriggers(manifest, leafName(newSym.scopePath)).map((t) => t.triggerId) : [];
 
       claims.push({
-        ...baseClaim(symbolId, constraintHits, triggerHits),
+        ...baseClaim(symbolId, constraintHits),
         ...(oldMatch ? { signatureChanged, oldSignature: oldMatch.signature, newSignature: newSym.signature } : {}),
       });
     }
@@ -203,7 +199,7 @@ export async function gatherFromDiff(repoRoot: string): Promise<DiffClaims | nul
     // top-level statements) -- still worth a file-level claim so path
     // constraints catch it, mirroring the daemon's Write-tool fallback.
     if (!emittedSymbolClaim && newContent !== oldContent) {
-      claims.push(baseClaim(file.relPath, constraintHits, []));
+      claims.push(baseClaim(file.relPath, constraintHits));
     }
   }
 

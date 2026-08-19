@@ -63,7 +63,6 @@ repo:
 
 ```sh
 twing align
-twing align --intent "adding a retry wrapper for the payments client"
 ```
 
 `twing align` is advisory -- it never blocks, just reports. It tells you
@@ -78,7 +77,7 @@ with the default branch.
 | Command | What it does |
 |---|---|
 | `twing init [--server <url>]` | One-time setup per machine: discover/confirm the coordinator, authenticate, install/wire the hook, start the daemon. Safe to re-run. |
-| `twing align [--intent "..."]` | Cross-session divergence findings (advisory, never blocks). |
+| `twing align` | Cross-session divergence findings (advisory, never blocks). |
 | `twing design register --summary "..." --touches a,b` | Register a design before your first edit/write (or let plan mode do it automatically). |
 | `twing design amend --id <designId> --touches c,d` | Expand an already-registered design to cover more files. |
 
@@ -320,7 +319,7 @@ via TypeScript project references. `npm link` in `packages/cli` gives you a
 | `twing admin bootstrap --token <bootstrap-token>` | Break-glass: claims the server's one-time bootstrap token, creating the first org and its admin. |
 | `twing admin invite` / `list-invites` / `revoke-invite` / `revoke-developer` / `list-developers` | Org-scoped admin actions (§17.10). |
 | `twing project invite` / `list-invites` / `revoke-invite` / `remove-developer` / `list-developers` | Project-scoped admin actions -- a project's own admins, not just org admins, can run these. |
-| `twing align [--intent "..."]` | Local constraint/trigger checks plus a server round-trip for cross-session divergence findings. |
+| `twing align` | Local constraint checks plus a server round-trip for cross-session divergence findings. |
 | `twing daemon` | Runs the daemon in the foreground (rarely needed manually -- `init` already starts it detached, or as a persistent OS-level service). |
 | `twing design register/resolve/list/reviews` | Design-conflict gate commands, see above. |
 | `twing design enable-gate` / `disable-gate` | Sets a per-project local override (`~/.twing/gate-overrides.json`) -- hook wiring is machine-global, so this is no longer about wiring/unwiring hook entries (that would toggle every repo at once); `disable-gate` opts just this one project out, other repos on the same machine are unaffected. |

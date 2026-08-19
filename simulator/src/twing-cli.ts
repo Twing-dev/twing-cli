@@ -20,10 +20,9 @@ export async function runTwingDesignDisableGate(cwd: string): Promise<void> {
 
 /** Inherits stdio so `align`'s own report prints directly -- that report
  * *is* the point of running the simulator, not something to re-format. */
-export function runTwingAlign(cwd: string, intent?: string): Promise<number> {
+export function runTwingAlign(cwd: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const args = [cliEntryPath(), "align"];
-    if (intent) args.push("--intent", intent);
     const child = spawn(process.execPath, args, { cwd, stdio: "inherit" });
     child.once("error", reject);
     child.once("exit", (code) => resolve(code ?? 0));
