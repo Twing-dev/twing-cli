@@ -49,6 +49,23 @@ services:
       - caddy-config:/config
     depends_on:
       - twing-serve
+    # `default` (this project's own implicit network, still needed for
+    # twing-serve:8787 by service-name DNS) plus the external twing-edge
+    # network shared with the twing-monitor compose project -- listing
+    # `networks:` at all opts a service out of the implicit default unless
+    # it's named explicitly here too. See twing-monitor's own
+    # deploy/docker/README.md for the other side of this.
+    networks:
+      - default
+      - twing-edge
+
+networks:
+  # Created once on the box (`docker network create twing-edge`), outside
+  # either compose project's lifecycle -- `docker compose down` here must
+  # never delete a network twing-monitor's own compose project also
+  # depends on.
+  twing-edge:
+    external: true
 
 volumes:
   caddy-data:
