@@ -31,6 +31,6 @@ coordination-server.twing.dev {
 # service name. No rate limiting here: this serves a static bundle, not
 # /v1/* API routes -- the coordinator's own auth-sensitive-route limiting
 # above is unaffected and unrelated.
-app.twing.dev {
+monitor.twing.dev {
 	reverse_proxy twing-monitor:80
 }
