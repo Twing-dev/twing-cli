@@ -30,6 +30,14 @@ export function tmpRepo(serverUrl?: string): string {
   return dir;
 }
 
+/** Adds a GitHub `origin` remote to a `tmpRepo()`, so `githubBinding`
+ * resolves to `{owner, repo}` -- needed for any test that exercises the
+ * GitHub-founding branches (`init.ts`/`join.ts`), which are otherwise
+ * skipped entirely for a bare repo with no remote at all. */
+export function addGithubRemote(repo: string, owner: string, name: string): void {
+  execFileSync("git", ["remote", "add", "origin", `https://github.com/${owner}/${name}.git`], { cwd: repo });
+}
+
 /** Points `os.homedir()` (via $HOME) at an isolated dir for the duration of
  * `run` -- never touches the real machine's `~/.twing/config.json`, same
  * reasoning as the Go gate tests' `setCachedToken`. */

@@ -14,10 +14,43 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { runInit, type InitDeps } from "./init.js";
-import { tmpRepo, withHome, cacheToken, withMockFetch, captureConsole, jsonResponse, textResponse, captureFetch, captureFetchSequence } from "./test-support.js";
+import { computeProjectId } from "@twing/core";
+import { runInit, isProjectMember, type InitDeps } from "./init.js";
+import {
+  tmpRepo,
+  withHome,
+  cacheToken,
+  addGithubRemote,
+  withMockFetch,
+  captureConsole,
+  jsonResponse,
+  textResponse,
+  captureFetch,
+  captureFetchSequence,
+} from "./test-support.js";
 
 const SERVER_URL = "http://localhost:9999";
+
+/** A URL-substring-routed fetch mock -- needed for tests that exercise more
+ * than one distinct endpoint in one `runInit` call (the reachability check,
+ * `/v1/auth/whoami`, GitHub's own device-code endpoint, `/v1/constraints/
+ * seed`), unlike `captureFetch`/`captureFetchSequence`'s single-response
+ * (or fixed-sequence) model. Throws on an unmatched URL rather than
+ * returning something arbitrary -- a test that didn't anticipate a call
+ * should fail loudly, not silently mask it. */
+function routedFetch(routes: { match: RegExp; response: Response }[]): { fetch: typeof fetch; calls: string[] } {
+  const calls: string[] = [];
+  const impl = (async (url: string | URL) => {
+    const u = String(url);
+    calls.push(u);
+    const route = routes.find((r) => r.match.test(u));
+    if (!route) throw new Error(`routedFetch: no route matched ${u}`);
+    return route.response.clone();
+  }) as typeof fetch;
+  return { fetch: impl, calls };
+}
+
+const REACHABILITY_ROUTE = { match: new RegExp(`^${SERVER_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/$`), response: textResponse("twing serve") };
 
 function fakeDeps(overrides: Partial<InitDeps> = {}): {
   deps: InitDeps;
@@ -208,5 +241,125 @@ test("runInit: constraint seeding failure is best-effort -- init still reports d
     const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
     assert.ok(logs.some((l) => l.includes("constraint seeding skipped")));
     assert.ok(logs.some((l) => l.includes("twing init: done")), "a failed best-effort seed must not abort init");
+  });
+});
+
+test("runInit: constraint seeding surfaces the server's real error reason instead of guessing (2026-08-18 fix)", async () => {
+  const { fetch } = captureFetch(jsonResponse({ error: "founder has no organization membership" }, 403));
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const repo = tmpRepo(SERVER_URL);
+    fs.writeFileSync(
+      path.join(repo, ".twing", "twing.yml"),
+      `coordinator:\n  serverUrl: ${SERVER_URL}\nconstraints:\n  - text: something\n    scope: src/**\n`,
+    );
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.ok(
+      logs.some((l) => l.includes("founder has no organization membership")),
+      "must surface the real server-side reason, not a generic guess",
+    );
+    assert.ok(
+      !logs.some((l) => l.includes("older server, or /v1/designs/* not deployed yet")),
+      "must not fall back to the generic guess when the server sent a real reason",
+    );
+  });
+});
+
+// --- per-project membership check (2026-08-18 fix) ---
+//
+// Found live: a cached token proves this machine is authenticated to a
+// *coordinator*, not that this identity is a *member of every project* on
+// it. `init` in a second, never-founded repo on an already-onboarded
+// coordinator used to reuse the cached token and skip the GitHub-founding
+// attempt entirely, silently falling through to the org-based founding
+// fallback, which fails for anyone with no org (the default for anyone
+// onboarded via GitHub-founding in the first place).
+
+test("isProjectMember: true when the project is in whoami's list", async () => {
+  const { fetch } = captureFetch(jsonResponse({ developerId: "me", projects: [{ projectId: "proj-1", orgId: "", role: "admin" }] }));
+  const isMember = await withMockFetch(fetch, () => isProjectMember(SERVER_URL, "proj-1", "tok"));
+  assert.equal(isMember, true);
+});
+
+test("isProjectMember: false when the project is absent from whoami's list", async () => {
+  const { fetch } = captureFetch(jsonResponse({ developerId: "me", projects: [{ projectId: "some-other-proj", orgId: "", role: "admin" }] }));
+  const isMember = await withMockFetch(fetch, () => isProjectMember(SERVER_URL, "proj-1", "tok"));
+  assert.equal(isMember, false);
+});
+
+test("isProjectMember: fails soft to true on a non-ok response", async () => {
+  const { fetch } = captureFetch(jsonResponse({ error: "unauthorized" }, 401));
+  const isMember = await withMockFetch(fetch, () => isProjectMember(SERVER_URL, "proj-1", "tok"));
+  assert.equal(isMember, true, "a failed check must not force a surprise join attempt on every retry");
+});
+
+test("isProjectMember: fails soft to true on a network error", async () => {
+  const throwingFetch = (async () => {
+    throw new Error("network down");
+  }) as typeof fetch;
+  const isMember = await withMockFetch(throwingFetch, () => isProjectMember(SERVER_URL, "proj-1", "tok"));
+  assert.equal(isMember, true);
+});
+
+test("runInit: a cached token skips the membership check entirely for a non-GitHub-hosted repo (no whoami call)", async () => {
+  const { fetch, calls } = captureFetch(textResponse("twing serve"));
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const repo = tmpRepo(); // no github remote at all
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.ok(!calls.some((c) => c.url.includes("/v1/auth/whoami")), "no github remote -- membership check must not even run");
+  });
+});
+
+test("runInit: cached token + already a project member on a GitHub-hosted repo -- no join attempt, seeding still runs", async () => {
+  const repo = tmpRepo();
+  addGithubRemote(repo, "acme", "widgets");
+  const projectId = computeProjectId(repo);
+  const { fetch, calls } = routedFetch([
+    REACHABILITY_ROUTE,
+    { match: /\/v1\/auth\/whoami$/, response: jsonResponse({ developerId: "me", projects: [{ projectId, orgId: "", role: "admin" }] }) },
+    { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) },
+  ]);
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.ok(calls.some((c) => /\/v1\/auth\/whoami$/.test(c)), "membership check must run for a github-hosted repo");
+    assert.ok(!calls.some((c) => c.includes("github.com/login/device/code")), "already a member -- must not attempt a GitHub join");
+    assert.ok(logs.some((l) => l.includes("twing init: done")));
+  });
+});
+
+test("runInit: cached token + NOT yet a project member on a GitHub-hosted repo -- attempts a GitHub join, falls back gracefully if it fails", async () => {
+  const repo = tmpRepo();
+  addGithubRemote(repo, "acme", "widgets");
+  const { fetch, calls } = routedFetch([
+    REACHABILITY_ROUTE,
+    { match: /\/v1\/auth\/whoami$/, response: jsonResponse({ developerId: "me", projects: [] }) }, // not a member of anything yet
+    { match: /github\.com\/login\/device\/code$/, response: jsonResponse({ error: "device flow unavailable in test" }, 500) },
+    { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) },
+  ]);
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.ok(calls.some((c) => /\/v1\/auth\/whoami$/.test(c)), "membership check must run");
+    assert.ok(calls.some((c) => c.includes("github.com/login/device/code")), "not a member -- must attempt a GitHub join for this project");
+    assert.ok(logs.some((l) => l.includes("automatic GitHub-verified join didn't work")));
+    assert.ok(logs.some((l) => l.includes("twing init: done")), "a failed join attempt must not abort init -- falls back to the cached token");
+  });
+});
+
+test("runInit: --no-github skips the membership check even for a GitHub-hosted repo with a cached token", async () => {
+  const repo = tmpRepo();
+  addGithubRemote(repo, "acme", "widgets");
+  const { fetch, calls } = routedFetch([REACHABILITY_ROUTE, { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) }]);
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, noGithub: true }, deps)));
+    assert.ok(!calls.some((c) => c.includes("/v1/auth/whoami")), "--no-github must skip the membership check entirely");
   });
 });

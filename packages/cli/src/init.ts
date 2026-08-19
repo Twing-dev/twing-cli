@@ -183,6 +183,30 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
 }
 
 /**
+ * Checks whether this identity already has a membership row for projectId
+ * on serverUrl, via GET /v1/auth/whoami's full project list (no
+ * per-project endpoint exists, and the list is small/cheap). Exists purely
+ * to let `resolveAuthToken` tell "authenticated to this *server*" apart
+ * from "a member of *this* project" -- see that function's comment for why
+ * those are different questions. Fails soft to `true` (assume already a
+ * member) on any network/parse error, so a transient whoami hiccup can't
+ * force a surprise GitHub device-flow prompt on every subsequent `init`
+ * run -- worst case this just falls through to the pre-existing
+ * best-effort `seedConstraints` founding attempt below, same as before
+ * this function existed.
+ */
+export async function isProjectMember(serverUrl: string, projectId: string, authToken: string): Promise<boolean> {
+  try {
+    const res = await authFetch(`${serverUrl}/v1/auth/whoami`, {}, authToken);
+    if (!res.ok) return true;
+    const body = (await res.json()) as { projects?: { projectId: string }[] };
+    return (body.projects ?? []).some((p) => p.projectId === projectId);
+  } catch {
+    return true;
+  }
+}
+
+/**
  * §17 Phase 3 GitHub-founding (2026-08-17): the auth-resolution precedence
  * for `init` -- unifies what used to be an inline `options.invite ? ... :
  * requireAuth(...)` ternary that had two problems: it always re-attempted
@@ -193,10 +217,21 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
  *
  *  1. `noAuth` (checked first, unconditionally) -- no identity ceremony
  *     exists for this server at all, nothing below is even relevant.
- *  2. An already-cached real token always wins over `--invite`/the default
- *     GitHub attempt -- the idempotency fix: re-running plain `twing init`
- *     (or `init --invite <code>` a second time) must never re-attempt a
- *     credential-minting call that only succeeds once.
+ *  2. An already-cached real token: proves we're authenticated to this
+ *     *server*, but says nothing about membership in *this* project --
+ *     those are different questions once one machine works across several
+ *     repos on the same coordinator (found live, 2026-08-18: `init` in a
+ *     second, never-founded repo on an already-onboarded coordinator used
+ *     to return the cached token here immediately, skipping the
+ *     GitHub-founding attempt entirely; `seedConstraints`' org-based
+ *     founding fallback then failed for anyone with no org membership --
+ *     the default for anyone onboarded via GitHub-founding in the first
+ *     place, since that path never creates one). So: check membership
+ *     first, and only attempt a GitHub join for *this* project if we're
+ *     not already in it -- reusing the cached token (never minting a
+ *     second one), mirroring `runJoinGithub`'s own existing-token branch.
+ *     Still the idempotency fix for the *token* itself either way:
+ *     re-running plain `twing init` never re-attempts credential minting.
  *  3. Explicit `--invite <code>` -- still fully supported, just no longer
  *     advertised as the primary path (§17 plan, Phase 2).
  *  4. Explicit `--no-github` opt-out -- skip straight to the old error.
@@ -210,7 +245,16 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
 async function resolveAuthToken(repoRoot: string, serverUrl: string, options: InitOptions): Promise<string | undefined> {
   const auth = getServerAuth(readConfig(), serverUrl);
   if (auth?.noAuth) return undefined;
-  if (auth?.authToken) return auth.authToken;
+  if (auth?.authToken) {
+    if (!options.noGithub && githubBinding(repoRoot) && !(await isProjectMember(serverUrl, computeProjectId(repoRoot), auth.authToken))) {
+      try {
+        return await runJoinGithub({ cwd: repoRoot, server: serverUrl });
+      } catch (err) {
+        console.log(`twing init: automatic GitHub-verified join didn't work (${err instanceof Error ? err.message : err}) -- falling back`);
+      }
+    }
+    return auth.authToken;
+  }
   if (options.invite) return runKeygen({ cwd: repoRoot, serverUrl, invite: options.invite });
   if (options.noGithub) return requireAuth(serverUrl, "twing init");
   if (githubBinding(repoRoot)) {
@@ -271,7 +315,14 @@ async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: 
       const body = (await res.json()) as { seeded?: number };
       console.log(`twing init: seeded ${body.seeded ?? manifest.constraints.length + reviewRules.length} constraint(s) into the coordinator (§17)`);
     } else {
-      console.log(`twing init: constraint seeding skipped (server responded ${res.status} -- older server, or /v1/designs/* not deployed yet)`);
+      // Found live, 2026-08-18: this used to always guess "older server, or
+      // /v1/designs/* not deployed yet" -- actively misleading for the real
+      // 403 case (e.g. "founder has no organization membership", the
+      // org-based founding fallback's own rejection), which has nothing to
+      // do with server age. Surface the server's actual reason when it
+      // sends one; only fall back to the generic guess when it didn't.
+      const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+      console.log(`twing init: constraint seeding skipped (server responded ${res.status}${errBody?.error ? `: ${errBody.error}` : " -- older server, or /v1/designs/* not deployed yet"})`);
     }
   } catch (err) {
     console.log(`twing init: constraint seeding skipped (${err instanceof Error ? err.message : err})`);
