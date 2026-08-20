@@ -76,7 +76,7 @@ function printUsage(): void {
       "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github]",
       "  twing login [--server <url>] [--token <pat>]",
       "  twing keygen --invite <code> [--server <url>] [--label <email>]",
-      "  twing whoami [--server <url>]",
+      "  twing whoami [--server <url>] [--show-token]",
       "  twing join --github [--server <url>]",
       "  twing daemon",
       "  twing align",
@@ -259,13 +259,18 @@ async function runProjectCommand(rest: string[]): Promise<void> {
   }
 }
 
-async function runWhoami(options: { server?: string; cwd: string }): Promise<void> {
+async function runWhoami(options: { server?: string; cwd: string; showToken?: boolean }): Promise<void> {
   const serverUrl = resolveServerUrl(options.cwd, options.server);
   if (!serverUrl) throw new Error("twing whoami: no server URL given -- pass --server <url> or set TWING_SERVER.");
   const token = requireAuth(serverUrl, "twing whoami");
   const res = await authFetch(`${serverUrl}/v1/auth/whoami`, {}, token, computeDeveloperId(options.cwd));
   const body = await res.json().catch(() => ({}));
-  console.log(JSON.stringify(body, null, 2));
+  // `token` is already sitting in ~/.twing/config.json in plaintext, so
+  // this isn't a new exposure -- just opt-in (not printed by default) so
+  // it doesn't land in scrollback/screen-recordings every time someone
+  // runs whoami to check their identity, the common case.
+  const output = options.showToken && token ? { ...body, token } : body;
+  console.log(JSON.stringify(output, null, 2));
 }
 
 async function runDaemonForeground(): Promise<void> {
@@ -311,7 +316,7 @@ async function main(): Promise<void> {
       return;
     }
     case "whoami":
-      await runWhoami({ server: flags.server, cwd: process.cwd() });
+      await runWhoami({ server: flags.server, cwd: process.cwd(), showToken: flags["show-token"] === "true" });
       return;
     case "join":
       if (flags.github !== "true") throw new Error("twing join: --github is required (the only join mechanism this command supports so far)");
