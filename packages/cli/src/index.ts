@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startDaemon } from "./daemon/server.js";
-import { defaultSocketPath, authFetch, computeDeveloperId } from "@twing/core";
+import { defaultSocketPath, authFetch, computeDeveloperId, readConfig } from "@twing/core";
 import { runInit } from "./init.js";
 import { runLogin } from "./login.js";
 import { runJoinGithub } from "./join.js";
@@ -77,6 +77,7 @@ function printUsage(): void {
       "  twing login [--server <url>] [--token <pat>]",
       "  twing keygen --invite <code> [--server <url>] [--label <email>]",
       "  twing whoami [--server <url>] [--show-token]",
+      "  twing servers [--show-token]",
       "  twing join --github [--server <url>]",
       "  twing daemon",
       "  twing align",
@@ -273,6 +274,40 @@ async function runWhoami(options: { server?: string; cwd: string; showToken?: bo
   console.log(JSON.stringify(output, null, 2));
 }
 
+/** First 8 chars + "..." -- enough to tell entries apart (and to eyeball-
+ * confirm you're looking at the token you think you are) without printing
+ * the whole thing where `--show-token` isn't also passed. */
+function redactToken(token: string): string {
+  return `${token.slice(0, 8)}...`;
+}
+
+/** `whoami` (above) answers "who am I on *this* server" -- singular,
+ * always the resolved one. This is the different, orthogonal question,
+ * "what servers do I have cached credentials for at all" -- a plain
+ * listing of ~/.twing/config.json, no network calls, no single server to
+ * resolve. Tokens redacted by default for the same reason whoami's own
+ * `--show-token` is opt-in: this is far more likely to end up pasted into
+ * a screen-recording or CI log than deliberately read by the one person
+ * who's supposed to see it. */
+async function runServers(options: { showToken?: boolean }): Promise<void> {
+  const config = readConfig();
+  const entries = Object.entries(config.servers ?? {});
+  if (entries.length === 0) {
+    console.log("twing servers: no cached servers -- run `twing login`/`twing init` against one first.");
+    return;
+  }
+  for (const [url, auth] of entries) {
+    const status = auth.noAuth
+      ? "no-auth (no token needed)"
+      : auth.authToken
+        ? options.showToken
+          ? auth.authToken
+          : redactToken(auth.authToken)
+        : "(no cached token)";
+    console.log(`${url}  ${status}`);
+  }
+}
+
 async function runDaemonForeground(): Promise<void> {
   const daemon = await startDaemon(defaultSocketPath());
   console.log(`twing daemon: listening on ${daemon.socketPath}`);
@@ -317,6 +352,9 @@ async function main(): Promise<void> {
     }
     case "whoami":
       await runWhoami({ server: flags.server, cwd: process.cwd(), showToken: flags["show-token"] === "true" });
+      return;
+    case "servers":
+      await runServers({ showToken: flags["show-token"] === "true" });
       return;
     case "join":
       if (flags.github !== "true") throw new Error("twing join: --github is required (the only join mechanism this command supports so far)");
