@@ -18,6 +18,7 @@ import {
   runAdminRevokeDeveloper,
   runAdminListDevelopers,
 } from "./admin.js";
+import { runConstraintsList, runConstraintsRemove } from "./constraints.js";
 import {
   runProjectInvite,
   runProjectListInvites,
@@ -105,6 +106,8 @@ function printUsage(): void {
       "  twing design reviews [--decide <reviewId> --decision approve|reject]",
       "  twing design enable-gate",
       "  twing design disable-gate",
+      "  twing constraints list [--project <id>] [--server <url>]",
+      "  twing constraints remove --id <constraintId> [--server <url>]",
     ].join("\n"),
   );
 }
@@ -225,6 +228,30 @@ async function runAdminCommand(rest: string[]): Promise<void> {
       return;
     case "list-developers":
       await runAdminListDevelopers({ cwd, server: flags.server, orgId: flags["org-id"] });
+      return;
+    default:
+      printUsage();
+      process.exit(1);
+  }
+}
+
+async function runConstraintsCommand(rest: string[]): Promise<void> {
+  const [sub, ...subArgs] = rest;
+  const flags = parseFlags(subArgs);
+  const cwd = process.cwd();
+
+  // Same dispatcher-level fix as runDesignCommand -- see its comment.
+  if (flags.help === "true") {
+    printUsage();
+    return;
+  }
+
+  switch (sub) {
+    case "list":
+      await runConstraintsList({ cwd, server: flags.server, project: flags.project });
+      return;
+    case "remove":
+      await runConstraintsRemove({ cwd, server: flags.server, id: flags.id });
       return;
     default:
       printUsage();
@@ -379,6 +406,9 @@ async function main(): Promise<void> {
       return;
     case "project":
       await runProjectCommand(rest);
+      return;
+    case "constraints":
+      await runConstraintsCommand(rest);
       return;
     default:
       printUsage();

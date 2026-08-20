@@ -120,6 +120,17 @@ closes one on demand, right when the work it named is finished, same as
 `resolve`/`amend` targeting one specific design by id. Safe to call more
 than once; closing an already-closed/superseded/expired design is a no-op.
 
+Constraints (the `canonical_abstraction`/`review_required` rules a design
+gets checked against, seeded from `.twing/twing.yml`'s `constraints:`
+section by `twing init`) are separate from designs -- `twing constraints
+list` shows what's currently enforced for a project, and any project admin
+can `twing constraints remove --id <constraintId>` to retire a stale one
+immediately. This is deliberately *unilateral* -- one admin acting alone,
+same as seeding a new/changed constraint already works today -- not a
+second-admin-approves-first staged flow. That's a real gap (an admin could
+narrow away a rule nobody else agreed to loosen) tracked as separate
+follow-up work, not yet built.
+
 ### For agents: handling a design-gate deny
 
 If an `Edit`/`Write` call comes back denied with a `twing design coordinator:
@@ -359,6 +370,8 @@ via TypeScript project references. `npm link` in `packages/cli` gives you a
 | `twing align` | Local constraint checks plus a server round-trip for cross-session divergence findings. |
 | `twing daemon` | Runs the daemon in the foreground (rarely needed manually -- `init` already starts it detached, or as a persistent OS-level service). |
 | `twing design register/resolve/amend/resume/close/list/reviews` | Design-conflict gate commands, see above. |
+| `twing constraints list [--project <id>] [--server <url>]` | Lists every constraint currently enforced for a project. |
+| `twing constraints remove --id <constraintId> [--server <url>]` | Admin-gated, unilateral, immediate -- see below. |
 | `twing design enable-gate` / `disable-gate` | Sets a per-project local override (`~/.twing/gate-overrides.json`) -- hook wiring is machine-global, so this is no longer about wiring/unwiring hook entries (that would toggle every repo at once); `disable-gate` opts just this one project out, other repos on the same machine are unaffected. |
 
 `twing review` (test-delta integrity on top of `align`) isn't built yet.

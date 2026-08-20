@@ -1252,6 +1252,30 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ items: constraintStore.forProject(projectId) });
   });
 
+  // Unilateral admin deletion -- same immediate-effect, admin-gated shape
+  // /v1/constraints/seed already has for add/update (ConstraintStore.add),
+  // just extended to cover removal (ConstraintStore.remove). Deliberately
+  // NOT the staged/approval redesign tracked separately as follow-up work
+  // (an admin proposes, a *different* admin approves before it takes
+  // effect) -- this is "any project admin can act immediately," matching
+  // how seeding already behaves today. Fetch-then-authorize-then-mutate,
+  // same order /v1/designs/:id/close uses -- the constraint's own
+  // projectId (not a caller-supplied one) is what the admin check runs
+  // against, so a caller can't authorize against a project they *do*
+  // manage to delete a constraint that actually belongs to one they don't.
+  app.delete("/v1/constraints/:id", (c) => {
+    const identity = c.get("identity");
+    const id = c.req.param("id");
+    const existing = constraintStore.get(id);
+    if (!existing) return c.json({ error: "no such constraint" }, 404);
+    if (!canManageProject(identity, existing.projectId)) {
+      return c.json({ error: "not an admin of this project" }, 403);
+    }
+    const removed = constraintStore.remove(id);
+    console.log(`twing serve: constraint ${id.slice(0, 8)} removed by ${identity.developerId}`);
+    return c.json({ removed: Boolean(removed) });
+  });
+
   // §17.10 hardening: deciding a review requires being that project's
   // admin, not mere token possession -- closes the gap flagged against the
   // old shared-token model.

@@ -776,6 +776,39 @@ export class ConstraintStore {
     return rows.map(fromConstraintRow);
   }
 
+  /** Single-row lookup by id, independent of projectId -- mirrors
+   * `DesignRegistry.get`. What `remove` (below) and its route use to find
+   * a constraint's own `projectId` for the admin-authz check *before*
+   * deleting, the same "fetch first, then authorize, then mutate" order
+   * `/v1/designs/:id/close` already uses. */
+  get(id: string): DesignConstraint | undefined {
+    const row = this.db.select().from(constraintsTable).where(eq(constraintsTable.id, id)).get() as ConstraintRow | undefined;
+    return row ? fromConstraintRow(row) : undefined;
+  }
+
+  /** Unilateral admin deletion -- same immediate-effect, admin-gated shape
+   * `add` (above) already has for create/update, just extended to cover
+   * removal. Deliberately NOT the staged/approval redesign (an admin
+   * proposes a change, a *different* admin approves it before it takes
+   * effect) that's tracked separately as still-open follow-up work -- this
+   * is the simpler "any project admin can act immediately" version,
+   * matching how seeding already behaves today. Revisit whether this
+   * should be folded into that staged flow once it's built, rather than
+   * left as a second, inconsistent mutation path. */
+  remove(id: string): DesignConstraint | undefined {
+    const existing = this.get(id);
+    if (!existing) return undefined;
+    this.db.delete(constraintsTable).where(eq(constraintsTable.id, id)).run();
+    this.activityLog.append({
+      projectId: existing.projectId,
+      kind: "constraint_removed",
+      relatedId: id,
+      ts: Date.now(),
+      payload: { statement: existing.statement, type: existing.type, scope: existing.scope },
+    });
+    return existing;
+  }
+
   /** Idempotent upsert keyed by (projectId, statement) -- used both by the
    * cold-start seed (`twing init` -> `POST /v1/constraints/seed`, §17.2)
    * and by future ratification of a resolved divergence.

@@ -779,6 +779,80 @@ test("POST /v1/constraints/seed: an already-founded project's constraint change 
   assert.equal(allowedRes.status, 200, await allowedRes.text());
 });
 
+// --- DELETE /v1/constraints/:id -----------------------------------------------
+
+/** proj-1 must actually be *founded* (a project membership row for the
+ * admin, not just a bare constraint row the `constraints` fixture can
+ * insert directly) before `canManageProject` has anything to say yes to --
+ * seeding through the real route, same as the existing seed-admin-gating
+ * test above, is what does that founding as a side effect. */
+async function foundProject(app: ReturnType<typeof createApp>, adminToken: string, projectId = "proj-1"): Promise<void> {
+  const res = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(adminToken) },
+    body: JSON.stringify({ projectId, constraints: [] }),
+  });
+  assert.equal(res.status, 200, `founding ${projectId} via seed failed: ${await res.text()}`);
+}
+
+test("DELETE /v1/constraints/:id: an admin removes it unilaterally and immediately -- same shape seeding's add/update already has", async () => {
+  const { app, dataDir, constraints } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token);
+  const constraint = constraints.add("proj-1", "use pkg/retry", ["src/**"], "canonical_abstraction", "seeded");
+
+  const res = await app.request(`/v1/constraints/${constraint.id}`, { method: "DELETE", headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { removed: true });
+  assert.deepEqual(constraints.forProject("proj-1"), []);
+});
+
+test("DELETE /v1/constraints/:id: a plain member is denied -- same admin-only bar as seeding", async () => {
+  const { app, dataDir, constraints } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token);
+  const constraint = constraints.add("proj-1", "use pkg/retry", ["src/**"], "canonical_abstraction", "seeded");
+
+  const projInviteRes = await app.request("/v1/projects/proj-1/invites", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ label: "carol@example.com", role: "member" }),
+  });
+  const projInvite = (await projInviteRes.json()) as { code: string };
+  await app.request(`/v1/invites/${projInvite.code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex("carols-pat"), label: "carol@example.com" }),
+  });
+
+  const res = await app.request(`/v1/constraints/${constraint.id}`, { method: "DELETE", headers: bearer("carols-pat") });
+  assert.equal(res.status, 403);
+  assert.equal(constraints.forProject("proj-1").length, 1, "member's denied attempt must not have deleted anything");
+});
+
+test("DELETE /v1/constraints/:id: 404 on an unknown id", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token);
+  const res = await app.request("/v1/constraints/no-such-id", { method: "DELETE", headers: bearer(admin.token) });
+  assert.equal(res.status, 404);
+});
+
+test("DELETE /v1/constraints/:id: authorization runs against the constraint's own projectId, not a caller-supplied one -- an admin of an unrelated project can't delete it", async () => {
+  const { app, dataDir, constraints } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token);
+  const constraint = constraints.add("proj-1", "use pkg/retry", ["src/**"], "canonical_abstraction", "seeded");
+
+  // dave is a real, authenticated developer -- just not a member of proj-1
+  // at all (an org invite, not a project one -- see makeUnrelatedDeveloper's
+  // own doc comment).
+  const davesPat = await makeUnrelatedDeveloper(app, admin, "dave@example.com", "daves-pat");
+  const res = await app.request(`/v1/constraints/${constraint.id}`, { method: "DELETE", headers: bearer(davesPat) });
+  assert.equal(res.status, 403);
+  assert.equal(constraints.forProject("proj-1").length, 1);
+});
+
 /** Sets up a project founded by alice, with an open design of hers on
  * `src/x.ts`, and bob added as a plain project member -- the shared
  * fixture for the alignment-thread tests below. */

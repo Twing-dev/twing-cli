@@ -560,3 +560,24 @@ test("ConstraintStore: add updates scope/type on an existing statement match ins
   const unchanged = store.add("p1", "use pkg/retry", ["packages/core/src/retry.ts"], "review_required", "seeded");
   assert.equal(unchanged.id, retyped.id);
 });
+
+test("ConstraintStore: get finds by id, remove deletes and logs constraint_removed, both are no-ops on an unknown id", () => {
+  const dataDir = tmpDataDir();
+  const activityLog = new DrizzleActivityLog(createDb({ dataDir }));
+  const store = new ConstraintStore(createDb({ dataDir }), { activityLog });
+  const created = store.add("p1", "use pkg/retry", ["src/**"], "canonical_abstraction", "seeded");
+
+  assert.deepEqual(store.get(created.id), created);
+  assert.equal(store.get("no-such-id"), undefined);
+
+  const removed = store.remove(created.id);
+  assert.deepEqual(removed, created);
+  assert.equal(store.get(created.id), undefined, "gone from forProject/get after removal");
+  assert.equal(store.forProject("p1").length, 0);
+
+  assert.equal(activityLog.eventsForRelatedId(created.id).filter((e) => e.kind === "constraint_removed").length, 1);
+
+  // Removing again (or an id that never existed) is a safe no-op, not a throw.
+  assert.equal(store.remove(created.id), undefined);
+  assert.equal(store.remove("never-existed"), undefined);
+});

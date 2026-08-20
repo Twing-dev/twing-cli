@@ -59,6 +59,11 @@ export type ActivityEventKind =
    * endpoint's upsert was keyed on statement text and returned the
    * existing row unchanged on any match). */
   | "constraint_updated"
+  /** Unilateral admin deletion (`ConstraintStore.remove`) -- same
+   * immediate-effect shape as `constraint_ratified`/`constraint_updated`
+   * above, just for removal. See that method's own doc comment for why
+   * this isn't the staged/approval redesign. */
+  | "constraint_removed"
   /** Async semantic-conflict comparator (design-semantic-check.ts) flagged
    * a conflict between two designs that the syntactic tiers (design-
    * checks.ts) missed or weren't asked about -- always advisory, feeds the
