@@ -210,6 +210,35 @@ export async function runDesignResolve(options: ResolveOptions): Promise<void> {
   console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
 }
 
+export interface CloseOptions {
+  cwd: string;
+  id?: string;
+}
+
+/**
+ * §17.6: explicit close -- hits the same `/v1/designs/:id/close` route the
+ * `SessionEnd` hook already calls best-effort for every open/flagged/
+ * dormant design in a session, just on demand for one specific design
+ * instead. Exists so a design doesn't have to sit open until session end
+ * (or the TTL sweep, `design-store.ts`'s `sweepExpired`) just because the
+ * work it named is already done -- an agent that finishes a task and
+ * doesn't close its own design leaves stale "open" scope other
+ * sessions/reviewers see as still-live. No-op (not an error) on a design
+ * that's already closed/superseded/expired -- `designs.close` only
+ * transitions `open`/`flagged`/`dormant`, so this is safe to call more
+ * than once.
+ */
+export async function runDesignClose(options: CloseOptions): Promise<void> {
+  const repoRoot = findRepoRoot(options.cwd);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
+  if (!options.id) {
+    throw new Error("twing design close: --id <designId> is required");
+  }
+
+  const res = await authFetch(`${serverUrl}/v1/designs/${options.id}/close`, { method: "PATCH" }, authToken, developerId);
+  console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
+}
+
 export interface AmendOptions {
   cwd: string;
   id?: string;

@@ -14,6 +14,7 @@ import { computeProjectId } from "@twing/core";
 import {
   runDesignRegister,
   runDesignResolve,
+  runDesignClose,
   runDesignAmend,
   runDesignResume,
   runDesignList,
@@ -120,6 +121,28 @@ test("runDesignResolve: throws without --id, or without --adopt/--justify", asyn
     const repo = tmpRepo(SERVER_URL);
     await assert.rejects(() => runDesignResolve({ cwd: repo, adopt: "d2" }), /--id/);
     await assert.rejects(() => runDesignResolve({ cwd: repo, id: "d1" }), /--adopt.*--justify/);
+  });
+});
+
+// --- runDesignClose -----------------------------------------------------------
+
+test("runDesignClose: PATCHes /v1/designs/:id/close and prints the response", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ status: "closed" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignClose({ cwd: repo, id: "d1" })));
+    assert.match(calls[0].url, /\/v1\/designs\/d1\/close$/);
+    assert.equal(calls[0].method, "PATCH");
+    assert.match(logs.join("\n"), /"status": "closed"/);
+  });
+});
+
+test("runDesignClose: throws without --id", async () => {
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await assert.rejects(() => runDesignClose({ cwd: repo }), /--id/);
   });
 });
 

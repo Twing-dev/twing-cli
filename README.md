@@ -80,6 +80,7 @@ with the default branch.
 | `twing align` | Cross-session divergence findings (advisory, never blocks). |
 | `twing design register --summary "..." --touches a,b` | Register a design before your first edit/write (or let plan mode do it automatically). |
 | `twing design amend --id <designId> --touches c,d` | Expand an already-registered design to cover more files. |
+| `twing design close --id <designId>` | Close a design once its work is done -- see below. |
 
 The full command list, including self-hosting/admin commands, is in
 "Modifying twing-cli itself" below.
@@ -100,6 +101,7 @@ than silently letting it through. Turn it off deliberately with
 ```sh
 twing design register --summary "adds a retry wrapper" --touches src/net/retry.ts
 twing design amend --id <designId> --touches src/net/retry-config.ts
+twing design close --id <designId>
 ```
 
 A deny message always names the exact command to run next (`register`,
@@ -107,6 +109,16 @@ A deny message always names the exact command to run next (`register`,
 repo dogfoods its own gate against a real coordinator; see its own
 `.twing/twing.yml` for a live example of the constraints it's checked
 against.
+
+A design left open past the point its work is actually done isn't harmless
+-- it's still-live scope other sessions' conflict checks compare against,
+so it can trigger a false overlap against someone else's genuinely
+unrelated work. `SessionEnd` best-effort-closes every open/flagged/dormant
+design for that session, and the TTL sweep eventually expires anything
+older, but neither is immediate -- `twing design close --id <designId>`
+closes one on demand, right when the work it named is finished, same as
+`resolve`/`amend` targeting one specific design by id. Safe to call more
+than once; closing an already-closed/superseded/expired design is a no-op.
 
 ### For agents: handling a design-gate deny
 
@@ -140,6 +152,31 @@ do:
   different from an ordinary failed tool call you're expected to just fix
   and move past silently (a typo'd path, a missing directory): this one
   represents someone else's work the gate is asking you to account for.
+
+### For agents: close your design when you're actually done
+
+A registered design doesn't expire the moment its task finishes -- it stays
+`open` (visible to every other session's conflict/overlap checks) until
+something closes it. That something should usually be you, not a fallback
+mechanism: `SessionEnd` best-effort-closes your session's open designs, and
+there's a TTL sweep behind that, but both are safety nets for a session
+that ends abruptly, not a substitute for closing deliberately. An open
+design that's actually finished work is exactly the kind of stale scope
+that produces a false "overlap" against someone else's genuinely unrelated
+change later in the same session or a concurrent one.
+
+So: once the work a design named is actually complete -- the edit landed,
+the task is done -- close it yourself:
+
+```sh
+twing design close --id <designId>
+```
+
+Do this before ending your turn if the task is finished, not just when a
+human happens to ask. It's a normal, expected part of finishing work
+through this gate, the same as `register` is part of starting it -- not
+something that needs separate permission each time, and not something to
+skip because `SessionEnd` will "probably get it eventually."
 
 ---
 
@@ -321,7 +358,7 @@ via TypeScript project references. `npm link` in `packages/cli` gives you a
 | `twing project invite` / `list-invites` / `revoke-invite` / `remove-developer` / `list-developers` | Project-scoped admin actions -- a project's own admins, not just org admins, can run these. |
 | `twing align` | Local constraint checks plus a server round-trip for cross-session divergence findings. |
 | `twing daemon` | Runs the daemon in the foreground (rarely needed manually -- `init` already starts it detached, or as a persistent OS-level service). |
-| `twing design register/resolve/list/reviews` | Design-conflict gate commands, see above. |
+| `twing design register/resolve/amend/resume/close/list/reviews` | Design-conflict gate commands, see above. |
 | `twing design enable-gate` / `disable-gate` | Sets a per-project local override (`~/.twing/gate-overrides.json`) -- hook wiring is machine-global, so this is no longer about wiring/unwiring hook entries (that would toggle every repo at once); `disable-gate` opts just this one project out, other repos on the same machine are unaffected. |
 
 `twing review` (test-delta integrity on top of `align`) isn't built yet.
