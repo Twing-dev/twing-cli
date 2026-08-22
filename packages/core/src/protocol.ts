@@ -61,6 +61,15 @@ export type ProtocolMessage = HookToDaemonMessage | CliToDaemonMessage | DaemonT
  * `Edit`/`Write` are firm claims (artifact-grade); `Read`/`Grep`/`Glob` are
  * soft claims. Derived here from `toolName` rather than sent on the wire,
  * since the daemon already owns this mapping and the hook stays a dumb pipe.
+ *
+ * The hook still enqueues `Read`/`Grep`/`Glob` events same as before (§4's
+ * capture table is unchanged, and this function still answers "soft" for
+ * them correctly) — but as of 2026-08-22, `daemon/claims.ts`'s
+ * `extractClaim` stops before ever calling this for a non-write event and
+ * returns null instead, so no soft `Claim` actually gets constructed/synced
+ * downstream of the daemon anymore (reported as pure noise, no consumer
+ * needed it enough to keep it). This function and the wire-level "soft"
+ * concept stay as-is; only the daemon's own decision to act on it changed.
  */
 export function stageForTool(toolName: HookToolName): "soft" | "firm" {
   return toolName === "Edit" || toolName === "Write" ? "firm" : "soft";

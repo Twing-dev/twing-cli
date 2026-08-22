@@ -16,6 +16,12 @@ export interface Claim {
   /** "src/net/retry.ts::RetryPolicy.backoff" — see computeSymbolId in symbol-id.ts */
   symbolId: string;
   kind: "read" | "write";
+  /** "soft" (Read/Grep/Glob) is still a valid value on the wire and in
+   * storage, but as of 2026-08-22 the daemon (the only live producer)
+   * never constructs one — see `daemon/claims.ts`'s `extractClaim` and
+   * `protocol.ts`'s `stageForTool`. Kept as a real value here rather than
+   * narrowed to `"firm"` only, since nothing prevents a future producer
+   * from legitimately emitting one again. */
   stage: "soft" | "firm";
   signatureChanged?: boolean;
   oldSignature?: string;

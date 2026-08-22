@@ -106,7 +106,7 @@ of it.)
 | Event | Operation | Behavior |
 |---|---|---|
 | `PostToolUse` (`Edit`\|`Write`) | **Enqueue** | Write one frame to the socket, don't wait for a reply beyond the OS write ack, exit 0 |
-| `PostToolUse` (`Read`\|`Grep`\|`Glob`) | **Enqueue** (soft claim) | Same, tagged `stage: soft` |
+| `PostToolUse` (`Read`\|`Grep`\|`Glob`) | **Enqueue** (soft claim) | Same, tagged `stage: soft` — still enqueued by the hook exactly as below, but the daemon drops it before constructing a `Claim` at all (2026-08-22, see §11's note) |
 | `SessionStart`, `UserPromptSubmit` | **Cache-check** | Ask the daemon "anything cached for me?", print its answer, exit 0 |
 | Everything else | No-op | Exit 0 immediately |
 
@@ -537,6 +537,20 @@ interface CallEdge {
   calleeSymbolId: string;
 }
 ```
+
+**2026-08-22: the daemon stopped constructing soft claims at all.** `stage: 'soft'`
+stays a real value in the type (nothing prevents some future producer from legitimately
+emitting one), but `daemon/claims.ts`'s `extractClaim` — the only live producer — now
+returns `null` for every `Read`/`Grep`/`Glob` event unconditionally, before ever building
+a `Claim`. Reported live as pure noise (every file glance became a
+dashboard/`align`-visible "claim") with no consumer that actually needed one badly enough
+to justify it. The daemon's local per-file state (`fileContent`/`fileSymbols`/
+`nameIndex`) still gets primed on a read exactly as before — dropping the returned
+`Claim` doesn't touch the signature-diff accuracy of the *next real edit* to that file.
+Deliberate side effect: check 2 below (contract divergence) now only ever sees
+`kind: 'write'` claims on the caller side too, since a soft claim on the caller never
+reaches the server to be "active" in the first place — a caller that's merely been read
+elsewhere no longer counts, only one that's actually been edited.
 
 **`symbolId` computation:** parse the file with Tree-sitter, walk up from the edited
 range to the nearest ancestor node that is a named function/method/class declaration,

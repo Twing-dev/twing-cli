@@ -109,7 +109,19 @@ export interface ExtractionResult {
 
 /** Returns null when there's nothing file-scoped to extract a claim from —
  * e.g. Grep/Glob, which target a pattern across many files rather than one
- * (§5's pipeline is explicitly "the affected file", singular). */
+ * (§5's pipeline is explicitly "the affected file", singular) — and also,
+ * as of 2026-08-22, for every `Read`/`Grep`/`Glob` event unconditionally:
+ * soft claims were pure noise downstream (every file glance became a
+ * dashboard/align-visible "claim") with no consumer that actually wanted
+ * them badly enough to justify it, so this stopped constructing/returning
+ * one for them at all — reported live, fixed same session. State priming
+ * below (`fileContent`/`fileSymbols`/`nameIndex`) still runs for a read,
+ * same as before: that's what gives the *next real edit's* signature diff
+ * something to compare against, and dropping the returned Claim doesn't
+ * touch it. Deliberate narrowing of §12 check 2 (contract_divergence): a
+ * caller that's merely been read no longer counts as "active" for that
+ * check, only one that's actually been written to — see the design doc's
+ * §12 note. */
 export async function extractClaim(input: ExtractionInput): Promise<ExtractionResult | null> {
   const rawPath = input.toolInput.file_path;
   if (typeof rawPath !== "string" || rawPath.length === 0) return null;
@@ -181,6 +193,12 @@ export async function extractClaim(input: ExtractionInput): Promise<ExtractionRe
     }
   }
 
+  // Soft (Read/Grep/Glob) claims stop here — priming above already ran, so
+  // the next real edit to this file still gets an accurate signature diff;
+  // there's just no Claim to construct/sync/show for the read itself. See
+  // this function's own doc comment.
+  if (!isWrite) return null;
+
   const symbolId = computeSymbolId(relPath, scopePath);
   const constraintHits = matchConstraints(state.manifest, relPath);
 
@@ -190,7 +208,7 @@ export async function extractClaim(input: ExtractionInput): Promise<ExtractionRe
     sessionId: input.sessionId,
     branch: computeBranch(repoRoot),
     symbolId,
-    kind: isWrite ? "write" : "read",
+    kind: "write",
     stage,
     ...(signatureChanged !== undefined ? { signatureChanged } : {}),
     ...(oldSignature !== undefined ? { oldSignature } : {}),
