@@ -28,6 +28,23 @@
  * to `"flagged"` or denies the Edit/Write gate. `constraintMatch` (tier 3)
  * and `summarySimilarity` (tier 4) are unchanged, still `severity: "error"`,
  * still blocking. See DesignSeverity's doc comment in core/types.ts.)
+ *
+ * (2026-08-22, same-developer pairs excluded from tiers 1 and 4: a usability
+ * pass on twing-monitor found overlap/conflict signal between a single
+ * developer's own two designs -- the common case once one person runs
+ * several concurrent agents/sessions -- was pure noise in the activity feed,
+ * not just a false-positive-prone blocker. Checked against this project's
+ * own live history: every alignment thread this project has ever opened
+ * (14/14) was a self-pair, and none was ever replied to or closed.
+ * `constraintMatch` (tier 3, see structuralOverlaps and runDesignChecks
+ * below) is untouched -- it's a path-vs-project-rule check with no "other
+ * developer" involved at all, so there's nothing to exclude. Reversed from
+ * `design-divergence.ts`'s and `checks.ts`'s prior convention of
+ * deliberately *including* a developer's own concurrent sessions (§8) --
+ * that convention is reversed there too, same day, same reasoning. A
+ * dedicated same-developer-multi-agent-drift feature is deferred, not
+ * rebuilt as a quieter variant of this one -- see those files' own
+ * comments.)
  */
 
 import { minimatch } from "minimatch";
@@ -92,6 +109,20 @@ export function overlapWaiverKey(conflictingDesignId: string, path: string): str
 function intersects(a: string[], b: string[]): string[] {
   const bSet = new Set(b.map(normalize));
   return a.filter((x) => bSet.has(normalize(x)));
+}
+
+/** Bare boolean creates/touches intersection, ignoring developerId and
+ * waivers -- deliberately *not* routed through `exactOverlap`/
+ * `structuralOverlaps` (2026-08-22): those now skip same-developer pairs
+ * entirely, which is correct for the overlap/conflict verdict, but wrong
+ * for `app.ts`'s stale-sibling nudge, which only ever compares designs
+ * within the *same session* -- same developer by construction, so it needs
+ * a real "do these scopes intersect" answer independent of that exclusion.
+ * Without this, every same-session sibling pair would look "non-
+ * overlapping" to the nudge regardless of whether their scopes actually
+ * collide, which is a real (not just cosmetic) wrong message. */
+export function pathsOverlap(a: DesignStatement, b: DesignStatement): boolean {
+  return intersects(a.creates, b.creates).length > 0 || intersects(a.touches, b.touches).length > 0;
 }
 
 /** Drops any path in `paths` already waived (`justifiedOverlaps`) for this
@@ -309,11 +340,17 @@ export function appendSummaryUpdate(existingSummary: string, update: string): st
  * not the original verdict" reasoning `constraintId`'s own recompute
  * already established, needed to know which specific paths a
  * justified-divergence review should waive (see
- * DesignStatement.justifiedOverlaps). */
+ * DesignStatement.justifiedOverlaps).
+ *
+ * Skips same-developer pairs (2026-08-22) -- see runDesignChecks's doc
+ * comment for why. Both call sites (here via runDesignChecks, and
+ * `/v1/designs/:id/resolve`'s own direct call) get the exclusion for free
+ * by living here rather than at each call site. */
 export function structuralOverlaps(candidate: DesignStatement, others: DesignStatement[]): DesignConflict[] {
   const conflicts: DesignConflict[] = [];
   for (const other of others) {
     if (other.id === candidate.id) continue;
+    if (other.developerId === candidate.developerId) continue;
     const exact = exactOverlap(candidate, other);
     if (exact) conflicts.push(exact);
   }
@@ -354,6 +391,7 @@ export function runDesignChecks(
 
   const similarityConflicts: DesignConflict[] = [];
   for (const other of others) {
+    if (other.developerId === candidate.developerId) continue; // see structuralOverlaps's doc comment
     const sim = summarySimilarity(candidate, other);
     if (sim) similarityConflicts.push(sim);
   }

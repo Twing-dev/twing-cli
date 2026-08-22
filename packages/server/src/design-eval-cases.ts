@@ -152,6 +152,7 @@ export const EVAL_CASES: EvalCase[] = [
     openDesigns: [
       design({
         id: "open-a",
+        developerId: "dev2", // a different developer -- same-developer pairs stopped producing overlap verdicts 2026-08-22
         sessionId: "s-billing",
         agentLabel: "billing-agent",
         creates: ["RetryPolicy"],
@@ -182,6 +183,7 @@ export const EVAL_CASES: EvalCase[] = [
     openDesigns: [
       design({
         id: "open-b",
+        developerId: "dev2", // a different developer -- same-developer pairs stopped producing overlap verdicts 2026-08-22
         sessionId: "s-breaker",
         creates: ["CircuitBreaker"],
         touches: ["src/net/retry.ts"],
@@ -488,6 +490,7 @@ export const EVAL_CASES: EvalCase[] = [
     openDesigns: [
       design({
         id: "open-billing",
+        developerId: "dev2", // a different developer -- same-developer pairs stopped producing overlap verdicts 2026-08-22
         touches: ["src/billing/invoice.ts"],
         summary: "Refactor the billing module to improve error handling and add tests",
       }),
@@ -528,6 +531,7 @@ export const EVAL_CASES: EvalCase[] = [
     openDesigns: [
       design({
         id: "open-checkout",
+        developerId: "dev2", // a different developer -- same-developer pairs stopped producing overlap verdicts 2026-08-22
         sessionId: "s-checkout",
         creates: ["FeatureFlagClient"],
         touches: ["src/flags/client.ts"],
@@ -848,10 +852,12 @@ export const EVAL_CASES: EvalCase[] = [
       "relationship on the second design contributes nothing -- it doesn't inflate the count or get treated as a " +
       "hit by accident.",
     candidate: design({ id: "candidate", creates: ["Foo"], touches: ["src/a.ts"], dependsOn: ["Bar"] }),
+    // developerId: "dev2" on every "other" -- same-developer pairs stopped
+    // producing overlap verdicts 2026-08-22.
     openDesigns: [
-      design({ id: "open-tier1", touches: ["src/a.ts"], summary: "Unrelated work that happens to touch src/a.ts" }),
-      design({ id: "open-tier2", creates: ["Bar"], touches: ["src/unrelated-y.ts"], summary: "Builds Bar, which the candidate assumes exists" }),
-      design({ id: "open-unrelated", creates: ["Zzz"], touches: ["src/z.ts"], summary: "Genuinely unrelated third design" }),
+      design({ id: "open-tier1", developerId: "dev2", touches: ["src/a.ts"], summary: "Unrelated work that happens to touch src/a.ts" }),
+      design({ id: "open-tier2", developerId: "dev2", creates: ["Bar"], touches: ["src/unrelated-y.ts"], summary: "Builds Bar, which the candidate assumes exists" }),
+      design({ id: "open-unrelated", developerId: "dev2", creates: ["Zzz"], touches: ["src/z.ts"], summary: "Genuinely unrelated third design" }),
     ],
     expectedVerdict: "overlap",
     expectedConflictCount: 1,
@@ -864,9 +870,11 @@ export const EVAL_CASES: EvalCase[] = [
     source: "manual",
     rationale: "2 open designs, both independently exact-overlap at tier 1 (different creates symbols each) -- asserts both land in the accumulated conflicts array, not just the first.",
     candidate: design({ id: "candidate", creates: ["Alpha", "Beta"] }),
+    // developerId: "dev2" on both -- same-developer pairs stopped producing
+    // overlap verdicts 2026-08-22.
     openDesigns: [
-      design({ id: "open-p", creates: ["Alpha"], summary: "Also builds Alpha" }),
-      design({ id: "open-q", creates: ["Beta"], summary: "Also builds Beta" }),
+      design({ id: "open-p", developerId: "dev2", creates: ["Alpha"], summary: "Also builds Alpha" }),
+      design({ id: "open-q", developerId: "dev2", creates: ["Beta"], summary: "Also builds Beta" }),
     ],
     expectedVerdict: "overlap",
     expectedConflictCount: 2,

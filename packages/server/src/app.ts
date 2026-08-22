@@ -25,6 +25,7 @@ import {
   jaccard,
   PLAN_RETRY_SIMILARITY_THRESHOLD,
   structuralOverlaps,
+  pathsOverlap,
 } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
@@ -452,13 +453,26 @@ export function createApp(options: CreateAppOptions = {}) {
    * time it re-reads the design -- "kill" without aborting an in-flight
    * HTTP call, "retain the findings" because activity_events/alignment
    * threads are append-only and nothing here ever retracts a past one.
+   *
+   * Skips same-developer pairs (2026-08-22) -- no LLM call, no alignment
+   * thread, no notice. There's no second party to align with when both
+   * designs are the same developer's own agents/sessions; a usability pass
+   * on twing-monitor found this was the single noisiest source of feed
+   * clutter (every one of this project's alignment threads was a self-pair,
+   * and each self-pair also double-notified the same developerId below --
+   * `addNotice(current.developerId, ...)` immediately followed by
+   * `addNotice(other.developerId, ...)`, identical args when the two ids
+   * match). See design-checks.ts's top-of-file comment for the full
+   * writeup.
    */
   function runSemanticComparatorPass(candidateId: string, others: DesignStatement[]): void {
     const started = designs.get(candidateId);
     if (!started) return;
     const startVersion = started.scopeVersion;
+    const candidateDeveloperId = started.developerId;
     void (async () => {
       for (const other of others) {
+        if (other.developerId === candidateDeveloperId) continue;
         const current = designs.get(candidateId);
         if (!current || current.scopeVersion !== startVersion) return; // superseded by a later amend -- stop
         const result = await checkSemanticConflict(current, other, { model: semanticCheckModel });
@@ -829,12 +843,18 @@ export function createApp(options: CreateAppOptions = {}) {
     // §17 design lifecycle (2026-08): registering a new design is a much
     // faster, more precise signal of context-switch than any inactivity
     // window -- if this session already has other open/flagged designs
-    // that this one genuinely doesn't overlap (not already caught by
-    // outcome.conflicts above), nudge about it. Advisory only: nothing
-    // about the sibling's status/lastActivityAt changes here -- dormancy
-    // stays driven by inactivity alone, this is purely informational.
-    const conflictingIds = new Set(outcome.conflicts.map((c) => c.conflictingDesignId));
-    const staleSiblings = open.filter((d) => d.sessionId === body.sessionId && !conflictingIds.has(d.id));
+    // that this one genuinely doesn't overlap, nudge about it. Advisory
+    // only: nothing about the sibling's status/lastActivityAt changes here
+    // -- dormancy stays driven by inactivity alone, this is purely
+    // informational.
+    //
+    // Deliberately `pathsOverlap`, not `outcome.conflicts` (2026-08-22): a
+    // same-session sibling is the same developer by construction, and
+    // `outcome.conflicts` now excludes same-developer pairs entirely (see
+    // design-checks.ts's top-of-file comment) -- reusing it here would make
+    // every sibling look "non-overlapping" regardless of whether their
+    // scopes actually collide, a wrong message, not just a missed one.
+    const staleSiblings = open.filter((d) => d.sessionId === body.sessionId && !pathsOverlap(design, d));
     for (const sibling of staleSiblings) {
       const message =
         `twing design coordinator: you also have design ${sibling.id} [${sibling.status}] open ` +

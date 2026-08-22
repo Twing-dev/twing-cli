@@ -52,18 +52,26 @@ export interface DesignDivergenceMatch {
 }
 
 /** For each new/changed claim, checks every currently-open design from a
- * *different session* (not developer -- matches `checks.ts`'s existing
- * convention of also catching one developer's own two concurrent sessions)
- * for scope overlap. One match per (claim, design) pair. Returns the
- * matched `design` alongside its `Finding` -- `app.ts` needs it to open/
- * reuse the right `alignment_threads` row; `runDesignDivergenceChecks`
- * below is the plain-`Finding[]` convenience wrapper for callers (and
- * tests) that don't need that. */
+ * *different session and a different developer* for scope overlap. One
+ * match per (claim, design) pair. Returns the matched `design` alongside
+ * its `Finding` -- `app.ts` needs it to open/reuse the right
+ * `alignment_threads` row; `runDesignDivergenceChecks` below is the
+ * plain-`Finding[]` convenience wrapper for callers (and tests) that don't
+ * need that.
+ *
+ * Previously excluded only `sessionId`, deliberately matching `checks.ts`'s
+ * convention of also catching one developer's own two concurrent sessions.
+ * Reversed 2026-08-22, same day and same reasoning as `checks.ts`'s own
+ * reversal: a usability pass on twing-monitor found same-developer
+ * divergence signal was pure feed noise in practice, never once acted on
+ * (this project's own history: 14/14 self-pair alignment threads sat open,
+ * unreplied). See design-checks.ts's top-of-file comment for the fuller
+ * writeup spanning all four layers this touched. */
 export function findDesignDivergences(newClaims: Claim[], openDesigns: DesignStatement[]): DesignDivergenceMatch[] {
   const matches: DesignDivergenceMatch[] = [];
   for (const claim of newClaims) {
     for (const design of openDesigns) {
-      if (design.sessionId === claim.sessionId) continue;
+      if (design.sessionId === claim.sessionId || design.developerId === claim.developerId) continue;
       if (!claimFallsInsideDesign(claim, design)) continue;
       matches.push({
         design,

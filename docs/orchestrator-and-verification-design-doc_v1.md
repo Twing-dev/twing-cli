@@ -290,6 +290,18 @@ No `.twing/config.yml` or project-registration step — see §8 for why none is 
 input used to surface trigger matches ahead of a diff, was removed along with the
 `triggers` mechanism itself — see §10's note.)**
 
+**(2026-08-22: same-developer pairs excluded from every overlap/conflict/divergence
+signal in this section and in §17.4 — `checks.ts`'s textual-overlap check (§12 check 1),
+`design-divergence.ts`'s claim-vs-open-design check, and `design-checks.ts`'s tiers 1
+and 4 all used to deliberately *include* a developer's own two concurrent sessions (the
+common case once one person runs several concurrent agents); a usability pass on
+twing-monitor found that signal was pure feed noise in practice, not just a
+false-positive-prone blocker — checked against this project's own live history, every
+alignment thread it had ever opened (14/14) was a self-pair, none ever replied to or
+closed. See `design-checks.ts`'s top-of-file comment for the full writeup spanning all
+three files this touched. A dedicated same-developer-multi-agent-drift feature is
+deferred, not rebuilt as a quieter variant of this one.)**
+
 ### `twing review`
 
 Runs everything `align` does, then adds:

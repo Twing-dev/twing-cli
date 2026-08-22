@@ -340,7 +340,7 @@ test("POST /v1/reviews/:id/decide: requires the project's admin role, not mere a
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
 
-  // alice founds proj-1 via a design registration, then creates a second, conflicting design and justifies the divergence.
+  // alice founds proj-1 via a design registration, then bob creates a second, conflicting design and justifies the divergence.
   const check1 = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
@@ -348,9 +348,15 @@ test("POST /v1/reviews/:id/decide: requires the project's admin role, not mere a
   });
   assert.equal(check1.status, 200);
 
+  // A genuinely different developer registers the "second, overlapping"
+  // design -- same-developer pairs no longer produce an overlap verdict at
+  // all (2026-08-22). Must come after proj-1 is founded above, or the
+  // invite this issues has no project to attach to yet.
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
+
   const check2 = await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "second, overlapping", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   assert.equal(check2.status, 200);
@@ -359,7 +365,7 @@ test("POST /v1/reviews/:id/decide: requires the project's admin role, not mere a
 
   const resolveRes = await app.request(`/v1/designs/${check2Body.designId}/resolve`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ resolution: "justified_divergence", justification: "intentional, reviewed" }),
   });
   assert.equal(resolveRes.status, 200);
@@ -402,15 +408,36 @@ async function makePendingReview(app: ReturnType<typeof createApp>, token: strin
     headers: { "content-type": "application/json", ...bearer(token) },
     body: JSON.stringify({ projectId, sessionId: "s1", summary: "first", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
-  const check2 = await app.request("/v1/designs/check", {
+
+  // A genuinely different developer registers the "overlapping" second
+  // design -- same-developer pairs no longer produce an overlap verdict at
+  // all (2026-08-22), so this helper needs two real identities to still
+  // exercise the justify/review flow it's named for. Unique label/pat per
+  // call: some callers invoke this twice against the same project.
+  const suffix = crypto.randomUUID();
+  const otherLabel = `reviewer-${suffix}@example.com`;
+  const otherPat = `pat-${suffix}`;
+  const inviteRes = await app.request(`/v1/projects/${projectId}/invites`, {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(token) },
+    body: JSON.stringify({ label: otherLabel, role: "member" }),
+  });
+  const invite = (await inviteRes.json()) as { code: string };
+  await app.request(`/v1/invites/${invite.code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex(otherPat), label: otherLabel }),
+  });
+
+  const check2 = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId, sessionId: "s2", summary: "second, overlapping", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const { designId } = (await check2.json()) as { designId: string };
   const resolveRes = await app.request(`/v1/designs/${designId}/resolve`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ resolution: "justified_divergence", justification: "intentional, reviewed" }),
   });
   const { reviewId } = (await resolveRes.json()) as { reviewId: string };
@@ -612,6 +639,44 @@ async function makeUnrelatedDeveloper(app: ReturnType<typeof createApp>, admin: 
   return pat;
 }
 
+/** Invites and redeems a second, real developer identity as a plain member
+ * of `projectId` -- reusable wherever a test needs a genuinely different
+ * developer to register the "other" side of an overlap/conflict test
+ * fixture (same-developer pairs stopped producing overlap verdicts at all,
+ * 2026-08-22 -- see design-checks.ts's top-of-file comment). Unique
+ * label/pat per call, so repeated use within one test/project doesn't
+ * collide.
+ *
+ * Founds `projectId` first (empty-constraints seed, same as `foundProject`
+ * below) if it isn't already -- an invite needs an existing project to
+ * attach to, and callers of this helper don't always already have one by
+ * the time they need a second developer. A no-op, not a reset, when the
+ * project is already founded: seeding `[]` adds nothing and removes
+ * nothing. */
+async function addProjectMember(app: ReturnType<typeof createApp>, adminToken: string, projectId: string): Promise<string> {
+  await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(adminToken) },
+    body: JSON.stringify({ projectId, constraints: [] }),
+  });
+
+  const suffix = crypto.randomUUID();
+  const label = `member-${suffix}@example.com`;
+  const pat = `pat-${suffix}`;
+  const inviteRes = await app.request(`/v1/projects/${projectId}/invites`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(adminToken) },
+    body: JSON.stringify({ label, role: "member" }),
+  });
+  const invite = (await inviteRes.json()) as { code: string };
+  await app.request(`/v1/invites/${invite.code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex(pat), label }),
+  });
+  return pat;
+}
+
 test("GET /v1/activity: design_checked/design_flagged carry the full why (conflicts/constraint/summary), not just the bare verdict string", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
@@ -635,9 +700,14 @@ test("GET /v1/activity: design_checked/design_flagged carry the full why (confli
   });
   assert.equal((await firstRes.json() as { verdict: string }).verdict, "clean");
 
+  // A genuinely different developer registers the "second" design -- same-
+  // developer pairs no longer produce an overlap verdict at all
+  // (2026-08-22). Must come after proj-1 is founded above.
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
+
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({
       projectId: "proj-1",
       sessionId: "s2",
@@ -1133,9 +1203,13 @@ test("POST /v1/designs/check: an error-severity overlap verdict persists as stat
     headers: { "content-type": "application/json", ...bearer(admin.token) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "adds retry logic for the payments client", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
+  // A genuinely different developer -- same-developer pairs no longer
+  // produce an overlap verdict at all (2026-08-22). Must come after proj-1
+  // is founded above.
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
   const overlapRes = await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "adds retry logic for the billing client", creates: ["b.ts"], touches: [], dependsOn: [] }),
   });
   const overlapBody = (await overlapRes.json()) as { verdict: string; designId: string; severity?: string };
@@ -1160,9 +1234,10 @@ test("POST /v1/designs/check: a warning-severity (tier 1 exact) overlap stays st
     headers: { "content-type": "application/json", ...bearer(admin.token) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first, unrelated topic entirely", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
+  const otherPat = await addProjectMember(app, admin.token, "proj-1"); // same-developer pairs no longer produce an overlap verdict at all (2026-08-22); must come after proj-1 is founded above
   const overlapRes = await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "second, also unrelated topic", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const overlapBody = (await overlapRes.json()) as { verdict: string; designId: string; severity?: string };
@@ -1308,6 +1383,11 @@ test("POST /v1/designs/check: a flagged design stays visible to a *third* design
     headers: { "content-type": "application/json", ...bearer(admin.token) },
     body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "protected path", scope: ["constrained.ts"], type: "canonical_abstraction" }] }),
   });
+  // "third" is registered by a different developer than "second" -- same-
+  // developer pairs no longer produce a tier-1 overlap verdict at all
+  // (2026-08-22), which is what this test is actually exercising. Must come
+  // after proj-1 is founded above (the seed call itself founds it).
+  const thirdDeveloperPat = await addProjectMember(app, admin.token, "proj-1");
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
@@ -1324,7 +1404,7 @@ test("POST /v1/designs/check: a flagged design stays visible to a *third* design
 
   const thirdRes = await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(thirdDeveloperPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s3", summary: "third, also overlapping", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const thirdBody = (await thirdRes.json()) as { verdict: string; conflicts: { conflictingDesignId: string }[] };
@@ -1470,10 +1550,11 @@ test("POST /v1/designs/:id/amend: a conflicting amendment persists the merged sc
 test("POST /v1/designs/:id/amend: a warning-severity (tier 1 exact) amendment persists and stays 'open'", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
+  const otherPat = await addProjectMember(app, admin.token, "proj-1"); // same-developer pairs no longer produce an overlap verdict at all (2026-08-22)
 
   await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "unrelated topic", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const registerRes = await app.request("/v1/designs/check", {
@@ -1615,11 +1696,12 @@ test("POST /v1/designs/:id/amend: an approved review waives only that specific c
 test("POST /v1/designs/:id/resolve: an approved structural overlap on one path doesn't re-flag on a later amend, but a newly-added overlapping path on the same pair still flags fresh (item 7's fix)", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
+  const otherPat = await addProjectMember(app, admin.token, "proj-1"); // same-developer pairs no longer produce an overlap verdict at all (2026-08-22)
 
   // The other design claims both file1.ts and file2.ts from the start.
   await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["file1.ts", "file2.ts"], dependsOn: [] }),
   });
 
@@ -1673,12 +1755,13 @@ test("POST /v1/designs/:id/resolve: attributes constraintId even when the design
   const { app, dataDir, constraints } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
   const constraint = constraints.add("proj-1", "needs review", ["shared.ts"], "review_required", "seeded");
+  const otherPat = await addProjectMember(app, admin.token, "proj-1"); // same-developer pairs no longer produce an overlap verdict at all (2026-08-22)
 
   // A second open design that also touches shared.ts -- this is what
   // creates the overlap tier-1 hit alongside the constraint match.
   await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
 
@@ -1720,15 +1803,19 @@ test("POST /v1/designs/:id/resolve: attributes constraintId even when the design
 test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator pass from the prior registration (kill stale, retain findings, start fresh)", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
+  // A different developer than "s-candidate" below -- the semantic
+  // comparator skips same-developer pairs entirely now (2026-08-22), which
+  // would leave `calls` at 0 throughout and this test asserting nothing real.
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
 
   await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other1", summary: "", creates: [], touches: ["other1.ts"], dependsOn: [] }),
   });
   await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other2", summary: "", creates: [], touches: ["other2.ts"], dependsOn: [] }),
   });
 
@@ -1944,10 +2031,15 @@ test("POST /v1/designs/:id/resume: a conflicting resume persists (identity reass
 test("POST /v1/designs/:id/resume: a warning-severity (tier 1 exact) resume persists and reopens as 'open'", async () => {
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
+  // Resume reassigns the design's developerId to whoever calls it (admin,
+  // below) -- "s2" needs to belong to someone else, or this is a
+  // same-developer pair and no longer produces an overlap verdict at all
+  // (2026-08-22).
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
 
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "unrelated", creates: [], touches: ["shared.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId } = (await firstRes.json()) as { designId: string };
@@ -2192,6 +2284,7 @@ test("POST /v1/designs/check: a substantively different rawPlanText for the same
 test("POST /v1/designs/check: a rawPlanText registration under a *different* session id never reregisters another session's design", async () => {
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
+  const otherPat = await addProjectMember(app, admin.token, "proj-1"); // same-developer pairs no longer produce an overlap verdict at all (2026-08-22)
   const planText = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls.";
 
   const first = await app.request("/v1/designs/check", {
@@ -2203,7 +2296,7 @@ test("POST /v1/designs/check: a rawPlanText registration under a *different* ses
 
   const second = await app.request("/v1/designs/check", {
     method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s-two", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
   });
   const secondBody = (await second.json()) as { designId: string; verdict: string };
@@ -2231,7 +2324,11 @@ test("POST /v1/designs/check: a structured (twing design register-style) call wi
   const secondBody = (await second.json()) as { designId: string; verdict: string };
   assert.equal(second.status, 200);
   assert.notEqual(secondBody.designId, firstBody.designId, "structured register calls are never deduped -- only ExitPlanMode's rawPlanText path is");
-  assert.equal(secondBody.verdict, "overlap");
+  // Both registered by the same developer (same session, even) -- same-
+  // developer pairs no longer produce an overlap verdict at all
+  // (2026-08-22). The real thing this test pins -- a genuinely new row, not
+  // a dedup -- is the assertion above; the verdict itself is incidental.
+  assert.equal(secondBody.verdict, "clean");
 });
 
 test("POST /v1/designs/check: a reregistered design keeps its justifiedConstraintIds -- an approved review survives the retry", async () => {

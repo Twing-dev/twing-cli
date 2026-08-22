@@ -80,9 +80,9 @@ test("runDesignDivergenceChecks: multiple open designs produce multiple findings
   );
 });
 
-test("runDesignDivergenceChecks: same-developer's own concurrent session still catches divergence (matches checks.ts convention)", () => {
+test("runDesignDivergenceChecks: excludes a developer's own concurrent session too (reversed 2026-08-22 -- see design-checks.ts's top-of-file comment)", () => {
   const claim = makeClaim({ developerId: "alice", sessionId: "s-alice-1" });
   const design = makeDesign({ developerId: "alice", sessionId: "s-alice-2", touches: ["src/net/retry.ts"] });
   const findings = runDesignDivergenceChecks([claim], [design]);
-  assert.equal(findings.length, 1);
+  assert.equal(findings.length, 0);
 });

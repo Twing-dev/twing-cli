@@ -14,14 +14,22 @@ function finding(kind: Finding["kind"], projectId: string, symbolId: string, dev
 }
 
 /** Check 1: another active write claim on the same symbol from a different
- * session (§8: this also catches one developer's own two concurrent
- * sessions — nothing here conditions on developerId being different). */
+ * session and a different developer. Originally (§8) deliberately included
+ * a developer's own two concurrent sessions; reversed 2026-08-22 after a
+ * twing-monitor usability pass found same-developer overlap signal was pure
+ * feed noise, never acted on in practice (checked against this project's
+ * own history: 14/14 self-pair alignment threads sat open, unreplied,
+ * across every layer that generates one -- this check, design-checks.ts's
+ * tiers, design-divergence.ts, and the semantic comparator). See
+ * design-checks.ts's top-of-file comment for the full reasoning; a
+ * dedicated same-developer-multi-agent-drift feature is deferred, not
+ * rebuilt as a quieter variant of this one. */
 function textualOverlap(claim: Claim, active: Claim[], now: number): Finding[] {
   if (claim.kind !== "write") return [];
   const findings: Finding[] = [];
   for (const other of active) {
     if (other === claim) continue;
-    if (other.symbolId === claim.symbolId && other.kind === "write" && other.sessionId !== claim.sessionId) {
+    if (other.symbolId === claim.symbolId && other.kind === "write" && other.sessionId !== claim.sessionId && other.developerId !== claim.developerId) {
       findings.push(
         finding(
           "textual_overlap",

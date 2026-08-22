@@ -42,7 +42,7 @@ test("clean when no overlap, no constraint match, no similarity", () => {
 
 test("tier 1: exact creates overlap -> overlap verdict, warning severity", () => {
   const candidate = design({ id: "a", creates: ["RetryPolicy"] });
-  const other = design({ id: "b", sessionId: "s2", creates: ["RetryPolicy"] });
+  const other = design({ id: "b", sessionId: "s2", developerId: "dev2", creates: ["RetryPolicy"] });
   const outcome = runDesignChecks(candidate, [other], []);
   assert.equal(outcome.verdict, "overlap");
   assert.equal(outcome.severity, "warning", "2026-08-19 severity split: tier 1 is display-only, never blocking");
@@ -52,11 +52,21 @@ test("tier 1: exact creates overlap -> overlap verdict, warning severity", () =>
 
 test("tier 1: exact touches overlap -> overlap verdict, warning severity", () => {
   const candidate = design({ id: "a", touches: ["src/net/retry.ts"] });
-  const other = design({ id: "b", sessionId: "s2", touches: ["src/net/retry.ts"] });
+  const other = design({ id: "b", sessionId: "s2", developerId: "dev2", touches: ["src/net/retry.ts"] });
   const outcome = runDesignChecks(candidate, [other], []);
   assert.equal(outcome.verdict, "overlap");
   assert.equal(outcome.severity, "warning");
   assert.equal(outcome.conflicts[0].overlapKind, "touches");
+});
+
+// 2026-08-22: same-developer pairs are excluded from every overlap/conflict
+// tier that compares two designs (tiers 1 and 4 here; design-divergence.ts
+// and checks.ts separately) -- see design-checks.ts's top-of-file comment.
+test("tier 1: no overlap verdict when the 'other' design belongs to the same developer", () => {
+  const candidate = design({ id: "a", developerId: "dev1", creates: ["RetryPolicy"], touches: ["src/net/retry.ts"] });
+  const other = design({ id: "b", sessionId: "s2", developerId: "dev1", creates: ["RetryPolicy"], touches: ["src/net/retry.ts"] });
+  const outcome = runDesignChecks(candidate, [other], []);
+  assert.equal(outcome.verdict, "clean");
 });
 
 // Item 7's fix (2026-08-18): structural overlap approval memory --
@@ -71,11 +81,11 @@ test("tier 1: exact touches overlap -> overlap verdict, warning severity", () =>
 // is correctly silenced, masking what these tests are actually checking.
 
 test("tier 1: a waived path stays quiet, but a second, different path on the same pair still flags", () => {
-  const other = design({ id: "b", sessionId: "s2", creates: ["file1.ts"], summary: "totally unrelated" });
+  const other = design({ id: "b", sessionId: "s2", developerId: "dev2", creates: ["file1.ts"], summary: "totally unrelated" });
   const waivedOnly = design({ id: "a", creates: ["file1.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
   assert.equal(runDesignChecks(waivedOnly, [other], []).verdict, "clean");
 
-  const otherWithBoth = design({ id: "b", sessionId: "s2", creates: ["file1.ts", "file2.ts"], summary: "totally unrelated" });
+  const otherWithBoth = design({ id: "b", sessionId: "s2", developerId: "dev2", creates: ["file1.ts", "file2.ts"], summary: "totally unrelated" });
   const waivedOnlyFile1 = design({ id: "a", creates: ["file1.ts", "file2.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
   const outcome = runDesignChecks(waivedOnlyFile1, [otherWithBoth], []);
   assert.equal(outcome.verdict, "overlap");
@@ -85,7 +95,7 @@ test("tier 1: a waived path stays quiet, but a second, different path on the sam
 
 test("tier 1: a waiver against design B doesn't leak to design C sharing the same path", () => {
   const candidate = design({ id: "a", creates: ["file1.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
-  const designC = design({ id: "c", sessionId: "s3", creates: ["file1.ts"], summary: "totally unrelated" });
+  const designC = design({ id: "c", sessionId: "s3", developerId: "dev3", creates: ["file1.ts"], summary: "totally unrelated" });
   const outcome = runDesignChecks(candidate, [designC], []);
   assert.equal(outcome.verdict, "overlap");
   assert.equal(outcome.severity, "warning");
@@ -111,7 +121,7 @@ test("tier 3: constraint scope match -> constraint_flag", () => {
 
 test("tier 4: summary similarity fallback only fires when 1-3 found nothing", () => {
   const candidate = design({ id: "a", summary: "adds a retry wrapper with exponential backoff for the payments client" });
-  const other = design({ id: "b", sessionId: "s2", summary: "adds a retry wrapper with exponential backoff for the billing client" });
+  const other = design({ id: "b", sessionId: "s2", developerId: "dev2", summary: "adds a retry wrapper with exponential backoff for the billing client" });
   const outcome = runDesignChecks(candidate, [other], []);
   assert.equal(outcome.verdict, "overlap");
   assert.equal(outcome.severity, "error", "2026-08-19 severity split: tier 4 unchanged, still blocking, deliberately not demoted alongside tier 1");
@@ -120,7 +130,14 @@ test("tier 4: summary similarity fallback only fires when 1-3 found nothing", ()
 
 test("tier 4 does not fire below the similarity threshold", () => {
   const candidate = design({ id: "a", summary: "adds a retry wrapper" });
-  const other = design({ id: "b", sessionId: "s2", summary: "renames a css variable" });
+  const other = design({ id: "b", sessionId: "s2", developerId: "dev2", summary: "renames a css variable" });
+  const outcome = runDesignChecks(candidate, [other], []);
+  assert.equal(outcome.verdict, "clean");
+});
+
+test("tier 4: no overlap verdict when the similar-sounding 'other' design belongs to the same developer", () => {
+  const candidate = design({ id: "a", developerId: "dev1", summary: "adds a retry wrapper with exponential backoff for the payments client" });
+  const other = design({ id: "b", sessionId: "s2", developerId: "dev1", summary: "adds a retry wrapper with exponential backoff for the billing client" });
   const outcome = runDesignChecks(candidate, [other], []);
   assert.equal(outcome.verdict, "clean");
 });
