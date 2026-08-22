@@ -1,6 +1,6 @@
 {
   "name": "@twing/cli",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "bin": {
@@ -20,7 +20,7 @@
     "test": "node --test dist/*.test.js"
   },
   "dependencies": {
-    "@twing/core": "^0.2.3",
+    "@twing/core": "^0.2.4",
     "web-tree-sitter": "^0.26.12"
   }
 }
