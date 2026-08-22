@@ -163,10 +163,13 @@ type designConstraintInfo struct {
 }
 
 type designCheckResponse struct {
-	Verdict    string                `json:"verdict"`
-	DesignID   string                `json:"designId"`
-	Conflicts  []designConflict      `json:"conflicts,omitempty"`
-	Constraint *designConstraintInfo `json:"constraint,omitempty"`
+	Verdict   string           `json:"verdict"`
+	DesignID  string           `json:"designId"`
+	Conflicts []designConflict `json:"conflicts,omitempty"`
+	// Every constraint the checked scope matched (2026-08-22, was a single
+	// `Constraint` -- see design-checks.ts's matchConstraintsForPaths doc
+	// comment for why this is a list now).
+	Constraints []designConstraintInfo `json:"constraints,omitempty"`
 	// Severity (2026-08-19, design-checks.ts's severity split): "warning" |
 	// "error" | "" (empty on a "clean" verdict, where it's moot). Only an
 	// "error" verdict denies here -- a "warning" (currently tier 1's
@@ -646,18 +649,21 @@ func overlapReason(result designCheckResponse) string {
 	return b.String()
 }
 
+// constraintReason lists every matched constraint (2026-08-22, was a single
+// statement/type pair) -- mirrors overlapReason's own loop over
+// result.Conflicts just above it in this file, so a session sees every
+// violation from one ExitPlanMode call instead of discovering the next one
+// only after justifying and retrying.
 func constraintReason(result designCheckResponse) string {
-	statement, constraintType := "", ""
-	if result.Constraint != nil {
-		statement = result.Constraint.Statement
-		constraintType = result.Constraint.Type
+	var b strings.Builder
+	fmt.Fprintf(&b, "twing design coordinator: this design (id %s) matches %d existing constraint(s):", result.DesignID, len(result.Constraints))
+	for _, c := range result.Constraints {
+		fmt.Fprintf(&b, "\n- [%s] %s", c.Type, c.Statement)
 	}
-	return fmt.Sprintf(
-		"twing design coordinator: this design (id %s) matches an existing %s constraint: %q. Adjust your plan to "+
-			"comply and re-run ExitPlanMode, or run `twing design resolve --id %s --justify \"<reason>\"` to record a "+
-			"justified divergence -- this queues for human review and does not itself unblock you.",
-		result.DesignID, constraintType, statement, result.DesignID,
-	)
+	fmt.Fprintf(&b, "\n\nAdjust your plan to comply with all of them and re-run ExitPlanMode, or run "+
+		"`twing design resolve --id %s --justify \"<reason>\"` to record a justified divergence -- this queues for "+
+		"human review and does not itself unblock you.", result.DesignID)
+	return b.String()
 }
 
 func openDesignsURL(serverURL, projectID, sessionID string) string {
@@ -793,8 +799,8 @@ func constraintMatchURL(serverURL, projectID, path, sessionID string) string {
 }
 
 type constraintMatchResponse struct {
-	Matched    bool                  `json:"matched"`
-	Constraint *designConstraintInfo `json:"constraint,omitempty"`
+	Matched     bool                   `json:"matched"`
+	Constraints []designConstraintInfo `json:"constraints,omitempty"`
 }
 
 // constraintCheckResult is checkPathConstraint's tri-state verdict --
@@ -848,16 +854,22 @@ func checkPathConstraint(serverURL, authToken, developerID, projectID, sessionID
 		logDesignGate("constraint match check: malformed response (blocking): %v", err)
 		return constraintCheckFailed, coordinatorErrorReason("malformed response")
 	}
-	if !result.Matched || result.Constraint == nil {
+	if !result.Matched || len(result.Constraints) == 0 {
 		return constraintClear, ""
 	}
-	return constraintMatched, fmt.Sprintf(
-		"twing design coordinator: %s is covered by an existing %s rule: %q. This applies regardless of what your "+
-			"registered design claims to touch. If this is intentional and reviewed, record it as a justified "+
-			"divergence: `twing design resolve --id <your-design-id> --justify \"<reason>\"` (queues for human "+
-			"review -- an admin approving it is what unblocks you, not the justify call itself).",
-		filePath, result.Constraint.Type, result.Constraint.Statement,
-	)
+	// Lists every matched constraint (2026-08-22, was a single %s rule: %q
+	// pair) -- same reasoning as constraintReason above: a file covered by
+	// several rules at once should deny with all of them named up front.
+	var b strings.Builder
+	fmt.Fprintf(&b, "twing design coordinator: %s is covered by %d existing rule(s):", filePath, len(result.Constraints))
+	for _, c := range result.Constraints {
+		fmt.Fprintf(&b, "\n- [%s] %s", c.Type, c.Statement)
+	}
+	fmt.Fprintf(&b, "\n\nThis applies regardless of what your registered design claims to touch. If this is "+
+		"intentional and reviewed, record it as a justified divergence: `twing design resolve --id "+
+		"<your-design-id> --justify \"<reason>\"` (queues for human review -- an admin approving it is what "+
+		"unblocks you, not the justify call itself).")
+	return constraintMatched, b.String()
 }
 
 // handleEditWriteGate is the universal fallback (§17/spec §9a): if an agent

@@ -792,12 +792,14 @@ export function createApp(options: CreateAppOptions = {}) {
       kind: "design_checked",
       relatedId: design.id,
       ts: Date.now(),
-      // `summary`/`conflicts`/`constraint` (twing-monitor, 2026-08-19): the
-      // dashboard's activity feed used to show only a bare "overlap"/
-      // "constraint_flag" string here with no way to tell *what* it
-      // overlapped or *which* constraint -- this is the one place
-      // `outcome`'s full detail is in scope, so it rides along on the event
-      // rather than being lost the moment this response is sent.
+      // `summary`/`conflicts`/`constraints` (twing-monitor, 2026-08-19; key
+      // pluralized 2026-08-22 alongside the multi-constraint fix -- the
+      // dashboard needs a matching update): the dashboard's activity feed
+      // used to show only a bare "overlap"/"constraint_flag" string here
+      // with no way to tell *what* it overlapped or *which* constraint(s)
+      // -- this is the one place `outcome`'s full detail is in scope, so it
+      // rides along on the event rather than being lost the moment this
+      // response is sent.
       payload: {
         verdict: outcome.verdict,
         severity: outcome.severity,
@@ -805,7 +807,7 @@ export function createApp(options: CreateAppOptions = {}) {
         reregistered,
         summary: design.summary,
         ...(outcome.conflicts.length > 0 ? { conflicts: outcome.conflicts } : {}),
-        ...(outcome.constraint ? { constraint: outcome.constraint } : {}),
+        ...(outcome.constraints.length > 0 ? { constraints: outcome.constraints } : {}),
       },
     });
 
@@ -821,7 +823,7 @@ export function createApp(options: CreateAppOptions = {}) {
     // fully recorded above (activity log) and in the response below; it's
     // display-only, not gate-relevant.
     if (outcome.verdict !== "clean" && outcome.severity === "error") {
-      designs.flag(design.id, outcome.verdict, { conflicts: outcome.conflicts, constraint: outcome.constraint });
+      designs.flag(design.id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
     }
 
     // §17 design lifecycle (2026-08): registering a new design is a much
@@ -856,7 +858,7 @@ export function createApp(options: CreateAppOptions = {}) {
       return c.json({ verdict: "clean", designId: design.id });
     }
     if (outcome.verdict === "constraint_flag") {
-      return c.json({ verdict: "constraint_flag", designId: design.id, constraint: outcome.constraint, severity: outcome.severity });
+      return c.json({ verdict: "constraint_flag", designId: design.id, constraints: outcome.constraints, severity: outcome.severity });
     }
     return c.json({ verdict: "overlap", designId: design.id, conflicts: outcome.conflicts, severity: outcome.severity });
   });
@@ -885,10 +887,12 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!body.justification) {
       return c.json({ error: "justified_divergence requires a justification" }, 400);
     }
-    // §17 review-flow fix (2026-08, amended 2026-08-17): if this design's
-    // own scope matches a constraint, attribute the review to that
-    // constraint id so approving it can later exclude it from the
-    // ground-truth backstop (justifiedConstraintIds, /v1/constraints/match).
+    // §17 review-flow fix (2026-08, amended 2026-08-17, widened 2026-08-22
+    // to every match instead of one -- see matchConstraintsForPaths' doc
+    // comment): if this design's own scope matches one or more constraints,
+    // attribute the review to all of their ids so approving it can later
+    // exclude them from the ground-truth backstop (justifiedConstraintIds,
+    // /v1/constraints/match).
     // Originally derived this from `checkAmendedScope`'s overall verdict --
     // wrong, because `runDesignChecks` returns tier-1 "overlap" (a conflict
     // against some *other* open design) before it ever reaches tier-3's
@@ -905,9 +909,9 @@ export function createApp(options: CreateAppOptions = {}) {
     // whatever else is open) is immune to that -- it answers "does this
     // design's scope hit a flagged path", not "what's the single top-line
     // verdict against everything else right now".
-    const constraintHit = matchConstraintsForPaths([...design.creates, ...design.touches], constraintStore.forProject(design.projectId), design.justifiedConstraintIds);
+    const constraintHits = matchConstraintsForPaths([...design.creates, ...design.touches], constraintStore.forProject(design.projectId), design.justifiedConstraintIds);
     // Item 7's fix (2026-08-18): same "recompute against current state at
-    // justify-time" reasoning as constraintHit above, applied to structural
+    // justify-time" reasoning as constraintHits above, applied to structural
     // design-vs-design overlap -- the top-line verdict that originally
     // flagged this design isn't trusted here either. Only ever narrows to
     // the *unwaived* remainder (structuralOverlaps already excludes
@@ -915,7 +919,13 @@ export function createApp(options: CreateAppOptions = {}) {
     // never re-appears in a fresh review; a genuinely new one still does.
     const structuralConflicts = structuralOverlaps(design, designs.openDesigns(design.projectId, Date.now(), design.id));
     const overlapWaivers = structuralConflicts.map((c) => ({ conflictingDesignId: c.conflictingDesignId, paths: c.overlapPaths }));
-    const review = designs.addReview(id, design.projectId, body.justification, constraintHit?.id, overlapWaivers);
+    const review = designs.addReview(
+      id,
+      design.projectId,
+      body.justification,
+      constraintHits.map((h) => h.id),
+      overlapWaivers,
+    );
     console.log(`twing serve: design ${id.slice(0, 8)} justified divergence -> pending review ${review.id.slice(0, 8)}`);
     return c.json({ status: "pending_review", reviewId: review.id });
   });
@@ -1016,14 +1026,14 @@ export function createApp(options: CreateAppOptions = {}) {
           severity: outcome.severity,
           summary: amended.summary,
           ...(outcome.conflicts.length > 0 ? { conflicts: outcome.conflicts } : {}),
-          ...(outcome.constraint ? { constraint: outcome.constraint } : {}),
+          ...(outcome.constraints.length > 0 ? { constraints: outcome.constraints } : {}),
         },
       });
       if (outcome.severity === "error") {
-        designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraint: outcome.constraint });
+        designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
       }
       runSemanticComparatorPass(id, open);
-      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraint: outcome.constraint, severity: outcome.severity });
+      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraints: outcome.constraints, severity: outcome.severity });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} amended -> scopeVersion ${amended.scopeVersion}`);
@@ -1096,14 +1106,14 @@ export function createApp(options: CreateAppOptions = {}) {
           severity: outcome.severity,
           summary: resumed.summary,
           ...(outcome.conflicts.length > 0 ? { conflicts: outcome.conflicts } : {}),
-          ...(outcome.constraint ? { constraint: outcome.constraint } : {}),
+          ...(outcome.constraints.length > 0 ? { constraints: outcome.constraints } : {}),
         },
       });
       if (outcome.severity === "error") {
-        designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraint: outcome.constraint });
+        designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
       }
       runSemanticComparatorPass(id, open);
-      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraint: outcome.constraint, severity: outcome.severity });
+      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraints: outcome.constraints, severity: outcome.severity });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} resumed by ${identity.developerId.slice(0, 12)}/${body.sessionId.slice(0, 12)}`);
@@ -1454,11 +1464,14 @@ export function createApp(options: CreateAppOptions = {}) {
       excludeConstraintIds = [...new Set(openDesigns.flatMap((d) => d.justifiedConstraintIds))];
     }
 
-    const hit = matchConstraintsForPaths([path], constraintStore.forProject(projectId), excludeConstraintIds);
-    if (hit) {
-      console.log(`twing serve: constraint match on ${path} (project ${projectId.slice(0, 12)}) -- ${hit.type}: ${hit.statement}`);
+    const hits = matchConstraintsForPaths([path], constraintStore.forProject(projectId), excludeConstraintIds);
+    if (hits.length > 0) {
+      console.log(
+        `twing serve: constraint match on ${path} (project ${projectId.slice(0, 12)}) -- ${hits.length} hit(s): ` +
+          hits.map((h) => `${h.type}: ${h.statement}`).join(" | "),
+      );
     }
-    return c.json({ matched: hit !== undefined, constraint: hit });
+    return c.json({ matched: hits.length > 0, constraints: hits });
   });
 
   return app;

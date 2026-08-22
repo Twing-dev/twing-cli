@@ -942,3 +942,53 @@ place this happens.
 prompt refuses to run without a real TTY (scripting, CI, or verifying this from an agent
 session with no terminal to type into), so if this is set, `init` posts it directly to
 `/v1/auth/login` instead of prompting. Not documented as the primary path; the prompt is.
+(Note: this subsection predates §17.10 hardening's per-developer PAT model -- see that
+term throughout the rest of this doc's code comments and CLAUDE.md; the shared-password
+mechanics above are retained as written rather than rewritten in place.)
+
+### 17.11 Multi-constraint surfacing — closing a gap found shipping constraint deletion
+
+**What happened, 2026-08-20/22:** shipping unilateral admin constraint deletion
+surfaced a second, unrelated gap in `matchConstraintsForPaths` (design-checks.ts):
+it only ever returned one "best" `ConstraintHit` for a whole call -- picked by
+`CONSTRAINT_TYPE_PRIORITY` (`review_required` > `canonical_abstraction` >
+`domain_fact`) then scope specificity -- even when the checked scope spanned
+several paths that each violated a genuinely *different* constraint. A session
+would justify-and-get-approved the one it saw, retry, and only then discover the
+next one, one at a time. Confirmed live re-registering this very fix's own design
+against this repo's `require_human_review` rules: the first `ExitPlanMode` check
+against a plan touching `packages/server/src/app.ts`, `packages/server/src/design-
+*.ts`, and `hook/design_gate.go` (three separate constraint rows, §17.9) surfaced
+only the `app.ts` one; justifying and approving it, then retrying, surfaced the
+`design-*.ts` one; only a third round-trip surfaced `hook/design_gate.go`'s.
+
+**The fix, structurally:** `matchConstraintsForPaths` returns every distinct
+constraint (deduped by id) with at least one matching scope pattern, not just the
+top-priority one -- still sorted `(priority asc, specificity desc)` so a caller
+that only wants "the one that matters most" can take `[0]`, but every consumer
+now threads a list: `DesignCheckOutcome.constraints`/`DesignCheckResult.constraints`
+(was `constraint`), the Go hook's `constraintReason`/`checkPathConstraint` deny
+messages (each now enumerates every hit), the CLI's printed output, and
+`PendingReview.constraintIds`/the `pending_reviews.constraint_ids` column (was a
+single nullable `constraintId`/`constraint_id`) so one justified-divergence review
+can settle several constraint matches in one admin approval, mirroring the
+`overlapWaivers` list `PendingReview` already carried for structural design-vs-
+design overlap (2026-08-18).
+
+**Deliberate behavior change, not just a return-type widening:** the old
+single-hit version also used its specificity tie-break to suppress a *same-type*
+constraint match whenever a more specific one of the same type also matched (a
+broad `packages/**` rule and a narrower `packages/server/**` rule of the same
+type, both matching one file -- only the narrower one used to surface). That
+suppression existed only to satisfy "pick exactly one winner," which no longer
+applies once the function returns a list -- two constraints with genuinely
+different statement text are real information, not noise, so both now come back.
+
+**What this does not fix:** this widens what a single check call *reports*; it
+doesn't change the underlying "adopt or justify" mechanism (§17.5) or add any new
+way to bypass a constraint -- an agent still has to either comply or justify every
+constraint it's shown, there are just more of them shown up front now instead of
+serially. It also doesn't touch `twing-monitor`'s dashboard, which reads the old
+singular `constraint` key off `design_flagged`/`review_created` activity payloads
+(§7's activity-log note in `packages/server`) -- that's a tracked follow-up in a
+separate repo, not part of this change.

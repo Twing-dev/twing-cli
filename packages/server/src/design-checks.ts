@@ -36,7 +36,10 @@ import type { DesignStatement, DesignConstraint, DesignConflict, DesignVerdict, 
 export interface DesignCheckOutcome {
   verdict: DesignVerdict;
   conflicts: DesignConflict[];
-  constraint?: ConstraintHit;
+  /** Always present (mirrors `conflicts` above), not just on `constraint_flag`
+   * -- empty everywhere else. See matchConstraintsForPaths's doc comment for
+   * why this is a list now, not a single optional hit. */
+  constraints: ConstraintHit[];
   /** See DesignSeverity (core/types.ts). Undefined for `"clean"`. */
   severity?: DesignSeverity;
 }
@@ -146,42 +149,65 @@ const CONSTRAINT_TYPE_PRIORITY: Record<DesignConstraintType, number> = {
   domain_fact: 2,
 };
 
+/**
+ * Returns *every* distinct constraint (deduped by id) that matches at least
+ * one of `targets`, not just one "best" hit -- fixed 2026-08-22 (design-gate
+ * friction item 8, found live shipping the constraint-deletion work
+ * 2026-08-20): this used to collapse to a single winner by
+ * `CONSTRAINT_TYPE_PRIORITY` then scope specificity, so a candidate whose
+ * paths violated two *different* constraints only ever saw the
+ * higher-priority one -- justify-and-approve that one, retry, and only then
+ * discover the second. Every consumer (runDesignChecks, `/v1/designs/check`
+ * and friends, the Go hook's deny message, the CLI's printed output) now
+ * threads a list through instead of a single optional hit. See design doc
+ * §17.11.
+ *
+ * Still sorted `(CONSTRAINT_TYPE_PRIORITY asc, scope-specificity desc)` --
+ * most-severe-and-specific first -- so a caller that only wants "the one
+ * that matters most" can still just take `[0]` (e.g. design-eval.test.ts's
+ * eval cases, which only ever expect one constraint per case).
+ *
+ * Deliberate behavior change from the old single-hit version: two
+ * *same-type* constraints both matching the same path (e.g. a broad
+ * `packages/**` rule and a narrower `packages/server/**` rule of the same
+ * type) used to suppress the broader one via the specificity tie-break --
+ * that tie-break existed only to pick a single winner, which this function
+ * no longer needs to do, so both now come back. Two constraints with
+ * genuinely different statement text are real information for whoever's
+ * reading the deny message, not noise to collapse away.
+ */
 export function matchConstraintsForPaths(
   targets: string[],
   constraints: DesignConstraint[],
   excludeConstraintIds: string[] = [],
-): ConstraintHit | undefined {
-  // §17 review-flow fix (2026-08): excludeConstraintIds must be filtered
-  // *inside* the best-match selection, not applied as a post-hoc check on
-  // whatever single constraint wins -- this function only ever returns one
-  // "best" hit. Found live via this fix's own test: filtering after the
-  // fact meant an already-justified constraint winning the selection could
-  // silently hide a second, genuinely different, never-justified
-  // constraint that also matched something in scope. Skipping excluded
-  // ids up front lets the *next*-best real match win instead.
+): ConstraintHit[] {
   const excluded = new Set(excludeConstraintIds);
-  let best: { constraint: DesignConstraint; scopeLength: number } | undefined;
+  const hits: { constraint: DesignConstraint; scopeLength: number }[] = [];
 
   for (const constraint of constraints) {
     if (excluded.has(constraint.id)) continue;
+    let bestScopeLength: number | undefined;
     for (const scopePattern of constraint.scope) {
       if (!targets.some((t) => t === scopePattern || minimatch(t, scopePattern))) continue;
-
-      const isHigherPriority = !best || CONSTRAINT_TYPE_PRIORITY[constraint.type] < CONSTRAINT_TYPE_PRIORITY[best.constraint.type];
-      const isMoreSpecificTie =
-        best && CONSTRAINT_TYPE_PRIORITY[constraint.type] === CONSTRAINT_TYPE_PRIORITY[best.constraint.type] && scopePattern.length > best.scopeLength;
-      if (isHigherPriority || isMoreSpecificTie) {
-        best = { constraint, scopeLength: scopePattern.length };
+      if (bestScopeLength === undefined || scopePattern.length > bestScopeLength) {
+        bestScopeLength = scopePattern.length;
       }
-      break; // this constraint already matched -- no need to check its other scope patterns
+    }
+    if (bestScopeLength !== undefined) {
+      hits.push({ constraint, scopeLength: bestScopeLength });
     }
   }
 
-  return best ? { id: best.constraint.id, statement: best.constraint.statement, type: best.constraint.type } : undefined;
+  hits.sort((a, b) => {
+    const byPriority = CONSTRAINT_TYPE_PRIORITY[a.constraint.type] - CONSTRAINT_TYPE_PRIORITY[b.constraint.type];
+    return byPriority !== 0 ? byPriority : b.scopeLength - a.scopeLength;
+  });
+
+  return hits.map((h) => ({ id: h.constraint.id, statement: h.constraint.statement, type: h.constraint.type }));
 }
 
-/** Tier 3: `creates`/`touches` against a constraint's scope globs. */
-function constraintMatch(candidate: DesignStatement, constraints: DesignConstraint[]): ConstraintHit | undefined {
+/** Tier 3: `creates`/`touches` against every constraint's scope globs. */
+function constraintMatch(candidate: DesignStatement, constraints: DesignConstraint[]): ConstraintHit[] {
   return matchConstraintsForPaths([...candidate.creates, ...candidate.touches], constraints, candidate.justifiedConstraintIds);
 }
 
@@ -310,7 +336,7 @@ export function runDesignChecks(
     // other one wrote). Still worth surfacing before either writes code --
     // that's the one thing this tier can do that claims (§4) can't, since
     // claims don't exist until code does -- just not worth blocking on.
-    return { verdict: "overlap", conflicts: structuralConflicts, severity: "warning" };
+    return { verdict: "overlap", conflicts: structuralConflicts, constraints: [], severity: "warning" };
   }
 
   // §17 review-flow fix (2026-08): a constraint already justified and
@@ -318,10 +344,12 @@ export function runDesignChecks(
   // re-evaluates the whole merged scope on every amend/resume, not just the
   // new delta, so without this a design would re-trip the same
   // already-settled constraint forever. A *different* constraint id still
-  // flags normally; this waives one specific match, not "skip all checks."
-  const constraintHit = constraintMatch(candidate, constraints);
-  if (constraintHit) {
-    return { verdict: "constraint_flag", conflicts: [], constraint: constraintHit, severity: "error" };
+  // flags normally; this waives those specific matches, not "skip all
+  // checks." (2026-08-22: `constraintHits` is now every match, not one --
+  // see matchConstraintsForPaths's doc comment.)
+  const constraintHits = constraintMatch(candidate, constraints);
+  if (constraintHits.length > 0) {
+    return { verdict: "constraint_flag", conflicts: [], constraints: constraintHits, severity: "error" };
   }
 
   const similarityConflicts: DesignConflict[] = [];
@@ -335,8 +363,8 @@ export function runDesignChecks(
     // at (see summarySimilarity's own comment), so it stays the one thing
     // standing in for real conceptual conflict detection until the
     // semantic comparator's own severity is revisited.
-    return { verdict: "overlap", conflicts: similarityConflicts, severity: "error" };
+    return { verdict: "overlap", conflicts: similarityConflicts, constraints: [], severity: "error" };
   }
 
-  return { verdict: "clean", conflicts: [] };
+  return { verdict: "clean", conflicts: [], constraints: [] };
 }

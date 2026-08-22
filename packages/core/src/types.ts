@@ -161,10 +161,11 @@ export interface DesignStatement {
    * re-trip that same already-approved constraint on every future amend,
    * forever, regardless of whether the new delta was even related. Appended
    * to (never removed from) by `DesignRegistry.decideReview` when a review
-   * carrying a `constraintId` is approved; consulted by `runDesignChecks` to
-   * skip a constraint match already settled for this exact design. A *new*,
-   * different review_required match still flags normally -- this waives one
-   * specific constraint, not "never check constraints again." */
+   * carrying `constraintIds` is approved -- one review can settle several at
+   * once (2026-08-22); consulted by `runDesignChecks` to skip constraint
+   * matches already settled for this exact design. A *new*, different
+   * review_required match still flags normally -- this waives specific
+   * constraints, not "never check constraints again." */
   justifiedConstraintIds: string[];
   /** Structural design-vs-design overlap's counterpart to
    * `justifiedConstraintIds` above (2026-08-18) -- `exactOverlap`
@@ -237,7 +238,13 @@ export interface DesignCheckResult {
   verdict: DesignVerdict;
   designId: string;
   conflicts?: DesignConflict[];
-  constraint?: { id: string; statement: string; type: DesignConstraintType };
+  /** Every constraint the checked scope matched (2026-08-22 -- was a single
+   * `constraint` object; `matchConstraintsForPaths` used to collapse to one
+   * "best" hit even when several different constraints each matched a
+   * different target path, so a session justifying the one it saw would
+   * only discover the next one on retry. See design-checks.ts's own doc
+   * comment on `matchConstraintsForPaths` for the full reasoning. */
+  constraints?: { id: string; statement: string; type: DesignConstraintType }[];
   /** See DesignSeverity. Undefined for `"clean"`. */
   severity?: DesignSeverity;
 }
@@ -251,12 +258,18 @@ export interface PendingReview {
   decision?: "approve" | "reject";
   /** Set only when this review was created against a `constraint_flag`
    * verdict (undefined for an `overlap`-triggered justified_divergence).
-   * Recorded so an approval can be attributed to the *specific* constraint
-   * it settled -- see DesignStatement.justifiedConstraintIds. */
-  constraintId?: string;
+   * Recorded so an approval can be attributed to the *specific* constraints
+   * it settled -- see DesignStatement.justifiedConstraintIds. Plural
+   * (2026-08-22, was a single `constraintId`) for the same reason
+   * `DesignCheckResult.constraints` is now a list -- one justified
+   * divergence can settle several distinct constraint matches at once
+   * rather than needing a separate review per constraint. Same
+   * list-of-things-one-review-can-settle shape as `overlapWaivers` below,
+   * which made the identical move for structural overlaps in 2026-08-18. */
+  constraintIds?: string[];
   /** Set only when this design currently has real structural overlap(s)
    * against other open designs at justify-time (2026-08-18) -- independent
-   * of `constraintId`, a review can carry both at once. Recomputed fresh by
+   * of `constraintIds`, a review can carry both at once. Recomputed fresh by
    * `/v1/designs/:id/resolve` against the design's *current* scope (same
    * "trust current state, not the original verdict" reasoning that
    * `constraintId`'s own recompute already established), not trusted from

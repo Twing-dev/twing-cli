@@ -24,7 +24,7 @@ import {
 import type { Db } from "./db/client.js";
 import { designs as designsTable, pendingReviews as reviewsTable, constraints as constraintsTable } from "./db/schema.js";
 import { DrizzleActivityLog, type ActivityLogWriter } from "./activity-log.js";
-import { mergeDesignScope, overlapWaiverKey } from "./design-checks.js";
+import { mergeDesignScope, overlapWaiverKey, type ConstraintHit } from "./design-checks.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
 
@@ -97,11 +97,12 @@ interface ReviewRow {
   justification: string;
   createdAt: number;
   decision: string | null;
-  constraintId: string | null;
+  constraintIds: string;
   overlapWaivers: string;
 }
 
 function fromReviewRow(row: ReviewRow): PendingReview {
+  const constraintIds = JSON.parse(row.constraintIds) as string[];
   const overlapWaivers = JSON.parse(row.overlapWaivers) as { conflictingDesignId: string; paths: string[] }[];
   return {
     id: row.id,
@@ -110,7 +111,7 @@ function fromReviewRow(row: ReviewRow): PendingReview {
     justification: row.justification,
     createdAt: row.createdAt,
     decision: (row.decision as PendingReview["decision"]) ?? undefined,
-    constraintId: row.constraintId ?? undefined,
+    constraintIds: constraintIds.length > 0 ? constraintIds : undefined,
     overlapWaivers: overlapWaivers.length > 0 ? overlapWaivers : undefined,
   };
 }
@@ -239,7 +240,7 @@ export class DesignRegistry {
   flag(
     id: string,
     verdict: DesignVerdict,
-    detail?: { conflicts?: DesignConflict[]; constraint?: { id: string; statement: string; type: DesignConstraintType } },
+    detail?: { conflicts?: DesignConflict[]; constraints?: ConstraintHit[] },
   ): DesignStatement | undefined {
     const existing = this.get(id);
     if (!existing || existing.status !== "open") return existing;
@@ -255,7 +256,7 @@ export class DesignRegistry {
         verdict,
         summary: existing.summary,
         ...(detail?.conflicts && detail.conflicts.length > 0 ? { conflicts: detail.conflicts } : {}),
-        ...(detail?.constraint ? { constraint: detail.constraint } : {}),
+        ...(detail?.constraints && detail.constraints.length > 0 ? { constraints: detail.constraints } : {}),
       },
     });
     return this.get(id);
@@ -558,10 +559,10 @@ export class DesignRegistry {
     designId: string,
     projectId: string,
     justification: string,
-    constraintId?: string,
+    constraintIds?: string[],
     overlapWaivers?: { conflictingDesignId: string; paths: string[] }[],
   ): PendingReview {
-    const review: PendingReview = { id: crypto.randomUUID(), designId, projectId, justification, createdAt: Date.now(), constraintId, overlapWaivers };
+    const review: PendingReview = { id: crypto.randomUUID(), designId, projectId, justification, createdAt: Date.now(), constraintIds, overlapWaivers };
     this.db
       .insert(reviewsTable)
       .values({
@@ -571,7 +572,7 @@ export class DesignRegistry {
         justification: review.justification,
         createdAt: review.createdAt,
         decision: null,
-        constraintId: constraintId ?? null,
+        constraintIds: JSON.stringify(constraintIds ?? []),
         overlapWaivers: JSON.stringify(overlapWaivers ?? []),
       })
       .run();
@@ -580,7 +581,7 @@ export class DesignRegistry {
       kind: "review_created",
       relatedId: review.id,
       ts: review.createdAt,
-      payload: { designId, justification, constraintId, overlapWaivers },
+      payload: { designId, justification, constraintIds, overlapWaivers },
     });
     return review;
   }
@@ -638,15 +639,18 @@ export class DesignRegistry {
     // nothing ever consulting `reviewDecision`) now makes the rejection
     // terminal: the design closes, the developer registers a fresh one.
     //
-    // §17 review-flow fix (2026-08): an approval that settles a specific
-    // constraint match also appends its id to justifiedConstraintIds, so
-    // runDesignChecks stops re-flagging *this exact* constraint on future
-    // amends -- see justifiedConstraintIds' own doc comment (core/types.ts).
-    // Only on approve; a rejected review settles nothing.
+    // §17 review-flow fix (2026-08, widened 2026-08-22): an approval that
+    // settles one or more specific constraint matches appends their ids to
+    // justifiedConstraintIds, so runDesignChecks stops re-flagging *these
+    // exact* constraints on future amends -- see justifiedConstraintIds'
+    // own doc comment (core/types.ts). Only on approve; a rejected review
+    // settles nothing. `constraintIds` (was a single `constraintId`) can
+    // now carry several at once -- same union shape as `justifiedOverlaps`
+    // just below.
     const design = this.get(review.designId);
     const justifiedConstraintIds =
-      decision === "approve" && review.constraintId && design && !design.justifiedConstraintIds.includes(review.constraintId)
-        ? [...design.justifiedConstraintIds, review.constraintId]
+      decision === "approve" && design && review.constraintIds && review.constraintIds.length > 0
+        ? [...new Set([...design.justifiedConstraintIds, ...review.constraintIds])]
         : undefined;
     // Item 7's fix (2026-08-18): same append-on-approve-only shape as
     // justifiedConstraintIds above, for structural design-vs-design overlap

@@ -1714,7 +1714,7 @@ test("POST /v1/designs/:id/resolve: attributes constraintId even when the design
 
   // And the ground-truth backstop must now actually honor it.
   const matchRes = await app.request(`/v1/constraints/match?projectId=proj-1&path=shared.ts&sessionId=s1`, { headers: bearer(admin.token) });
-  assert.deepEqual(await matchRes.json(), { matched: false }, "an approved, attributed constraint must be excluded from the ground-truth check");
+  assert.deepEqual(await matchRes.json(), { matched: false, constraints: [] }, "an approved, attributed constraint must be excluded from the ground-truth check");
 });
 
 test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator pass from the prior registration (kill stale, retain findings, start fresh)", async () => {

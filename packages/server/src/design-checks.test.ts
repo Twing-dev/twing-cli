@@ -106,7 +106,7 @@ test("tier 3: constraint scope match -> constraint_flag", () => {
   const outcome = runDesignChecks(candidate, [], [constraint]);
   assert.equal(outcome.verdict, "constraint_flag");
   assert.equal(outcome.severity, "error");
-  assert.equal(outcome.constraint?.statement, constraint.statement);
+  assert.equal(outcome.constraints[0]?.statement, constraint.statement);
 });
 
 test("tier 4: summary similarity fallback only fires when 1-3 found nothing", () => {
@@ -139,12 +139,13 @@ test("matchConstraintsForPaths: matches a bare path against a constraint's scope
     source: "seeded",
     createdAt: Date.now(),
   };
-  const hit = matchConstraintsForPaths(["packages/server/src/app.ts"], [constraint]);
-  assert.equal(hit?.statement, constraint.statement);
-  assert.equal(hit?.type, "review_required");
+  const hits = matchConstraintsForPaths(["packages/server/src/app.ts"], [constraint]);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.statement, constraint.statement);
+  assert.equal(hits[0]?.type, "review_required");
 });
 
-test("matchConstraintsForPaths: no match returns undefined", () => {
+test("matchConstraintsForPaths: no match returns an empty list", () => {
   const constraint: DesignConstraint = {
     id: "c1",
     projectId: "p1",
@@ -154,8 +155,8 @@ test("matchConstraintsForPaths: no match returns undefined", () => {
     source: "seeded",
     createdAt: Date.now(),
   };
-  const hit = matchConstraintsForPaths(["packages/core/src/identity.ts"], [constraint]);
-  assert.equal(hit, undefined);
+  const hits = matchConstraintsForPaths(["packages/core/src/identity.ts"], [constraint]);
+  assert.deepEqual(hits, []);
 });
 
 test("matchConstraintsForPaths: fires even when the path was never declared by any design", () => {
@@ -173,8 +174,43 @@ test("matchConstraintsForPaths: fires even when the path was never declared by a
     createdAt: Date.now(),
   };
   const editedFilePath = "packages/server/src/design-checks.ts";
-  const hit = matchConstraintsForPaths([editedFilePath], [constraint]);
-  assert.notEqual(hit, undefined);
+  const hits = matchConstraintsForPaths([editedFilePath], [constraint]);
+  assert.equal(hits.length, 1);
+});
+
+// Item 8's fix (2026-08-22): two different target paths, each violating a
+// different constraint, both come back from one call -- previously only the
+// higher-priority hit surfaced, and the second was only discoverable by
+// justifying the first and retrying. See matchConstraintsForPaths' own doc
+// comment.
+test("matchConstraintsForPaths: two different paths hitting two different constraints both come back in one call", () => {
+  const reviewRequired: DesignConstraint = {
+    id: "c1",
+    projectId: "p1",
+    type: "review_required",
+    statement: "the hosted coordinator -- do not remove without sign-off",
+    scope: ["packages/server/**"],
+    source: "seeded",
+    createdAt: Date.now(),
+  };
+  const canonicalAbstraction: DesignConstraint = {
+    id: "c2",
+    projectId: "p1",
+    type: "canonical_abstraction",
+    statement: "use the shared frame codec; don't invent a second wire format",
+    scope: ["packages/core/src/framing.ts"],
+    source: "seeded",
+    createdAt: Date.now(),
+  };
+  const hits = matchConstraintsForPaths(
+    ["packages/server/src/app.ts", "packages/core/src/framing.ts"],
+    [canonicalAbstraction, reviewRequired],
+  );
+  assert.equal(hits.length, 2);
+  // review_required still sorts first (higher priority), even though
+  // canonical_abstraction was passed in first.
+  assert.equal(hits[0]?.id, "c1");
+  assert.equal(hits[1]?.id, "c2");
 });
 
 // Found live, 2026-08-11: a broad canonical_abstraction constraint on
@@ -200,12 +236,18 @@ test("matchConstraintsForPaths: review_required wins over canonical_abstraction 
     source: "seeded",
     createdAt: Date.now(),
   };
-  const hit = matchConstraintsForPaths(["packages/server/src/app.ts"], [broad, narrow]);
-  assert.equal(hit?.type, "review_required");
-  assert.equal(hit?.statement, narrow.statement);
+  const hits = matchConstraintsForPaths(["packages/server/src/app.ts"], [broad, narrow]);
+  assert.equal(hits[0]?.type, "review_required");
+  assert.equal(hits[0]?.statement, narrow.statement);
 });
 
-test("matchConstraintsForPaths: among same-type matches, the more specific (longer) scope wins", () => {
+// Deliberate behavior change (2026-08-22): the old single-hit version
+// suppressed the broader same-type rule via this same specificity
+// tie-break, since it only needed to pick one winner. Now that the
+// function returns every match, both come back -- the tie-break just
+// controls sort order (more specific first), not which one survives. See
+// matchConstraintsForPaths' own doc comment.
+test("matchConstraintsForPaths: among same-type matches, both come back, more specific (longer) scope sorted first", () => {
   const wide: DesignConstraint = {
     id: "c1",
     projectId: "p1",
@@ -224,8 +266,10 @@ test("matchConstraintsForPaths: among same-type matches, the more specific (long
     source: "seeded",
     createdAt: Date.now(),
   };
-  const hit = matchConstraintsForPaths(["packages/server/src/app.ts"], [wide, specific]);
-  assert.equal(hit?.statement, "specific rule");
+  const hits = matchConstraintsForPaths(["packages/server/src/app.ts"], [wide, specific]);
+  assert.equal(hits.length, 2);
+  assert.equal(hits[0]?.statement, "specific rule");
+  assert.equal(hits[1]?.statement, "wide rule");
 });
 
 // §17 scope enforcement (2026-08): pathInDesignScope is the ground-truth

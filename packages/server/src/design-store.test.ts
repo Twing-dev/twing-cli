@@ -169,9 +169,9 @@ test("DesignRegistry: flag's optional detail persists a constraint match, and om
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "retry helper", creates: [], touches: [], dependsOn: [] });
 
   const constraint = { id: "c1", statement: "use pkg/retry", type: "canonical_abstraction" as const };
-  registry.flag(a.id, "constraint_flag", { conflicts: [], constraint });
+  registry.flag(a.id, "constraint_flag", { conflicts: [], constraints: [constraint] });
   const events = log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_flagged");
-  assert.deepEqual(events[0].payload, { verdict: "constraint_flag", summary: "retry helper", constraint });
+  assert.deepEqual(events[0].payload, { verdict: "constraint_flag", summary: "retry helper", constraints: [constraint] });
   registry.stop();
 });
 
@@ -486,7 +486,7 @@ test("DesignRegistry: reregisterFromPlan is a full replace, not an additive merg
 test("DesignRegistry: reregisterFromPlan preserves justifiedConstraintIds -- a prior approval survives the retry", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text" });
-  const review = registry.addReview(a.id, "p1", "justified", "c1");
+  const review = registry.addReview(a.id, "p1", "justified", ["c1"]);
   registry.decideReview(review.id, "approve");
   assert.deepEqual(registry.get(a.id)?.justifiedConstraintIds, ["c1"]);
   const reregistered = registry.reregisterFromPlan(a.id, { summary: "s", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text 2" });

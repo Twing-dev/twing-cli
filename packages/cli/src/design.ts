@@ -57,7 +57,10 @@ interface DesignCheckResponseJSON {
   verdict?: "clean" | "overlap" | "constraint_flag";
   designId?: string;
   conflicts?: DesignConflictJSON[];
-  constraint?: { statement: string; type: string };
+  /** Every constraint the checked scope matched (2026-08-22, was a single
+   * `constraint` object -- see design-checks.ts's matchConstraintsForPaths
+   * doc comment for the full reasoning). */
+  constraints?: { statement: string; type: string }[];
   /** 2026-08-19 severity split -- "warning" (tier 1's exactOverlap only,
    * currently) is display-only, undefined/"error" means today's original
    * blocking behavior. See DesignSeverity's doc comment in core/types.ts. */
@@ -90,7 +93,9 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
     }
     console.log(`  -> adopt the existing design, or run: twing design resolve --id ${result.designId} --justify "<reason>"`);
   } else if (result.verdict === "constraint_flag") {
-    console.log(`  [${result.constraint?.type}] ${result.constraint?.statement}`);
+    for (const c of result.constraints ?? []) {
+      console.log(`  [${c.type}] ${c.statement}`);
+    }
     console.log(`  -> adjust your plan, or run: twing design resolve --id ${result.designId} --justify "<reason>"`);
   }
 }

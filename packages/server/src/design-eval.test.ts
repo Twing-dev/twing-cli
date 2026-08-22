@@ -27,8 +27,8 @@ for (const c of EVAL_CASES.filter((c) => c.bucket === "obvious_conflict")) {
     const outcome = outcomeFor(c);
     assert.equal(outcome.verdict, c.expectedVerdict);
     if (c.expectedOverlapKind) assert.equal(outcome.conflicts[0]?.overlapKind, c.expectedOverlapKind);
-    if (c.expectedConstraintType) assert.equal(outcome.constraint?.type, c.expectedConstraintType);
-    if (c.expectedConstraintStatement) assert.equal(outcome.constraint?.statement, c.expectedConstraintStatement);
+    if (c.expectedConstraintType) assert.equal(outcome.constraints[0]?.type, c.expectedConstraintType);
+    if (c.expectedConstraintStatement) assert.equal(outcome.constraints[0]?.statement, c.expectedConstraintStatement);
     if (c.expectedConflictCount !== undefined) assert.equal(outcome.conflicts.length, c.expectedConflictCount);
   });
 }

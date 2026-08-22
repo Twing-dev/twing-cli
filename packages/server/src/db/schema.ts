@@ -63,7 +63,7 @@ export const projectRecords = sqliteTable("project_records", {
   orgId: text("org_id"),
   foundedBy: text("founded_by").notNull(),
   foundedAt: integer("founded_at").notNull(),
-  // §17 Phase 3: nullable, no default (follows pending_reviews.constraint_id's
+  // §17 Phase 3: nullable, no default (follows designs.agentLabel's
   // precedent) -- absent for every project founded before this shipped, and
   // for any project whose remote isn't GitHub-hosted at all (non-GitHub
   // projects stay invite-only, parked per the plan). Set once, at founding
@@ -161,13 +161,17 @@ export const pendingReviews = sqliteTable(
     justification: text("justification").notNull(),
     createdAt: integer("created_at").notNull(),
     decision: text("decision"), // "approve" | "reject" | null
-    /** Set only for a review created against a `constraint_flag` verdict --
-     * see PendingReview's doc comment (core/types.ts). */
-    constraintId: text("constraint_id"),
+    /** Every constraint this review settles, if it was created against a
+     * `constraint_flag` verdict -- see PendingReview's doc comment
+     * (core/types.ts). JSON string[], defaults to "[]". Plural
+     * (2026-08-22, was a nullable single `constraint_id`) for the same
+     * reason `overlapWaivers` below is a list, not a single id: one review
+     * can now settle several distinct constraint matches at once. */
+    constraintIds: text("constraint_ids").notNull().default("[]"),
     /** Item 7's fix (2026-08-18): the structural overlap(s) this design had
      * against other open designs at justify-time, recomputed fresh rather
      * than trusted from whatever verdict originally flagged it -- same
-     * reasoning as `constraintId` above. JSON
+     * reasoning as `constraintIds` above. JSON
      * `{conflictingDesignId, paths}[]` (a list, not a single id, since one
      * review can span multiple conflicting designs), defaults to "[]". See
      * PendingReview.overlapWaivers. */

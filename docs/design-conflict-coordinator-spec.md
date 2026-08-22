@@ -6,8 +6,11 @@
 > `session_id`); Constraint Store persisted as an appended JSON file, not Postgres/
 > SQLite; §13's cross-harness adapters (Codex, opencode, Gemini CLI, Pi) deferred,
 > Claude Code only; the git-commit-detection close trigger in §8 deferred in favor of a
-> `SessionEnd` hook plus the existing TTL fallback. Kept below verbatim as the original
-> input document.
+> `SessionEnd` hook plus the existing TTL fallback; §4's `constraint_flag` response
+> below carries a single `constraint` object -- as of §17.11 (2026-08-22) it's a
+> `constraints` list instead, since a checked scope can violate more than one
+> constraint at once and the implementation now surfaces every match in one round
+> trip rather than one at a time. Kept below verbatim as the original input document.
 
 # Design Conflict Coordinator — Build Spec (Phase 1 of 3)
 

@@ -241,7 +241,7 @@ func TestHandleEditWriteGate_ConstraintMatched_DeniesAndSkipsOpenDesignsCall(t *
 		switch r.URL.Path {
 		case "/v1/constraints/match":
 			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"matched":true,"constraint":{"statement":"needs review","type":"review_required"}}`))
+			_, _ = w.Write([]byte(`{"matched":true,"constraints":[{"statement":"needs review","type":"review_required"}]}`))
 		case "/v1/designs/scope-match":
 			t.Fatal("scope-match lookup should not run once the constraint check matched")
 		}
