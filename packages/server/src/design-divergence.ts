@@ -70,6 +70,16 @@ export interface DesignDivergenceMatch {
 export function findDesignDivergences(newClaims: Claim[], openDesigns: DesignStatement[]): DesignDivergenceMatch[] {
   const matches: DesignDivergenceMatch[] = [];
   for (const claim of newClaims) {
+    // 2026-08-23: skip claims with no resolved symbol -- a bare file path
+    // (no "::"), which `claims.ts::extractClaim` still constructs and
+    // returns for a whole-file `Write`, an unparseable file (Tree-sitter is
+    // JS/TS-only in v0), or a failed edit-point lookup. These carry no more
+    // precision than "this file was touched somehow" and were a confirmed,
+    // live contributor to alignment-thread noise (several of the 14 threads
+    // one design pair accumulated -- see alignment-store.ts's findOrCreate
+    // doc comment -- were bare paths, including a `.md` file Tree-sitter
+    // can't even parse). Symbol-level claims are unaffected.
+    if (!claim.symbolId.includes("::")) continue;
     for (const design of openDesigns) {
       if (design.sessionId === claim.sessionId || design.developerId === claim.developerId) continue;
       if (!claimFallsInsideDesign(claim, design)) continue;

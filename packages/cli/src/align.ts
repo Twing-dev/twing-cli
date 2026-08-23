@@ -140,9 +140,15 @@ interface AlignmentThreadJSON {
   id: string;
   status: string;
   symbolId: string;
+  /** 2026-08-23 categorization redesign (alignment-store.ts) -- server
+   * always populates this (falling back to `[symbolId]` for a pre-redesign
+   * row), so this listing can rely on it directly rather than re-deriving
+   * its own fallback. */
+  symbolIds?: string[];
   developerId: string;
   otherDeveloperId: string;
   systemDescription: string;
+  category?: string;
 }
 
 export async function runAlignThreads(options: AlignThreadsOptions): Promise<void> {
@@ -165,8 +171,21 @@ export async function runAlignThreads(options: AlignThreadsOptions): Promise<voi
     return;
   }
   for (const t of items) {
-    console.log(`${t.id}  [${t.status}]  ${t.developerId} <-> ${t.otherDeveloperId}  ${t.symbolId}`);
+    // 2026-08-23: dropped the raw (and, for an amended thread, stale --
+    // only ever the *first* overlapping symbol, never updated -- see
+    // alignment-store.ts's amend()) trailing symbolId in favor of a
+    // category tag, which also restores info this line lost for a
+    // semantic-conflict thread once the old symbolId-as-design-id stand-in
+    // hack was removed server-side.
+    const categoryTag = t.category ? `  [${t.category}]` : "";
+    console.log(`${t.id}  [${t.status}]${categoryTag}  ${t.developerId} <-> ${t.otherDeveloperId}`);
     console.log(`  ${t.systemDescription}`);
+    // Every accumulated overlapping file, not just the frozen first one --
+    // only worth a line once there's more than one to show.
+    const symbolIds = t.symbolIds ?? [];
+    if (t.category === "symbol_claim" && symbolIds.length > 1) {
+      console.log(`  files: ${symbolIds.join(", ")}`);
+    }
   }
 }
 

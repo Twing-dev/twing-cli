@@ -222,6 +222,10 @@ export const alignmentThreads = sqliteTable(
   {
     id: text("id").primaryKey(),
     projectId: text("project_id").notNull(),
+    // Legacy: the single symbol/design-id-stand-in a thread used to be keyed
+    // on (see alignment-store.ts's findOrCreate doc comment) -- kept
+    // read-only for pre-2026-08-23 rows; no longer written by new code.
+    // `symbolIds` is the source of truth going forward.
     symbolId: text("symbol_id").notNull(),
     developerId: text("developer_id").notNull(), // the claim owner who triggered the divergence
     otherDeveloperId: text("other_developer_id").notNull(), // the open design's owner
@@ -231,6 +235,16 @@ export const alignmentThreads = sqliteTable(
     openedAt: integer("opened_at").notNull(),
     closedAt: integer("closed_at"),
     closedBy: text("closed_by"),
+    // 2026-08-23 alignment-thread redesign (see alignment-store.ts's header
+    // comment): category/summary/symbolIds/initiatingDesignId/lastActivityAt
+    // are all nullable-or-defaulted so pre-existing rows keep reading
+    // correctly -- every new row gets real values, nothing here is backfilled
+    // onto old rows.
+    category: text("category"), // "duplication" | "contradictory_assumptions" | "tension" | "symbol_claim"
+    summary: text("summary"), // short list-view label, distinct from systemDescription's full text
+    symbolIds: text("symbol_ids").notNull().default("[]"), // JSON string[] -- every overlapping path accumulated across amendments
+    initiatingDesignId: text("initiating_design_id"), // the initiating developer's own open design, when one resolves
+    lastActivityAt: integer("last_activity_at"), // bumped on amend; falls back to openedAt when null
   },
   (t) => [index("alignment_threads_project_id_idx").on(t.projectId)],
 );

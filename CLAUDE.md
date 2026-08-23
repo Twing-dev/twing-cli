@@ -233,6 +233,37 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     Closing is unilateral — neither party needs the other's agreement, this
     is voluntary reconciliation, not enforcement. `twing align
     threads`/`respond`/`close` is the CLI side.
+    **2026-08-23 categorization/dedup redesign:** a thread now carries a
+    structured `category` (`duplication`/`contradictory_assumptions`/
+    `tension` — mirrors `SemanticConflictKind` exactly, the semantic
+    comparator's own producer — or `symbol_claim` for the claims-path
+    divergence above), a short `summary` for list views (`buildAlignmentSummary`,
+    `alignment-store.ts`) distinct from `systemDescription`'s full text,
+    `symbolIds` (every overlapping path accumulated over time, claims-path
+    only), and `initiatingDesignId` (the initiating developer's own open
+    design, best-effort — see below). `AlignmentThreadStore.findOrCreate`'s
+    dedup key dropped `symbolId` in favor of `(developerId, otherDeveloperId,
+    designId)`: one live design pair had accumulated **14 simultaneous open
+    threads**, one per touched file/symbol, because the old key forked a new
+    thread on every new symbol instead of reusing the existing one — repeat
+    overlap now amends the open thread (merges into `symbolIds`, bumps
+    `lastActivityAt`, posts a follow-up message only when something
+    genuinely new is being said) instead of forking. Also as of this change,
+    `findDesignDivergences` (`design-divergence.ts`) skips any claim with no
+    resolved symbol (a bare file path, no `::`) entirely — `claims.ts`'s
+    fallback for a whole-file `Write`, an unparseable file (Tree-sitter is
+    JS/TS-only), or a failed edit-point lookup was a confirmed, live
+    contributor to that same fan-out and carries no more precision than
+    "this file was touched somehow." `initiatingDesignId` is deliberately
+    best-effort, not always resolvable: a claim can have no design behind it
+    at all (`disable-gate`, or `Bash`, which skips both the design gate and
+    claim capture entirely — see `wire-hooks.ts`'s matchers, so a Bash-driven
+    edit isn't even a Claim) — twing-monitor shows that honestly as a
+    labeled "no design registered for this edit" state rather than a blank
+    or degrading the thread. Pre-2026-08-23 rows keep their old shape
+    (`category`/`summary`/`initiatingDesignId` absent, `symbolIds` falling
+    back to the legacy singular `symbolId`) — never backfilled, per this
+    schema's usual append-only/don't-rewrite-history convention.
   - `/v1/designs/*`, `/v1/reviews/*`, `/v1/constraints/*` — §17 gate path:
     `design-checks.ts` (verdict logic: `clean`/`overlap`/`constraint_flag`),
     `design-store.ts` (`DesignRegistry`, `ConstraintStore`), `design-extract.ts`

@@ -999,6 +999,77 @@ test("POST /v1/claims: resubmitting a changed claim against the same open diverg
   assert.equal(listBody.items.length, 1, "should reuse the same open thread, not open a second one");
 });
 
+test("POST /v1/claims: a divergence claim on a *different* symbol against the same design pair amends the thread instead of forking a new one (2026-08-23 dedup fix)", async () => {
+  const { app, dataDir } = freshApp();
+  const { bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
+
+  const first = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f", ts: 1000 })] }),
+  });
+  const firstBody = (await first.json()) as { findings: { kind: string; threadId?: string }[] };
+  const firstThreadId = firstBody.findings.find((f) => f.kind === "design_divergence")!.threadId!;
+
+  const second = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::g", ts: 2000 })] }),
+  });
+  const secondBody = (await second.json()) as { findings: { kind: string; threadId?: string }[] };
+  const secondThreadId = secondBody.findings.find((f) => f.kind === "design_divergence")!.threadId!;
+
+  assert.equal(secondThreadId, firstThreadId, "same developer pair + target design -- must amend, not fork");
+
+  const listRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(bobToken) });
+  const listBody = (await listRes.json()) as { items: { id: string; symbolIds: string[]; category: string; summary: string }[] };
+  assert.equal(listBody.items.length, 1, "one thread, not two");
+  assert.deepEqual(listBody.items[0].symbolIds.sort(), ["src/x.ts::f", "src/x.ts::g"]);
+  assert.equal(listBody.items[0].category, "symbol_claim");
+  assert.match(listBody.items[0].summary, /overlapping path/);
+});
+
+test("POST /v1/claims: a divergence finding links the claiming developer's own open design as initiatingDesignId, when they have one", async () => {
+  const { app, dataDir } = freshApp();
+  const { bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
+
+  const bobDesignRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
+  });
+  const bobDesignBody = (await bobDesignRes.json()) as { designId: string };
+
+  const claimRes = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
+  });
+  const { findings } = (await claimRes.json()) as { findings: { kind: string; threadId?: string }[] };
+  const threadId = findings.find((f) => f.kind === "design_divergence")!.threadId!;
+
+  const threadRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(bobToken) });
+  const threadBody = (await threadRes.json()) as { thread: { initiatingDesignId?: string } };
+  assert.equal(threadBody.thread.initiatingDesignId, bobDesignBody.designId);
+});
+
+test("POST /v1/claims: a divergence finding leaves initiatingDesignId unset when the claiming developer has no open design of their own", async () => {
+  const { app, dataDir } = freshApp();
+  const { bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
+
+  const claimRes = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
+  });
+  const { findings } = (await claimRes.json()) as { findings: { kind: string; threadId?: string }[] };
+  const threadId = findings.find((f) => f.kind === "design_divergence")!.threadId!;
+
+  const threadRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(bobToken) });
+  const threadBody = (await threadRes.json()) as { thread: { initiatingDesignId?: string } };
+  assert.equal(threadBody.thread.initiatingDesignId, undefined, "no design behind the edit -- must stay honestly absent, not a wrong value");
+});
+
 test("alignment threads: only the two parties can read/reply/close -- a third project member gets 403", async () => {
   const { app, dataDir } = freshApp();
   const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
@@ -1105,6 +1176,7 @@ test("POST /v1/designs/check: the async semantic-conflict comparator opens an al
     body: JSON.stringify({ tokenHash: sha256Hex("bobs-pat"), label: "bob@example.com" }),
   });
 
+  let bobDesignId: string | undefined;
   await withBedrockEnv(async () => {
     await withMockFetch(
       (async () =>
@@ -1130,6 +1202,7 @@ test("POST /v1/designs/check: the async semantic-conflict comparator opens an al
         // fire-and-forget side effects below.
         const bobDesignBody = (await bobDesign.json()) as { verdict: string; designId: string };
         assert.equal(bobDesignBody.verdict, "clean");
+        bobDesignId = bobDesignBody.designId;
 
         await waitFor(async () => {
           const res = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer("bobs-pat") });
@@ -1142,12 +1215,15 @@ test("POST /v1/designs/check: the async semantic-conflict comparator opens an al
 
   const threadsRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(admin.token) });
   const threadsBody = (await threadsRes.json()) as {
-    items: { developerId: string; otherDeveloperId: string; systemDescription: string }[];
+    items: { developerId: string; otherDeveloperId: string; systemDescription: string; category: string; summary: string; initiatingDesignId?: string }[];
   };
   assert.equal(threadsBody.items.length, 1);
   assert.equal(threadsBody.items[0].developerId, "bob@example.com");
   assert.equal(threadsBody.items[0].otherDeveloperId, "alice@example.com");
   assert.equal(threadsBody.items[0].systemDescription, "they fight over the same guarantee");
+  assert.equal(threadsBody.items[0].category, "tension", "matches the comparator's own SemanticConflictKind");
+  assert.match(threadsBody.items[0].summary, /Tension with/);
+  assert.equal(threadsBody.items[0].initiatingDesignId, bobDesignId, "the candidate design (bob's) is always resolvable on this path");
 
   const aliceNotices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
   const aliceNoticesBody = (await aliceNotices.json()) as { items: { message: string }[] };

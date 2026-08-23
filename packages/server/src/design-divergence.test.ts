@@ -86,3 +86,18 @@ test("runDesignDivergenceChecks: excludes a developer's own concurrent session t
   const findings = runDesignDivergenceChecks([claim], [design]);
   assert.equal(findings.length, 0);
 });
+
+test("runDesignDivergenceChecks: a bare-path (no-symbol) claim never produces a finding, even when it falls inside a design's touches (2026-08-23 noise fix)", () => {
+  // What claims.ts::extractClaim falls back to for a whole-file Write, an
+  // unparseable file, or a failed edit-point lookup -- computeSymbolId
+  // returns the bare relPath, with no "::".
+  const claim = makeClaim({ symbolId: "src/net/retry.ts" });
+  const design = makeDesign({ touches: ["src/net/retry.ts"] });
+  assert.equal(runDesignDivergenceChecks([claim], [design]).length, 0);
+});
+
+test("runDesignDivergenceChecks: a symbol-level claim on the same file still produces a finding", () => {
+  const claim = makeClaim({ symbolId: "src/net/retry.ts::RetryPolicy.backoff" });
+  const design = makeDesign({ touches: ["src/net/retry.ts"] });
+  assert.equal(runDesignDivergenceChecks([claim], [design]).length, 1);
+});

@@ -30,7 +30,7 @@ import {
 import { extractDesign } from "./design-extract.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
-import { AlignmentThreadStore } from "./alignment-store.js";
+import { AlignmentThreadStore, buildAlignmentSummary } from "./alignment-store.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role } from "./identity-store.js";
 import { fetchRepoPermissions } from "./github-client.js";
@@ -477,13 +477,21 @@ export function createApp(options: CreateAppOptions = {}) {
         if (!current || current.scopeVersion !== startVersion) return; // superseded by a later amend -- stop
         const result = await checkSemanticConflict(current, other, { model: semanticCheckModel });
         if (!result.conflict) continue;
+        // `isValidResult` (design-semantic-check.ts) doesn't runtime-enforce
+        // that a non-null `kind` accompanies `conflict: true` -- fall back to
+        // "tension" (the most generic category) rather than drop a genuine
+        // conflict signal over a model-schema inconsistency.
+        const category = result.kind ?? "tension";
         const thread = alignmentThreads.findOrCreate({
           projectId: current.projectId,
-          symbolId: current.id, // stand-in dedup key -- no real symbolId for a design-vs-design finding
+          symbolIds: [], // no real symbol for a design-vs-design finding
           developerId: current.developerId,
           otherDeveloperId: other.developerId,
           designId: other.id,
           systemDescription: result.reason,
+          category,
+          summary: buildAlignmentSummary(category, other.summary, 0),
+          initiatingDesignId: current.id, // this path always has a real initiating design -- always resolvable
           ts: Date.now(),
         });
         activityLog.append({
@@ -554,15 +562,29 @@ export function createApp(options: CreateAppOptions = {}) {
     // thread (dedup handled by AlignmentThreadStore.findOrCreate) so both
     // parties can reconcile asynchronously; the thread's id rides along on
     // the Finding/Notice so `twing align respond` has something to point at.
-    const divergences = findDesignDivergences(changed, designs.openDesigns(projectId));
+    const openDesignsForDivergence = designs.openDesigns(projectId);
+    const divergences = findDesignDivergences(changed, openDesignsForDivergence);
     const divergenceFindings: Finding[] = divergences.map(({ finding, design }) => {
+      // Best-effort: the claiming developer's own open design, if they have
+      // one -- reused from the same list already fetched for the divergence
+      // check itself, no extra query. Genuinely absent (not a bug) when the
+      // edit had no design behind it at all -- `disable-gate`, or `Bash`,
+      // which skips both the gate and claim capture entirely
+      // (`wire-hooks.ts`'s matchers) -- see alignment-store.ts's
+      // `initiatingDesignId` doc comment.
+      const initiatingDesign = openDesignsForDivergence
+        .filter((d) => d.developerId === finding.developerId)
+        .sort((a, b) => b.lastActivityAt - a.lastActivityAt)[0];
       const thread = alignmentThreads.findOrCreate({
         projectId,
-        symbolId: finding.symbolId,
+        symbolIds: [finding.symbolId],
         developerId: finding.developerId,
         otherDeveloperId: finding.otherDeveloperId,
         designId: design.id,
         systemDescription: finding.reason,
+        category: "symbol_claim",
+        summary: buildAlignmentSummary("symbol_claim", design.summary, 1),
+        initiatingDesignId: initiatingDesign?.id,
         ts: finding.ts,
       });
       return { ...finding, threadId: thread.id };
