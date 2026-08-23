@@ -34,6 +34,7 @@ function makeDesign(overrides: Partial<DesignStatement> = {}): DesignStatement {
     scopeVersion: 1,
     justifiedConstraintIds: [],
     justifiedOverlaps: [],
+    justifiedConflicts: [],
     lastActivityAt: 0,
     ...overrides,
   };

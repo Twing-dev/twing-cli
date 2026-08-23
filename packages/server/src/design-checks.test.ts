@@ -28,6 +28,7 @@ function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
     scopeVersion: 1,
     justifiedConstraintIds: [],
     justifiedOverlaps: [],
+    justifiedConflicts: [],
     lastActivityAt: Date.now(),
     ...overrides,
   };
@@ -124,7 +125,7 @@ test("tier 4: summary similarity fallback only fires when 1-3 found nothing", ()
   const other = design({ id: "b", sessionId: "s2", developerId: "dev2", summary: "adds a retry wrapper with exponential backoff for the billing client" });
   const outcome = runDesignChecks(candidate, [other], []);
   assert.equal(outcome.verdict, "overlap");
-  assert.equal(outcome.severity, "error", "2026-08-19 severity split: tier 4 unchanged, still blocking, deliberately not demoted alongside tier 1");
+  assert.equal(outcome.severity, "warning", "2026-08-22: tier 4 demoted alongside tier 1 -- weakest-evidence tier, no path corroboration by construction");
   assert.match(outcome.conflicts[0].overlapDetail, /similar/);
 });
 

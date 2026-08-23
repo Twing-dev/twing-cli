@@ -61,8 +61,15 @@
     {
       "idx": 8,
       "version": "6",
-      "when": 1787502016182,
-      "tag": "0008_alignment-thread-categorization",
+      "when": 1787441949342,
+      "tag": "0008_elite_sentinels",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1787503979007,
+      "tag": "0009_alignment-thread-categorization",
       "breakpoints": true
     }
   ]

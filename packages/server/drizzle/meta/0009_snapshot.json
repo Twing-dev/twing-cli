@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "76d07af1-d785-4188-983c-08314f740249",
-  "prevId": "62e7d8bc-7338-4dfb-bbdd-456fc6becda0",
+  "id": "ba516c0b-625e-45af-a9bc-6f77536fded7",
+  "prevId": "76d07af1-d785-4188-983c-08314f740249",
   "tables": {
     "activity_events": {
       "name": "activity_events",
@@ -169,6 +169,42 @@
         "closed_by": {
           "name": "closed_by",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "category": {
+          "name": "category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "summary": {
+          "name": "summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "symbol_ids": {
+          "name": "symbol_ids",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
+        },
+        "initiating_design_id": {
+          "name": "initiating_design_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_activity_at": {
+          "name": "last_activity_at",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

@@ -191,6 +191,15 @@ export interface DesignStatement {
    * the *other* design's own checks should waive that same path -- that's
    * a separate decision on that design's own row, if it ever comes up. */
   justifiedOverlaps: string[];
+  /** Semantic comparator's counterpart to `justifiedOverlaps` above
+   * (2026-08-22) -- entries are bare `conflictingDesignId`s (no paths: a
+   * `"conflict"` verdict has no path evidence to key on, see
+   * DesignVerdict's doc comment), so `runSemanticComparatorPass` skips
+   * re-checking (and re-flagging) a pair once its conflict has been
+   * justified and approved. Appended (never removed) by
+   * `DesignRegistry.decideReview` when a review carrying
+   * `conflictWaivers` is approved -- see `PendingReview.conflictWaivers`. */
+  justifiedConflicts: string[];
 }
 
 export type DesignConstraintType = "canonical_abstraction" | "domain_fact" | "review_required";
@@ -207,7 +216,20 @@ export interface DesignConstraint {
   createdAt: number;
 }
 
-export type DesignVerdict = "clean" | "overlap" | "constraint_flag";
+/** `"conflict"` (2026-08-22): the semantic comparator's own verdict
+ * (design-semantic-check.ts's `checkSemanticConflict`, driven by app.ts's
+ * `runSemanticComparatorPass`) -- an LLM judgment that two designs conflict
+ * in intent, as opposed to `"overlap"`'s exact-path/keyword matching.
+ * Distinct from `"overlap"` because it has different evidence (LLM
+ * reasoning over free text, not paths) and a different justification shape
+ * (see DesignStatement.justifiedConflicts / PendingReview.conflictWaivers,
+ * keyed by conflicting design id alone, no paths -- there's nothing
+ * path-shaped to waive). Never returned by `runDesignChecks`/
+ * `DesignCheckResult` (design-checks.ts's tiers 1-4 run synchronously
+ * against the request that triggered them); only ever set via
+ * `DesignRegistry.flag()` from the async comparator pass, after its
+ * response has already been sent. */
+export type DesignVerdict = "clean" | "overlap" | "constraint_flag" | "conflict";
 
 /** 2026-08-19: an `overlap`/`constraint_flag` verdict is no longer
  * uniformly blocking -- `severity` says which of the two it is. `"warning"`
@@ -216,10 +238,12 @@ export type DesignVerdict = "clean" | "overlap" | "constraint_flag";
  * today's original behavior, unchanged: the design gets demoted to
  * `"flagged"` (design-store.ts's `flag()`), which is what the Edit/Write
  * gate's `/v1/designs/scope-match` and ExitPlanMode's registration-time
- * check both key off to deny. Currently `exactOverlap` (tier 1) is the only
- * `"warning"` source -- `summarySimilarity` (tier 4) and `constraintMatch`
- * (tier 3) both stay `"error"`. Absent/undefined on a `"clean"` verdict,
- * where severity is moot. */
+ * check both key off to deny. As of 2026-08-22, both `exactOverlap` (tier 1)
+ * and `summarySimilarity` (tier 4) are `"warning"` -- only `constraintMatch`
+ * (tier 3) stays `"error"` among the synchronous tiers. Absent/undefined on
+ * a `"clean"` verdict, where severity is moot. `"conflict"` verdicts don't
+ * carry a `DesignSeverity` at all -- they're set directly via `flag()` from
+ * the async comparator pass, never through `DesignCheckResult`. */
 export type DesignSeverity = "warning" | "error";
 
 export type DesignOverlapKind = "creates" | "touches" | "constraint";
@@ -284,4 +308,13 @@ export interface PendingReview {
    * see DesignStatement.justifiedOverlaps for how an approval consumes
    * this. */
   overlapWaivers?: { conflictingDesignId: string; paths: string[] }[];
+  /** Semantic comparator's counterpart to `overlapWaivers` above
+   * (2026-08-22) -- set only when this design currently has a `"conflict"`
+   * flag against it (recorded conflicts, not recomputed live at
+   * justify-time: unlike `overlapWaivers`'s cheap local recompute, a live
+   * recheck here would mean a second synchronous LLM call inside
+   * `/v1/designs/:id/resolve`). One entry per conflicting design, no paths
+   * -- see DesignStatement.justifiedConflicts for how an approval consumes
+   * this. */
+  conflictWaivers?: { conflictingDesignId: string }[];
 }

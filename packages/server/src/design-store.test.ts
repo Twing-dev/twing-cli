@@ -511,6 +511,25 @@ test("DesignRegistry: decideReview approve populates justifiedOverlaps from the 
   registry.stop();
 });
 
+test("DesignRegistry: decideReview approve populates justifiedConflicts from the review's conflictWaivers, reject leaves it untouched", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
+  const b = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s2", summary: "", creates: [], touches: [], dependsOn: [] });
+  const c = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s3", summary: "", creates: [], touches: [], dependsOn: [] });
+
+  const rejected = registry.addReview(a.id, "p1", "nope", undefined, undefined, [{ conflictingDesignId: b.id }]);
+  registry.decideReview(rejected.id, "reject");
+  assert.deepEqual(registry.get(a.id)?.justifiedConflicts, [], "rejection settles nothing");
+
+  const approved = registry.addReview(a.id, "p1", "fine, proceeding despite the semantic conflict", undefined, undefined, [
+    { conflictingDesignId: b.id },
+    { conflictingDesignId: c.id },
+  ]);
+  registry.decideReview(approved.id, "approve");
+  assert.deepEqual(registry.get(a.id)?.justifiedConflicts.sort(), [b.id, c.id].sort());
+  registry.stop();
+});
+
 test("DesignRegistry: reregisterFromPlan preserves justifiedOverlaps -- a prior overlap approval survives the retry", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text" });

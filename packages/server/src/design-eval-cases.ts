@@ -45,6 +45,7 @@ export function design(overrides: Partial<DesignStatement> = {}): DesignStatemen
     scopeVersion: 1,
     justifiedConstraintIds: [],
     justifiedOverlaps: [],
+    justifiedConflicts: [],
     lastActivityAt: Date.now(),
     ...overrides,
   };

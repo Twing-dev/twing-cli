@@ -26,8 +26,23 @@
  * blocking to `severity: "warning"` -- a same-file coincidence flags for
  * display (design detail, activity feed) but no longer demotes the design
  * to `"flagged"` or denies the Edit/Write gate. `constraintMatch` (tier 3)
- * and `summarySimilarity` (tier 4) are unchanged, still `severity: "error"`,
- * still blocking. See DesignSeverity's doc comment in core/types.ts.)
+ * unchanged, still `severity: "error"`, still blocking. See DesignSeverity's
+ * doc comment in core/types.ts.)
+ *
+ * (2026-08-22, `summarySimilarity` (tier 4) also demoted to `severity:
+ * "warning"`: by construction it only ever runs once tier 1 has already
+ * found *zero* path-level overlap (see the early return in
+ * `runDesignChecks` below), so every tier-4 hit was blocking on unvalidated
+ * Jaccard word-overlap of free text alone, with no path corroboration --
+ * the weakest-evidence tier carrying the same blocking weight as an actual
+ * constraint violation, and stronger weight than tier 1's own exact path
+ * collision. Real conceptual-overlap enforcement now belongs to the
+ * semantic comparator's own `"conflict"` verdict instead (see
+ * `runSemanticComparatorPass` in app.ts, and DesignVerdict's doc comment in
+ * core/types.ts) -- unlike this tier, that one is at least an LLM judgment
+ * over the designs' actual text, not a bag-of-words heuristic, and it
+ * blocks by flagging the design once its async check returns, rather than
+ * synchronously here.)
  *
  * (2026-08-22, same-developer pairs excluded from tiers 1 and 4: a usability
  * pass on twing-monitor found overlap/conflict signal between a single
@@ -263,7 +278,9 @@ export function jaccard(a: string, b: string): number {
 }
 
 /** Tier 4: deliberately weak fallback net, only consulted when 1-3 find
- * nothing (design doc §17.4 / spec §6.4). */
+ * nothing (design doc §17.4 / spec §6.4). Non-blocking (2026-08-22, see this
+ * file's header comment) -- Jaccard word-overlap on free text with no path
+ * evidence isn't strong enough grounds to deny real work on its own. */
 function summarySimilarity(candidate: DesignStatement, other: DesignStatement): DesignConflict | undefined {
   const score = jaccard(candidate.summary, other.summary);
   if (score < SUMMARY_SIMILARITY_THRESHOLD) return undefined;
@@ -396,12 +413,14 @@ export function runDesignChecks(
     if (sim) similarityConflicts.push(sim);
   }
   if (similarityConflicts.length > 0) {
-    // Unchanged, deliberately not demoted alongside tier 1 -- this is a
-    // conceptual-overlap fallback with no specific colliding path to point
-    // at (see summarySimilarity's own comment), so it stays the one thing
-    // standing in for real conceptual conflict detection until the
-    // semantic comparator's own severity is revisited.
-    return { verdict: "overlap", conflicts: similarityConflicts, constraints: [], severity: "error" };
+    // Demoted alongside tier 1 (2026-08-22, see this file's header
+    // comment) -- a conceptual-overlap fallback with no specific colliding
+    // path to point at (see summarySimilarity's own comment) isn't strong
+    // enough evidence to block on its own. Real conceptual-conflict
+    // enforcement now belongs to the semantic comparator's own `"conflict"`
+    // verdict (app.ts's runSemanticComparatorPass), which blocks by
+    // flagging the design once its async LLM check returns.
+    return { verdict: "overlap", conflicts: similarityConflicts, constraints: [], severity: "warning" };
   }
 
   return { verdict: "clean", conflicts: [], constraints: [] };
