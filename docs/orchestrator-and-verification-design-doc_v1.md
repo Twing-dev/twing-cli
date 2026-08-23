@@ -798,12 +798,37 @@ rather than renumbered (matches the code's own tier-numbered comments/test names
 weren't renumbered either — see the note below):
 
 1. Exact `creates`/`touches` intersection against every other `open` design, same
-   `projectId`.
+   `projectId`. `severity: "warning"` — display-only, doesn't block (2026-08-19).
 3. `creates`/`touches` against `DesignConstraint.scope` (reused `minimatch`, already a
    `@twing/core` dependency) — a `canonical_abstraction` hit or `review_required` scope
-   hit is `constraint_flag`, independent of any agent-vs-agent overlap.
+   hit is `constraint_flag`, independent of any agent-vs-agent overlap. `severity:
+   "error"` — the only remaining synchronous tier that blocks.
 4. Jaccard keyword-set similarity over `summary`, only if 1/3 found nothing — a
-   deliberately weak fallback net, not the primary signal.
+   deliberately weak fallback net, not the primary signal. `severity: "warning"` as of
+   2026-08-22 (was `"error"`): by construction this tier only ever runs once tier 1 has
+   already found *zero* path-level overlap, so a hit here was blocking on unvalidated
+   word-overlap of free text alone, with no path corroboration at all — the
+   weakest-evidence tier carrying the strongest (blocking) weight. Real conceptual-overlap
+   *enforcement* now belongs to the async semantic comparator's own `"conflict"` verdict
+   instead (below) — an LLM judgment over the designs' actual text, not a bag-of-words
+   heuristic.
+
+**Blocking async: the semantic comparator's `"conflict"` verdict (2026-08-22).**
+`design-semantic-check.ts`'s `checkSemanticConflict` — the LLM-based check described at
+the end of this section — used to be purely advisory (an alignment-thread notice, never a
+deny). It now also flags the candidate design (`DesignRegistry.flag(id, "conflict",
+...)`) on a hit, the same `status → "flagged"` transition tiers 3/(formerly 4) use.
+Deliberately still async, not moved into the synchronous `/v1/designs/check` response —
+a design's *registration* is never denied over it, since that would mean an LLM
+round-trip (and, for `n` open designs, up to `n` of them) in the hot `ExitPlanMode`/
+`Edit`/`Write` path. Instead, the flag takes effect retroactively-from-now-on: whatever
+was edited before the async check returns stays edited, but the gate's existing, already
+per-edit `/v1/designs/scope-match` check (§17.9-adjacent, keys off `status` alone) denies
+the *next* `Edit`/`Write` in that session once the flag lands. `justifiedConflicts`
+(`DesignStatement`) is `justifiedOverlaps`' counterpart for this verdict — bare
+conflicting-design ids, no paths, since a `"conflict"` verdict has no path evidence to key
+on — so an approved justification (§17.5) doesn't just get re-flagged on the comparator's
+next pass.
 
 **(2026-08-19, removed: tier 2, the spec's step 2, `creates` ∩ `depends_on` collision.)** Same
 call as `triggers` above, for the same underlying reason: it only ever matched an exact
@@ -827,6 +852,20 @@ queues to `/v1/reviews` and does not unblock by itself; the hook keeps denying w
 "awaiting review" until a human calls `POST /v1/reviews/:id/decide {decision:
 "approve"}` — the one legitimate human-facing pause in this system, run via `twing
 design reviews --decide`.
+
+This is deliberately the *only* unblocking path for anything that gates — including the
+`"conflict"` verdict (§17.4). `/v1/alignment-threads/*` (§4/§7's advisory family — both
+divergence checks and, when it doesn't also flag, the semantic comparator) is a separate,
+parallel mechanism: closing an alignment thread is unilateral, either party alone, no
+approval needed — deliberate, since it's voluntary reconciliation between two sessions,
+not enforcement. Reusing that unilateral close to lift an actual block would let either
+party silently self-unblock with zero human review, defeating the point of gating in the
+first place — so a `"conflict"` flag's justify call (`/v1/designs/:id/resolve`) computes
+`conflictWaivers` (bare conflicting-design ids, `PendingReview.conflictWaivers`) from
+whichever other designs this one currently has an *open* alignment thread against, rather
+than recomputing live via a second synchronous LLM call, and an approved review appends
+those ids to `justifiedConflicts` — same shape, same review queue, same admin-`decide`
+gate as `constraintIds`/`overlapWaivers` already use.
 
 ### 17.6 Lifecycle
 

@@ -464,6 +464,21 @@ export function createApp(options: CreateAppOptions = {}) {
    * `addNotice(other.developerId, ...)`, identical args when the two ids
    * match). See design-checks.ts's top-of-file comment for the full
    * writeup.
+   *
+   * **2026-08-22: blocking.** A hit now also flags the candidate
+   * (`designs.flag(..., "conflict", ...)`) alongside the existing
+   * alignment-thread/notice/activity-log side effects -- see DesignVerdict's
+   * doc comment (core/types.ts) for why this is a distinct verdict from
+   * `"overlap"`. Deliberately *not* synchronous: this still runs after the
+   * triggering response was already sent, so it can't deny the registration
+   * itself (and a few files may already have been edited by the time it
+   * lands) -- it flips the design's `status` to `"flagged"` so the *next*
+   * `Edit`/`Write` in that session is denied by the existing, unchanged
+   * `/v1/designs/scope-match` check, same enforcement path `constraint_flag`
+   * and tier-4 `overlap` already use. Skips any `other.id` already in
+   * `current.justifiedConflicts` before even calling the LLM -- an approved
+   * justification must not just re-flag on the very next pass (mirrors how
+   * `structuralOverlaps` skips already-waived `justifiedOverlaps` paths).
    */
   function runSemanticComparatorPass(candidateId: string, others: DesignStatement[]): void {
     const started = designs.get(candidateId);
@@ -475,6 +490,7 @@ export function createApp(options: CreateAppOptions = {}) {
         if (other.developerId === candidateDeveloperId) continue;
         const current = designs.get(candidateId);
         if (!current || current.scopeVersion !== startVersion) return; // superseded by a later amend -- stop
+        if (current.justifiedConflicts.includes(other.id)) continue;
         const result = await checkSemanticConflict(current, other, { model: semanticCheckModel });
         if (!result.conflict) continue;
         const thread = alignmentThreads.findOrCreate({
@@ -496,6 +512,18 @@ export function createApp(options: CreateAppOptions = {}) {
         });
         store.addNotice(current.developerId, result.reason, Date.now(), thread.id);
         store.addNotice(other.developerId, result.reason, Date.now(), thread.id);
+        designs.flag(current.id, "conflict", {
+          conflicts: [
+            {
+              conflictingDesignId: other.id,
+              agentLabel: other.agentLabel,
+              overlapKind: "touches",
+              overlapDetail: result.reason,
+              conflictingSummary: other.summary,
+              overlapPaths: [],
+            },
+          ],
+        });
       }
     })().catch((err) => console.error("twing serve: semantic conflict check failed", err));
   }
@@ -939,12 +967,26 @@ export function createApp(options: CreateAppOptions = {}) {
     // never re-appears in a fresh review; a genuinely new one still does.
     const structuralConflicts = structuralOverlaps(design, designs.openDesigns(design.projectId, Date.now(), design.id));
     const overlapWaivers = structuralConflicts.map((c) => ({ conflictingDesignId: c.conflictingDesignId, paths: c.overlapPaths }));
+    // Semantic comparator's counterpart to overlapWaivers above (2026-08-22):
+    // no cheap live recompute here (that would mean a second synchronous LLM
+    // call inside this route) -- instead, read back which other designs this
+    // one currently has an *open* alignment thread against with this design
+    // as the `symbolId` (the same dedup key `runSemanticComparatorPass` uses
+    // when it calls `alignmentThreads.findOrCreate`), since that call runs
+    // unconditionally for every conflicting `other`, unlike `designs.flag()`
+    // itself which no-ops (and so drops the detail) once already flagged.
+    // See PendingReview.conflictWaivers' own doc comment (@twing/core).
+    const conflictWaivers = alignmentThreads
+      .listByProject(design.projectId, "open")
+      .filter((t) => t.symbolId === design.id && t.designId)
+      .map((t) => ({ conflictingDesignId: t.designId! }));
     const review = designs.addReview(
       id,
       design.projectId,
       body.justification,
       constraintHits.map((h) => h.id),
       overlapWaivers,
+      conflictWaivers.length > 0 ? conflictWaivers : undefined,
     );
     console.log(`twing serve: design ${id.slice(0, 8)} justified divergence -> pending review ${review.id.slice(0, 8)}`);
     return c.json({ status: "pending_review", reviewId: review.id });

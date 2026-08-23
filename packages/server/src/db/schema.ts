@@ -148,6 +148,12 @@ export const designs = sqliteTable(
      * `${conflictingDesignId}::${path}` keys, defaults to "[]" for
      * pre-existing rows via the migration. */
     justifiedOverlaps: text("justified_overlaps").notNull().default("[]"),
+    /** Semantic comparator's counterpart to `justifiedOverlaps` above
+     * (2026-08-22) -- see `DesignStatement.justifiedConflicts`'s own doc
+     * comment (@twing/core) for the full reasoning. JSON string[] of bare
+     * `conflictingDesignId`s (no paths -- a `"conflict"` verdict has none to
+     * key on), defaults to "[]" for pre-existing rows via the migration. */
+    justifiedConflicts: text("justified_conflicts").notNull().default("[]"),
   },
   (t) => [index("designs_project_id_idx").on(t.projectId), index("designs_session_id_idx").on(t.sessionId)],
 );
@@ -176,6 +182,14 @@ export const pendingReviews = sqliteTable(
      * review can span multiple conflicting designs), defaults to "[]". See
      * PendingReview.overlapWaivers. */
     overlapWaivers: text("overlap_waivers").notNull().default("[]"),
+    /** Semantic comparator's counterpart to `overlapWaivers` above
+     * (2026-08-22) -- set only when this review was created against a
+     * `"conflict"` verdict, recorded from the design's current flag rather
+     * than recomputed live (a live recheck would mean a second synchronous
+     * LLM call inside `/v1/designs/:id/resolve`). JSON
+     * `{conflictingDesignId}[]`, defaults to "[]". See
+     * PendingReview.conflictWaivers. */
+    conflictWaivers: text("conflict_waivers").notNull().default("[]"),
   },
   (t) => [index("pending_reviews_project_id_idx").on(t.projectId)],
 );

@@ -678,14 +678,14 @@ async function addProjectMember(app: ReturnType<typeof createApp>, adminToken: s
 }
 
 test("GET /v1/activity: design_checked/design_flagged carry the full why (conflicts/constraint/summary), not just the bare verdict string", async () => {
-  const { app, dataDir } = freshApp();
+  const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
 
-  // Tier 4 (summary similarity), not tier 1 -- since the 2026-08-19 severity
-  // split, tier 1's exactOverlap is "warning" severity and no longer logs
-  // design_flagged (see the dedicated warning-severity test below for that
-  // path). Distinct, non-overlapping touches so tier 1 doesn't fire first;
-  // near-identical summaries so tier 4's Jaccard fallback does.
+  // Tier 4 (summary similarity) -- non-blocking as of 2026-08-22 (see
+  // design-checks.ts's header comment), same as tier 1. Distinct,
+  // non-overlapping touches so tier 1 doesn't fire first; near-identical
+  // summaries so tier 4's Jaccard fallback does, populating `conflicts` on
+  // design_checked even though it no longer flags anything by itself.
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
@@ -698,7 +698,8 @@ test("GET /v1/activity: design_checked/design_flagged carry the full why (confli
       dependsOn: [],
     }),
   });
-  assert.equal((await firstRes.json() as { verdict: string }).verdict, "clean");
+  const firstBody = (await firstRes.json()) as { verdict: string; designId: string };
+  assert.equal(firstBody.verdict, "clean");
 
   // A genuinely different developer registers the "second" design -- same-
   // developer pairs no longer produce an overlap verdict at all
@@ -719,7 +720,24 @@ test("GET /v1/activity: design_checked/design_flagged carry the full why (confli
   });
   const secondBody = (await secondRes.json()) as { verdict: string; designId: string; severity?: string };
   assert.equal(secondBody.verdict, "overlap");
-  assert.equal(secondBody.severity, "error", "sanity: tier 4 must still be error-severity, or this test isn't exercising design_flagged");
+  assert.equal(secondBody.severity, "warning", "sanity: tier 4 is warning-severity (2026-08-22) -- design_checked still logs conflicts on its own; design_flagged now only comes from the async semantic-conflict path (runSemanticComparatorPass)");
+
+  // Simulate what runSemanticComparatorPass (app.ts) does on a real
+  // conflict hit -- flags the design directly, same DesignConflict detail
+  // shape tiers 1/4 already use. Exercised this way rather than through the
+  // real LLM call: this test is about design_flagged's activity-log detail
+  // carrying through, not about the LLM's own judgment.
+  designs.flag(secondBody.designId, "conflict", {
+    conflicts: [
+      {
+        conflictingDesignId: firstBody.designId,
+        overlapKind: "touches",
+        overlapDetail: "these designs conflict in intent (simulated for this test)",
+        conflictingSummary: "adds a shared caching layer for the payments service",
+        overlapPaths: [],
+      },
+    ],
+  });
 
   const activityRes = await app.request(`/v1/activity?projectId=proj-1&relatedId=${secondBody.designId}`, { headers: bearer(admin.token) });
   assert.equal(activityRes.status, 200);
@@ -1192,34 +1210,41 @@ test("POST /v1/designs/check: the async semantic-conflict comparator produces no
 
 // --- §17 scope enforcement (2026-08): flag / scope-match / amend ---
 
-test("POST /v1/designs/check: an error-severity overlap verdict persists as status 'flagged', not 'open' (§17 scope enforcement)", async () => {
-  const { app, dataDir } = freshApp();
+test("designs.flag(..., 'conflict', ...) persists as status 'flagged', not 'open' (§17 scope enforcement, async semantic-conflict path)", async () => {
+  const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
 
-  // Tier 4 (summary similarity, error severity), not tier 1 -- see the
-  // dedicated warning-severity test below for tier 1's "stays open" case.
-  await app.request("/v1/designs/check", {
+  // Since 2026-08-22 there's no longer a *synchronous* error-severity
+  // "overlap" verdict at all (tiers 1 and 4 are both "warning" now -- see
+  // the dedicated warning-severity test below). The design-vs-design
+  // conflict path that actually flags is the async semantic comparator
+  // (runSemanticComparatorPass, app.ts), which calls designs.flag(id,
+  // "conflict", ...) directly once its LLM check returns -- exercised
+  // here the same way, since this test is about status persistence, not
+  // the LLM's own judgment (see design-eval.test.ts for that).
+  const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "adds retry logic for the payments client", creates: ["a.ts"], touches: [], dependsOn: [] }),
-  });
-  // A genuinely different developer -- same-developer pairs no longer
-  // produce an overlap verdict at all (2026-08-22). Must come after proj-1
-  // is founded above.
-  const otherPat = await addProjectMember(app, admin.token, "proj-1");
-  const overlapRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(otherPat) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "adds retry logic for the billing client", creates: ["b.ts"], touches: [], dependsOn: [] }),
   });
-  const overlapBody = (await overlapRes.json()) as { verdict: string; designId: string; severity?: string };
-  assert.equal(overlapBody.verdict, "overlap");
-  assert.equal(overlapBody.severity, "error", "sanity: must be error-severity, or this test isn't exercising the flagging path");
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  designs.flag(designId, "conflict", {
+    conflicts: [
+      {
+        conflictingDesignId: "other-design-id",
+        overlapKind: "touches",
+        overlapDetail: "these designs conflict in intent (simulated for this test)",
+        conflictingSummary: "adds retry logic for the payments client",
+        overlapPaths: [],
+      },
+    ],
+  });
 
   const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s2`, { headers: bearer(admin.token) });
   const listBody = (await listRes.json()) as { items: { id: string; status: string }[] };
-  const registered = listBody.items.find((d) => d.id === overlapBody.designId);
-  assert.equal(registered?.status, "flagged", "a design whose own verdict was error-severity must not read back as 'open'");
+  const registered = listBody.items.find((d) => d.id === designId);
+  assert.equal(registered?.status, "flagged", "a design flagged with a 'conflict' verdict must not read back as 'open'");
 });
 
 // 2026-08-19 severity split: tier 1's exactOverlap is display-only now --
