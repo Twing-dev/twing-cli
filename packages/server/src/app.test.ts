@@ -1139,6 +1139,58 @@ test("alignment threads: only the two parties can read/reply/close -- a third pr
   assert.equal(bobClose.status, 200);
 });
 
+test("alignment threads: a project admin who isn't a party can list/read (but not reply/close) -- 2026-08-24 visibility reversal", async () => {
+  const { app, dataDir } = freshApp();
+  const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
+
+  const claimRes = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
+  });
+  const { findings } = (await claimRes.json()) as { findings: { kind: string; threadId?: string }[] };
+  const threadId = findings.find((f) => f.kind === "design_divergence")!.threadId!;
+
+  // dave: a second project *admin*, not a party to this thread -- found live
+  // (2026-08-23): a project admin whose dashboard login identity differs
+  // from the developerId their own claims/designs are authored under saw
+  // zero alignment threads at all, since "party-only" had no admin
+  // override. Read access now follows canManageProject; mutation stays
+  // party-only.
+  const daveInvite = await app.request("/v1/projects/proj-1/invites", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(alice.token) },
+    body: JSON.stringify({ label: "dave-admin@example.com", role: "admin" }),
+  });
+  const daveCode = ((await daveInvite.json()) as { code: string }).code;
+  await app.request(`/v1/invites/${daveCode}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex("daves-pat"), label: "dave-admin@example.com" }),
+  });
+
+  const daveList = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer("daves-pat") });
+  assert.equal(daveList.status, 200);
+  const daveListBody = (await daveList.json()) as { items: { id: string }[] };
+  assert.ok(
+    daveListBody.items.some((t) => t.id === threadId),
+    "a non-party admin should see the thread in the project-wide list",
+  );
+
+  const daveGet = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer("daves-pat") });
+  assert.equal(daveGet.status, 200, "a non-party admin should be able to read the thread's detail/messages");
+
+  const davePost = await app.request(`/v1/alignment-threads/${threadId}/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer("daves-pat") },
+    body: JSON.stringify({ message: "trying to butt in" }),
+  });
+  assert.equal(davePost.status, 403, "admin visibility doesn't extend to acting inside a conversation they aren't named on");
+
+  const daveClose = await app.request(`/v1/alignment-threads/${threadId}/close`, { method: "PATCH", headers: bearer("daves-pat") });
+  assert.equal(daveClose.status, 403);
+});
+
 test("alignment threads: replying notifies the other party via the existing notice pipeline", async () => {
   const { app, dataDir } = freshApp();
   const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);

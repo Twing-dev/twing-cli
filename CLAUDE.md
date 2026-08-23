@@ -228,11 +228,25 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     stamps its id onto the `Finding`/`Notice` — always advisory (flag, never
     block); `/v1/alignment-threads/*` (below) is how the two parties reply.
   - `/v1/alignment-threads/*` — the async reply channel for a
-    `design_divergence` finding: list/read/reply/close, party-only (the two
-    developers a thread names, never a bystander even a project admin).
-    Closing is unilateral — neither party needs the other's agreement, this
-    is voluntary reconciliation, not enforcement. `twing align
-    threads`/`respond`/`close` is the CLI side.
+    `design_divergence` finding: list/read/reply/close. Closing is unilateral
+    — neither party needs the other's agreement, this is voluntary
+    reconciliation, not enforcement. `twing align threads`/`respond`/`close`
+    is the CLI side.
+    **2026-08-24 admin read visibility:** list/read (`canViewThread`, `app.ts`)
+    now also allow a project admin (`canManageProject`) who isn't a named
+    party, reversed from the original "party-only, never a bystander even a
+    project admin." Found live: a project admin whose dashboard login
+    identity (`join-via-github`, e.g.
+    `206395444+someuser@users.noreply.github.com`) differs from the
+    developerId their own CLI/PAT sessions author claims/designs under (e.g.
+    a git-email-derived `mbhattacharyarules@gmail.com`) saw zero alignment
+    threads in twing-monitor despite being the real party on several, from
+    that exact PAT identity — not a bug in the party check itself (it's
+    correctly symmetric), just no admin visibility at all once login and
+    authoring identity diverge, which is the common case for anyone using
+    both the CLI and the dashboard. Reply/close (`isThreadParty`) are
+    unchanged and stay party-only — an admin can see every reconciliation in
+    their project now but still can't act inside one they're not named on.
     **2026-08-23 categorization/dedup redesign:** a thread now carries a
     structured `category` (`duplication`/`contradictory_assumptions`/
     `tension` — mirrors `SemanticConflictKind` exactly, the semantic

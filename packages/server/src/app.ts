@@ -684,13 +684,33 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ items });
   });
 
-  /** Membership check shared by all four alignment-thread routes below:
-   * only the two parties on a thread (never a bystander, even a project
-   * admin) can read/reply/close it -- this is a private, voluntary
-   * reconciliation channel between the two developers it names, not a
-   * project-wide one. */
+  /** Authorization for the two *mutating* alignment-thread routes (reply,
+   * close): only the two parties on a thread can act on it -- this stays a
+   * private, voluntary reconciliation channel between the two developers it
+   * names, no admin override. Acting on someone else's reconciliation isn't
+   * oversight, it's participating in a conversation you weren't part of. */
   function isThreadParty(identity: ResolvedIdentity, thread: { developerId: string; otherDeveloperId: string }): boolean {
     return noAuth || identity.developerId === thread.developerId || identity.developerId === thread.otherDeveloperId;
+  }
+
+  /** Read authorization for the two *viewing* routes (list, get): a party,
+   * or a project admin. Reversed 2026-08-24 from "party-only, never a
+   * bystander even a project admin" -- found live: a project admin whose
+   * dashboard-login identity (`join-via-github`, e.g.
+   * `206395444+someuser@users.noreply.github.com`) differs from the
+   * developerId their CLI/PAT sessions actually author claims/designs under
+   * (e.g. their git-email-derived `mbhattacharyarules@gmail.com`) saw *zero*
+   * alignment threads in twing-monitor despite being the named party on
+   * several, real from that exact PAT identity -- not a bug in
+   * `isThreadParty` (it's correctly symmetric), just a channel with no
+   * admin visibility at all once a person's login identity and authoring
+   * identity diverge, which turns out to be the common case for anyone
+   * using both the CLI and the dashboard. Reply/close stay party-only
+   * (`isThreadParty` above, unchanged) -- an admin can now *see* every
+   * reconciliation in their project but still can't act inside one they're
+   * not named on. */
+  function canViewThread(identity: ResolvedIdentity, thread: { projectId: string; developerId: string; otherDeveloperId: string }): boolean {
+    return isThreadParty(identity, thread) || canManageProject(identity, thread.projectId);
   }
 
   // Alignment threads (statefulness redesign, 2026-08): the async,
@@ -706,7 +726,7 @@ export function createApp(options: CreateAppOptions = {}) {
       return c.json({ error: "not a member of this project" }, 403);
     }
     const status = c.req.query("status") as "open" | "closed" | undefined;
-    const items = alignmentThreads.listByProject(projectId, status).filter((t) => isThreadParty(identity, t));
+    const items = alignmentThreads.listByProject(projectId, status).filter((t) => canViewThread(identity, t));
     return c.json({ items });
   });
 
@@ -714,7 +734,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const identity = c.get("identity");
     const thread = alignmentThreads.get(c.req.param("id"));
     if (!thread) return c.json({ error: "no such thread" }, 404);
-    if (!isThreadParty(identity, thread)) return c.json({ error: "not a party to this thread" }, 403);
+    if (!canViewThread(identity, thread)) return c.json({ error: "not a party to this thread" }, 403);
     return c.json({ thread, messages: alignmentThreads.messages(thread.id) });
   });
 
