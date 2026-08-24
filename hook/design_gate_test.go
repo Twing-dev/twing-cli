@@ -162,7 +162,7 @@ func TestHandleEditWriteGate_NoCachedToken_DeniesWithoutNetworkCall(t *testing.T
 	if decision != "deny" {
 		t.Fatalf("decision = %q, want deny", decision)
 	}
-	if !strings.Contains(reason, "no auth token cached") {
+	if !strings.Contains(reason, "isn't signed in") {
 		t.Errorf("reason = %q, want it to mention no cached token", reason)
 	}
 }
@@ -213,7 +213,7 @@ func TestHandleEditWriteGate_ConstraintCheckAuthRejected_Denies(t *testing.T) {
 	if decision != "deny" {
 		t.Fatalf("decision = %q, want deny", decision)
 	}
-	if !strings.Contains(reason, "authentication rejected") {
+	if !strings.Contains(reason, "sign-in was rejected") {
 		t.Errorf("reason = %q, want it to mention rejected authentication", reason)
 	}
 }
@@ -231,7 +231,7 @@ func TestHandleEditWriteGate_CoordinatorUnreachable_Denies(t *testing.T) {
 	if decision != "deny" {
 		t.Fatalf("decision = %q, want deny", decision)
 	}
-	if !strings.Contains(reason, "unreachable") {
+	if !strings.Contains(reason, "can't reach the coordinator") {
 		t.Errorf("reason = %q, want it to mention unreachable", reason)
 	}
 }
@@ -281,7 +281,7 @@ func TestHandleEditWriteGate_OpenDesignsUnexpectedStatus_Denies(t *testing.T) {
 	if decision != "deny" {
 		t.Fatalf("decision = %q, want deny", decision)
 	}
-	if !strings.Contains(reason, "coordinator error") {
+	if !strings.Contains(reason, "didn't understand from the coordinator") {
 		t.Errorf("reason = %q, want it to mention a coordinator error", reason)
 	}
 }
@@ -305,7 +305,7 @@ func TestHandleEditWriteGate_NoOpenDesign_DeniesWithRegisterInstructions(t *test
 	if decision != "deny" {
 		t.Fatalf("decision = %q, want deny", decision)
 	}
-	if !strings.Contains(reason, "no design registered") {
+	if !strings.Contains(reason, "needs to know what you're building") {
 		t.Errorf("reason = %q, want it to mention no design registered", reason)
 	}
 }
@@ -496,7 +496,7 @@ func TestHandleExitPlanMode_NoCachedToken_DeniesWithoutNetworkCall(t *testing.T)
 	if decision != "deny" {
 		t.Fatalf("decision = %q, want deny", decision)
 	}
-	if !strings.Contains(reason, "no auth token cached") {
+	if !strings.Contains(reason, "isn't signed in") {
 		t.Errorf("reason = %q, want it to mention no cached token", reason)
 	}
 }
@@ -539,7 +539,7 @@ func TestHandleExitPlanMode_CoordinatorUnreachable_Denies(t *testing.T) {
 	if decision != "deny" {
 		t.Fatalf("decision = %q, want deny", decision)
 	}
-	if !strings.Contains(reason, "unreachable") {
+	if !strings.Contains(reason, "can't reach the coordinator") {
 		t.Errorf("reason = %q, want it to mention unreachable", reason)
 	}
 }
@@ -878,5 +878,156 @@ func TestHandlePreToolUse_DesignGateOff_NoOp(t *testing.T) {
 	stdout := captureStdout(t, func() { handlePreToolUse(editPayload(repo, "sess1")) })
 	if stdout != "" {
 		t.Errorf("stdout = %q, want empty", stdout)
+	}
+}
+
+// --- deny message shape (2026-08-24 readability rewrite) ---
+//
+// The three-layer grammar these assert (plain headline -> detail -> "What
+// now") is the whole point of that change: every deny used to open with an
+// identifier, which meant a reader couldn't tell a bug from a rule from a
+// teammate without parsing internal vocabulary. `allDenyMessages` is
+// deliberately exhaustive -- a new *Reason function that isn't listed here
+// is the one way this could silently regress.
+func allDenyMessages(t *testing.T) map[string]string {
+	t.Helper()
+	overlap := designCheckResponse{
+		DesignID: "11111111-2222-3333-4444-555555555555",
+		Conflicts: []designConflict{{
+			ConflictingDesignID: "66666666-7777-8888-9999-000000000000",
+			OverlapKind:         "exactOverlap",
+			OverlapDetail:       "both plans write src/net/http-client.ts",
+			ConflictingSummary:  "adds retry with exponential backoff to the API client",
+		}},
+	}
+	constraint := designCheckResponse{
+		DesignID:    "11111111-2222-3333-4444-555555555555",
+		Constraints: []designConstraintInfo{{Statement: "money paths need a second pair of eyes", Type: "review_required"}},
+	}
+	return map[string]string{
+		"noDesign":           noDesignReason(),
+		"flagged":            flaggedDesignReason("11111111-2222-3333-4444-555555555555", false),
+		"flaggedPendingRev":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", true),
+		"outOfScope":         outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts"),
+		"dormant":            dormantDesignReason("11111111-2222-3333-4444-555555555555", "adds retry", 7200000),
+		"overlap":            overlapReason(overlap),
+		"constraint":         constraintReason(constraint),
+		"authRequired":       authRequiredReason("https://coordination-server.twing.dev"),
+		"authRejected401":    authRejectedReason(http.StatusUnauthorized, "https://coordination-server.twing.dev"),
+		"authRejected403":    authRejectedReason(http.StatusForbidden, "https://coordination-server.twing.dev"),
+		"unreachable":        unreachableReason(fmt.Errorf("connection refused")),
+		"coordinatorError":   coordinatorErrorReason("unexpected status 500"),
+		"ambiguousMultiRepo": ambiguousMultiRepoReason([]childCoordinator{{DirName: "api"}, {DirName: "web"}}),
+	}
+}
+
+// The load-bearing assertion of the whole rewrite: layer 1 is a plain
+// sentence, so no identifier may appear in it. A UUID in the first line is
+// exactly the regression this guards against.
+func TestDenyMessages_HeadlineIsPlainSentence(t *testing.T) {
+	for name, msg := range allDenyMessages(t) {
+		headline := strings.SplitN(msg, "\n", 2)[0]
+		if headline == "" {
+			t.Errorf("%s: empty headline", name)
+			continue
+		}
+		if strings.Contains(headline, "11111111") || strings.Contains(headline, "66666666") {
+			t.Errorf("%s: headline contains an identifier: %q", name, headline)
+		}
+		if !strings.HasSuffix(headline, ".") {
+			t.Errorf("%s: headline should be a sentence, got %q", name, headline)
+		}
+		if len(headline) > denyWrapWidth+8 {
+			t.Errorf("%s: headline too long (%d chars): %q", name, len(headline), headline)
+		}
+	}
+}
+
+// Prose must stay narrow enough for a small terminal. Command lines are
+// exempt: a design id is a 36-char UUID, so `twing design resolve --id
+// <uuid> --justify "<reason>"` cannot fit and shouldn't be broken.
+func TestDenyMessages_ProseLinesStayNarrow(t *testing.T) {
+	for name, msg := range allDenyMessages(t) {
+		for _, line := range strings.Split(msg, "\n") {
+			if strings.Contains(line, "twing ") || strings.Contains(line, "TWING_") {
+				continue // a command line
+			}
+			if len(line) > denyWrapWidth+len(denyCommandIndent) {
+				t.Errorf("%s: line too long (%d chars): %q", name, len(line), line)
+			}
+		}
+	}
+}
+
+func TestDenyMessages_TellYouWhatToDo(t *testing.T) {
+	for name, msg := range allDenyMessages(t) {
+		if !strings.Contains(msg, "What now") {
+			t.Errorf("%s: no 'What now' section", name)
+		}
+	}
+}
+
+// 401 and 403 are different problems with different fixes. Collapsing them
+// cost a real user five days: the message said the token was stale and to
+// run `twing login`, when the actual cause was a 403 -- not being a member
+// of the project -- which `twing login` cannot fix.
+func TestAuthRejectedReason_DistinguishesUnauthorizedFromForbidden(t *testing.T) {
+	unauthorized := authRejectedReason(http.StatusUnauthorized, "https://example.com")
+	forbidden := authRejectedReason(http.StatusForbidden, "https://example.com")
+
+	if unauthorized == forbidden {
+		t.Fatal("401 and 403 must not produce the same message")
+	}
+	if !strings.Contains(forbidden, "access to this project") {
+		t.Errorf("403 should say it's a project-access problem, got %q", forbidden)
+	}
+	if !strings.Contains(forbidden, "twing whoami") {
+		t.Errorf("403 should suggest checking current access, got %q", forbidden)
+	}
+	if !strings.Contains(unauthorized, "wasn't recognised") && !strings.Contains(unauthorized, "didn't recognise") {
+		t.Errorf("401 should say the credentials weren't recognised, got %q", unauthorized)
+	}
+	for _, msg := range []string{unauthorized, forbidden} {
+		if strings.Contains(msg, "twing login") {
+			t.Errorf("neither should suggest `twing login` -- it can't fix either case: %q", msg)
+		}
+	}
+}
+
+// A semantic conflict is flagged asynchronously, minutes after a clean
+// registration, so the old "conflict from its own registration" wording was
+// simply false in the common case.
+func TestFlaggedDesignReason_DoesNotClaimConflictCameFromRegistration(t *testing.T) {
+	msg := flaggedDesignReason("11111111-2222-3333-4444-555555555555", false)
+	if strings.Contains(msg, "registration") {
+		t.Errorf("should not attribute the conflict to registration time: %q", msg)
+	}
+}
+
+// Optional fields are genuinely absent in production (a design registered
+// without a summary, a zero dormant duration), and must not produce a
+// dangling label with no value.
+func TestDormantDesignReason_OmitsMissingSummary(t *testing.T) {
+	msg := dormantDesignReason("11111111-2222-3333-4444-555555555555", "", 0)
+	if strings.Contains(msg, "What it was") {
+		t.Errorf("empty summary should be omitted entirely, got %q", msg)
+	}
+	if !strings.Contains(msg, "What now") {
+		t.Errorf("should still render actions, got %q", msg)
+	}
+}
+
+// The agent note is addressed to the agent, not the person reading the
+// terminal, so it must be visibly separated from the user-facing text.
+func TestDenyOutput_SeparatesAgentNoteFromUserText(t *testing.T) {
+	out := denyOutput("PreToolUse", noDesignReason())
+	hook := out["hookSpecificOutput"].(map[string]any)
+	reason := hook["permissionDecisionReason"].(string)
+
+	if !strings.Contains(reason, "\n---\nNote for the agent:") {
+		t.Errorf("agent note should be behind a labelled rule, got %q", reason)
+	}
+	if strings.Index(reason, "---\nNote for the agent:") < strings.Index(reason, "What now") {
+		t.Error("agent note should come after the user-facing content")
 	}
 }
