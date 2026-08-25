@@ -343,3 +343,57 @@ export interface PendingReview {
    * this. */
   conflictWaivers?: { conflictingDesignId: string }[];
 }
+
+/**
+ * `GET /v1/reviews`'s response shape (2026-08-25). A bare `PendingReview`
+ * carries only the requester's own `justification` plus opaque ids, which
+ * is the least useful subset of what a reviewer needs: it names the
+ * argument for letting the work through without naming the work, who wants
+ * it, or what stopped it. An admin was being asked to approve a sentence.
+ *
+ * Every added field is optional, so this stays a pure superset -- an older
+ * dashboard reading this response is unaffected, and a review whose design
+ * has since been deleted still serializes cleanly rather than 500ing.
+ * Nothing here is stored: it's assembled per request from rows that already
+ * exist (see review-enrich.ts), so there's no schema change and no risk of
+ * the copy drifting from the design it describes.
+ */
+export interface ReviewDesignSummary {
+  summary: string;
+  creates: string[];
+  touches: string[];
+  developerId: string;
+  status: DesignStatement["status"];
+}
+
+export interface ReviewConstraintSummary {
+  id: string;
+  statement: string;
+  type: DesignConstraintType;
+}
+
+/** `overlapWaivers` (path collisions) and `conflictWaivers` (the semantic
+ * comparator's judgement) are separate concepts internally, and an approval
+ * consumes them differently. To a human deciding, they're one question --
+ * "whose work does this collide with, and how do I know?" -- so they're
+ * merged here, with `kind` preserving which check produced it. */
+export interface ReviewConflictSummary {
+  designId: string;
+  kind: "overlap" | "conflict";
+  /** Absent if the conflicting design has since been deleted. */
+  summary?: string;
+  developerId?: string;
+  /** Only ever set for `kind: "overlap"` -- the semantic comparator has no
+   * specific path to point at. */
+  paths?: string[];
+}
+
+export interface EnrichedPendingReview extends PendingReview {
+  /** Absent only if the design was deleted after the review was raised. */
+  design?: ReviewDesignSummary;
+  /** Resolved from `constraintIds`. Absent when the review came from an
+   * overlap rather than a constraint. */
+  constraints?: ReviewConstraintSummary[];
+  /** `overlapWaivers` and `conflictWaivers`, resolved and merged. */
+  conflicts?: ReviewConflictSummary[];
+}

@@ -456,6 +456,43 @@ test("GET /v1/reviews: defaults to ?status=pending, unchanged from before the qu
   assert.equal(body.items[0].decision, undefined);
 });
 
+// Enriched response (2026-08-25). Before this, the route returned review
+// rows verbatim: the requester's justification plus opaque ids, and nothing
+// about the work itself -- so twing-monitor's card led with the argument for
+// letting something through without ever naming what it was. The unit tests
+// in review-enrich.test.ts cover the assembly; this asserts the route
+// actually wires it up, against a real design created through the real flow.
+test("GET /v1/reviews: carries the design a review is about, not just its justification", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await makePendingReview(app, admin.token, "proj-1");
+
+  const res = await app.request("/v1/reviews?projectId=proj-1", { headers: bearer(admin.token) });
+  const body = (await res.json()) as {
+    items: {
+      justification: string;
+      design?: { summary: string; developerId: string; touches: string[]; status: string };
+      conflicts?: { designId: string; kind: string; summary?: string }[];
+    }[];
+  };
+
+  const item = body.items[0];
+  // The original field is untouched -- this is a superset, so an older
+  // dashboard reading this response still works exactly as before.
+  assert.ok(item.justification.length > 0);
+
+  assert.ok(item.design, "expected the review to carry its design");
+  assert.ok(item.design.summary.length > 0, "expected a human-readable summary to lead with");
+  assert.ok(item.design.developerId.length > 0, "expected to know who is asking");
+
+  // makePendingReview justifies against a real overlap with a second
+  // developer's design, so the reviewer should be able to see whose work it
+  // collides with -- the question they're actually being asked.
+  assert.ok(item.conflicts && item.conflicts.length > 0, "expected the conflicting design to be named");
+  assert.equal(item.conflicts[0].kind, "overlap");
+  assert.ok(item.conflicts[0].summary, "expected the conflicting design's summary to be resolved");
+});
+
 test("GET /v1/reviews?status=decided: only shows reviews an admin already decided", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
