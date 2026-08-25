@@ -560,6 +560,36 @@ func TestHandleExitPlanMode_CleanVerdict_Allows(t *testing.T) {
 	}
 }
 
+// §17 design linking (2026-08): a genuinely single-repo plan (no sibling
+// candidates discovered, so handleExitPlanModeSingle handles it, not the
+// multi-candidate path) must never invent a groupId -- the server's own
+// "group of one" self-assignment is sufficient, nothing to link here.
+func TestHandleExitPlanModeSingle_NeverSetsGroupID(t *testing.T) {
+	var checkedGroupID string
+	var sawCheck bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/designs/check" {
+			sawCheck = true
+			var body designCheckRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			checkedGroupID = body.GroupID
+		}
+		_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	captureStdout(t, func() { handleExitPlanMode(planPayload(repo, "sess1")) })
+	if !sawCheck {
+		t.Fatal("expected a /v1/designs/check call")
+	}
+	if checkedGroupID != "" {
+		t.Errorf("groupId = %q, want empty -- single-repo plans must not invent a group", checkedGroupID)
+	}
+}
+
 // 2026-08-19 severity split (design-checks.ts): a "warning"-severity
 // "overlap" verdict (tier 1's exactOverlap only, currently) registers and
 // allows same as clean -- the conflict is still recorded server-side for
@@ -726,6 +756,7 @@ func TestHandleExitPlanMode_MultiCandidate_PlanTouchesOnlyOneCandidate_Registers
 
 func TestHandleExitPlanMode_MultiCandidate_PlanSpansBothCandidates_RegistersInBoth(t *testing.T) {
 	var checkedProjects []string
+	var checkedGroupIDs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		switch r.URL.Path {
@@ -735,6 +766,7 @@ func TestHandleExitPlanMode_MultiCandidate_PlanSpansBothCandidates_RegistersInBo
 			var body designCheckRequest
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			checkedProjects = append(checkedProjects, body.ProjectID)
+			checkedGroupIDs = append(checkedGroupIDs, body.GroupID)
 			_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
 		}
 	}))
@@ -750,6 +782,47 @@ func TestHandleExitPlanMode_MultiCandidate_PlanSpansBothCandidates_RegistersInBo
 	}
 	if len(checkedProjects) != 2 || checkedProjects[0] == checkedProjects[1] {
 		t.Errorf("checked projects = %v, want two distinct project ids -- one design registered per repo", checkedProjects)
+	}
+	// §17 design linking (2026-08): both candidates in one plan invocation
+	// must share the same non-empty groupId, so the two resulting designs
+	// link automatically with no extra agent action.
+	if len(checkedGroupIDs) != 2 || checkedGroupIDs[0] == "" || checkedGroupIDs[0] != checkedGroupIDs[1] {
+		t.Errorf("checked groupIds = %v, want two equal non-empty values", checkedGroupIDs)
+	}
+}
+
+// §17 design linking (2026-08): a fresh groupId is minted per
+// handleExitPlanMode invocation, never persisted -- two separate
+// invocations (e.g. two distinct plans in the same session) must not share
+// one.
+func TestHandleExitPlanMode_MultiCandidate_MintsAFreshGroupIDPerInvocation(t *testing.T) {
+	var checkedGroupIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/designs/extract":
+			_, _ = w.Write([]byte(`{"creates":[],"touches":["TwingMail/packages/api/mailbox.ts","twinmail-ui/src/Inbox.tsx"],"dependsOn":[],"summary":"full-stack change"}`))
+		case "/v1/designs/check":
+			var body designCheckRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			checkedGroupIDs = append(checkedGroupIDs, body.GroupID)
+			_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	parent, _, _ := setupMultiRepoCwd(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	captureStdout(t, func() { handleExitPlanMode(planPayload(parent, "sess1")) })
+	captureStdout(t, func() { handleExitPlanMode(planPayload(parent, "sess1")) })
+
+	if len(checkedGroupIDs) != 4 {
+		t.Fatalf("checked groupIds = %v, want 4 (2 candidates x 2 invocations)", checkedGroupIDs)
+	}
+	firstInvocation, secondInvocation := checkedGroupIDs[0], checkedGroupIDs[2]
+	if firstInvocation == "" || secondInvocation == "" || firstInvocation == secondInvocation {
+		t.Errorf("first invocation groupId = %q, second = %q, want both non-empty and distinct", firstInvocation, secondInvocation)
 	}
 }
 

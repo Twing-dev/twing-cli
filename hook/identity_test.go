@@ -40,3 +40,17 @@ func TestCanonicalizeRemoteURL_SelfHostedSSHWithSubgroup(t *testing.T) {
 		t.Errorf("canonicalizeRemoteURL(...) = %q, want %q", got, want)
 	}
 }
+
+// §17 design linking (2026-08): generateGroupID is a fresh, unpersisted
+// primitive (unlike readOrCreatePersistedID above) -- just confirms it
+// produces non-empty, distinct values on successive calls.
+func TestGenerateGroupID_ReturnsNonEmptyDistinctValues(t *testing.T) {
+	a := generateGroupID()
+	b := generateGroupID()
+	if a == "" || b == "" {
+		t.Fatalf("generateGroupID() returned empty string(s): %q, %q", a, b)
+	}
+	if a == b {
+		t.Errorf("two calls returned the same id %q, want distinct", a)
+	}
+}

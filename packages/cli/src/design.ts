@@ -56,6 +56,10 @@ interface DesignCheckResponseJSON {
   error?: string;
   verdict?: "clean" | "overlap" | "constraint_flag";
   designId?: string;
+  /** §17 design linking (2026-08) -- the design's own groupId, self-assigned
+   * or caller-supplied. Copy this into a sibling repo's
+   * `twing design register --group <id>` to link the two. */
+  groupId?: string;
   conflicts?: DesignConflictJSON[];
   /** Every constraint the checked scope matched (2026-08-22, was a single
    * `constraint` object -- see design-checks.ts's matchConstraintsForPaths
@@ -78,6 +82,11 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
     return;
   }
   console.log(`verdict: ${result.verdict}${result.severity ? ` (${result.severity})` : ""}  design: ${result.designId}`);
+  if (result.groupId) {
+    // §17 design linking (2026-08): the copy-paste hint for linking a
+    // sibling-repo registration to this one.
+    console.log(`  group: ${result.groupId}  (registering a linked design in another repo? pass --group ${result.groupId})`);
+  }
   if (result.verdict === "overlap" && result.severity === "warning") {
     // Display-only (2026-08-19 severity split): recorded for visibility,
     // design stays open, no action required.
@@ -108,6 +117,10 @@ export interface RegisterOptions {
   creates?: string;
   touches?: string;
   dependsOn?: string;
+  /** §17 design linking (2026-08): links this registration to an existing
+   * design (typically in another repo) sharing the same unit of work --
+   * pass the `groupId` printed by that design's own registration. */
+  group?: string;
 }
 
 /**
@@ -173,6 +186,7 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
         creates: splitList(options.creates),
         touches: splitList(options.touches),
         dependsOn: splitList(options.dependsOn),
+        ...(options.group ? { groupId: options.group } : {}),
       }),
     },
     authToken,
