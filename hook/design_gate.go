@@ -279,11 +279,121 @@ func allowOutput(eventName string) map[string]any {
 // path, a missing directory). This suffix instead travels with the
 // message itself, so it reaches every agent that hits the gate regardless
 // of what (if anything) that repo's own CLAUDE.md says.
-const agentInstructionSuffix = "\n\n(This is twing's design-conflict gate -- a coordination check between " +
-	"agents/sessions, not a bug to route around. If you act on this yourself, say so explicitly in your reply " +
-	"to the operator: what you did and why, not a silent retry-and-succeed -- this creates a persistent record " +
-	"attributed to their identity. See twing-cli's README, \"For agents: handling a design-gate deny\", for the " +
-	"full explanation.)"
+// Separated by a rule and explicitly addressed, so a human reading the deny
+// can see at a glance that this paragraph isn't aimed at them -- before this
+// it ran straight on from the user-facing text, which made an already-dense
+// message read as one undifferentiated wall.
+const agentInstructionSuffix = "\n\n---\nNote for the agent: this is twing's coordination gate, not a bug to\n" +
+	"route around. If you resolve it yourself, say so explicitly in your reply\n" +
+	"to the operator -- what you did and why, not a silent retry-and-succeed.\n" +
+	"It creates a persistent record under their identity. See twing-cli's\n" +
+	"README, \"For agents: handling a design-gate deny\", for the full\n" +
+	"explanation."
+
+// Every deny message this file produces follows one three-layer grammar:
+//
+//  1. headline -- one plain sentence, no identifiers, no jargon. The only
+//     line most readers will actually read.
+//  2. why + details -- indented context, for whoever wants it.
+//  3. "What now" -- the exact commands.
+//
+// Rendering constraints, all driven by the fact that we do not own the
+// renderer: this string is JSON (see writeJSON) handed to Claude Code, and
+// the same text is also read by the agent. So no ANSI colour (it would
+// arrive as literal escape bytes and pollute the model's context) and no
+// emoji or box-drawing. Structure is the only formatting available, which
+// is why prose is hard-wrapped rather than left to the terminal.
+const (
+	denyIndent           = "  "
+	denyActionIndent     = "    "
+	denyCommandIndent    = "      "
+	denyDetailLabelWidth = 14
+	denyWrapWidth        = 72
+)
+
+// denyDetail is one "label  value" row in a deny message's detail block. A
+// zero value renders as a blank separator line, for messages that list
+// several conflicts or rules.
+type denyDetail struct{ Label, Value string }
+
+// denyAction is one entry under "What now": what it achieves, the command
+// that does it (optional -- some actions are advice, not a command), and an
+// optional caveat. The command lives on its own line rather than beside the
+// label because a real design id is a 36-character UUID, which blows any
+// label-plus-command line well past a sane terminal width.
+type denyAction struct {
+	Label   string
+	Command string
+	Note    string
+}
+
+// wrapText hard-wraps prose at width, preserving nothing but word breaks --
+// deny text has no intentional internal line structure to protect.
+func wrapText(s string, width int) []string {
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return nil
+	}
+	lines := []string{}
+	current := words[0]
+	for _, w := range words[1:] {
+		if len(current)+1+len(w) > width {
+			lines = append(lines, current)
+			current = w
+			continue
+		}
+		current += " " + w
+	}
+	return append(lines, current)
+}
+
+func writeWrapped(b *strings.Builder, text, indent string) {
+	for _, line := range wrapText(text, denyWrapWidth-len(indent)) {
+		b.WriteString("\n" + indent + line)
+	}
+}
+
+// denyMessage assembles the three layers. Every *Reason function below goes
+// through it, so the messages cannot drift apart into separate dialects.
+func denyMessage(headline, why string, details []denyDetail, actions []denyAction) string {
+	var b strings.Builder
+	b.WriteString(headline)
+
+	if why != "" {
+		b.WriteString("\n")
+		writeWrapped(&b, why, denyIndent)
+	}
+
+	if len(details) > 0 {
+		b.WriteString("\n")
+		for _, d := range details {
+			if d.Label == "" && d.Value == "" {
+				b.WriteString("\n")
+				continue
+			}
+			if d.Label == "" {
+				b.WriteString("\n" + denyIndent + strings.Repeat(" ", denyDetailLabelWidth) + d.Value)
+				continue
+			}
+			fmt.Fprintf(&b, "\n%s%-*s%s", denyIndent, denyDetailLabelWidth, d.Label, d.Value)
+		}
+	}
+
+	if len(actions) > 0 {
+		b.WriteString("\n\n" + denyIndent + "What now")
+		for _, a := range actions {
+			b.WriteString("\n" + denyActionIndent + a.Label)
+			if a.Command != "" {
+				b.WriteString("\n" + denyCommandIndent + a.Command)
+			}
+			if a.Note != "" {
+				writeWrapped(&b, a.Note, denyCommandIndent)
+			}
+		}
+	}
+
+	return b.String()
+}
 
 func denyOutput(eventName, reason string) map[string]any {
 	return map[string]any{
@@ -301,37 +411,97 @@ func denyOutput(eventName, reason string) map[string]any {
 // needs the reason text alone, not the hookSpecificOutput wrapper, to hand
 // back to its caller.
 
-func authRequiredReason(serverURL string) string {
-	return fmt.Sprintf(
-		"twing design coordinator: no auth token cached for %s. Run `twing login --server %s` "+
-			"(or `twing init`), then retry -- the design gate blocks rather than letting an "+
-			"unauthenticated write through.", serverURL, serverURL)
+// gateOffAction is the same escape hatch on every failure-path message --
+// none of these are the user's fault, so each one says how to keep working.
+var gateOffAction = denyAction{
+	Label:   "Or work without conflict checking",
+	Command: "TWING_DESIGN_GATE=off",
+	Note:    "Turns the gate off for this session. Nothing else is affected.",
 }
 
-func authRejectedReason() string {
-	return "twing design coordinator: authentication rejected (401/403). Your cached token is " +
-		"stale or revoked -- run `twing login` to get a valid one, then retry."
+const failClosedWhy = "twing blocks rather than risk letting two people edit the same thing " +
+	"without either of them noticing."
+
+func authRequiredReason(serverURL string) string {
+	return denyMessage(
+		"twing can't check for conflicts -- this machine isn't signed in.",
+		failClosedWhy,
+		[]denyDetail{{"Coordinator", serverURL}},
+		[]denyAction{
+			{Label: "Sign in", Command: fmt.Sprintf("twing login --server %s", serverURL)},
+			{Label: "Or set this repo up from scratch", Command: "twing init"},
+			gateOffAction,
+		},
+	)
+}
+
+// authRejectedReason splits 401 from 403 (2026-08-24). They are genuinely
+// different problems with different fixes, and collapsing them cost a real
+// user five days: the message said "your cached token is stale -- run twing
+// login", but the actual cause was a 403 (the developer simply wasn't a
+// member of that project yet), which `twing login` cannot fix. A 401 is
+// "we don't know this token"; a 403 is "we know you, this project doesn't
+// admit you."
+func authRejectedReason(status int, serverURL string) string {
+	if status == http.StatusForbidden {
+		return denyMessage(
+			"twing can't check for conflicts -- you don't have access to this project.",
+			"Your sign-in worked, but this project didn't accept it. Usually that means "+
+				"you haven't been added to it yet. "+failClosedWhy,
+			[]denyDetail{{"Coordinator", serverURL}, {"Response", "403 access denied"}},
+			[]denyAction{
+				{
+					Label:   "Join this project",
+					Command: "twing join --github",
+					Note:    "Run this from inside this repo. It uses your GitHub access to decide your role.",
+				},
+				{Label: "See what you currently have access to", Command: "twing whoami"},
+				gateOffAction,
+			},
+		)
+	}
+	return denyMessage(
+		"twing can't check for conflicts -- your sign-in was rejected.",
+		"The coordinator didn't recognise this machine's saved credentials. They may have "+
+			"expired or been revoked. "+failClosedWhy,
+		[]denyDetail{{"Coordinator", serverURL}, {"Response", "401 not recognised"}},
+		[]denyAction{
+			{Label: "Sign in again", Command: "twing join --github", Note: "Run this from inside this repo."},
+			gateOffAction,
+		},
+	)
 }
 
 func unreachableReason(err error) string {
-	return fmt.Sprintf(
-		"twing design coordinator unreachable: %v. This action is blocked until the coordinator "+
-			"is reachable -- the design gate does not fail open. Set TWING_DESIGN_GATE=off if you "+
-			"need to work offline.", err)
+	return denyMessage(
+		"twing can't reach the coordinator to check for conflicts.",
+		failClosedWhy,
+		[]denyDetail{{"Error", fmt.Sprintf("%v", err)}},
+		[]denyAction{
+			{Label: "Check your connection, then retry"},
+			gateOffAction,
+		},
+	)
 }
 
 func coordinatorErrorReason(detail string) string {
-	return fmt.Sprintf(
-		"twing design coordinator error: %s. This action is blocked -- the design gate does not "+
-			"fail open. Set TWING_DESIGN_GATE=off if you need to work offline.", detail)
+	return denyMessage(
+		"twing got an answer it didn't understand from the coordinator.",
+		failClosedWhy,
+		[]denyDetail{{"Detail", detail}},
+		[]denyAction{
+			{Label: "Retry -- this is usually temporary"},
+			gateOffAction,
+		},
+	)
 }
 
 func authRequiredOutput(eventName, serverURL string) map[string]any {
 	return denyOutput(eventName, authRequiredReason(serverURL))
 }
 
-func authRejectedOutput(eventName string) map[string]any {
-	return denyOutput(eventName, authRejectedReason())
+func authRejectedOutput(eventName string, status int, serverURL string) map[string]any {
+	return denyOutput(eventName, authRejectedReason(status, serverURL))
 }
 
 func unreachableOutput(eventName string, err error) map[string]any {
@@ -571,7 +741,7 @@ func postDesignCheck(serverURL, authToken, developerID string, reqBody designChe
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		logDesignGate("designs/check returned status %d (blocking)", res.StatusCode)
-		return designCheckResponse{}, authRejectedReason()
+		return designCheckResponse{}, authRejectedReason(res.StatusCode, serverURL)
 	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("designs/check returned status %d (blocking)", res.StatusCode)
@@ -607,7 +777,7 @@ func postDesignExtract(serverURL, authToken, developerID, planText string) (desi
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		logDesignGate("designs/extract returned status %d (blocking)", res.StatusCode)
-		return designExtractResponse{}, authRejectedReason()
+		return designExtractResponse{}, authRejectedReason(res.StatusCode, serverURL)
 	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("designs/extract returned status %d (blocking)", res.StatusCode)
@@ -650,25 +820,99 @@ func ambiguousMultiRepoReason(candidates []childCoordinator) string {
 	for i, c := range candidates {
 		names[i] = c.DirName
 	}
-	return fmt.Sprintf(
-		"twing design coordinator: this session's working directory isn't itself a git repo, and spans multiple "+
-			"onboarded repos (%s), but the plan doesn't mention a concrete file path inside any of them, so twing "+
-			"can't tell which project(s) to register it against. Either mention concrete paths in the plan (e.g. "+
-			"\"%s/path/to/file.ts\"), or re-run ExitPlanMode from inside the specific repo this work belongs to.",
-		strings.Join(names, ", "), names[0],
+	return denyMessage(
+		"twing can't tell which project this work belongs to.",
+		"This folder isn't a git repo itself, and it contains several repos that use "+
+			"twing. Your plan doesn't mention a file inside any of them, so there's "+
+			"nothing to match on.",
+		[]denyDetail{{"Repos here", strings.Join(names, ", ")}},
+		[]denyAction{
+			{
+				Label: "Mention a real file path in your plan",
+				Note:  fmt.Sprintf("For example: %s/path/to/file.ts", names[0]),
+			},
+			{
+				Label: "Or plan from inside the repo this work belongs to",
+				Note:  "Start a session there and twing will know which project you mean.",
+			},
+		},
+	)
+}
+
+// noDesignReason was an inline string at its single call site until
+// 2026-08-24 -- extracted so it can be tested alongside every other deny
+// message, and so it goes through the same formatter rather than drifting.
+func noDesignReason() string {
+	return denyMessage(
+		"Before your first edit, twing needs to know what you're building.",
+		"Other people -- and other AI sessions -- may be working in this same code "+
+			"right now. Saying what you're doing lets twing warn you before two of "+
+			"you collide.",
+		nil,
+		[]denyAction{
+			{
+				Label: "Let plan mode do it for you",
+				Note:  "Finishing a plan registers this automatically. Nothing else to run.",
+			},
+			{
+				Label:   "Or say it yourself",
+				Command: "twing design register --summary \"<the goal>\" --touches <files>",
+				Note: "The summary is what teammates see if your work overlaps theirs, " +
+					"so describe the real goal rather than a placeholder.",
+			},
+		},
 	)
 }
 
 func overlapReason(result designCheckResponse) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "twing design coordinator: this design (id %s) overlaps %d other open design(s).", result.DesignID, len(result.Conflicts))
-	for _, c := range result.Conflicts {
-		fmt.Fprintf(&b, "\n- [%s] conflicts with design %s: %s. Their summary: %s", c.OverlapKind, c.ConflictingDesignID, c.OverlapDetail, c.ConflictingSummary)
+	headline := "Someone else is already planning similar work."
+	if len(result.Conflicts) > 1 {
+		headline = "Other people are already planning similar work."
 	}
-	fmt.Fprintf(&b, "\n\nAdopt the existing design and re-run ExitPlanMode once your plan reflects it, or run "+
-		"`twing design resolve --id %s --justify \"<reason>\"` to record a justified divergence -- this queues for "+
-		"human review and does not itself unblock you.", result.DesignID)
-	return b.String()
+
+	details := []denyDetail{}
+	for i, c := range result.Conflicts {
+		if i > 0 {
+			details = append(details, denyDetail{})
+		}
+		details = append(details,
+			denyDetail{"Their plan", c.ConflictingSummary},
+			denyDetail{"", "design " + c.ConflictingDesignID},
+			denyDetail{"Why it clashes", c.OverlapDetail},
+		)
+	}
+
+	return denyMessage(
+		headline,
+		"twing compared your plan against everything else being worked on right now.",
+		details,
+		[]denyAction{
+			{
+				Label: "Build on their work instead",
+				Note:  "Adjust your plan so it extends theirs, then finish planning again.",
+			},
+			{
+				Label:   "Or explain why yours needs to be separate",
+				Command: fmt.Sprintf("twing design resolve --id %s --justify \"<reason>\"", result.DesignID),
+				Note:    "This goes to a project admin. You stay blocked until they decide.",
+			},
+		},
+	)
+}
+
+// constraintTypeText translates a constraint's machine type into something
+// a reader who has never opened .twing/twing.yml can act on.
+func constraintTypeText(t string) string {
+	switch t {
+	case "review_required":
+		return "a human must review changes here"
+	case "canonical_abstraction":
+		return "use the existing approach, don't add a second one"
+	case "domain_fact":
+		return "a fact about this codebase you should not contradict"
+	default:
+		return t
+	}
 }
 
 // constraintReason lists every matched constraint (2026-08-22, was a single
@@ -677,15 +921,34 @@ func overlapReason(result designCheckResponse) string {
 // violation from one ExitPlanMode call instead of discovering the next one
 // only after justifying and retrying.
 func constraintReason(result designCheckResponse) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "twing design coordinator: this design (id %s) matches %d existing constraint(s):", result.DesignID, len(result.Constraints))
-	for _, c := range result.Constraints {
-		fmt.Fprintf(&b, "\n- [%s] %s", c.Type, c.Statement)
+	details := []denyDetail{}
+	for i, c := range result.Constraints {
+		if i > 0 {
+			details = append(details, denyDetail{})
+		}
+		details = append(details,
+			denyDetail{"Rule", c.Statement},
+			denyDetail{"", "(" + constraintTypeText(c.Type) + ")"},
+		)
 	}
-	fmt.Fprintf(&b, "\n\nAdjust your plan to comply with all of them and re-run ExitPlanMode, or run "+
-		"`twing design resolve --id %s --justify \"<reason>\"` to record a justified divergence -- this queues for "+
-		"human review and does not itself unblock you.", result.DesignID)
-	return b.String()
+
+	return denyMessage(
+		"This work touches something your team has protected.",
+		"Your team registered rules for these areas of the codebase. They apply to "+
+			"everyone, and they're checked before any edit goes through.",
+		details,
+		[]denyAction{
+			{
+				Label: "Adjust your plan to comply",
+				Note:  "Then finish planning again and it'll be re-checked.",
+			},
+			{
+				Label:   "Or explain why it can't comply",
+				Command: fmt.Sprintf("twing design resolve --id %s --justify \"<reason>\"", result.DesignID),
+				Note:    "This goes to a project admin. You stay blocked until they decide.",
+			},
+		},
+	)
 }
 
 func openDesignsURL(serverURL, projectID, sessionID string) string {
@@ -732,7 +995,7 @@ func checkDesignScope(serverURL, authToken, developerID, projectID, sessionID, f
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
-		return designScopeMatchResponse{}, authRejectedReason()
+		return designScopeMatchResponse{}, authRejectedReason(res.StatusCode, serverURL)
 	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
@@ -750,30 +1013,59 @@ func checkDesignScope(serverURL, authToken, developerID, projectID, sessionID, f
 	return result, ""
 }
 
+// The "unresolved ... from its own registration" wording this replaced was
+// wrong as of the async semantic comparator (2026-08-22): a design can be
+// flagged minutes after a clean registration, by runSemanticComparatorPass,
+// so the conflict frequently did not come from registration at all.
 func flaggedDesignReason(designID string, pendingReview bool) string {
 	if pendingReview {
-		return fmt.Sprintf(
-			"twing design coordinator: your registered design (id %s) has a justified-divergence review "+
-				"already pending -- nothing more to do on your end. An admin needs to approve or reject it "+
-				"(`twing design reviews`) before this design counts as usable again. Retrying won't help until "+
-				"then.",
-			designID,
+		return denyMessage(
+			"You're waiting on a person, not on twing.",
+			"Your explanation has been sent to a project admin. There's nothing more to do "+
+				"on your end -- retrying won't help until someone decides.",
+			[]denyDetail{{"Your plan", designID}, {"Status", "waiting for review"}},
+			[]denyAction{
+				{Label: "Check where it stands", Command: "twing design reviews"},
+				{Label: "Or ask a project admin to take a look"},
+			},
 		)
 	}
-	return fmt.Sprintf(
-		"twing design coordinator: your registered design (id %s) has an unresolved overlap/constraint "+
-			"conflict from its own registration -- it doesn't count as a usable open design until you resolve "+
-			"it. Run `twing design resolve --id %s (--adopt <designId> | --justify \"<reason>\")`, then retry this edit.",
-		designID, designID,
+	return denyMessage(
+		"Someone else may already be doing this work.",
+		"twing compared your plan against other active sessions and found a conflict, "+
+			"so this edit is on hold until that's settled.",
+		[]denyDetail{{"Your plan", designID}, {"Status", "on hold until resolved"}},
+		[]denyAction{
+			{
+				Label:   "Build on their work instead",
+				Command: fmt.Sprintf("twing design resolve --id %s --adopt <theirPlanId>", designID),
+			},
+			{
+				Label:   "Or explain why yours needs to be separate",
+				Command: fmt.Sprintf("twing design resolve --id %s --justify \"<reason>\"", designID),
+				Note:    "This goes to a project admin. You stay blocked until they decide.",
+			},
+		},
 	)
 }
 
 func outOfScopeReason(designID, path string) string {
-	return fmt.Sprintf(
-		"twing design coordinator: %s isn't in your registered design's declared scope (id %s). Either run "+
-			"`twing design amend --id %s --touches %s` (re-checked against other open designs/constraints, doesn't "+
-			"just silently expand your scope), or register a separate design if this is genuinely unrelated work.",
-		path, designID, designID, path,
+	return denyMessage(
+		"You're changing a file you didn't mention in your plan.",
+		"twing can't tell whether that's a natural part of your work or the start of a "+
+			"collision with someone else, so it's asking first.",
+		[]denyDetail{{"File", path}, {"Your plan", designID}},
+		[]denyAction{
+			{
+				Label:   "Add it to your plan",
+				Command: fmt.Sprintf("twing design amend --id %s --touches %s", designID, path),
+				Note:    "This is re-checked against other active sessions, not a silent expansion.",
+			},
+			{
+				Label: "Or register a separate plan",
+				Note:  "Use this if the change is genuinely unrelated to what you registered.",
+			},
+		},
 	)
 }
 
@@ -800,12 +1092,28 @@ func dormantSinceText(ms int64) string {
 // context (summary, how long dormant) for whoever decides to actually
 // judge "same task or not" before running `twing design resume`.
 func dormantDesignReason(designID, summary string, dormantSinceMs int64) string {
-	return fmt.Sprintf(
-		"twing design coordinator: this file matches design %s (%q), which has been dormant (no activity) for "+
-			"~%s. It's not resumed automatically -- if this really is the same task, run `twing design resume --id %s "+
-			"[--touches <path>]` (re-checked against everything currently open before it reactivates). If it's "+
-			"unrelated, register a separate design instead.",
-		designID, summary, dormantSinceText(dormantSinceMs), designID,
+	details := []denyDetail{{"Paused task", designID}}
+	if summary != "" {
+		details = append(details, denyDetail{"What it was", summary})
+	}
+	details = append(details, denyDetail{"Idle for", "~" + dormantSinceText(dormantSinceMs)})
+
+	return denyMessage(
+		"This file belongs to a task that was paused.",
+		"A plan covering this file has had no activity for a while. twing doesn't "+
+			"restart it on its own, in case it was set aside deliberately.",
+		details,
+		[]denyAction{
+			{
+				Label:   "Pick it back up",
+				Command: fmt.Sprintf("twing design resume --id %s", designID),
+				Note:    "Re-checked against everything currently active before it restarts.",
+			},
+			{
+				Label: "Or register a new plan",
+				Note:  "Use this if your current work is unrelated to the paused task.",
+			},
+		},
 	)
 }
 
@@ -860,7 +1168,7 @@ func checkPathConstraint(serverURL, authToken, developerID, projectID, sessionID
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		logDesignGate("constraint match check returned status %d (blocking)", res.StatusCode)
-		return constraintCheckFailed, authRejectedReason()
+		return constraintCheckFailed, authRejectedReason(res.StatusCode, serverURL)
 	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("constraint match check returned status %d (blocking)", res.StatusCode)
@@ -879,19 +1187,52 @@ func checkPathConstraint(serverURL, authToken, developerID, projectID, sessionID
 	if !result.Matched || len(result.Constraints) == 0 {
 		return constraintClear, ""
 	}
-	// Lists every matched constraint (2026-08-22, was a single %s rule: %q
-	// pair) -- same reasoning as constraintReason above: a file covered by
-	// several rules at once should deny with all of them named up front.
-	var b strings.Builder
-	fmt.Fprintf(&b, "twing design coordinator: %s is covered by %d existing rule(s):", filePath, len(result.Constraints))
-	for _, c := range result.Constraints {
-		fmt.Fprintf(&b, "\n- [%s] %s", c.Type, c.Statement)
+	return constraintMatched, pathConstraintReason(filePath, result.Constraints)
+}
+
+// pathConstraintReason is the §17.9 ground-truth backstop's own deny --
+// deliberately separate from constraintReason (the ExitPlanMode path)
+// because this one checks the literal file being written, independent of
+// what the session's registered design claims to touch, and says so.
+//
+// It was an inline strings.Builder at its single call site until
+// 2026-08-24. That is exactly why it was missed in the first pass of the
+// readability rewrite: it was never a *Reason function, so it didn't turn
+// up alongside the others. Extracted so it goes through the same formatter
+// and is covered by the same tests.
+//
+// Lists every matched constraint (2026-08-22, was a single statement/type
+// pair) -- a file covered by several rules at once should deny with all of
+// them named up front, not reveal the next one only after a retry.
+func pathConstraintReason(filePath string, constraints []designConstraintInfo) string {
+	details := []denyDetail{{"File", filePath}}
+	for _, c := range constraints {
+		details = append(details,
+			denyDetail{},
+			denyDetail{"Rule", c.Statement},
+			denyDetail{"", "(" + constraintTypeText(c.Type) + ")"},
+		)
 	}
-	fmt.Fprintf(&b, "\n\nThis applies regardless of what your registered design claims to touch. If this is "+
-		"intentional and reviewed, record it as a justified divergence: `twing design resolve --id "+
-		"<your-design-id> --justify \"<reason>\"` (queues for human review -- an admin approving it is what "+
-		"unblocks you, not the justify call itself).")
-	return constraintMatched, b.String()
+
+	return denyMessage(
+		"This file is protected by one of your team's rules.",
+		"A human needs to approve changes here. This applies to the file itself, "+
+			"whatever your plan says it touches -- so registering a different plan "+
+			"won't get around it.",
+		details,
+		[]denyAction{
+			{
+				Label: "Edit something else instead",
+				Note:  "The simplest route, if this change isn't essential right now.",
+			},
+			{
+				Label:   "Or record why this change is needed",
+				Command: "twing design resolve --id <your-plan-id> --justify \"<reason>\"",
+				Note: "This goes to a project admin. Their approval is what unblocks " +
+					"you -- writing the justification does not.",
+			},
+		},
+	)
 }
 
 // handleEditWriteGate is the universal fallback (§17/spec §9a): if an agent
@@ -992,13 +1333,7 @@ func handleEditWriteGate(payload hookPayload) {
 	case "out_of_scope":
 		writeJSON(denyOutput("PreToolUse", outOfScopeReason(scopeMatch.DesignID, relPath)))
 	case "no_design":
-		writeJSON(denyOutput("PreToolUse",
-			"twing design coordinator: no design registered for this session yet. Either enter plan mode "+
-				"(ExitPlanMode registers one automatically), or run `twing design register --summary "+
-				"\"<what you are trying to achieve in this session, concretely>\" --creates a,b --touches c,d "+
-				"--depends-on e,f` directly, then retry this edit. The summary is what other sessions and human "+
-				"reviewers see when your work overlaps theirs -- describe the actual goal, not a placeholder.",
-		))
+		writeJSON(denyOutput("PreToolUse", noDesignReason()))
 	default:
 		logDesignGate("design scope check: unknown state %q (blocking)", scopeMatch.State)
 		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown state %q", scopeMatch.State)))
