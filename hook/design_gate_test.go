@@ -440,6 +440,72 @@ func TestHandleEditWriteGate_OutOfScope_DeniesWithAmendInstructions(t *testing.T
 	}
 }
 
+// Found live (2026-08-25): with more than one open design in the session,
+// the deny used to silently pick just one (and the *oldest* one, an
+// unrelated bug on the server side -- see app.ts's own comment) instead of
+// offering every candidate. This is the fix: every open design in
+// `openDesigns` gets its own amend command.
+func TestHandleEditWriteGate_OutOfScope_MultipleOpenDesigns_OffersEveryOneAsAnAmendCandidate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/constraints/match":
+			_, _ = w.Write([]byte(`{"matched":false}`))
+		case "/v1/designs/scope-match":
+			_, _ = w.Write([]byte(`{"state":"out_of_scope","designId":"d-newest","openDesigns":[
+				{"id":"d-newest","summary":"the current task"},
+				{"id":"d-oldest","summary":"an earlier, unrelated task"}
+			]}`))
+		}
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+	for _, want := range []string{"d-newest", "the current task", "d-oldest", "an earlier, unrelated task"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("reason missing %q -- every open design must be offered, not just one\n%s", want, reason)
+		}
+	}
+	if strings.Count(reason, "design amend --id") != 2 {
+		t.Errorf("reason should offer exactly 2 amend commands, one per open design:\n%s", reason)
+	}
+}
+
+func TestOutOfScopeReason_CapsTheListAndFoldsTheRestIntoACount(t *testing.T) {
+	candidates := make([]designSummary, 0, maxOutOfScopeCandidates+3)
+	for i := 0; i < maxOutOfScopeCandidates+3; i++ {
+		candidates = append(candidates, designSummary{ID: fmt.Sprintf("d%d", i), Summary: fmt.Sprintf("task %d", i)})
+	}
+	reason := outOfScopeReason(candidates[0].ID, "src/net/retry.ts", candidates)
+
+	if got := strings.Count(reason, "design amend --id"); got != maxOutOfScopeCandidates {
+		t.Errorf("amend commands = %d, want exactly the cap (%d)", got, maxOutOfScopeCandidates)
+	}
+	if !strings.Contains(reason, "3 more") {
+		t.Errorf("reason should say how many more are hidden (3), got:\n%s", reason)
+	}
+	if !strings.Contains(reason, "design list --mine --status open") {
+		t.Errorf("reason should point at `design list --mine --status open` to see the rest, got:\n%s", reason)
+	}
+	// The candidates past the cap must not leak into the message at all.
+	if strings.Contains(reason, candidates[maxOutOfScopeCandidates].ID) {
+		t.Errorf("reason names a candidate past the cap: %q", candidates[maxOutOfScopeCandidates].ID)
+	}
+}
+
+func TestOutOfScopeReason_SingleCandidate_NoCountingLanguage(t *testing.T) {
+	reason := outOfScopeReason("d1", "src/net/retry.ts", []designSummary{{ID: "d1", Summary: "the current task"}})
+	if strings.Contains(reason, "more than one") || strings.Contains(reason, "more open plan") {
+		t.Errorf("a single candidate must not talk about multiple plans:\n%s", reason)
+	}
+}
+
 func TestHandleEditWriteGate_NoCoordinatorConfigured_SilentNoOp(t *testing.T) {
 	repo := newTestRepo(t, "") // no .twing/twing.yml at all
 	setCachedToken(t, "http://unused.invalid", "")
@@ -981,7 +1047,11 @@ func allDenyMessages(t *testing.T) map[string]string {
 		"noDesign":           noDesignReason(),
 		"flagged":            flaggedDesignReason("11111111-2222-3333-4444-555555555555", false),
 		"flaggedPendingRev":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", true),
-		"outOfScope":         outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts"),
+		"outOfScope":         outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", nil),
+		"outOfScopeMulti": outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", []designSummary{
+			{ID: "11111111-2222-3333-4444-555555555555", Summary: "add retry with backoff"},
+			{ID: "66666666-7777-8888-9999-000000000000", Summary: "unrelated debounce helper"},
+		}),
 		"dormant":            dormantDesignReason("11111111-2222-3333-4444-555555555555", "adds retry", 7200000),
 		"overlap":            overlapReason(overlap),
 		"constraint":         constraintReason(constraint),
@@ -1088,6 +1158,22 @@ func TestDormantDesignReason_OmitsMissingSummary(t *testing.T) {
 	}
 	if !strings.Contains(msg, "What now") {
 		t.Errorf("should still render actions, got %q", msg)
+	}
+}
+
+// The "no design" deny previously offered only "register something new"
+// (plan mode, or `design register`) -- a session with an already-open
+// design elsewhere in the project (e.g. from earlier the same day) had no
+// suggested path to join it instead, which is most of why unrelated small
+// fixes ended up as their own untracked designs rather than `--group`-linked
+// into the ongoing effort (twing-cli issue, 2026-08-25).
+func TestNoDesignReason_SuggestsJoiningAnExistingOpenDesign(t *testing.T) {
+	msg := noDesignReason()
+	if !strings.Contains(msg, "twing design list --mine --status open") {
+		t.Errorf("should point at listing the caller's own open designs, got %q", msg)
+	}
+	if !strings.Contains(msg, "amend --id") || !strings.Contains(msg, "--group") {
+		t.Errorf("should suggest amend --group as the follow-up, got %q", msg)
 	}
 }
 

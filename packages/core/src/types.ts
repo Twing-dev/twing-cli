@@ -253,8 +253,17 @@ export interface DesignConstraint {
  * `DesignCheckResult` (design-checks.ts's tiers 1-4 run synchronously
  * against the request that triggered them); only ever set via
  * `DesignRegistry.flag()` from the async comparator pass, after its
- * response has already been sent. */
-export type DesignVerdict = "clean" | "overlap" | "constraint_flag" | "conflict";
+ * response has already been sent.
+ *
+ * `"has_open_designs"` (2026-08-25): a pre-registration check, distinct from
+ * the tiers above in that it runs *before* any row exists for this request
+ * at all -- `overlap`/`constraint_flag`/`conflict` all presuppose a design
+ * was already created and are about that design's relationship to others;
+ * this one is about whether registration should even proceed. Only reachable
+ * from `POST /v1/designs/check`'s structured (non-`rawPlanText`) path, i.e.
+ * `twing design register`, never `ExitPlanMode` -- see
+ * `DesignCheckResult.openDesigns`'s doc comment. */
+export type DesignVerdict = "clean" | "overlap" | "constraint_flag" | "conflict" | "has_open_designs";
 
 /** 2026-08-19: an `overlap`/`constraint_flag` verdict is no longer
  * uniformly blocking -- `severity` says which of the two it is. `"warning"`
@@ -291,7 +300,10 @@ export interface DesignConflict {
 
 export interface DesignCheckResult {
   verdict: DesignVerdict;
-  designId: string;
+  /** Absent only for `"has_open_designs"` -- that verdict fires *before* a
+   * row is created (see DesignVerdict's own doc comment), so there is no id
+   * to report yet. Every other verdict always has one. */
+  designId?: string;
   conflicts?: DesignConflict[];
   /** Every constraint the checked scope matched (2026-08-22 -- was a single
    * `constraint` object; `matchConstraintsForPaths` used to collapse to one
@@ -302,6 +314,12 @@ export interface DesignCheckResult {
   constraints?: { id: string; statement: string; type: DesignConstraintType }[];
   /** See DesignSeverity. Undefined for `"clean"`. */
   severity?: DesignSeverity;
+  /** Set only for `"has_open_designs"` (2026-08-25) -- the developer's other
+   * currently-open designs, cross-project, that a plain `twing design
+   * register` call found before creating a new row. Lets the CLI print
+   * "here's what you already have open" without a second round trip. Never
+   * set for any other verdict. */
+  openDesigns?: { id: string; projectId: string; summary: string; lastActivityAt: number }[];
 }
 
 export interface PendingReview {

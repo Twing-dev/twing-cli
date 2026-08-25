@@ -54,7 +54,9 @@ interface DesignConflictJSON {
 
 interface DesignCheckResponseJSON {
   error?: string;
-  verdict?: "clean" | "overlap" | "constraint_flag";
+  verdict?: "clean" | "overlap" | "constraint_flag" | "has_open_designs";
+  /** Absent only for `"has_open_designs"` -- that verdict fires before any
+   * row is created. See DesignVerdict's own doc comment in core/types.ts. */
   designId?: string;
   /** §17 design linking (2026-08) -- the design's own groupId, self-assigned
    * or caller-supplied. Copy this into a sibling repo's
@@ -69,6 +71,10 @@ interface DesignCheckResponseJSON {
    * currently) is display-only, undefined/"error" means today's original
    * blocking behavior. See DesignSeverity's doc comment in core/types.ts. */
   severity?: "warning" | "error";
+  /** Set only for `"has_open_designs"` (2026-08-25, "force a choice"
+   * registration-sprawl fix) -- the developer's other currently-open
+   * designs, cross-project, found before this registration was created. */
+  openDesigns?: { id: string; projectId: string; summary: string; lastActivityAt: number }[];
 }
 
 async function parseJsonOrUnauthorized<T>(res: Response): Promise<T | { error: string }> {
@@ -81,7 +87,11 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
     console.error(`twing design: ${result.error}`);
     return;
   }
-  console.log(`verdict: ${result.verdict}${result.severity ? ` (${result.severity})` : ""}  design: ${result.designId}`);
+  // "has_open_designs" (2026-08-25) has no designId -- no row exists yet
+  // for this verdict, see DesignCheckResult.designId's own doc comment.
+  console.log(
+    `verdict: ${result.verdict}${result.severity ? ` (${result.severity})` : ""}` + (result.designId ? `  design: ${result.designId}` : ""),
+  );
   if (result.groupId) {
     // §17 design linking (2026-08): the copy-paste hint for linking a
     // sibling-repo registration to this one.
@@ -106,6 +116,15 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
       console.log(`  [${c.type}] ${c.statement}`);
     }
     console.log(`  -> adjust your plan, or run: twing design resolve --id ${result.designId} --justify "<reason>"`);
+  } else if (result.verdict === "has_open_designs") {
+    // "Force a choice" registration-sprawl fix (2026-08-25): no row was
+    // created for this call -- nothing to point `resolve`/`close` at yet.
+    for (const d of result.openDesigns ?? []) {
+      console.log(`  open: ${d.id}  (project ${d.projectId}) -- "${d.summary || "no summary"}"`);
+    }
+    console.log(`  -> if this is a continuation, link it: twing design register ... --group <id>`);
+    console.log(`  -> if that work is done, close it first: twing design close --id <id>`);
+    console.log(`  -> if this is genuinely new, override: twing design register ... --force`);
   }
 }
 
@@ -121,6 +140,11 @@ export interface RegisterOptions {
    * design (typically in another repo) sharing the same unit of work --
    * pass the `groupId` printed by that design's own registration. */
   group?: string;
+  /** "Force a choice" registration-sprawl fix (2026-08-25): explicit
+   * override of the has-open-designs pre-registration check -- for a
+   * genuinely new, unrelated design registered while another is still
+   * open. See DesignCheckRequestBody.force's doc comment (packages/server). */
+  force?: boolean;
 }
 
 /**
@@ -187,6 +211,7 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
         touches: splitList(options.touches),
         dependsOn: splitList(options.dependsOn),
         ...(options.group ? { groupId: options.group } : {}),
+        ...(options.force ? { force: true } : {}),
       }),
     },
     authToken,
@@ -376,6 +401,14 @@ export async function runDesignResume(options: ResumeOptions): Promise<void> {
 export interface ListOptions {
   cwd: string;
   status?: string;
+  /** Filters to designs registered under the caller's own `developerId` --
+   * purely client-side (the server response already carries `developerId`
+   * per row; this just narrows what gets printed), so no new query param.
+   * Point of this flag: give a session hitting `noDesignReason()`'s "no
+   * design registered" deny a fast way to check whether it already has an
+   * open design elsewhere in the project it should join (`amend --group`)
+   * instead of registering a fresh one for the same ongoing effort. */
+  mine?: boolean;
 }
 
 /** Coarse, human-readable approximation ("3h ago", "2d ago") -- mirrors
@@ -404,9 +437,10 @@ export async function runDesignList(options: ListOptions): Promise<void> {
     return;
   }
   const body = (await res.json()) as {
-    items?: { id: string; status: string; summary: string; creates: string[]; touches: string[]; lastActivityAt?: number }[];
+    items?: { id: string; status: string; summary: string; creates: string[]; touches: string[]; lastActivityAt?: number; developerId: string }[];
   };
-  for (const d of body.items ?? []) {
+  const items = options.mine ? (body.items ?? []).filter((d) => d.developerId === developerId) : (body.items ?? []);
+  for (const d of items) {
     const activity = d.lastActivityAt ? `  last activity ${relativeTime(d.lastActivityAt)}` : "";
     console.log(`${d.id}  [${d.status}]${activity}  ${d.summary || "(no summary)"}  creates=${d.creates.join(",")}  touches=${d.touches.join(",")}`);
   }

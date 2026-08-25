@@ -38,6 +38,15 @@ export function addGithubRemote(repo: string, owner: string, name: string): void
   execFileSync("git", ["remote", "add", "origin", `https://github.com/${owner}/${name}.git`], { cwd: repo });
 }
 
+/** Sets a `tmpRepo()`'s local `user.email` -- a fresh `git init` has none of
+ * its own, so `computeDeveloperId` (git-email-derived) would otherwise fall
+ * through to whatever's in the *host machine's* global git config, which is
+ * unset/unpredictable in CI. Needed by any test that depends on a specific,
+ * deterministic `developerId` (e.g. `--mine` filtering). */
+export function setUserEmail(repo: string, email: string): void {
+  execFileSync("git", ["config", "user.email", email], { cwd: repo });
+}
+
 /** Points `os.homedir()` (via $HOME) at an isolated dir for the duration of
  * `run` -- never touches the real machine's `~/.twing/config.json`, same
  * reasoning as the Go gate tests' `setCachedToken`. */

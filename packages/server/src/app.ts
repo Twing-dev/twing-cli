@@ -61,6 +61,12 @@ interface DesignCheckRequestBody {
   // link label. Optional: self-assigned server-side to this design's own
   // id when omitted. See DesignStatement.groupId (@twing/core).
   groupId?: string;
+  // "Force a choice" registration-sprawl fix (2026-08-25): explicit opt-out
+  // of the has-open-designs pre-registration check below, for a developer
+  // who's deliberately starting a genuinely new, unrelated design while
+  // another is still open. Like groupId, not identity-bearing -- just a
+  // caller-chosen override, never itself a source of authorization.
+  force?: boolean;
 }
 
 interface ResolveRequestBody {
@@ -856,6 +862,30 @@ export function createApp(options: CreateAppOptions = {}) {
         }
       }
     }
+    // "Force a choice" registration-sprawl fix (2026-08-25): before creating
+    // yet another open design, make sure the developer isn't just about to
+    // fragment work they already have open elsewhere. Deliberately scoped to
+    // exactly the structured `twing design register` path -- `ExitPlanMode`
+    // (rawPlanText) always registers unchanged; see this plan's own doc
+    // comment / commit message for why blocking it too would require
+    // guessing at a retry-safe auto-link the way an earlier version of this
+    // feature wrongly did. `groupId`/`force` are the two explicit escape
+    // hatches: a caller who already knows which existing design this
+    // continues, or one deliberately overriding, skips the check entirely.
+    // No row is created if this fires -- unlike overlap/constraint_flag,
+    // which register-then-flag, there's nothing yet worth flagging, so
+    // don't create the very clutter this exists to prevent.
+    if (!body.rawPlanText && !body.groupId && !body.force) {
+      const openForDeveloper = designs.openDesignsForDeveloper(identity.developerId, Date.now());
+      if (openForDeveloper.length > 0) {
+        return c.json({
+          verdict: "has_open_designs",
+          severity: "error",
+          openDesigns: openForDeveloper.map((d) => ({ id: d.id, projectId: d.projectId, summary: d.summary, lastActivityAt: d.lastActivityAt })),
+        });
+      }
+    }
+
     design ??= designs.register({
       projectId: body.projectId,
       developerId: identity.developerId,
@@ -923,24 +953,35 @@ export function createApp(options: CreateAppOptions = {}) {
 
     // §17 design lifecycle (2026-08): registering a new design is a much
     // faster, more precise signal of context-switch than any inactivity
-    // window -- if this session already has other open/flagged designs
-    // that this one genuinely doesn't overlap, nudge about it. Advisory
-    // only: nothing about the sibling's status/lastActivityAt changes here
-    // -- dormancy stays driven by inactivity alone, this is purely
-    // informational.
+    // window -- if this developer already has other open designs that this
+    // one genuinely doesn't overlap, nudge about it. Advisory only: nothing
+    // about the sibling's status/lastActivityAt changes here -- dormancy
+    // stays driven by inactivity alone, this is purely informational.
+    //
+    // Broadened 2026-08-25 ("force a choice" registration-sprawl fix) from
+    // `openDesigns(projectId, ...)` filtered to same-session, to
+    // `openDesignsForDeveloper` -- cross-project and no longer
+    // session-restricted (session-scoping was only ever load-bearing for an
+    // earlier, abandoned ExitPlanMode-blocking approach; see this feature's
+    // plan/commit message). This is `ExitPlanMode`'s entire half of that
+    // feature: it never blocks, it just gets a wider, more useful version of
+    // this same notice.
     //
     // Deliberately `pathsOverlap`, not `outcome.conflicts` (2026-08-22): a
-    // same-session sibling is the same developer by construction, and
+    // same-developer sibling is the same developer by construction, and
     // `outcome.conflicts` now excludes same-developer pairs entirely (see
     // design-checks.ts's top-of-file comment) -- reusing it here would make
     // every sibling look "non-overlapping" regardless of whether their
-    // scopes actually collide, a wrong message, not just a missed one.
-    const staleSiblings = open.filter((d) => d.sessionId === body.sessionId && !pathsOverlap(design, d));
+    // scopes actually collide, a wrong message, not just a missed one. A
+    // cross-project sibling is never path-comparable at all, so it always
+    // qualifies as "doesn't overlap" and always gets the notice.
+    const staleSiblings = designs.openDesignsForDeveloper(identity.developerId, Date.now(), design.id).filter((d) => !pathsOverlap(design, d));
     for (const sibling of staleSiblings) {
       const message =
         `twing design coordinator: you also have design ${sibling.id} [${sibling.status}] open ` +
         `("${sibling.summary || "no summary"}") that this new design doesn't touch. If that work is done, ` +
-        `close it: twing design close --id ${sibling.id}`;
+        `close it: twing design close --id ${sibling.id} -- or if it's the same effort, link them: ` +
+        `twing design amend --id ${design.id} --group ${sibling.id}`;
       activityLog.append({
         projectId: body.projectId,
         developerId: identity.developerId,
@@ -1321,7 +1362,21 @@ export function createApp(options: CreateAppOptions = {}) {
         designs.touch(hit.id);
         return c.json({ state: "in_scope", designId: hit.id });
       }
-      return c.json({ state: "out_of_scope", designId: openOnes[openOnes.length - 1].id });
+      // Found live (2026-08-25): with more than one open design for this
+      // session, this used to hand back `openOnes[openOnes.length - 1]` --
+      // since `openOnes` inherits `listByProject`'s newest-first order
+      // (design-store.ts), that's the *oldest* open design, not the most
+      // recently registered/active one. A single-candidate guess should at
+      // least guess the most likely one; `designId` here is now
+      // `openOnes[0]`, the newest. `openDesigns` is new -- every open
+      // candidate for this session (still newest-first), so the caller
+      // (the Go hook's deny message) can offer all of them instead of
+      // silently picking just one.
+      return c.json({
+        state: "out_of_scope",
+        designId: openOnes[0].id,
+        openDesigns: openOnes.map((d) => ({ id: d.id, summary: d.summary })),
+      });
     }
 
     const dormantOnes = sessionDesigns.filter((d) => d.status === "dormant");

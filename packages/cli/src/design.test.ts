@@ -22,7 +22,7 @@ import {
   runDesignEnableGate,
   runDesignDisableGate,
 } from "./design.js";
-import { tmpRepo, withHome, cacheToken, withMockFetch, withEnv, captureConsole, jsonResponse, captureFetch } from "./test-support.js";
+import { tmpRepo, withHome, cacheToken, withMockFetch, withEnv, captureConsole, jsonResponse, captureFetch, setUserEmail } from "./test-support.js";
 
 const SERVER_URL = "http://localhost:9999";
 
@@ -131,6 +131,50 @@ test("runDesignRegister: prints no group line when the response has no groupId",
     const repo = tmpRepo(SERVER_URL);
     const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo" })));
     assert.ok(!logs.some((l) => l.includes("group:")), 'must not print "group: undefined" or similar when groupId is absent');
+  });
+});
+
+// "Force a choice" registration-sprawl fix (2026-08-25)
+
+test("runDesignRegister: --force sends force: true in the request body", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1", groupId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "genuinely new", force: true }));
+    const body = calls[0].body as Record<string, unknown>;
+    assert.equal(body.force, true);
+  });
+});
+
+test("runDesignRegister: omitting --force sends no force field at all", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1", groupId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo" }));
+    const body = calls[0].body as Record<string, unknown>;
+    assert.equal("force" in body, false, "must be omitted entirely, not sent as an explicit false");
+  });
+});
+
+test("runDesignRegister: a has_open_designs verdict lists the other open designs and the three next-step commands", async () => {
+  const { fetch } = captureFetch(
+    jsonResponse({
+      verdict: "has_open_designs",
+      severity: "error",
+      openDesigns: [{ id: "d-old", projectId: "proj-x", summary: "an older, still-open task", lastActivityAt: 1 }],
+    }),
+  );
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "new task" })));
+    assert.ok(logs.some((l) => l.includes("verdict: has_open_designs")));
+    assert.ok(logs.some((l) => l.includes("d-old") && l.includes("an older, still-open task")));
+    assert.ok(logs.some((l) => l.includes("--group")));
+    assert.ok(logs.some((l) => l.includes("design close")));
+    assert.ok(logs.some((l) => l.includes("--force")));
   });
 });
 
@@ -299,6 +343,45 @@ test("runDesignList: appends ?status= and prints last-activity staleness", async
     const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignList({ cwd: repo, status: "dormant" })));
     assert.match(calls[0].url, /[?&]status=dormant/);
     assert.ok(logs.some((l) => l.includes("[dormant]") && l.includes("last activity 2h ago") && l.includes("old work")));
+  });
+});
+
+test("runDesignList: --mine filters to the caller's own developerId, client-side, sending no extra query param", async () => {
+  const { fetch, calls } = captureFetch(
+    jsonResponse({
+      items: [
+        { id: "mine", status: "open", summary: "my work", creates: [], touches: [], developerId: "erin@example.com" },
+        { id: "theirs", status: "open", summary: "someone else's work", creates: [], touches: [], developerId: "someone-else@example.com" },
+      ],
+    }),
+  );
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    setUserEmail(repo, "erin@example.com");
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignList({ cwd: repo, mine: true })));
+    assert.ok(!calls[0].url.includes("mine"), "filtering is client-side -- no ?mine= param sent");
+    assert.ok(logs.some((l) => l.includes("my work")));
+    assert.ok(!logs.some((l) => l.includes("someone else's work")));
+  });
+});
+
+test("runDesignList: without --mine, prints every design regardless of developerId", async () => {
+  const { fetch } = captureFetch(
+    jsonResponse({
+      items: [
+        { id: "mine", status: "open", summary: "my work", creates: [], touches: [], developerId: "erin@example.com" },
+        { id: "theirs", status: "open", summary: "someone else's work", creates: [], touches: [], developerId: "someone-else@example.com" },
+      ],
+    }),
+  );
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    setUserEmail(repo, "erin@example.com");
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignList({ cwd: repo })));
+    assert.ok(logs.some((l) => l.includes("my work")));
+    assert.ok(logs.some((l) => l.includes("someone else's work")));
   });
 });
 
