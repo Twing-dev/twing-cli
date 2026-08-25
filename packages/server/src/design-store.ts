@@ -316,6 +316,15 @@ export class DesignRegistry {
        * gets this *same raw text* appended onto *its own* existing summary
        * independently, via `appendSummaryUpdate`, not a shared copy. */
       summaryUpdate?: string;
+      /** §17 design linking (2026-08): join (or move to) a different
+       * group after registration -- `groupId` was previously only ever
+       * settable at `register()` time. Same no-existence-check trust
+       * model as `register`'s own `--group`: this is a plain reassignment
+       * of `id`'s own `groupId` column, never validated against a real
+       * row. If `summaryUpdate` is also set in this same call, the fan-out
+       * below targets whichever group this resolves to (the *new* one),
+       * not whatever `id` was grouped with before this call. */
+      groupId?: string;
     },
   ): DesignStatement | undefined {
     const existing = this.get(id);
@@ -334,6 +343,7 @@ export class DesignRegistry {
         // calling here, so this is a plain assignment, not a merge decision
         // made at this layer.
         ...(delta.summary !== undefined ? { summary: delta.summary } : {}),
+        ...(delta.groupId !== undefined ? { groupId: delta.groupId } : {}),
         scopeVersion,
         lastActivityAt: Date.now(), // §17 design lifecycle: amending is itself real activity
       })
@@ -351,6 +361,7 @@ export class DesignRegistry {
         addedCreates: delta.creates ?? [],
         addedDependsOn: delta.dependsOn ?? [],
         ...(delta.summary !== undefined ? { newSummary: delta.summary } : {}),
+        ...(delta.groupId !== undefined ? { newGroupId: delta.groupId } : {}),
       },
     });
 
@@ -364,11 +375,17 @@ export class DesignRegistry {
     // the project that minted it) is treated as sufficient authorization to
     // link a second project's design to it -- this is the user's explicit,
     // already-made trust decision for this feature, not an oversight.
-    if (delta.summaryUpdate !== undefined && existing.groupId) {
+    //
+    // `effectiveGroupId` reads `delta.groupId` first, not `existing.groupId`
+    // -- when this same call also just moved `id` into a different group
+    // (see this method's `groupId` param doc comment), the fan-out targets
+    // the group `id` is joining, not the one it's leaving.
+    const effectiveGroupId = delta.groupId ?? existing.groupId;
+    if (delta.summaryUpdate !== undefined && effectiveGroupId) {
       const siblings = this.db
         .select()
         .from(designsTable)
-        .where(and(eq(designsTable.groupId, existing.groupId), sql`${designsTable.id} != ${id}`))
+        .where(and(eq(designsTable.groupId, effectiveGroupId), sql`${designsTable.id} != ${id}`))
         .all() as DesignRow[];
       for (const sibRow of siblings) {
         const sib = fromDesignRow(sibRow);
@@ -381,7 +398,7 @@ export class DesignRegistry {
           kind: "design_amended",
           relatedId: sib.id,
           ts: Date.now(),
-          payload: { newSummary: sibSummary, propagatedFromDesignId: id, propagatedFromGroupId: existing.groupId },
+          payload: { newSummary: sibSummary, propagatedFromDesignId: id, propagatedFromGroupId: effectiveGroupId },
         });
       }
     }

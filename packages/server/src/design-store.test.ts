@@ -649,6 +649,65 @@ test("DesignRegistry: amend/close on an ungrouped design (groupId === own id) be
   registry.stop();
 });
 
+test("DesignRegistry: amend's groupId reassigns an ungrouped design's own groupId (join a group after the fact)", () => {
+  const registry = freshRegistry();
+  const anchor = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "anchor", creates: [], touches: [], dependsOn: [] });
+  const solo = registry.register({ projectId: "p2", developerId: "d2", sessionId: "s2", summary: "was solo", creates: [], touches: [], dependsOn: [] });
+  assert.equal(solo.groupId, solo.id, "starts as its own group of one");
+
+  const amended = registry.amend(solo.id, { groupId: anchor.id });
+  assert.equal(amended?.groupId, anchor.id);
+
+  const group = registry.listByGroup(anchor.id);
+  assert.deepEqual(
+    group.map((d) => d.id).sort(),
+    [anchor.id, solo.id].sort(),
+  );
+  registry.stop();
+});
+
+test("DesignRegistry: amend with both groupId and summaryUpdate propagates to the NEW group's siblings, not the old group's", () => {
+  const registry = freshRegistry();
+  const oldSibling = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "old group sibling", creates: [], touches: [], dependsOn: [] });
+  const mover = registry.register({ projectId: "p2", developerId: "d2", sessionId: "s2", summary: "mover", creates: [], touches: [], dependsOn: [], groupId: oldSibling.id });
+  const newAnchor = registry.register({ projectId: "p3", developerId: "d3", sessionId: "s3", summary: "new group anchor", creates: [], touches: [], dependsOn: [] });
+
+  registry.amend(mover.id, { groupId: newAnchor.id, summary: "mover\n\nUpdate: joined a new group", summaryUpdate: "joined a new group" });
+
+  assert.equal(registry.get(oldSibling.id)?.summary, "old group sibling", "the OLD group's sibling must not receive the update");
+  assert.match(registry.get(newAnchor.id)!.summary, /joined a new group$/, "the NEW group's sibling must receive it");
+  registry.stop();
+});
+
+test("DesignRegistry: a groupId-only amend (no scope/summary delta) succeeds and leaves everything else untouched", () => {
+  const registry = freshRegistry();
+  const anchor = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "anchor", creates: [], touches: [], dependsOn: [] });
+  const target = registry.register({ projectId: "p2", developerId: "d2", sessionId: "s2", summary: "unchanged summary", creates: ["a.ts"], touches: ["b.ts"], dependsOn: ["c.ts"] });
+
+  const amended = registry.amend(target.id, { groupId: anchor.id });
+  assert.equal(amended?.groupId, anchor.id);
+  assert.equal(amended?.summary, "unchanged summary");
+  assert.deepEqual(amended?.creates, ["a.ts"]);
+  assert.deepEqual(amended?.touches, ["b.ts"]);
+  assert.deepEqual(amended?.dependsOn, ["c.ts"]);
+  registry.stop();
+});
+
+test("DesignRegistry: amend's design_amended activity payload carries newGroupId", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const anchor = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "anchor", creates: [], touches: [], dependsOn: [] });
+  const target = registry.register({ projectId: "p2", developerId: "d2", sessionId: "s2", summary: "target", creates: [], touches: [], dependsOn: [] });
+
+  registry.amend(target.id, { groupId: anchor.id });
+
+  const events = log.eventsForRelatedId(target.id).filter((e) => e.kind === "design_amended");
+  assert.equal(events.length, 1);
+  assert.equal((events[0].payload as { newGroupId?: string }).newGroupId, anchor.id);
+  registry.stop();
+});
+
 test("DesignRegistry: close propagates to every open/flagged/dormant sibling across projects, leaves an already-closed sibling's closedAt untouched", () => {
   const registry = freshRegistry();
   // `c` closes first, *while solo* (same reasoning as the amend/propagation

@@ -272,6 +272,12 @@ export interface AmendOptions {
    * to explain *why* silently destroyed the design's entire original
    * context instead. */
   summary?: string;
+  /** §17 design linking (2026-08): join (or move to) a different group
+   * after registration -- same no-existence-check trust model as
+   * `register --group` (a groupId is a caller-supplied label, never
+   * validated against a real design). Printed back via the shared
+   * `group: <id>` hint in `printDesignVerdict`, same as `register`/`check`. */
+  group?: string;
 }
 
 /**
@@ -293,8 +299,8 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
   if (!options.id) {
     throw new Error("twing design amend: --id <designId> is required");
   }
-  if (!options.touches && !options.creates && !options.dependsOn && !options.summary) {
-    throw new Error("twing design amend: pass at least one of --touches, --creates, --depends-on, --summary");
+  if (!options.touches && !options.creates && !options.dependsOn && !options.summary && !options.group) {
+    throw new Error("twing design amend: pass at least one of --touches, --creates, --depends-on, --summary, --group");
   }
 
   const res = await authFetch(
@@ -307,6 +313,7 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
         addCreates: splitList(options.creates),
         addDependsOn: splitList(options.dependsOn),
         ...(options.summary ? { summary: options.summary } : {}),
+        ...(options.group ? { groupId: options.group } : {}),
       }),
     },
     authToken,
