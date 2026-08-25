@@ -30,6 +30,7 @@ import {
 import { extractDesign } from "./design-extract.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
+import { enrichReviews } from "./review-enrich.js";
 import { AlignmentThreadStore, buildAlignmentSummary } from "./alignment-store.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role } from "./identity-store.js";
@@ -1351,7 +1352,18 @@ export function createApp(options: CreateAppOptions = {}) {
     if (status !== "pending" && status !== "decided" && status !== "all") {
       return c.json({ error: "expected ?status= to be pending, decided, or all" }, 400);
     }
-    return c.json({ items: designs.listReviews(projectId, status) });
+    // Enriched (2026-08-25): a bare review row names the argument for
+    // letting work through without naming the work, so a reviewer had
+    // nothing to decide on. Assembled per request from rows that already
+    // exist -- no schema change, and no stored copy that could drift from
+    // the design it describes. Every added field is optional, so an older
+    // dashboard reading this is unaffected. See review-enrich.ts.
+    const items = enrichReviews(
+      designs.listReviews(projectId, status),
+      (id) => designs.get(id),
+      (id) => constraintStore.get(id),
+    );
+    return c.json({ items });
   });
 
   // twing-monitor v1: the dashboard's ActivityView -- newest-first,
