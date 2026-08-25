@@ -990,6 +990,7 @@ func allDenyMessages(t *testing.T) map[string]string {
 		"authRejected403":    authRejectedReason(http.StatusForbidden, "https://coordination-server.twing.dev"),
 		"unreachable":        unreachableReason(fmt.Errorf("connection refused")),
 		"coordinatorError":   coordinatorErrorReason("unexpected status 500"),
+		"pathConstraint":     pathConstraintReason("hook/design_gate.go", []designConstraintInfo{{Statement: "the gate's own verdict/deny logic", Type: "review_required"}}),
 		"ambiguousMultiRepo": ambiguousMultiRepoReason([]childCoordinator{{DirName: "api"}, {DirName: "web"}}),
 	}
 }
@@ -1102,5 +1103,37 @@ func TestDenyOutput_SeparatesAgentNoteFromUserText(t *testing.T) {
 	}
 	if strings.Index(reason, "---\nNote for the agent:") < strings.Index(reason, "What now") {
 		t.Error("agent note should come after the user-facing content")
+	}
+}
+
+// There are two constraint denials, not one: constraintReason covers the
+// ExitPlanMode path, pathConstraintReason the Edit/Write ground-truth
+// backstop. The second was missed in the first pass of the readability
+// rewrite (2026-08-24) because it was an inline strings.Builder rather than
+// a *Reason function, so it didn't turn up alongside the others -- found
+// only by driving the real binary against a real coordinator. This asserts
+// both, so a third one can't hide the same way.
+func TestBothConstraintPaths_LeadWithPlainSentence(t *testing.T) {
+	rules := []designConstraintInfo{{Statement: "money paths need a second pair of eyes", Type: "review_required"}}
+
+	planPath := constraintReason(designCheckResponse{DesignID: "11111111-2222-3333-4444-555555555555", Constraints: rules})
+	editPath := pathConstraintReason("src/billing/charge.ts", rules)
+
+	for name, msg := range map[string]string{"ExitPlanMode": planPath, "Edit/Write": editPath} {
+		headline := strings.SplitN(msg, "\n", 2)[0]
+		if strings.HasPrefix(headline, "twing design coordinator:") {
+			t.Errorf("%s: still leads with the old machine-facing prefix: %q", name, headline)
+		}
+		if !strings.Contains(msg, "What now") {
+			t.Errorf("%s: no 'What now' section", name)
+		}
+		if !strings.Contains(msg, "a human must review changes here") {
+			t.Errorf("%s: constraint type not translated to plain language", name)
+		}
+	}
+
+	// The Edit/Write path names the specific file; the plan path does not.
+	if !strings.Contains(editPath, "src/billing/charge.ts") {
+		t.Error("Edit/Write path should name the file being written")
 	}
 }

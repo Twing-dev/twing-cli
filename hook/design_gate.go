@@ -1187,19 +1187,52 @@ func checkPathConstraint(serverURL, authToken, developerID, projectID, sessionID
 	if !result.Matched || len(result.Constraints) == 0 {
 		return constraintClear, ""
 	}
-	// Lists every matched constraint (2026-08-22, was a single %s rule: %q
-	// pair) -- same reasoning as constraintReason above: a file covered by
-	// several rules at once should deny with all of them named up front.
-	var b strings.Builder
-	fmt.Fprintf(&b, "twing design coordinator: %s is covered by %d existing rule(s):", filePath, len(result.Constraints))
-	for _, c := range result.Constraints {
-		fmt.Fprintf(&b, "\n- [%s] %s", c.Type, c.Statement)
+	return constraintMatched, pathConstraintReason(filePath, result.Constraints)
+}
+
+// pathConstraintReason is the §17.9 ground-truth backstop's own deny --
+// deliberately separate from constraintReason (the ExitPlanMode path)
+// because this one checks the literal file being written, independent of
+// what the session's registered design claims to touch, and says so.
+//
+// It was an inline strings.Builder at its single call site until
+// 2026-08-24. That is exactly why it was missed in the first pass of the
+// readability rewrite: it was never a *Reason function, so it didn't turn
+// up alongside the others. Extracted so it goes through the same formatter
+// and is covered by the same tests.
+//
+// Lists every matched constraint (2026-08-22, was a single statement/type
+// pair) -- a file covered by several rules at once should deny with all of
+// them named up front, not reveal the next one only after a retry.
+func pathConstraintReason(filePath string, constraints []designConstraintInfo) string {
+	details := []denyDetail{{"File", filePath}}
+	for _, c := range constraints {
+		details = append(details,
+			denyDetail{},
+			denyDetail{"Rule", c.Statement},
+			denyDetail{"", "(" + constraintTypeText(c.Type) + ")"},
+		)
 	}
-	fmt.Fprintf(&b, "\n\nThis applies regardless of what your registered design claims to touch. If this is "+
-		"intentional and reviewed, record it as a justified divergence: `twing design resolve --id "+
-		"<your-design-id> --justify \"<reason>\"` (queues for human review -- an admin approving it is what "+
-		"unblocks you, not the justify call itself).")
-	return constraintMatched, b.String()
+
+	return denyMessage(
+		"This file is protected by one of your team's rules.",
+		"A human needs to approve changes here. This applies to the file itself, "+
+			"whatever your plan says it touches -- so registering a different plan "+
+			"won't get around it.",
+		details,
+		[]denyAction{
+			{
+				Label: "Edit something else instead",
+				Note:  "The simplest route, if this change isn't essential right now.",
+			},
+			{
+				Label:   "Or record why this change is needed",
+				Command: "twing design resolve --id <your-plan-id> --justify \"<reason>\"",
+				Note: "This goes to a project admin. Their approval is what unblocks " +
+					"you -- writing the justification does not.",
+			},
+		},
+	)
 }
 
 // handleEditWriteGate is the universal fallback (§17/spec §9a): if an agent
