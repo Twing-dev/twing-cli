@@ -1760,7 +1760,7 @@ test("POST /v1/designs/:id/amend: a clean amendment persists, bumps scopeVersion
           headers: { "content-type": "application/json", ...bearer(admin.token) },
           body: JSON.stringify({ addTouches: ["b.ts"] }),
         });
-        assert.deepEqual(await amendRes.json(), { verdict: "clean", designId });
+        assert.deepEqual(await amendRes.json(), { verdict: "clean", designId, groupId: designId });
       },
     ),
   );
@@ -1793,7 +1793,7 @@ test("POST /v1/designs/:id/amend: a summary-only amendment appends an Update ent
           headers: { "content-type": "application/json", ...bearer(admin.token) },
           body: JSON.stringify({ summary: "the corrected summary" }),
         });
-        assert.deepEqual(await amendRes.json(), { verdict: "clean", designId });
+        assert.deepEqual(await amendRes.json(), { verdict: "clean", designId, groupId: designId });
       },
     ),
   );
@@ -1803,6 +1803,75 @@ test("POST /v1/designs/:id/amend: a summary-only amendment appends an Update ent
   const amended = listBody.items.find((d) => d.id === designId);
   assert.match(amended?.summary ?? "", /^placeholder\n\nUpdate \(\d{4}-\d{2}-\d{2}\): the corrected summary$/, "original summary must survive, new text appended as a dated Update entry");
   assert.deepEqual(amended?.touches, ["a.ts"], "amend --summary alone must not touch the existing scope");
+});
+
+test("POST /v1/designs/:id/amend: a groupId-only body joins a group after the fact, and doesn't hit the 400 guard", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const anchorRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "anchor", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const anchor = (await anchorRes.json()) as { designId: string; groupId?: string };
+
+  const soloRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "was solo", creates: [], touches: ["b.ts"], dependsOn: [] }),
+  });
+  const solo = (await soloRes.json()) as { designId: string; groupId?: string };
+  assert.equal(solo.groupId, solo.designId, "starts as its own group of one");
+
+  const amendRes = await app.request(`/v1/designs/${solo.designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ groupId: anchor.designId }),
+  });
+  assert.equal(amendRes.status, 200);
+  const amendBody = (await amendRes.json()) as { verdict: string; groupId?: string };
+  assert.equal(amendBody.verdict, "clean");
+  assert.equal(amendBody.groupId, anchor.designId);
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-b`, { headers: bearer(admin.token) });
+  const { items } = (await listRes.json()) as { items: { id: string; groupId?: string }[] };
+  assert.equal(items.find((d) => d.id === solo.designId)?.groupId, anchor.designId);
+});
+
+test("POST /v1/designs/:id/amend: groupId passes through checkAmendedScope's delta unused -- joining a group doesn't itself change the touches/creates/dependsOn conflict-check outcome", async () => {
+  // checkAmendedScope only ever reads touches/creates/dependsOn/summary off
+  // its delta (confirmed by reading it) -- this exercises that a
+  // groupId-only amend (no scope change at all) re-runs the same check
+  // registration already passed and still comes back clean, i.e. adding
+  // `groupId` to the delta shape didn't accidentally wire it into the
+  // conflict-detection candidate.
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const anchorRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "anchor", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const anchor = (await anchorRes.json()) as { designId: string };
+
+  const targetRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "target", creates: [], touches: ["b.ts"], dependsOn: [] }),
+  });
+  const target = (await targetRes.json()) as { designId: string; verdict: string };
+  assert.equal(target.verdict, "clean", "sanity: unrelated projects/paths, nothing to conflict with");
+
+  const amendRes = await app.request(`/v1/designs/${target.designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ groupId: anchor.designId }),
+  });
+  const amendBody = (await amendRes.json()) as { verdict: string; groupId?: string };
+  assert.equal(amendBody.verdict, "clean");
+  assert.equal(amendBody.groupId, anchor.designId);
 });
 
 test("POST /v1/designs/:id/amend: neither a scope delta nor a summary is a 400, not a silent no-op", async () => {

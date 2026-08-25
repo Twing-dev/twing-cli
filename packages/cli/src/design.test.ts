@@ -238,6 +238,27 @@ test("runDesignAmend: --summary alongside --touches sends both", async () => {
   });
 });
 
+test("runDesignAmend: --group alone satisfies the 'pass at least one of' guard and sends groupId", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1", groupId: "anchor-id" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignAmend({ cwd: repo, id: "d1", group: "anchor-id" })));
+    assert.deepEqual(calls[0].body, { addTouches: [], addCreates: [], addDependsOn: [], groupId: "anchor-id" });
+    assert.ok(logs.some((l) => l.includes("group: anchor-id") && l.includes("--group anchor-id")));
+  });
+});
+
+test("runDesignAmend: --group alongside --summary sends both", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1", groupId: "anchor-id" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await withMockFetch(fetch, () => runDesignAmend({ cwd: repo, id: "d1", summary: "joining the group", group: "anchor-id" }));
+    assert.deepEqual(calls[0].body, { addTouches: [], addCreates: [], addDependsOn: [], summary: "joining the group", groupId: "anchor-id" });
+  });
+});
+
 // --- runDesignResume ----------------------------------------------------------
 
 test("runDesignResume: sends sessionId plus the split scope delta", async () => {

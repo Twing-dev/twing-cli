@@ -81,6 +81,10 @@ interface AmendRequestBody {
   addCreates?: string[];
   addDependsOn?: string[];
   summary?: string;
+  /** §17 design linking (2026-08): join (or move to) a different group
+   * after registration -- see DesignRegistry.amend's `groupId` param doc
+   * comment for the full reasoning. */
+  groupId?: string;
 }
 
 // §17 design lifecycle (2026-08): sessionId is required -- resume
@@ -1110,9 +1114,10 @@ export function createApp(options: CreateAppOptions = {}) {
       // this design's merged one. See DesignRegistry.amend's `summaryUpdate`
       // param doc comment.
       summaryUpdate: body?.summary,
+      groupId: body?.groupId,
     };
-    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined) {
-      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary" }, 400);
+    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.groupId === undefined) {
+      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/groupId" }, 400);
     }
 
     const { outcome, open } = checkAmendedScope(design, delta);
@@ -1166,12 +1171,12 @@ export function createApp(options: CreateAppOptions = {}) {
         designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
       }
       runSemanticComparatorPass(id, open);
-      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraints: outcome.constraints, severity: outcome.severity });
+      return c.json({ verdict: outcome.verdict, designId: id, groupId: amended.groupId, conflicts: outcome.conflicts, constraints: outcome.constraints, severity: outcome.severity });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} amended -> scopeVersion ${amended.scopeVersion}`);
     runSemanticComparatorPass(amended.id, open);
-    return c.json({ verdict: "clean", designId: amended.id });
+    return c.json({ verdict: "clean", designId: amended.id, groupId: amended.groupId });
   });
 
   // §17 design lifecycle (2026-08): reactivate a *dormant* design -- always
