@@ -55,6 +55,12 @@ interface DesignCheckRequestBody {
   dependsOn?: string[];
   summary?: string;
   ttlMs?: number;
+  // §17 design linking (2026-08): unlike developerId (resolved from the
+  // authenticated identity, never client-supplied), groupId IS
+  // client-suppliable -- it's not identity-bearing, just a caller-chosen
+  // link label. Optional: self-assigned server-side to this design's own
+  // id when omitted. See DesignStatement.groupId (@twing/core).
+  groupId?: string;
 }
 
 interface ResolveRequestBody {
@@ -859,6 +865,7 @@ export function createApp(options: CreateAppOptions = {}) {
       // DesignStatement.rawPlanExcerpt's doc comment in @twing/core for why.
       rawPlanExcerpt: body.rawPlanText,
       ttlMs: body.ttlMs,
+      groupId: body.groupId,
     });
 
     const open = designs.openDesigns(body.projectId, Date.now(), design.id);
@@ -944,13 +951,22 @@ export function createApp(options: CreateAppOptions = {}) {
 
     runSemanticComparatorPass(design.id, open);
 
+    // groupId (§17 design linking, 2026-08): echoed back on every branch --
+    // post self-assignment, this is what lets a CLI caller that didn't pass
+    // --group still see the value to hand a sibling-repo registration.
     if (outcome.verdict === "clean") {
-      return c.json({ verdict: "clean", designId: design.id });
+      return c.json({ verdict: "clean", designId: design.id, groupId: design.groupId });
     }
     if (outcome.verdict === "constraint_flag") {
-      return c.json({ verdict: "constraint_flag", designId: design.id, constraints: outcome.constraints, severity: outcome.severity });
+      return c.json({
+        verdict: "constraint_flag",
+        designId: design.id,
+        groupId: design.groupId,
+        constraints: outcome.constraints,
+        severity: outcome.severity,
+      });
     }
-    return c.json({ verdict: "overlap", designId: design.id, conflicts: outcome.conflicts, severity: outcome.severity });
+    return c.json({ verdict: "overlap", designId: design.id, groupId: design.groupId, conflicts: outcome.conflicts, severity: outcome.severity });
   });
 
   // §17.5: adopt the conflicting design (superseded), or justify diverging
@@ -1081,7 +1097,20 @@ export function createApp(options: CreateAppOptions = {}) {
     // appendSummaryUpdate (which embeds the current date) and risking a
     // divergent result between "what got checked" and "what got saved".
     const summary = body?.summary !== undefined ? appendSummaryUpdate(design.summary, body.summary) : undefined;
-    const delta = { touches: body?.addTouches ?? [], creates: body?.addCreates ?? [], dependsOn: body?.addDependsOn ?? [], summary };
+    const delta = {
+      touches: body?.addTouches ?? [],
+      creates: body?.addCreates ?? [],
+      dependsOn: body?.addDependsOn ?? [],
+      summary,
+      // §17 design linking (2026-08): the raw, un-appended update text --
+      // `summary` above is already the *final merged* string for this one
+      // design; `designs.amend`'s groupId fan-out needs the raw text
+      // instead, so each linked sibling can independently append the same
+      // update onto its own summary rather than being overwritten with
+      // this design's merged one. See DesignRegistry.amend's `summaryUpdate`
+      // param doc comment.
+      summaryUpdate: body?.summary,
+    };
     if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined) {
       return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary" }, 400);
     }

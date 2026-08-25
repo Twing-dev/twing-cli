@@ -1448,6 +1448,178 @@ test("GET /v1/designs: newest-first, optionally filtered by status/sessionId", a
   );
 });
 
+// ---------------------------------------------------------------------------
+// §17 design linking (groupId) -- 2026-08
+// ---------------------------------------------------------------------------
+
+test("POST /v1/designs/check: with no groupId in the body, the response self-assigns and echoes groupId === designId", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "x", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const body = (await res.json()) as { verdict: string; designId: string; groupId?: string };
+  assert.equal(body.groupId, body.designId);
+});
+
+test("POST /v1/designs/check: a caller-supplied groupId links a registration in a different project, echoed back on the overlap verdict branch too", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const first = (await firstRes.json()) as { designId: string; groupId?: string };
+  assert.equal(first.groupId, first.designId);
+
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
+  });
+  const second = (await secondRes.json()) as { verdict: string; designId: string; groupId?: string };
+  assert.equal(second.verdict, "clean");
+  assert.equal(second.groupId, first.groupId);
+
+  // A different developer in proj-b registers a genuinely conflicting
+  // design against `second`'s own scope, to exercise the "overlap" verdict
+  // response branch specifically -- confirms groupId is echoed there too,
+  // not just on the "clean" branch (a separate `c.json()` call in the
+  // route that could otherwise be missed).
+  const otherPat = await addProjectMember(app, admin.token, "proj-b");
+  const conflictRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s3", summary: "conflicting", creates: ["b.ts"], touches: [], dependsOn: [] }),
+  });
+  const conflict = (await conflictRes.json()) as { verdict: string; designId: string; groupId?: string };
+  assert.equal(conflict.verdict, "overlap");
+  assert.equal(conflict.groupId, conflict.designId, "the conflicting design got its own default group, unrelated to the linked pair's");
+});
+
+test("POST /v1/designs/:id/amend: a summary update propagates to a linked sibling design in a different project", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "repo-A original", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const first = (await firstRes.json()) as { designId: string; groupId?: string };
+
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "repo-B original", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
+  });
+  const second = (await secondRes.json()) as { designId: string };
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      (async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: false, kind: null, reason: "" }) } }] }), { status: 200 })) as typeof fetch,
+      async () => {
+        const amendRes = await app.request(`/v1/designs/${first.designId}/amend`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ summary: "also handles pagination" }),
+        });
+        assert.equal(amendRes.status, 200);
+      },
+    ),
+  );
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-b`, { headers: bearer(admin.token) });
+  const { items } = (await listRes.json()) as { items: { id: string; summary: string }[] };
+  const sibling = items.find((d) => d.id === second.designId);
+  assert.match(sibling?.summary ?? "", /^repo-B original/, "sibling keeps its own original text");
+  assert.match(sibling?.summary ?? "", /also handles pagination$/, "sibling gains its own appended update from the linked amend");
+});
+
+test("PATCH /v1/designs/:id/close: closing one design closes its linked sibling in a different project -- deliberately no membership check against the sibling's own project", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const first = (await firstRes.json()) as { designId: string; groupId?: string };
+
+  // `admin` here is a member of proj-a (via bootstrap) but has never
+  // touched proj-b before this linked registration -- confirming the
+  // sibling still closes anyway is the point: possessing the groupId is
+  // treated as sufficient, this is the user's explicit trust decision for
+  // this feature (see DesignRegistry.close's own comment), not an
+  // oversight to be caught here.
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
+  });
+  const second = (await secondRes.json()) as { designId: string };
+
+  const closeRes = await app.request(`/v1/designs/${first.designId}/close`, { method: "PATCH", headers: bearer(admin.token) });
+  assert.equal(closeRes.status, 200);
+  assert.deepEqual(await closeRes.json(), { status: "closed" });
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-b`, { headers: bearer(admin.token) });
+  const { items } = (await listRes.json()) as { items: { id: string; status: string }[] };
+  assert.equal(items.find((d) => d.id === second.designId)?.status, "closed");
+});
+
+test("GET /v1/designs: items include groupId", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "x", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const { designId } = (await res.json()) as { designId: string };
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-1`, { headers: bearer(admin.token) });
+  const { items } = (await listRes.json()) as { items: { id: string; groupId?: string }[] };
+  const item = items.find((d) => d.id === designId);
+  assert.equal(item?.groupId, designId);
+});
+
+// Critical regression guard: grouping two designs across different projects
+// must NEVER let the gate's verdict logic compare across them -- openDesigns
+// stays strictly scoped to one projectId regardless of a shared groupId.
+test("POST /v1/designs/check: two linked designs in different projects with overlapping touches still verdict clean -- grouping never lets verdict logic compare across projects", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: [], touches: ["shared/path.ts"], dependsOn: [] }),
+  });
+  const first = (await firstRes.json()) as { designId: string; groupId?: string; verdict: string };
+  assert.equal(first.verdict, "clean");
+
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    // Deliberately the SAME path as `first`'s touches, in a DIFFERENT
+    // project, linked via groupId -- if openDesigns or any overlap check
+    // ever compared across projects because of the shared groupId, this
+    // would come back "overlap" instead of "clean".
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: [], touches: ["shared/path.ts"], dependsOn: [], groupId: first.groupId }),
+  });
+  const second = (await secondRes.json()) as { designId: string; groupId?: string; verdict: string };
+  assert.equal(second.verdict, "clean", "grouping must never suppress a real overlap, nor manufacture one across projects");
+  assert.equal(second.groupId, first.groupId);
+});
+
 test("GET /v1/designs/scope-match: no_design, in_scope, out_of_scope, and flagged", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);

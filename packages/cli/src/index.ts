@@ -97,7 +97,7 @@ function printUsage(): void {
       "  twing project revoke-invite --code <invite-code> [--server <url>]",
       "  twing project remove-developer --developer-id <id> [--project <id>] [--server <url>]",
       "  twing project list-developers [--project <id>] [--server <url>]",
-      "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f",
+      "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f [--group <groupId>]",
       "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
       "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f] [--summary \"...\"]",
       "  twing design resume --id <designId> [--session <id>] [--touches a,b] [--creates c,d] [--depends-on e,f]",
@@ -131,7 +131,16 @@ async function runDesignCommand(rest: string[]): Promise<void> {
 
   switch (sub) {
     case "register":
-      await runDesignRegister({ cwd, session: flags.session, label: flags.label, summary: flags.summary, creates: flags.creates, touches: flags.touches, dependsOn: flags["depends-on"] });
+      await runDesignRegister({
+        cwd,
+        session: flags.session,
+        label: flags.label,
+        summary: flags.summary,
+        creates: flags.creates,
+        touches: flags.touches,
+        dependsOn: flags["depends-on"],
+        group: flags.group,
+      });
       return;
     case "resolve":
       await runDesignResolve({ cwd, id: flags.id, adopt: flags.adopt, justify: flags.justify });

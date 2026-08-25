@@ -111,6 +111,12 @@ export const designs = sqliteTable(
   "designs",
   {
     id: text("id").primaryKey(),
+    /** §17 design linking (2026-08): cross-project label, self-assigned to
+     * `id` at registration when not supplied -- see `DesignStatement.groupId`'s
+     * doc comment (@twing/core) for the full reasoning. Nullable, no
+     * backfill for pre-existing rows (this schema's usual "never backfilled"
+     * convention -- a pre-migration design just has no group). */
+    groupId: text("group_id"),
     projectId: text("project_id").notNull(),
     developerId: text("developer_id").notNull(),
     sessionId: text("session_id").notNull(),
@@ -155,7 +161,11 @@ export const designs = sqliteTable(
      * key on), defaults to "[]" for pre-existing rows via the migration. */
     justifiedConflicts: text("justified_conflicts").notNull().default("[]"),
   },
-  (t) => [index("designs_project_id_idx").on(t.projectId), index("designs_session_id_idx").on(t.sessionId)],
+  (t) => [
+    index("designs_project_id_idx").on(t.projectId),
+    index("designs_session_id_idx").on(t.sessionId),
+    index("designs_group_id_idx").on(t.groupId),
+  ],
 );
 
 export const pendingReviews = sqliteTable(

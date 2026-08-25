@@ -549,6 +549,144 @@ test("DesignRegistry: reregisterFromPlan returns undefined for a nonexistent id"
   registry.stop();
 });
 
+// ---------------------------------------------------------------------------
+// §17 design linking (groupId) -- 2026-08
+// ---------------------------------------------------------------------------
+
+test("DesignRegistry: register self-assigns groupId to its own id when none is supplied", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
+  assert.equal(a.groupId, a.id);
+  registry.stop();
+});
+
+test("DesignRegistry: register honors a caller-supplied groupId", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
+  const b = registry.register({ projectId: "p2", developerId: "d1", sessionId: "s2", summary: "", creates: [], touches: [], dependsOn: [], groupId: a.id });
+  assert.equal(b.groupId, a.id);
+  assert.notEqual(b.groupId, b.id);
+  registry.stop();
+});
+
+test("DesignRegistry: listByGroup returns every row sharing a groupId across projects, regardless of status", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
+  const b = registry.register({ projectId: "p2", developerId: "d2", sessionId: "s2", summary: "", creates: [], touches: [], dependsOn: [], groupId: a.groupId });
+  registry.close(b.id);
+  const group = registry.listByGroup(a.groupId!);
+  assert.equal(group.length, 2);
+  assert.deepEqual(
+    group.map((d) => d.id).sort(),
+    [a.id, b.id].sort(),
+  );
+  registry.stop();
+});
+
+test("DesignRegistry: listByGroup returns empty for an unknown groupId", () => {
+  const registry = freshRegistry();
+  assert.deepEqual(registry.listByGroup("no-such-group"), []);
+  registry.stop();
+});
+
+test("DesignRegistry: amend's summaryUpdate propagates to a closed sibling in another project, appended onto the sibling's own summary", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  // `a` closes first, *while solo* (no siblings yet, so close()'s own
+  // fan-out has nothing to propagate to) -- then `b` joins `a`'s group
+  // afterward, open. This is the only reachable way to end up with one
+  // open and one closed member of the same group: close()'s fan-out (see
+  // its own test above) closes every open sibling the moment any one
+  // member is closed, so two designs can't independently be "linked, one
+  // open one closed" unless the closed one got there before the link
+  // existed.
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "repo-A original summary", creates: [], touches: [], dependsOn: [] });
+  registry.close(a.id);
+  const b = registry.register({
+    projectId: "p2",
+    developerId: "d2",
+    sessionId: "s2",
+    summary: "repo-B original summary",
+    creates: [],
+    touches: [],
+    dependsOn: [],
+    groupId: a.id,
+  });
+
+  registry.amend(b.id, { summary: "repo-B original summary\n\nUpdate: shared note", summaryUpdate: "shared note" });
+
+  const sibling = registry.get(a.id)!;
+  assert.equal(sibling.status, "closed", "propagation must not reopen a closed sibling");
+  assert.match(sibling.summary, /^repo-A original summary/, "sibling keeps its own original text, not the primary's");
+  assert.match(sibling.summary, /shared note$/, "sibling gains its own appended update, not the primary's full merged string");
+  assert.doesNotMatch(sibling.summary, /repo-B original summary/, "sibling must never receive the primary's own original text");
+
+  const propagated = log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_amended");
+  assert.equal(propagated.length, 1);
+  assert.equal((propagated[0].payload as { propagatedFromDesignId?: string }).propagatedFromDesignId, b.id);
+  registry.stop();
+});
+
+test("DesignRegistry: amend with only scope fields (no summaryUpdate) does not propagate to siblings", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] });
+  const b = registry.register({ projectId: "p2", developerId: "d2", sessionId: "s2", summary: "repo-B summary", creates: [], touches: [], dependsOn: [], groupId: a.groupId });
+
+  registry.amend(a.id, { touches: ["only-in-a.ts"] });
+
+  assert.equal(registry.get(b.id)?.summary, "repo-B summary");
+  registry.stop();
+});
+
+test("DesignRegistry: amend/close on an ungrouped design (groupId === own id) behave exactly as before -- no-op fan-out, no error", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "solo", creates: [], touches: [], dependsOn: [] });
+  const amended = registry.amend(a.id, { summary: "solo\n\nUpdate: note", summaryUpdate: "note" });
+  assert.equal(amended?.summary, "solo\n\nUpdate: note");
+  const closed = registry.close(a.id);
+  assert.equal(closed?.status, "closed");
+  registry.stop();
+});
+
+test("DesignRegistry: close propagates to every open/flagged/dormant sibling across projects, leaves an already-closed sibling's closedAt untouched", () => {
+  const registry = freshRegistry();
+  // `c` closes first, *while solo* (same reasoning as the amend/propagation
+  // test above: close()'s own fan-out would otherwise immediately close a
+  // and b too, the moment c joined their group, leaving nothing for the
+  // later close(a.id) call below to actually exercise). `a` and `b` join
+  // c's group afterward, both open.
+  const c = registry.register({ projectId: "p3", developerId: "d3", sessionId: "s3", summary: "", creates: [], touches: [], dependsOn: [] });
+  registry.close(c.id);
+  const cClosedAt = registry.get(c.id)!.closedAt;
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], groupId: c.id });
+  const b = registry.register({ projectId: "p2", developerId: "d2", sessionId: "s2", summary: "", creates: [], touches: [], dependsOn: [], groupId: c.id });
+
+  registry.close(a.id);
+
+  assert.equal(registry.get(a.id)?.status, "closed");
+  assert.equal(registry.get(b.id)?.status, "closed", "open sibling in a different project also closes");
+  assert.equal(registry.get(c.id)?.status, "closed");
+  assert.equal(registry.get(c.id)?.closedAt, cClosedAt, "already-closed sibling's closedAt is not re-stamped");
+  registry.stop();
+});
+
+test("DesignRegistry: close's sibling fan-out logs a design_closed event with propagatedFrom* payload", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
+  const b = registry.register({ projectId: "p2", developerId: "d2", sessionId: "s2", summary: "", creates: [], touches: [], dependsOn: [], groupId: a.groupId });
+
+  registry.close(a.id);
+
+  const events = log.eventsForRelatedId(b.id).filter((e) => e.kind === "design_closed");
+  assert.equal(events.length, 1);
+  assert.equal((events[0].payload as { propagatedFromDesignId?: string }).propagatedFromDesignId, a.id);
+  assert.equal((events[0].payload as { propagatedFromGroupId?: string }).propagatedFromGroupId, a.groupId);
+  registry.stop();
+});
+
 test("ConstraintStore: add is idempotent per (projectId, statement) and persists across instances", () => {
   const dataDir = tmpDataDir();
   const store1 = new ConstraintStore(createDb({ dataDir }));

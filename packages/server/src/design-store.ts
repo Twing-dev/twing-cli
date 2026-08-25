@@ -24,7 +24,7 @@ import {
 import type { Db } from "./db/client.js";
 import { designs as designsTable, pendingReviews as reviewsTable, constraints as constraintsTable } from "./db/schema.js";
 import { DrizzleActivityLog, type ActivityLogWriter } from "./activity-log.js";
-import { mergeDesignScope, overlapWaiverKey, type ConstraintHit } from "./design-checks.js";
+import { mergeDesignScope, appendSummaryUpdate, overlapWaiverKey, type ConstraintHit } from "./design-checks.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
 
@@ -47,6 +47,7 @@ export type NewDesignInput = Omit<
 
 interface DesignRow {
   id: string;
+  groupId: string | null;
   projectId: string;
   developerId: string;
   sessionId: string;
@@ -71,6 +72,7 @@ interface DesignRow {
 function fromDesignRow(row: DesignRow): DesignStatement {
   return {
     id: row.id,
+    groupId: row.groupId ?? undefined,
     projectId: row.projectId,
     developerId: row.developerId,
     sessionId: row.sessionId,
@@ -144,9 +146,14 @@ export class DesignRegistry {
 
   register(input: NewDesignInput): DesignStatement {
     const now = Date.now();
+    const id = crypto.randomUUID();
     const design: DesignStatement = {
       ...input,
-      id: crypto.randomUUID(),
+      id,
+      // §17 design linking (2026-08): self-assign to this design's own id
+      // when the caller doesn't supply one -- see DesignStatement.groupId's
+      // doc comment (@twing/core) for the full reasoning.
+      groupId: input.groupId ?? id,
       status: "open",
       createdAt: now,
       ttlMs: input.ttlMs ?? DEFAULT_DESIGN_ACTIVE_TTL_MS,
@@ -160,6 +167,7 @@ export class DesignRegistry {
       .insert(designsTable)
       .values({
         id: design.id,
+        groupId: design.groupId,
         projectId: design.projectId,
         developerId: design.developerId,
         sessionId: design.sessionId,
@@ -288,7 +296,28 @@ export class DesignRegistry {
    * been superseded. Returns `undefined` if the design isn't currently
    * `"open"` (flagged/closed/superseded/expired designs can't be amended --
    * resolve or re-register instead). */
-  amend(id: string, delta: { touches?: string[]; creates?: string[]; dependsOn?: string[]; summary?: string }): DesignStatement | undefined {
+  amend(
+    id: string,
+    delta: {
+      touches?: string[];
+      creates?: string[];
+      dependsOn?: string[];
+      summary?: string;
+      /** §17 design linking (2026-08): the caller's raw, un-appended update
+       * text -- distinct from `summary` above, which by the time it reaches
+       * here is already the *final merged* string for `id` itself
+       * (app.ts's amend route computes `appendSummaryUpdate(design.summary,
+       * body.summary)` before calling in, so the pre-persist check and the
+       * persist see an identical string). Copying that final string
+       * verbatim onto a linked sibling would overwrite the sibling's own
+       * summary/update-history with the primary's -- exactly the kind of
+       * drift this feature exists to prevent. Instead, when this is set and
+       * `id`'s design has a `groupId` shared by other rows, each sibling
+       * gets this *same raw text* appended onto *its own* existing summary
+       * independently, via `appendSummaryUpdate`, not a shared copy. */
+      summaryUpdate?: string;
+    },
+  ): DesignStatement | undefined {
     const existing = this.get(id);
     if (!existing || existing.status !== "open") return undefined;
     const merged = mergeDesignScope(existing, delta);
@@ -324,6 +353,39 @@ export class DesignRegistry {
         ...(delta.summary !== undefined ? { newSummary: delta.summary } : {}),
       },
     });
+
+    // §17 design linking (2026-08): fan out the raw update text to every
+    // OTHER row sharing this design's groupId, across any project,
+    // regardless of that sibling's own status -- see DesignStatement.groupId
+    // and this method's `summaryUpdate` param doc comments for the full
+    // reasoning. Deliberately no isProjectMember check against a sibling's
+    // own project here: possessing/quoting a groupId (an unguessable
+    // random id, only ever obtained by having been an authorized member of
+    // the project that minted it) is treated as sufficient authorization to
+    // link a second project's design to it -- this is the user's explicit,
+    // already-made trust decision for this feature, not an oversight.
+    if (delta.summaryUpdate !== undefined && existing.groupId) {
+      const siblings = this.db
+        .select()
+        .from(designsTable)
+        .where(and(eq(designsTable.groupId, existing.groupId), sql`${designsTable.id} != ${id}`))
+        .all() as DesignRow[];
+      for (const sibRow of siblings) {
+        const sib = fromDesignRow(sibRow);
+        const sibSummary = appendSummaryUpdate(sib.summary, delta.summaryUpdate);
+        this.db.update(designsTable).set({ summary: sibSummary }).where(eq(designsTable.id, sib.id)).run();
+        this.activityLog.append({
+          projectId: sib.projectId,
+          developerId: sib.developerId,
+          sessionId: sib.sessionId,
+          kind: "design_amended",
+          relatedId: sib.id,
+          ts: Date.now(),
+          payload: { newSummary: sibSummary, propagatedFromDesignId: id, propagatedFromGroupId: existing.groupId },
+        });
+      }
+    }
+
     return this.get(id);
   }
 
@@ -405,6 +467,21 @@ export class DesignRegistry {
     return rows.map(fromDesignRow);
   }
 
+  /** §17 design linking (2026-08): every row sharing a `groupId`, across
+   * every project -- the cross-project counterpart to `listByProject`
+   * above. No status filter (unlike `openDesigns`): a linked-group view
+   * wants closed siblings too, not just live ones. Same newest-first,
+   * `rowid`-tiebreak ordering as `listByProject`. */
+  listByGroup(groupId: string): DesignStatement[] {
+    const rows = this.db
+      .select()
+      .from(designsTable)
+      .where(eq(designsTable.groupId, groupId))
+      .orderBy(sql`${designsTable.createdAt} DESC, rowid DESC`)
+      .all() as DesignRow[];
+    return rows.map(fromDesignRow);
+  }
+
   /** ExitPlanMode retry dedup (§17, 2026-08-18): the candidate lookup for
    * "did this session already register a plan-mode design we should update
    * in place instead of duplicating." Scoped to `rawPlanExcerpt IS NOT
@@ -467,6 +544,15 @@ export class DesignRegistry {
    * constraint match. Returns `undefined` if `id` no longer exists (should
    * not happen in practice -- the caller just looked it up -- but mirrors
    * every other store method's contract here). */
+  /** §17 design linking (2026-08): this `.set({...})` deliberately never
+   * writes `groupId` -- a retried `ExitPlanMode` call that finds and
+   * updates an existing candidate row in place (this method) always
+   * preserves that row's *original* groupId, even though
+   * `hook/design_gate.go`'s `handleExitPlanModeMultiCandidate` mints a
+   * fresh, unpersisted groupId on every single invocation. That fresh id
+   * is silently discarded whenever this retry-dedup path fires -- which is
+   * exactly what keeps a linked multi-repo pair from drifting apart on a
+   * plan retry. Do not "fix" this by threading the new groupId through. */
   reregisterFromPlan(
     id: string,
     args: { summary: string; creates: string[]; touches: string[]; dependsOn: string[]; rawPlanExcerpt: string },
@@ -532,6 +618,41 @@ export class DesignRegistry {
         relatedId: id,
         ts: closedAt,
       });
+
+      // §17 design linking (2026-08): closing propagates the same way
+      // amend()'s summary fan-out does, and for the same reasoning -- see
+      // that method's comment for the shared trust-boundary note
+      // (possessing a groupId is treated as sufficient authorization,
+      // deliberately no isProjectMember check against a sibling's own
+      // project here either). Only rows still in a closeable state are
+      // touched -- an already-closed sibling's `closedAt` is left exactly
+      // as it was, not re-stamped.
+      if (existing.groupId) {
+        const siblings = this.db
+          .select()
+          .from(designsTable)
+          .where(
+            and(
+              eq(designsTable.groupId, existing.groupId),
+              sql`${designsTable.id} != ${id}`,
+              sql`${designsTable.status} IN ('open', 'flagged', 'dormant')`,
+            ),
+          )
+          .all() as DesignRow[];
+        for (const sibRow of siblings) {
+          const sib = fromDesignRow(sibRow);
+          this.db.update(designsTable).set({ status: "closed", closedAt }).where(eq(designsTable.id, sib.id)).run();
+          this.activityLog.append({
+            projectId: sib.projectId,
+            developerId: sib.developerId,
+            sessionId: sib.sessionId,
+            kind: "design_closed",
+            relatedId: sib.id,
+            ts: closedAt,
+            payload: { propagatedFromDesignId: id, propagatedFromGroupId: existing.groupId },
+          });
+        }
+      }
     }
     return this.get(id);
   }
@@ -541,7 +662,17 @@ export class DesignRegistry {
    * substitute for the spec's deferred git-commit-detection trigger.
    * Includes `"flagged"` (§17 scope enforcement, 2026-08) so an abandoned,
    * never-resolved conflicting design doesn't linger past session end, and
-   * `"dormant"` (§17 design lifecycle, 2026-08) for the same reason. */
+   * `"dormant"` (§17 design lifecycle, 2026-08) for the same reason.
+   *
+   * §17 design linking (2026-08): bulk-closes by `sessionId` directly via
+   * SQL, bypassing `close()` entirely -- deliberately does NOT propagate
+   * across a `groupId` here. A multi-repo `ExitPlanMode` registration
+   * registers every linked row under the *same* session id, so this
+   * method's existing per-`sessionId` filter already incidentally closes
+   * every linked row together, with no groupId-awareness needed. A
+   * manually `--group`-linked pair registered under two different session
+   * ids will NOT both close when one session ends -- a known, accepted
+   * gap, not a silent inconsistency. */
   closeSession(sessionId: string): number {
     const now = Date.now();
     const open = this.db

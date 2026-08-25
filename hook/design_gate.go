@@ -139,6 +139,18 @@ type designCheckRequest struct {
 	Touches     []string `json:"touches,omitempty"`
 	DependsOn   []string `json:"dependsOn,omitempty"`
 	Summary     string   `json:"summary,omitempty"`
+	// GroupID (§17 design linking, 2026-08): cross-project label linking
+	// this design to sibling DesignStatement rows registered in other
+	// repos for the same unit of work. Optional -- self-assigned
+	// server-side (to this design's own new id) when omitted. Only
+	// handleExitPlanModeMultiCandidate sets it today: it mints one fresh
+	// id per plan invocation (generateGroupID, identity.go) and reuses it
+	// across every matching candidate's registration call in that same
+	// pass, so a multi-repo plan's rows link automatically with zero
+	// extra agent action. handleExitPlanModeSingle deliberately never
+	// sets this -- a genuinely single-repo plan gets no group beyond the
+	// default "group of one" the server assigns anyway.
+	GroupID string `json:"groupId,omitempty"`
 }
 
 // designExtractResponse mirrors ExtractedDesign (design-extract.ts), the
@@ -176,6 +188,10 @@ type designCheckResponse struct {
 	// exactOverlap only) is display-only, same as "clean" as far as this
 	// gate is concerned. See DesignSeverity's doc comment in core/types.ts.
 	Severity string `json:"severity,omitempty"`
+	// GroupID (§17 design linking, 2026-08): echoes back the design's own
+	// groupId (self-assigned or caller-supplied). Not consumed by any
+	// gate decision today -- available for future logging/diagnostics.
+	GroupID string `json:"groupId,omitempty"`
 }
 
 // blocksGate reports whether this response's verdict should deny the tool
@@ -436,6 +452,11 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 		return
 	}
 
+	// §17 design linking (2026-08): one groupId per plan invocation, shared
+	// across every candidate this plan matches below -- see
+	// generateGroupID's doc comment (identity.go).
+	groupID := generateGroupID()
+
 	type group struct {
 		config     twingConfig
 		candidates []childCoordinator
@@ -495,6 +516,7 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 				Touches:   touches,
 				DependsOn: extracted.DependsOn,
 				Summary:   extracted.Summary,
+				GroupID:   groupID,
 			}
 			result, failReason := postDesignCheck(cfg.ServerURL, cfg.AuthToken, developerID, reqBody)
 			if failReason != "" {

@@ -100,6 +100,31 @@ export const DEFAULT_DESIGN_DORMANT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface DesignStatement {
   id: string;
+  /** §17 design linking (2026-08): cross-project label -- self-assigned to
+   * this design's own `id` by `DesignRegistry.register()` when the caller
+   * doesn't supply one, so every design has a non-null groupId ("group of
+   * one" by default). A sibling registration for the *same* unit of work
+   * in a different project passes this design's `id` back in as its own
+   * `groupId` to link the two rows. Linking is purely a label -- there is
+   * no new table, no cross-project overlap/constraint/scope-match
+   * comparison, and no new access-control surface; `openDesigns`/
+   * `reviewDecision`/`justifiedConstraintIds` etc. all stay strictly
+   * single-`projectId`, unaffected by grouping.
+   *
+   * Only two fields propagate across every row sharing a `groupId` (any
+   * project): `summary` (`DesignRegistry.amend()`) and closing
+   * (`DesignRegistry.close()`) -- the two things meant to read as "one
+   * shared thing" across the group; letting them silently drift would make
+   * the link actively misleading rather than merely incomplete.
+   * `creates`/`touches`/`dependsOn` never propagate (inherently
+   * per-project data -- repo A's paths are never repo B's), and neither
+   * does `reviewDecision`/constraint justification (a constraint hit in
+   * one project is that project's own admin's call, regardless of what
+   * it's grouped with). See `DesignRegistry.register`/`amend`/`close` in
+   * `packages/server/src/design-store.ts` for the mechanics, and
+   * `hook/design_gate.go`'s `handleExitPlanModeMultiCandidate` for where a
+   * multi-repo plan gets one minted and linked automatically. */
+  groupId?: string;
   projectId: string;
   developerId: string;
   sessionId: string;
