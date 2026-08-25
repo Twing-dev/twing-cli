@@ -92,6 +92,48 @@ test("runDesignRegister: a 401 response prints the unauthorized hint instead of 
   });
 });
 
+test("runDesignRegister: --group sends groupId in the request body", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d2", groupId: "existing-group-id" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "linked half", group: "existing-group-id" }));
+    const body = calls[0].body as Record<string, unknown>;
+    assert.equal(body.groupId, "existing-group-id");
+  });
+});
+
+test("runDesignRegister: omitting --group sends no groupId field at all", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1", groupId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo" }));
+    const body = calls[0].body as Record<string, unknown>;
+    assert.equal("groupId" in body, false, "must be omitted entirely, not sent as an explicit undefined");
+  });
+});
+
+test("runDesignRegister: prints the groupId copy-paste hint when the response includes one", async () => {
+  const { fetch } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1", groupId: "g1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo" })));
+    assert.ok(logs.some((l) => l.includes("group: g1") && l.includes("--group g1")));
+  });
+});
+
+test("runDesignRegister: prints no group line when the response has no groupId", async () => {
+  const { fetch } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo" })));
+    assert.ok(!logs.some((l) => l.includes("group:")), 'must not print "group: undefined" or similar when groupId is absent');
+  });
+});
+
 // --- runDesignResolve --------------------------------------------------------
 
 test("runDesignResolve: --adopt sends resolution: adopted", async () => {

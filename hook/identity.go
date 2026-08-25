@@ -40,6 +40,21 @@ func readOrCreatePersistedID(idPath string) string {
 	return generated
 }
 
+// generateGroupID mints a fresh, unpersisted random id (§17 design linking,
+// 2026-08) -- same crypto/rand + hex.EncodeToString mechanic as
+// readOrCreatePersistedID above, deliberately without the disk-persistence
+// half: a plan's groupId only needs to stay stable for the duration of one
+// ExitPlanMode invocation (reused across every matching candidate's
+// registration call within that single pass), never across separate
+// invocations -- see design-store.ts's reregisterFromPlan doc comment for
+// why a *retried* plan safely discards a freshly-minted groupId here rather
+// than needing one persisted.
+func generateGroupID() string {
+	buf := make([]byte, 16)
+	_, _ = rand.Read(buf)
+	return hex.EncodeToString(buf)
+}
+
 var scpLikeRemoteRe = regexp.MustCompile(`^[^@/]+@([^:/]+):(.+)$`)
 var schemeRemoteRe = regexp.MustCompile(`(?i)^[a-z][a-z0-9+.-]*://(?:[^@/]+@)?`)
 
