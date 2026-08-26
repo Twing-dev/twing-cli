@@ -89,7 +89,7 @@ If that lists the expected tables (`claims`, `design_statements`,
 ```sh
 cd twing-cli && git fetch --tags && git checkout v0.2.6
 cd deploy/docker
-VERSION=0.2.6 docker compose build
+docker compose build
 docker compose up -d
 ```
 
@@ -101,16 +101,18 @@ volume, not something a rebuild touches.
 
 Checking out a release tag (not `git pull` off `main`) is what makes the
 server's declared version (`GET /v1/version`, §17 version-compatibility
-enforcement) mean something real: the `VERSION` build arg gets baked into
-the image (`packages/server/Dockerfile`, `TWING_SERVE_VERSION`), exact-
-matched against every client. One residual race this doesn't fully close:
-`release-npm.yml`'s `npm publish` can take a couple of minutes after the
-tag is pushed, and could still fail -- a redeploy done in the same breath
-as tagging should confirm that workflow actually succeeded first, not just
-that the tag exists, or clients' `npm install -g @twing/cli@latest`
-remediation (the daemon's soft notice and the §17 gate's hard deny both
-suggest it) could briefly resolve to something older than what the server
-now expects (`TWING_DESIGN_GATE=off` is the escape hatch for that window).
+enforcement) mean something real: `packages/server/package.json`'s
+committed version -- bumped as part of the same commit that gets tagged,
+same as `@twing/cli`'s -- is what `getServerVersion()` reads and reports,
+exact-matched against every client. One residual race this doesn't fully
+close: `release-npm.yml`'s `npm publish` can take a couple of minutes after
+the tag is pushed, and could still fail -- a redeploy done in the same
+breath as tagging should confirm that workflow actually succeeded first,
+not just that the tag exists, or clients' `npm install -g
+@twing/cli@latest` remediation (the daemon's soft notice and the §17
+gate's hard deny both suggest it) could briefly resolve to something older
+than what the server now expects (`TWING_DESIGN_GATE=off` is the escape
+hatch for that window).
 
 ## Rate limiting
 
