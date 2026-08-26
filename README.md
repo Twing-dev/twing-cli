@@ -143,9 +143,12 @@ the same work before that becomes a merge conflict or a design disagreement
 discovered too late.
 
 Each deny message already tells you the specific command to run
-(`twing design register`, `amend`, `resume`, or `resolve --justify`) --
-follow it, then retry the original edit. Two things worth knowing before you
-do:
+(`twing design register`, `amend`, `resume`, or `resolve --justify`) -- or,
+on a fresh session's very first deny, to check `twing design list --mine
+--status open` first and join an existing open design of yours via `amend
+--group` if one already covers the same effort, rather than registering a
+new one for it. Follow whichever it tells you, then retry the original
+edit. Two things worth knowing before you do:
 
 - **`resolve --justify` records a justification, it does not itself unblock
   you.** It queues a `PendingReview` for a project admin to approve or

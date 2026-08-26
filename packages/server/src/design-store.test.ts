@@ -26,6 +26,36 @@ test("DesignRegistry: openDesigns excludes the candidate itself", () => {
   registry.stop();
 });
 
+test("DesignRegistry: openDesignsForDeveloper finds a developer's open design in a different project", () => {
+  const registry = freshRegistry();
+  registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "first", creates: ["X"], touches: [], dependsOn: [] });
+  const b = registry.register({ projectId: "p2", developerId: "d1", sessionId: "s2", summary: "second", creates: ["Y"], touches: [], dependsOn: [] });
+  // Different developer, different project -- must not show up.
+  registry.register({ projectId: "p3", developerId: "d2", sessionId: "s3", summary: "other dev", creates: ["Z"], touches: [], dependsOn: [] });
+  const open = registry.openDesignsForDeveloper("d1", Date.now());
+  assert.equal(open.length, 2);
+  assert.ok(open.some((d) => d.id === b.id));
+  registry.stop();
+});
+
+test("DesignRegistry: openDesignsForDeveloper excludes the given excludeId and non-open statuses", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "a", creates: ["X"], touches: [], dependsOn: [] });
+  const b = registry.register({ projectId: "p2", developerId: "d1", sessionId: "s2", summary: "b", creates: ["Y"], touches: [], dependsOn: [] });
+  registry.close(b.id);
+  const open = registry.openDesignsForDeveloper("d1", Date.now(), a.id);
+  assert.equal(open.length, 0);
+  registry.stop();
+});
+
+test("DesignRegistry: openDesignsForDeveloper excludes expired (TTL-elapsed) designs", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "a", creates: [], touches: [], dependsOn: [], ttlMs: 10 });
+  const open = registry.openDesignsForDeveloper("d1", a.createdAt + 1000);
+  assert.equal(open.length, 0);
+  registry.stop();
+});
+
 test("DesignRegistry: TTL expiry excludes designs past createdAt+ttlMs", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 10 });

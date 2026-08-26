@@ -860,6 +860,13 @@ func noDesignReason() string {
 				Note: "The summary is what teammates see if your work overlaps theirs, " +
 					"so describe the real goal rather than a placeholder.",
 			},
+			{
+				Label:   "Or join what you already have open",
+				Command: "twing design list --mine --status open",
+				Note: "If one of these is the same effort as what you're about to do, link " +
+					"this into it instead of starting a new one: twing design amend --id <id> " +
+					"--group <id> (or --touches/--summary to just widen it).",
+			},
 		},
 	)
 }
@@ -978,6 +985,27 @@ type designScopeMatchResponse struct {
 	// Both used to deny with the identical message telling you to run
 	// `twing design resolve`, even immediately after you already had.
 	PendingReview bool `json:"pendingReview,omitempty"`
+	// Set only for state "out_of_scope" (2026-08-25) -- every open design
+	// for this session, newest-first, not just the one `DesignID` names.
+	// Found live: with more than one open design in a session, silently
+	// picking just `DesignID` to suggest amending offered no way to see (or
+	// choose) the others -- and the field it picked from was actually the
+	// *oldest* one (array-index-off-newest-first-order bug), not even the
+	// best single guess. Deliberately backward-compatible: an older
+	// coordinator that doesn't send this field yet leaves it empty, and
+	// outOfScopeReason falls back to a one-candidate list built from
+	// `DesignID` alone.
+	OpenDesigns []designSummary `json:"openDesigns,omitempty"`
+}
+
+// designSummary is the minimal per-design context outOfScopeReason needs to
+// render an actionable candidate -- id (for the amend command) and summary
+// (for a human/agent to judge "is this the same task"). Distinct from
+// designConflict/designConstraintInfo above -- those describe a *check*
+// result, this describes a plain design row.
+type designSummary struct {
+	ID      string `json:"id"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // checkDesignScope is §17 scope enforcement's (2026-08) ground-truth
@@ -1049,24 +1077,61 @@ func flaggedDesignReason(designID string, pendingReview bool) string {
 	)
 }
 
-func outOfScopeReason(designID, path string) string {
-	return denyMessage(
-		"You're changing a file you didn't mention in your plan.",
-		"twing can't tell whether that's a natural part of your work or the start of a "+
-			"collision with someone else, so it's asking first.",
-		[]denyDetail{{"File", path}, {"Your plan", designID}},
-		[]denyAction{
-			{
-				Label:   "Add it to your plan",
-				Command: fmt.Sprintf("twing design amend --id %s --touches %s", designID, path),
-				Note:    "This is re-checked against other active sessions, not a silent expansion.",
-			},
-			{
-				Label: "Or register a separate plan",
-				Note:  "Use this if the change is genuinely unrelated to what you registered.",
-			},
-		},
-	)
+// maxOutOfScopeCandidates caps how many of a session's open designs
+// outOfScopeReason lists as amend candidates -- a deny message is meant to
+// be scanned in a few seconds, not read like `twing design list`'s own
+// output. Past this, the remaining count is folded into one more action
+// pointing at that command instead of one row per design.
+const maxOutOfScopeCandidates = 5
+
+func outOfScopeReason(designID, path string, openDesigns []designSummary) string {
+	// Backward compatible with a coordinator that doesn't send OpenDesigns
+	// yet (see designScopeMatchResponse's own doc comment) -- falls back to
+	// the single id it does send, with no summary to show.
+	candidates := openDesigns
+	if len(candidates) == 0 && designID != "" {
+		candidates = []designSummary{{ID: designID}}
+	}
+
+	headline := "You're changing a file you didn't mention in your plan."
+	why := "twing can't tell whether that's a natural part of your work or the start of a " +
+		"collision with someone else, so it's asking first."
+	if len(candidates) > 1 {
+		headline = "You're changing a file none of your open plans mention."
+		why = "You have more than one plan open in this session, and none of them cover " +
+			"this file. twing can't tell whether that's a natural part of one of them " +
+			"or the start of a collision with someone else, so it's asking first."
+	}
+
+	shown := candidates
+	if len(shown) > maxOutOfScopeCandidates {
+		shown = shown[:maxOutOfScopeCandidates]
+	}
+
+	actions := make([]denyAction, 0, len(shown)+2)
+	for _, d := range shown {
+		label := "Add it to your plan"
+		if d.Summary != "" {
+			label = fmt.Sprintf("Add it to %q", d.Summary)
+		}
+		actions = append(actions, denyAction{
+			Label:   label,
+			Command: fmt.Sprintf("twing design amend --id %s --touches %s", d.ID, path),
+			Note:    "This is re-checked against other active sessions, not a silent expansion.",
+		})
+	}
+	if extra := len(candidates) - len(shown); extra > 0 {
+		actions = append(actions, denyAction{
+			Label:   fmt.Sprintf("...and %d more open plan(s), not shown above", extra),
+			Command: "twing design list --mine --status open",
+		})
+	}
+	actions = append(actions, denyAction{
+		Label: "Or register a separate plan",
+		Note:  "Use this if the change is genuinely unrelated to what you registered.",
+	})
+
+	return denyMessage(headline, why, []denyDetail{{"File", path}}, actions)
 }
 
 // dormantSinceText renders a millisecond duration as a coarse,
@@ -1331,7 +1396,7 @@ func handleEditWriteGate(payload hookPayload) {
 	case "dormant":
 		writeJSON(denyOutput("PreToolUse", dormantDesignReason(scopeMatch.DesignID, scopeMatch.Summary, scopeMatch.DormantSinceMs)))
 	case "out_of_scope":
-		writeJSON(denyOutput("PreToolUse", outOfScopeReason(scopeMatch.DesignID, relPath)))
+		writeJSON(denyOutput("PreToolUse", outOfScopeReason(scopeMatch.DesignID, relPath, scopeMatch.OpenDesigns)))
 	case "no_design":
 		writeJSON(denyOutput("PreToolUse", noDesignReason()))
 	default:

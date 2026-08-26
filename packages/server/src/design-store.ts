@@ -238,6 +238,33 @@ export class DesignRegistry {
     return rows.map(fromDesignRow);
   }
 
+  /** Every currently-*open* design for a developer, across every project
+   * (2026-08-25, "force a choice" registration-sprawl fix) -- the
+   * cross-project counterpart to `openDesigns` above, keyed by `developerId`
+   * instead of `projectId`. Deliberately `status = "open"` only, not `IN
+   * ("open", "flagged")` like `openDesigns` -- a flagged design already has
+   * its own review/justify flow demanding attention; it isn't "another open
+   * design" competing for a fresh registration decision. `dormant` stays
+   * excluded for the same reason it's excluded everywhere else in this
+   * class. Same `lastActivityAt + ttlMs > now` liveness check as
+   * `openDesigns`. `excludeId` excludes by design id (not session id --
+   * there's no session-scoping need here; see this feature's own plan/PR
+   * for why). */
+  openDesignsForDeveloper(developerId: string, now: number = Date.now(), excludeId?: string): DesignStatement[] {
+    const conditions = [
+      eq(designsTable.developerId, developerId),
+      eq(designsTable.status, "open"),
+      sql`${designsTable.lastActivityAt} + ${designsTable.ttlMs} > ${now}`,
+    ];
+    if (excludeId) conditions.push(sql`${designsTable.id} != ${excludeId}`);
+    const rows = this.db
+      .select()
+      .from(designsTable)
+      .where(and(...conditions))
+      .all() as DesignRow[];
+    return rows.map(fromDesignRow);
+  }
+
   /** §17 scope enforcement (2026-08): a design's own registration/amendment
    * verdict wasn't `clean` -- demote it out of "open" so it stops counting
    * as a usable design for the Edit/Write gate, without losing its id

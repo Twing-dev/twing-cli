@@ -97,12 +97,12 @@ function printUsage(): void {
       "  twing project revoke-invite --code <invite-code> [--server <url>]",
       "  twing project remove-developer --developer-id <id> [--project <id>] [--server <url>]",
       "  twing project list-developers [--project <id>] [--server <url>]",
-      "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f [--group <groupId>]",
+      "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f [--group <groupId>] [--force]",
       "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
       "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f] [--summary \"...\"] [--group <groupId>]",
       "  twing design resume --id <designId> [--session <id>] [--touches a,b] [--creates c,d] [--depends-on e,f]",
       "  twing design close --id <designId>",
-      "  twing design list [--status open]",
+      "  twing design list [--status open] [--mine]",
       "  twing design reviews [--decide <reviewId> --decision approve|reject]",
       "  twing design enable-gate",
       "  twing design disable-gate",
@@ -140,6 +140,7 @@ async function runDesignCommand(rest: string[]): Promise<void> {
         touches: flags.touches,
         dependsOn: flags["depends-on"],
         group: flags.group,
+        force: flags.force === "true",
       });
       return;
     case "resolve":
@@ -155,7 +156,7 @@ async function runDesignCommand(rest: string[]): Promise<void> {
       await runDesignClose({ cwd, id: flags.id });
       return;
     case "list":
-      await runDesignList({ cwd, status: flags.status });
+      await runDesignList({ cwd, status: flags.status, mine: flags.mine === "true" });
       return;
     case "reviews":
       await runDesignReviews({ cwd, decide: flags.decide, decision: flags.decision === "approve" || flags.decision === "reject" ? flags.decision : undefined });

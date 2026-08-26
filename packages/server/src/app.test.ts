@@ -574,7 +574,7 @@ test("GET /v1/activity: newest-first, respects ?limit=, ?before= pages backward,
     await app.request("/v1/designs/check", {
       method: "POST",
       headers: { "content-type": "application/json", ...bearer(admin.token) },
-      body: JSON.stringify({ projectId: "proj-1", sessionId: `s${i}`, summary: summaries[i], creates: [`f${i}.ts`], touches: [], dependsOn: [] }),
+      body: JSON.stringify({ projectId: "proj-1", sessionId: `s${i}`, summary: summaries[i], creates: [`f${i}.ts`], touches: [], dependsOn: [], force: true }),
     });
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
@@ -610,9 +610,15 @@ test("GET /v1/activity: newest-first, respects ?limit=, ?before= pages backward,
   const pagedIds = [...firstBody.items, ...secondBody.items].map((e) => e.id).sort();
   assert.deepEqual(pagedIds, allBody.items.map((e) => e.id).sort());
 
+  // "Force a choice" registration-sprawl fix (2026-08-25): every call here
+  // uses the same developer and disjoint touches/creates, so from the 2nd
+  // call onward the broadened stale-sibling notice also fires once per
+  // already-open, non-overlapping prior design -- 0+1+2+3+4 = 10 extra
+  // design_stale_sibling_suggested events on top of the original 10
+  // (design_registered + design_checked, one pair per check call).
   const unfiltered = await app.request("/v1/activity?projectId=proj-1", { headers: bearer(admin.token) });
   const unfilteredBody = (await unfiltered.json()) as { items: unknown[] };
-  assert.equal(unfilteredBody.items.length, 10, "design_registered + design_checked, one pair per check call");
+  assert.equal(unfilteredBody.items.length, 20);
 
   const filteredOut = await app.request("/v1/activity?projectId=proj-1&kind=review_decided", { headers: bearer(admin.token) });
   assert.deepEqual(((await filteredOut.json()) as { items: unknown[] }).items, []);
@@ -1458,7 +1464,7 @@ test("GET /v1/designs: newest-first, optionally filtered by status/sessionId", a
     const res = await app.request("/v1/designs/check", {
       method: "POST",
       headers: { "content-type": "application/json", ...bearer(admin.token) },
-      body: JSON.stringify({ projectId: "proj-1", sessionId, summary: `design for ${sessionId}`, creates: [], touches, dependsOn: [] }),
+      body: JSON.stringify({ projectId: "proj-1", sessionId, summary: `design for ${sessionId}`, creates: [], touches, dependsOn: [], force: true }),
     });
     return (await res.json()) as { designId: string; verdict: string };
   };
@@ -1675,7 +1681,7 @@ test("GET /v1/designs/scope-match: no_design, in_scope, out_of_scope, and flagge
   assert.deepEqual(await inScope.json(), { state: "in_scope", designId });
 
   const outOfScope = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=z.ts`, { headers: bearer(admin.token) });
-  assert.deepEqual(await outOfScope.json(), { state: "out_of_scope", designId });
+  assert.deepEqual(await outOfScope.json(), { state: "out_of_scope", designId, openDesigns: [{ id: designId, summary: "" }] });
 
   // A constraint match (tier 3, error severity), not tier 1 exact overlap --
   // since the 2026-08-19 severity split tier 1 is "warning" severity and no
@@ -1688,7 +1694,7 @@ test("GET /v1/designs/scope-match: no_design, in_scope, out_of_scope, and flagge
   const flaggedRegisterRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["protected.ts"], dependsOn: [] }),
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["protected.ts"], dependsOn: [], force: true }),
   });
   const { designId: flaggedId, verdict: flaggedVerdict } = (await flaggedRegisterRes.json()) as { designId: string; verdict: string };
   assert.equal(flaggedVerdict, "constraint_flag");
@@ -1708,6 +1714,43 @@ test("GET /v1/designs/scope-match: no_design, in_scope, out_of_scope, and flagge
 
   const flaggedAfterResolve = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s2&path=protected.ts`, { headers: bearer(admin.token) });
   assert.deepEqual(await flaggedAfterResolve.json(), { state: "flagged", designId: flaggedId, pendingReview: true });
+});
+
+// Found live (2026-08-25): with more than one open design in the same
+// session, out_of_scope used to hand back a single `designId` picked as
+// `openOnes[openOnes.length - 1]` -- since openOnes inherits listByProject's
+// newest-first order, that's the *oldest* open design, not the newest/most
+// likely one, and the hook had no way to see the others at all.
+test("GET /v1/designs/scope-match: out_of_scope with more than one open design in the session lists every one, newest-first, not just the oldest", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "oldest task", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId: firstId } = (await firstRes.json()) as { designId: string };
+
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "newest task", creates: [], touches: ["b.ts"], dependsOn: [], force: true }),
+  });
+  const { designId: secondId } = (await secondRes.json()) as { designId: string };
+
+  const outOfScope = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=z.ts`, { headers: bearer(admin.token) });
+  const body = (await outOfScope.json()) as { state: string; designId?: string; openDesigns?: { id: string; summary: string }[] };
+  assert.equal(body.state, "out_of_scope");
+  assert.equal(body.designId, secondId, "the single-designId hint must be the newest open design, not the oldest");
+  assert.deepEqual(
+    body.openDesigns,
+    [
+      { id: secondId, summary: "newest task" },
+      { id: firstId, summary: "oldest task" },
+    ],
+    "every open design for the session must be listed, newest-first",
+  );
 });
 
 test("GET /v1/designs/scope-match: with no ?path=, can only report no_design/flagged/in_scope (can't verify scope without a path)", async () => {
@@ -1758,7 +1801,7 @@ test("POST /v1/designs/check: a flagged design stays visible to a *third* design
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "second", creates: [], touches: ["shared.ts", "constrained.ts"], dependsOn: [] }),
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "second", creates: [], touches: ["shared.ts", "constrained.ts"], dependsOn: [], force: true }),
   });
   const secondBody = (await secondRes.json()) as { verdict: string; designId: string; severity?: string };
   assert.equal(secondBody.verdict, "constraint_flag");
@@ -1856,7 +1899,7 @@ test("POST /v1/designs/:id/amend: a groupId-only body joins a group after the fa
   const soloRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "was solo", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "was solo", creates: [], touches: ["b.ts"], dependsOn: [], force: true }),
   });
   const solo = (await soloRes.json()) as { designId: string; groupId?: string };
   assert.equal(solo.groupId, solo.designId, "starts as its own group of one");
@@ -1896,7 +1939,7 @@ test("POST /v1/designs/:id/amend: groupId passes through checkAmendedScope's del
   const targetRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "target", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "target", creates: [], touches: ["b.ts"], dependsOn: [], force: true }),
   });
   const target = (await targetRes.json()) as { designId: string; verdict: string };
   assert.equal(target.verdict, "clean", "sanity: unrelated projects/paths, nothing to conflict with");
@@ -2036,7 +2079,7 @@ test("POST /v1/designs/:id/amend: a rejected amend's proposed scope survives an 
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], force: true }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -2247,7 +2290,7 @@ test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other2", summary: "", creates: [], touches: ["other2.ts"], dependsOn: [] }),
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other2", summary: "", creates: [], touches: ["other2.ts"], dependsOn: [], force: true }),
   });
 
   let calls = 0;
@@ -2520,7 +2563,7 @@ test("POST /v1/designs/check: registering a non-overlapping design for the same 
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "unrelated second task", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "unrelated second task", creates: [], touches: ["b.ts"], dependsOn: [], force: true }),
   });
 
   const notices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
@@ -2544,7 +2587,7 @@ test("POST /v1/designs/check: an overlapping second design does not also fire th
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], force: true }),
   });
 
   const notices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
@@ -2556,27 +2599,32 @@ test("POST /v1/designs/check: an overlapping second design does not also fire th
   );
 });
 
-test("POST /v1/designs/check: a non-overlapping design from a *different* session does not fire a stale-sibling notice", async () => {
+// "Force a choice" registration-sprawl fix (2026-08-25): the stale-sibling
+// nudge's sibling set was broadened from same-session to
+// openDesignsForDeveloper -- see app.ts's own comment on the exact spot.
+// This test previously asserted the opposite (cross-session siblings don't
+// fire); it now pins the new, intended behavior instead.
+test("POST /v1/designs/check: a non-overlapping design from a *different* session DOES now fire a stale-sibling notice (broadened, 2026-08-25)", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
 
-  await app.request("/v1/designs/check", {
+  const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
     body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
+  const { designId: firstId } = (await firstRes.json()) as { designId: string };
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["b.ts"], dependsOn: [], force: true }),
   });
 
   const notices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
   const noticesBody = (await notices.json()) as { items: { message: string }[] };
-  assert.equal(
-    noticesBody.items.filter((n) => n.message.includes("also have design")).length,
-    0,
-    "the nudge is scoped to same-session siblings only",
+  assert.ok(
+    noticesBody.items.some((n) => n.message.includes(firstId) && n.message.includes("also have design")),
+    "the nudge is developer-wide now, not scoped to same-session siblings",
   );
 });
 
@@ -2750,7 +2798,7 @@ test("POST /v1/designs/check: a structured (twing design register-style) call wi
   const second = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-cli", summary: "task one", creates: ["A"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-cli", summary: "task one", creates: ["A"], touches: [], dependsOn: [], force: true }),
   });
   const secondBody = (await second.json()) as { designId: string; verdict: string };
   assert.equal(second.status, 200);
@@ -2799,6 +2847,108 @@ test("POST /v1/designs/check: a reregistered design keeps its justifiedConstrain
   const secondBody = (await second.json()) as { designId: string; verdict: string };
   assert.equal(secondBody.designId, firstBody.designId, "same row reregistered");
   assert.equal(secondBody.verdict, "clean", "already-justified constraint must not be re-flagged after a mere retry");
+});
+
+// ---------------------------------------------------------------------------
+// "Force a choice" registration-sprawl fix (2026-08-25) -- POST
+// /v1/designs/check's pre-registration has_open_designs check.
+// ---------------------------------------------------------------------------
+
+test("POST /v1/designs/check: a structured register call blocks with has_open_designs when the developer already has another open design, and creates no row", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId: firstId } = (await firstRes.json()) as { designId: string };
+
+  const beforeCount = designs.listByProject("proj-1").length;
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-2", sessionId: "s2", summary: "second, different project entirely", creates: [], touches: ["b.ts"], dependsOn: [] }),
+  });
+  assert.equal(secondRes.status, 200);
+  const secondBody = (await secondRes.json()) as { verdict: string; designId?: string; openDesigns?: { id: string }[]; severity?: string };
+  assert.equal(secondBody.verdict, "has_open_designs");
+  assert.equal(secondBody.severity, "error");
+  assert.equal(secondBody.designId, undefined, "no row exists for this verdict yet");
+  assert.ok(secondBody.openDesigns?.some((d) => d.id === firstId));
+  assert.equal(designs.listByProject("proj-1").length, beforeCount, "no new row persisted anywhere");
+  assert.equal(designs.listByProject("proj-2").length, 0, "no new row persisted anywhere");
+});
+
+test("POST /v1/designs/check: a caller-supplied groupId skips the has_open_designs block", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId: firstId } = (await firstRes.json()) as { designId: string };
+
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-2", sessionId: "s2", summary: "linked continuation", creates: [], touches: ["b.ts"], dependsOn: [], groupId: firstId }),
+  });
+  const secondBody = (await secondRes.json()) as { verdict: string; groupId?: string };
+  assert.notEqual(secondBody.verdict, "has_open_designs");
+  assert.equal(secondBody.groupId, firstId);
+});
+
+test("POST /v1/designs/check: force:true skips the has_open_designs block", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-2", sessionId: "s2", summary: "genuinely new", creates: [], touches: ["b.ts"], dependsOn: [], force: true }),
+  });
+  const secondBody = (await secondRes.json()) as { verdict: string; designId?: string };
+  assert.notEqual(secondBody.verdict, "has_open_designs");
+  assert.ok(secondBody.designId);
+});
+
+test("POST /v1/designs/check: an ExitPlanMode-shaped (rawPlanText) request is never blocked by has_open_designs, regardless of other open designs", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      projectId: "proj-2",
+      sessionId: "s-plan",
+      rawPlanText: "Add a debounce helper to src/ui/search-box.ts so keystrokes don't trigger a network call on every character.",
+      summary: "add debounce helper",
+      creates: [],
+      touches: ["src/ui/search-box.ts"],
+      dependsOn: [],
+    }),
+  });
+  assert.equal(secondRes.status, 200);
+  const secondBody = (await secondRes.json()) as { verdict: string; designId?: string };
+  assert.notEqual(secondBody.verdict, "has_open_designs");
+  assert.ok(secondBody.designId);
 });
 
 // --- §17 Phase 4: no_auth mode ---
