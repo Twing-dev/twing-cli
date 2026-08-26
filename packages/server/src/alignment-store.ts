@@ -21,7 +21,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import type { Db } from "./db/client.js";
 import { alignmentThreads as threadsTable } from "./db/schema.js";
 import { DrizzleActivityLog } from "./activity-log.js";
@@ -226,19 +226,58 @@ export class AlignmentThreadStore {
    * instead -- merging new `symbolIds` in, bumping `lastActivityAt`, and
    * posting a follow-up message only when something genuinely new is being
    * recorded -- is the actual fix; see this file's header comment on why a
-   * follow-up message rather than a silent mutation. */
+   * follow-up message rather than a silent mutation.
+   *
+   * 2026-08-26: same bug class, different axis -- direction. `checks.ts`'s
+   * `recordSymbolConflict` resolves and flags *both* sides in one call, so
+   * `symbol_conflict` naturally gets one shared thread. `llm_divergence`
+   * doesn't: `runSemanticComparatorPass` only ever checks the *current*
+   * design being registered/amended against everything else already open --
+   * one-directional by construction. When A registers and gets checked
+   * against B's open design, then B later registers/amends and gets
+   * checked against A's, those are two separate calls with
+   * `developerId`/`otherDeveloperId` in opposite order (A,B) vs (B,A) -- the
+   * forward-only dedup above never recognized them as the same underlying
+   * tension between the same two designs, so it forked a second thread
+   * (confirmed live: two separate threads for what was one disagreement
+   * between one pair of designs). Fixed by also matching the *reverse*
+   * shape: a reverse call's `otherDeveloperId`/`developerId` swap the
+   * existing row's `developerId`/`otherDeveloperId`, and its `designId`
+   * (the *other* side's design, from the new caller's point of view) is the
+   * existing row's `initiatingDesignId` (the side that got flagged
+   * *first*) -- and symmetrically, the reverse call's own
+   * `initiatingDesignId` is the existing row's `designId`. Both design-id
+   * links are required together (not just one) so this can't accidentally
+   * merge two genuinely-different conflicts that happen to share only one
+   * side; either id being unresolved (as `checkAmendedScope`'s callers
+   * sometimes are) just skips the reverse match, same forward-only
+   * fallback as before this fix. */
   findOrCreate(input: FindOrCreateInput): AlignmentThread {
-    const dedupConditions = [
+    const forward = [
       eq(threadsTable.projectId, input.projectId),
       eq(threadsTable.developerId, input.developerId),
       eq(threadsTable.otherDeveloperId, input.otherDeveloperId),
       eq(threadsTable.status, "open"),
     ];
-    if (input.designId) dedupConditions.push(eq(threadsTable.designId, input.designId));
+    if (input.designId) forward.push(eq(threadsTable.designId, input.designId));
+
+    const conditions = [and(...forward)!];
+    if (input.designId && input.initiatingDesignId) {
+      conditions.push(
+        and(
+          eq(threadsTable.projectId, input.projectId),
+          eq(threadsTable.developerId, input.otherDeveloperId),
+          eq(threadsTable.otherDeveloperId, input.developerId),
+          eq(threadsTable.status, "open"),
+          eq(threadsTable.initiatingDesignId, input.designId),
+          eq(threadsTable.designId, input.initiatingDesignId),
+        )!,
+      );
+    }
     const existingRow = this.db
       .select()
       .from(threadsTable)
-      .where(and(...dedupConditions))
+      .where(or(...conditions))
       .get() as ThreadRow | undefined;
     if (existingRow) return this.amend(existingRow, input);
 
@@ -380,6 +419,32 @@ export class AlignmentThreadStore {
       payload: { message },
     });
     return { authorId, message, ts };
+  }
+
+  /** Same shape as `postMessage`, author-less -- for a note the coordinator
+   * itself is making, not a party replying (2026-08-26). `messages()` reads
+   * these back the same way it already does the auto-generated seed note in
+   * `findOrCreate` (also author-less, same `alignment_message_posted` kind);
+   * `AlignmentMessage.authorId` has been optional for exactly this since
+   * that seed note existed, this just gives a second, later-in-the-thread's-
+   * life caller the same capability. See `app.ts`'s
+   * `notifyAlignmentThreadsOfDecision` for the one caller: resolving a
+   * design's block (self-approve or admin-decide) never touched its paired
+   * thread at all, so a genuinely-resolved conflict and one nobody ever
+   * came back to looked identical from here -- both just sat "open"
+   * forever. */
+  postSystemMessage(threadId: string, message: string): AlignmentMessage | undefined {
+    const thread = this.get(threadId);
+    if (!thread) return undefined;
+    const ts = Date.now();
+    this.activityLog.append({
+      projectId: thread.projectId,
+      kind: "alignment_message_posted",
+      relatedId: threadId,
+      ts,
+      payload: { message },
+    });
+    return { message, ts };
   }
 
   /** Unilateral -- either party can close a thread without the other

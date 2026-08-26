@@ -11,7 +11,7 @@
 
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import type { Claim, CallEdge, DesignStatement, DesignConstraintType, Finding } from "@twing/core";
+import type { Claim, CallEdge, DesignStatement, DesignConstraintType, Finding, PendingReview } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
 import { findClaimConflicts, type ClaimFindingMatch } from "./checks.js";
@@ -557,6 +557,52 @@ export function createApp(options: CreateAppOptions = {}) {
         });
       }
     })().catch((err) => console.error("twing serve: semantic conflict check failed", err));
+  }
+
+  /** (2026-08-26) Resolving a design's block -- self-approve or admin-decide,
+   * both end in `designs.decideReview` -- never touched the paired
+   * alignment thread at all: `findOrCreate`/`postMessage`/`close` are the
+   * only writers, and neither decide path calls any of them. From the
+   * thread's own point of view, a conflict that got justified and cleared
+   * within a minute looked identical to one nobody ever came back to --
+   * both just sat "open" forever with no trace of what happened, found
+   * live investigating why real production threads looked unresolved.
+   *
+   * Posts one system note per thread this decision actually settles, read
+   * back from the review's own already-computed `conflictWaivers`/
+   * `symbolConflictWaivers` (not re-derived -- those were fixed at
+   * justify-time). Both waiver kinds are symmetric now (2026-08-26,
+   * alignment-store.ts's `findOrCreate` reverse-direction fix): either
+   * waiver list can point at a thread where this design is the
+   * `initiatingDesignId` *or* the referenced `designId`, so both are
+   * checked. Deliberately does not close the thread -- closing stays a
+   * separate, human decision (see this repo's own plan doc's "explicitly
+   * out of scope" note); this only makes an already-resolved block visibly
+   * resolved instead of indistinguishable from an abandoned one. */
+  function notifyAlignmentThreadsOfDecision(review: PendingReview, decision: "approve" | "reject"): void {
+    const design = designs.get(review.designId);
+    const who = design?.developerId ?? review.projectId;
+    const note = `Resolved: ${who}'s design was ${decision}d -- "${review.justification}"`;
+    const openThreads = alignmentThreads.listByProject(review.projectId, "open");
+
+    for (const w of review.conflictWaivers ?? []) {
+      const thread = openThreads.find(
+        (t) =>
+          t.category === "llm_divergence" &&
+          ((t.initiatingDesignId === review.designId && t.designId === w.conflictingDesignId) ||
+            (t.designId === review.designId && t.initiatingDesignId === w.conflictingDesignId)),
+      );
+      if (thread) alignmentThreads.postSystemMessage(thread.id, note);
+    }
+    for (const w of review.symbolConflictWaivers ?? []) {
+      const thread = openThreads.find(
+        (t) =>
+          t.category === "symbol_conflict" &&
+          ((t.initiatingDesignId === review.designId && t.designId === w.conflictingDesignId) ||
+            (t.designId === review.designId && t.initiatingDesignId === w.conflictingDesignId)),
+      );
+      if (thread) alignmentThreads.postSystemMessage(thread.id, note);
+    }
   }
 
   /** Shared by `/v1/designs/:id/amend` and `/v1/designs/:id/resume`: builds
@@ -1132,10 +1178,23 @@ export function createApp(options: CreateAppOptions = {}) {
     // `symbolConflictWaivers` below, which needed the same read-back and
     // would otherwise have copied the same dead pattern next to a working
     // one. See PendingReview.conflictWaivers' own doc comment (@twing/core).
+    //
+    // 2026-08-26, second fix, same day: `initiatingDesignId`-only was
+    // correct back when each side of an llm_divergence pair always got its
+    // *own* separate thread (each one-directional `runSemanticComparatorPass`
+    // call forked a new thread, so "am I the initiator" and "do I have a
+    // thread at all" were the same question). Now that `findOrCreate`
+    // recognizes the reverse direction and reuses one shared thread per
+    // pair (see its own doc comment, alignment-store.ts), the side that
+    // *wasn't* first to trigger the check can show up as the thread's
+    // `designId` instead of its `initiatingDesignId` -- same both-sides
+    // shape `symbolConflictWaivers` below already has to handle, for the
+    // same reason.
     const conflictWaivers = alignmentThreads
       .listByProject(design.projectId, "open")
-      .filter((t) => t.category === "llm_divergence" && t.initiatingDesignId === design.id && t.designId)
-      .map((t) => ({ conflictingDesignId: t.designId! }));
+      .filter((t) => t.category === "llm_divergence" && (t.initiatingDesignId === design.id || t.designId === design.id))
+      .map((t) => ({ conflictingDesignId: (t.initiatingDesignId === design.id ? t.designId : t.initiatingDesignId)! }))
+      .filter((w) => w.conflictingDesignId);
     // `symbolConflictWaivers` (2026-08-26, new bucket): unlike llm_divergence
     // above, a `symbol_conflict` finding can flag *both* sides independently
     // (`recordSymbolConflict`, app.ts's `/v1/claims` handler) -- so this
@@ -1173,6 +1232,7 @@ export function createApp(options: CreateAppOptions = {}) {
     // has.
     if (constraintHits.length === 0) {
       designs.decideReview(review.id, "approve");
+      notifyAlignmentThreadsOfDecision(review, "approve");
       return c.json({ status: "resolved", reviewId: review.id });
     }
     return c.json({ status: "pending_review", reviewId: review.id });
@@ -1628,6 +1688,7 @@ export function createApp(options: CreateAppOptions = {}) {
       return c.json({ error: "expected decision: approve | reject" }, 400);
     }
     const decided = designs.decideReview(id, body.decision);
+    if (decided) notifyAlignmentThreadsOfDecision(decided, body.decision);
     console.log(`twing serve: review ${id.slice(0, 8)} decided -> ${body.decision}`);
     return c.json({ review: decided });
   });

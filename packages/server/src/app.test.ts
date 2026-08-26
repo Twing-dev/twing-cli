@@ -1365,6 +1365,319 @@ test("POST /v1/designs/check: the async semantic-conflict comparator opens an al
   assert.ok(bobNoticesBody.items.some((n) => n.message === "they fight over the same guarantee"));
 });
 
+// Found live (2026-08-26): runSemanticComparatorPass only ever checks the
+// *current* design being registered/amended against everything else
+// already open -- one-directional by construction. When bob's registration
+// gets checked against alice's open design, then alice's own later amend
+// gets checked against bob's, those used to land in two separate threads
+// (developerId/otherDeveloperId reversed) for what's really one
+// disagreement between one pair of designs -- confirmed live as two open
+// threads for the same tension. alignment-store.ts's findOrCreate now
+// recognizes the reverse direction and reuses the one thread instead.
+test("POST /v1/designs/check: a bidirectional llm_divergence -- both developers' own checks flagging the same pair -- lands in one shared thread, not two", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+
+  const aliceRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's retention sweep", creates: [], touches: ["src/activity-log.ts"], dependsOn: [] }),
+  });
+  const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
+
+  const inviteRes = await app.request("/v1/projects/proj-1/invites", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ label: "bob@example.com", role: "member" }),
+  });
+  const invite = (await inviteRes.json()) as { code: string };
+  await app.request(`/v1/invites/${invite.code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex("bobs-pat"), label: "bob@example.com" }),
+  });
+
+  let bobDesignId: string | undefined;
+  await withBedrockEnv(async () => {
+    await withMockFetch(
+      (async () =>
+        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: true, kind: "tension", reason: "they fight over the same guarantee" }) } }] }), {
+          status: 200,
+        })) as typeof fetch,
+      async () => {
+        const bobRes = await app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer("bobs-pat") },
+          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's audit permanence work", creates: [], touches: ["src/identity-store.ts"], dependsOn: [] }),
+        });
+        bobDesignId = ((await bobRes.json()) as { designId: string }).designId;
+        await waitFor(async () => {
+          const res = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(admin.token) });
+          const body = (await res.json()) as { items: unknown[] };
+          return body.items.length > 0;
+        });
+      },
+    );
+  });
+
+  let threadsRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(admin.token) });
+  let threadsBody = (await threadsRes.json()) as { items: { id: string; initiatingDesignId?: string; designId?: string }[] };
+  assert.equal(threadsBody.items.length, 1, "sanity: bob's check opened exactly one thread");
+  const threadId = threadsBody.items[0].id;
+  assert.equal(threadsBody.items[0].initiatingDesignId, bobDesignId);
+  assert.equal(threadsBody.items[0].designId, aliceDesignId);
+
+  // Alice's own work amends her original design -- her own one-directional
+  // check runs against bob's now-flagged (still counts as "open" for
+  // comparison purposes) design, reporting the same tension from the other
+  // side.
+  await withBedrockEnv(async () => {
+    await withMockFetch(
+      (async () =>
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: true, kind: "tension", reason: "still fighting over the same guarantee, alice's side" }) } }] }),
+          { status: 200 },
+        )) as typeof fetch,
+      async () => {
+        await app.request(`/v1/designs/${aliceDesignId}/amend`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ addTouches: ["src/activity-log-extra.ts"] }),
+        });
+        await waitFor(async () => {
+          const res = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(admin.token) });
+          if (res.status !== 200) return false;
+          const body = (await res.json()) as { messages: { message: string }[] };
+          return body.messages.some((m) => m.message === "still fighting over the same guarantee, alice's side");
+        });
+      },
+    );
+  });
+
+  threadsRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(admin.token) });
+  threadsBody = (await threadsRes.json()) as { items: { id: string; initiatingDesignId?: string; designId?: string }[] };
+  assert.equal(threadsBody.items.length, 1, "bob-initiated and alice-initiated findings for the same pair must share one thread, not fork a second");
+  assert.equal(threadsBody.items[0].id, threadId);
+  assert.equal(threadsBody.items[0].initiatingDesignId, bobDesignId, "the first flagger stays the recorded initiator");
+  assert.equal(threadsBody.items[0].designId, aliceDesignId);
+});
+
+// Found live (2026-08-26): resolving a design's block (self-approve or
+// admin-decide, both end in DesignRegistry.decideReview) never touched the
+// paired alignment thread at all -- a genuinely-resolved conflict and one
+// nobody ever came back to looked identical from the thread's own point of
+// view, both just sitting "open" forever with no trace of what happened.
+test("POST /v1/designs/:id/resolve: self-approving an llm_divergence block posts a system note into its alignment thread", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's retention sweep", creates: [], touches: ["src/activity-log.ts"], dependsOn: [] }),
+  });
+
+  const inviteRes = await app.request("/v1/projects/proj-1/invites", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ label: "bob@example.com", role: "member" }),
+  });
+  const invite = (await inviteRes.json()) as { code: string };
+  await app.request(`/v1/invites/${invite.code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex("bobs-pat"), label: "bob@example.com" }),
+  });
+
+  let bobDesignId: string | undefined;
+  let threadId: string | undefined;
+  await withBedrockEnv(async () => {
+    await withMockFetch(
+      (async () =>
+        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: true, kind: "tension", reason: "they fight over the same guarantee" }) } }] }), {
+          status: 200,
+        })) as typeof fetch,
+      async () => {
+        const bobRes = await app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer("bobs-pat") },
+          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's audit permanence work", creates: [], touches: ["src/identity-store.ts"], dependsOn: [] }),
+        });
+        bobDesignId = ((await bobRes.json()) as { designId: string }).designId;
+        await waitFor(async () => {
+          const res = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(admin.token) });
+          const body = (await res.json()) as { items: { id: string }[] };
+          if (body.items.length === 0) return false;
+          threadId = body.items[0].id;
+          return true;
+        });
+      },
+    );
+  });
+
+  const resolveRes = await app.request(`/v1/designs/${bobDesignId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer("bobs-pat") },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "reviewed with alice offline, proceeding" }),
+  });
+  const resolveBody = (await resolveRes.json()) as { status: string };
+  assert.equal(resolveBody.status, "resolved", "no constraint hits -- self-approves immediately");
+
+  const threadRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(admin.token) });
+  const threadBody = (await threadRes.json()) as { thread: { status: string }; messages: { message: string; authorId?: string }[] };
+  assert.equal(threadBody.thread.status, "open", "resolving the design must not itself close the conversation -- that stays a separate, human action");
+  const resolutionNote = threadBody.messages.find((m) => m.message.includes("Resolved"));
+  assert.ok(resolutionNote, "the thread must show the block was actually cleared, not just look abandoned");
+  assert.match(resolutionNote!.message, /bob@example\.com/);
+  assert.match(resolutionNote!.message, /reviewed with alice offline, proceeding/);
+  assert.equal(resolutionNote!.authorId, undefined, "a system note, not posted as either party");
+});
+
+// The reverse-direction merge (just above) means both sides' resolutions
+// now land in the *same* thread -- this is what actually answers "who
+// unblocked themselves and who didn't" from one place, rather than two
+// disconnected threads each showing half the picture.
+test("POST /v1/designs/:id/resolve: both sides independently self-approving a shared llm_divergence thread each post their own resolution note", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+
+  const aliceRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's retention sweep", creates: [], touches: ["src/activity-log.ts"], dependsOn: [] }),
+  });
+  const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
+
+  const inviteRes = await app.request("/v1/projects/proj-1/invites", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ label: "bob@example.com", role: "member" }),
+  });
+  const invite = (await inviteRes.json()) as { code: string };
+  await app.request(`/v1/invites/${invite.code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex("bobs-pat"), label: "bob@example.com" }),
+  });
+
+  let bobDesignId: string | undefined;
+  let threadId: string | undefined;
+  await withBedrockEnv(async () => {
+    await withMockFetch(
+      (async () =>
+        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: true, kind: "tension", reason: "they fight over the same guarantee" }) } }] }), {
+          status: 200,
+        })) as typeof fetch,
+      async () => {
+        const bobRes = await app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer("bobs-pat") },
+          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's audit permanence work", creates: [], touches: ["src/identity-store.ts"], dependsOn: [] }),
+        });
+        bobDesignId = ((await bobRes.json()) as { designId: string }).designId;
+        await waitFor(async () => {
+          const res = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(admin.token) });
+          const body = (await res.json()) as { items: { id: string }[] };
+          if (body.items.length === 0) return false;
+          threadId = body.items[0].id;
+          return true;
+        });
+      },
+    );
+  });
+
+  // Bob resolves his side first.
+  await app.request(`/v1/designs/${bobDesignId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer("bobs-pat") },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "bob's justification" }),
+  });
+
+  // Alice's own registration also got flagged against bob's (reverse
+  // direction, same shared thread) -- resolve hers too.
+  await withBedrockEnv(async () => {
+    await withMockFetch(
+      (async () =>
+        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: true, kind: "tension", reason: "alice's side of the same tension" }) } }] }), {
+          status: 200,
+        })) as typeof fetch,
+      async () => {
+        await app.request(`/v1/designs/${aliceDesignId}/amend`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ addTouches: ["src/activity-log-extra.ts"] }),
+        });
+        await waitFor(async () => {
+          const res = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(admin.token) });
+          const body = (await res.json()) as { messages: { message: string }[] };
+          return body.messages.some((m) => m.message === "alice's side of the same tension");
+        });
+      },
+    );
+  });
+
+  const aliceResolveRes = await app.request(`/v1/designs/${aliceDesignId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "alice's justification" }),
+  });
+  assert.equal((await aliceResolveRes.json() as { status: string }).status, "resolved");
+
+  const threadRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(admin.token) });
+  const threadBody = (await threadRes.json()) as { messages: { message: string }[] };
+  const resolutionNotes = threadBody.messages.filter((m) => m.message.includes("Resolved"));
+  assert.equal(resolutionNotes.length, 2, "both sides' resolutions must show up, in the one shared thread");
+  assert.ok(resolutionNotes.some((m) => m.message.includes("bob@example.com") && m.message.includes("bob's justification")));
+  assert.ok(resolutionNotes.some((m) => m.message.includes("alice@example.com") && m.message.includes("alice's justification")));
+});
+
+test("POST /v1/designs/:id/resolve: self-approving a symbol_conflict block posts a system note into the shared thread, for either side", async () => {
+  const { app, dataDir } = freshApp();
+  const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir); // alice's design already covers src/x.ts
+
+  const bobDesignRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
+  });
+  const { designId: bobDesignId } = (await bobDesignRes.json()) as { designId: string };
+
+  const claimRes = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
+  });
+  const { findings } = (await claimRes.json()) as { findings: { kind: string; threadId?: string }[] };
+  const threadId = findings.find((f) => f.kind === "design_divergence")!.threadId!;
+
+  // Get alice's design id (the one intruded upon) from the thread itself.
+  const beforeRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
+  const aliceDesignId = ((await beforeRes.json()) as { thread: { designId?: string } }).thread.designId!;
+
+  // Bob (the intruder) resolves his own side first.
+  const bobResolveRes = await app.request(`/v1/designs/${bobDesignId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "bob's justification" }),
+  });
+  assert.equal((await bobResolveRes.json() as { status: string }).status, "resolved");
+
+  // Alice (the intruded-upon party) independently resolves hers too.
+  const aliceResolveRes = await app.request(`/v1/designs/${aliceDesignId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(alice.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "alice's justification" }),
+  });
+  assert.equal((await aliceResolveRes.json() as { status: string }).status, "resolved");
+
+  const afterRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
+  const afterBody = (await afterRes.json()) as { messages: { message: string }[] };
+  const resolutionNotes = afterBody.messages.filter((m) => m.message.includes("Resolved"));
+  assert.equal(resolutionNotes.length, 2, "both the initiator and the referenced side must each show up as resolved");
+  assert.ok(resolutionNotes.some((m) => m.message.includes("bob@example.com") && m.message.includes("bob's justification")));
+  assert.ok(resolutionNotes.some((m) => m.message.includes("alice@example.com") && m.message.includes("alice's justification")));
+});
+
 test("POST /v1/designs/check: the async semantic-conflict comparator produces no side effects when it finds nothing", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
