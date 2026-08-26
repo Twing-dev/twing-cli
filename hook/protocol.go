@@ -76,7 +76,14 @@ type noticeItem struct {
 	Message string `json:"message"`
 }
 
+// versionMismatchInfo mirrors VersionMismatchInfo in packages/core/src/protocol.ts.
+type versionMismatchInfo struct {
+	ClientVersion string `json:"clientVersion"`
+	ServerVersion string `json:"serverVersion"`
+}
+
 type noticesMessage struct {
-	Type  string       `json:"type"`
-	Items []noticeItem `json:"items"`
+	Type            string               `json:"type"`
+	Items           []noticeItem         `json:"items"`
+	VersionMismatch *versionMismatchInfo `json:"versionMismatch,omitempty"`
 }

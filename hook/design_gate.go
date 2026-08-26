@@ -223,6 +223,15 @@ func setAuthHeader(req *http.Request, authToken, developerID string) {
 	}
 }
 
+// setVersionHeader sends this hook binary's own version on every gate call
+// (§17 version-compatibility enforcement), so the coordinator can respond
+// with 426 (StatusUpgradeRequired) rather than a stale binary silently
+// getting a verdict it may not correctly enforce. version is "dev" for a
+// plain unstamped local build -- see version.go's doc comment.
+func setVersionHeader(req *http.Request) {
+	req.Header.Set("x-twing-hook-version", version)
+}
+
 func postJSON(targetURL string, body any, timeout time.Duration, authToken, developerID string) (*http.Response, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -234,6 +243,7 @@ func postJSON(targetURL string, body any, timeout time.Duration, authToken, deve
 	}
 	req.Header.Set("content-type", "application/json")
 	setAuthHeader(req, authToken, developerID)
+	setVersionHeader(req)
 	client := &http.Client{Timeout: timeout}
 	return client.Do(req)
 }
@@ -244,6 +254,7 @@ func getJSON(targetURL string, authToken, developerID string) (*http.Response, e
 		return nil, err
 	}
 	setAuthHeader(req, authToken, developerID)
+	setVersionHeader(req)
 	client := &http.Client{Timeout: designGateTimeout}
 	return client.Do(req)
 }
@@ -496,6 +507,46 @@ func coordinatorErrorReason(detail string) string {
 	)
 }
 
+// hookVersionMismatchReason is the §17 version-compatibility enforcement
+// deny: exact match required (design doc, no min-version range), so any
+// drift -- older or newer -- blocks. Unlike the other three failure classes
+// above, this one has a real, self-serve fix that doesn't touch Edit/Write:
+// `npm install -g`/`twing daemon restart` are both Bash invocations, never
+// gated by this file (it has only ever hooked Edit, Write, and
+// ExitPlanMode), so remediation is always runnable even while this denies.
+// hookVersionMismatchReasonFromResponse reads a 426 response's body for the
+// coordinator's declared serverVersion (packages/server/src/app.ts's
+// version-mismatch middleware: {"error":"hook_version_mismatch","hookVersion":...,"serverVersion":...}).
+// A malformed/unreadable body still denies -- serverVersion just reads
+// "unknown" rather than falling through to coordinatorErrorReason, since
+// the status code alone already tells us definitively what happened.
+func hookVersionMismatchReasonFromResponse(res *http.Response) string {
+	var body struct {
+		ServerVersion string `json:"serverVersion"`
+	}
+	if data, err := io.ReadAll(res.Body); err == nil {
+		_ = json.Unmarshal(data, &body)
+	}
+	serverVersion := body.ServerVersion
+	if serverVersion == "" {
+		serverVersion = "unknown"
+	}
+	return hookVersionMismatchReason(version, serverVersion)
+}
+
+func hookVersionMismatchReason(hookVersion, serverVersion string) string {
+	return denyMessage(
+		"twing can't check for conflicts -- this machine's twing-cli is out of date.",
+		"A mismatched version might not understand the coordinator's current API, "+
+			"so twing blocks rather than risk enforcing conflict checks incorrectly.",
+		[]denyDetail{{"This machine", hookVersion}, {"Coordinator expects", serverVersion}},
+		[]denyAction{
+			{Label: "Update, then retry", Command: "npm install -g @twing/cli@latest && twing daemon restart"},
+			gateOffAction,
+		},
+	)
+}
+
 func authRequiredOutput(eventName, serverURL string) map[string]any {
 	return denyOutput(eventName, authRequiredReason(serverURL))
 }
@@ -739,6 +790,10 @@ func postDesignCheck(serverURL, authToken, developerID string, reqBody designChe
 		logDesignGate("designs/check returned status %d (blocking)", res.StatusCode)
 		return designCheckResponse{}, authRejectedReason(res.StatusCode, serverURL)
 	}
+	if res.StatusCode == http.StatusUpgradeRequired {
+		logDesignGate("designs/check: hook version mismatch (blocking)")
+		return designCheckResponse{}, hookVersionMismatchReasonFromResponse(res)
+	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("designs/check returned status %d (blocking)", res.StatusCode)
 		return designCheckResponse{}, coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
@@ -774,6 +829,10 @@ func postDesignExtract(serverURL, authToken, developerID, planText string) (desi
 	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		logDesignGate("designs/extract returned status %d (blocking)", res.StatusCode)
 		return designExtractResponse{}, authRejectedReason(res.StatusCode, serverURL)
+	}
+	if res.StatusCode == http.StatusUpgradeRequired {
+		logDesignGate("designs/extract: hook version mismatch (blocking)")
+		return designExtractResponse{}, hookVersionMismatchReasonFromResponse(res)
 	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("designs/extract returned status %d (blocking)", res.StatusCode)
@@ -1016,6 +1075,10 @@ func checkDesignScope(serverURL, authToken, developerID, projectID, sessionID, f
 		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
 		return designScopeMatchResponse{}, authRejectedReason(res.StatusCode, serverURL)
 	}
+	if res.StatusCode == http.StatusUpgradeRequired {
+		logDesignGate("design scope check: hook version mismatch (blocking)")
+		return designScopeMatchResponse{}, hookVersionMismatchReasonFromResponse(res)
+	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
 		return designScopeMatchResponse{}, coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
@@ -1255,6 +1318,10 @@ func checkPathConstraint(serverURL, authToken, developerID, projectID, sessionID
 	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		logDesignGate("constraint match check returned status %d (blocking)", res.StatusCode)
 		return constraintCheckFailed, authRejectedReason(res.StatusCode, serverURL)
+	}
+	if res.StatusCode == http.StatusUpgradeRequired {
+		logDesignGate("constraint match check: hook version mismatch (blocking)")
+		return constraintCheckFailed, hookVersionMismatchReasonFromResponse(res)
 	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("constraint match check returned status %d (blocking)", res.StatusCode)

@@ -8,9 +8,11 @@ export interface EphemeralServer {
 
 /** Spawns a throwaway `twing serve` for this run only -- no persistence, no
  * reuse across runs, torn down when the simulator exits. */
-export async function startEphemeralServer(port: number): Promise<EphemeralServer> {
+export async function startEphemeralServer(port: number, version?: string): Promise<EphemeralServer> {
+  const env: NodeJS.ProcessEnv = { ...process.env, PORT: String(port) };
+  if (version) env.TWING_SERVE_VERSION = version;
   const child = spawn(process.execPath, [serverEntryPath()], {
-    env: { ...process.env, PORT: String(port) },
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
 

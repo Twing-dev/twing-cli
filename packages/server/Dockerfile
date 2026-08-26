@@ -38,5 +38,15 @@ WORKDIR /app
 COPY --from=builder /app /app
 WORKDIR /app/packages/server
 
+# Baked in at build time from the release tag (deploy/docker/README.md's
+# redeploy flow passes --build-arg VERSION=X.Y.Z after checking out that
+# tag) -- same "derive from the tag" source of truth release-npm.yml and
+# release-hook.yml already use for the npm packages and the hook binary.
+# Reuses main.ts's existing TWING_SERVE_VERSION env var rather than a new
+# mechanism; that var predates this (added for the simulator's integration
+# test) but was always meant to become the real production path too.
+ARG VERSION=dev
+ENV TWING_SERVE_VERSION=$VERSION
+
 EXPOSE 8787
 CMD ["node", "dist/main.js"]

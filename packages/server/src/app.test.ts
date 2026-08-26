@@ -52,7 +52,7 @@ async function waitFor(predicate: () => Promise<boolean> | boolean, timeoutMs = 
   throw new Error(`waitFor: predicate never became true within ${timeoutMs}ms`);
 }
 
-function freshApp(options: { corsOrigins?: string[] } = {}) {
+function freshApp(options: { corsOrigins?: string[]; version?: string } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-app-test-"));
   // In-memory DB for speed -- these tests don't need cross-instance
   // persistence (that's design-store.test.ts/identity-store.test.ts's job).
@@ -63,7 +63,7 @@ function freshApp(options: { corsOrigins?: string[] } = {}) {
   const designs = new DesignRegistry(db);
   const constraints = new ConstraintStore(db);
   const alignmentThreads = new AlignmentThreadStore(db);
-  const app = createApp({ db, identities, store, designs, constraints, alignmentThreads, corsOrigins: options.corsOrigins });
+  const app = createApp({ db, identities, store, designs, constraints, alignmentThreads, corsOrigins: options.corsOrigins, version: options.version });
   return { app, dataDir, identities, store, designs, constraints, alignmentThreads };
 }
 
@@ -3786,6 +3786,44 @@ test("POST /v1/designs/extract: still requires authentication, same as every oth
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ rawPlanText: "do the thing" }),
+  });
+  assert.equal(res.status, 401);
+});
+
+test("GET /v1/version: unauthenticated, reports the configured version", async () => {
+  const { app } = freshApp({ version: "9.9.9" });
+
+  const res = await app.request("/v1/version");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { version: string };
+  assert.equal(body.version, "9.9.9");
+});
+
+test("hook version-mismatch: a mismatched x-twing-hook-version denies with 426 before the auth check ever runs", async () => {
+  const { app } = freshApp({ version: "9.9.9" });
+
+  // No Authorization header at all -- would otherwise be a 401. The 426
+  // must win, since a stale hook binary needs to know *why* even when its
+  // cached token would also be rejected.
+  const res = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-twing-hook-version": "0.0.1" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(res.status, 426);
+  const body = (await res.json()) as { error: string; hookVersion: string; serverVersion: string };
+  assert.equal(body.error, "hook_version_mismatch");
+  assert.equal(body.hookVersion, "0.0.1");
+  assert.equal(body.serverVersion, "9.9.9");
+});
+
+test("hook version-mismatch: a matching x-twing-hook-version falls through to the normal (401) path", async () => {
+  const { app } = freshApp({ version: "9.9.9" });
+
+  const res = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-twing-hook-version": "9.9.9" },
+    body: JSON.stringify({}),
   });
   assert.equal(res.status, 401);
 });

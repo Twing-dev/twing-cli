@@ -75,3 +75,11 @@ export function queryDaemonClaims(cwd: string): Promise<DaemonClaims | null> {
 export function queryDaemonNotices(sessionId: string): Promise<Notice[] | null> {
   return queryDaemon({ type: "get_notices", sessionId }, "notices", (msg) => (msg.items ?? []) as Notice[]);
 }
+
+/** `twing daemon restart`'s no-service-installed path (daemon-restart.ts):
+ * ask a running daemon to exit cleanly over the socket rather than relying
+ * on OS signals alone. Resolves false the same way every other query here
+ * treats "the daemon didn't answer" -- not running, or already gone. */
+export function requestDaemonShutdown(): Promise<boolean> {
+  return queryDaemon({ type: "shutdown" }, "shutdown_ack", () => true).then((r) => r ?? false);
+}

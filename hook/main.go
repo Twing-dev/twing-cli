@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -73,15 +74,21 @@ func handlePostToolUse(payload hookPayload) {
 }
 
 func handleCacheCheck(payload hookPayload) {
-	items := cacheCheck(payload.SessionID)
-	if len(items) == 0 {
+	result := cacheCheck(payload.SessionID)
+
+	messages := make([]string, 0, len(result.Items)+1)
+	for _, item := range result.Items {
+		messages = append(messages, item.Message)
+	}
+	if vm := result.VersionMismatch; vm != nil {
+		messages = append(messages, fmt.Sprintf(
+			"twing: this machine's twing-cli (%s) does not match the coordinator's expected version (%s). "+
+				"Run `npm install -g @twing/cli@latest`, then `twing daemon restart`.",
+			vm.ClientVersion, vm.ServerVersion))
+	}
+	if len(messages) == 0 {
 		// Nothing cached: empty stdout, exit 0 — a clean no-op (§4).
 		return
-	}
-
-	messages := make([]string, len(items))
-	for i, item := range items {
-		messages[i] = item.Message
 	}
 
 	output := map[string]any{

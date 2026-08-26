@@ -9,7 +9,8 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test dist/*.test.js"
   },
   "dependencies": {
     "@twing/core": "*",

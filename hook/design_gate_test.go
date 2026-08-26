@@ -236,6 +236,35 @@ func TestHandleEditWriteGate_CoordinatorUnreachable_Denies(t *testing.T) {
 	}
 }
 
+func TestHandleEditWriteGate_HookVersionMismatch_Denies(t *testing.T) {
+	var gotVersionHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVersionHeader = r.Header.Get("x-twing-hook-version")
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusUpgradeRequired)
+		_, _ = w.Write([]byte(`{"error":"hook_version_mismatch","hookVersion":"dev","serverVersion":"9.9.9"}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+	if !strings.Contains(reason, "out of date") {
+		t.Errorf("reason = %q, want it to mention the version mismatch", reason)
+	}
+	if !strings.Contains(reason, "9.9.9") {
+		t.Errorf("reason = %q, want it to name the coordinator's expected version", reason)
+	}
+	if gotVersionHeader == "" {
+		t.Error("outgoing request did not carry x-twing-hook-version")
+	}
+}
+
 func TestHandleEditWriteGate_ConstraintMatched_DeniesAndSkipsOpenDesignsCall(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

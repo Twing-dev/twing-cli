@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { fileURLToPath } from "node:url";
+import { getCliVersion } from "./version.js";
 
 export function hookBinaryPath(): string {
   const ext = process.platform === "win32" ? ".exe" : "";
@@ -110,10 +111,17 @@ export async function ensureHookInstalled(): Promise<string> {
     // release-hook.yml). Forcing the external linker (via cgo + the
     // system's real `cc`/`ld`) produces a properly-formed binary. Mach-O-only
     // concept -- ELF/PE builds (Linux/Windows) never needed this.
+    // -X main.version=... stamps this npm install's own version into the
+    // binary (version.go), same as release-hook.yml's release builds do
+    // from the git tag -- the §17 gate's version-compatibility check needs
+    // a real value here too, not the "dev" fallback, since this is a
+    // genuine `@twing/cli` install, just building its hook from source
+    // rather than fetching a prebuilt binary.
+    const versionLdflag = `-X main.version=${getCliVersion()}`;
     const buildArgs =
       process.platform === "darwin"
-        ? ["build", "-ldflags=-linkmode=external", "-o", target, "."]
-        : ["build", "-o", target, "."];
+        ? ["build", `-ldflags=-linkmode=external ${versionLdflag}`, "-o", target, "."]
+        : ["build", `-ldflags=${versionLdflag}`, "-o", target, "."];
     execFileSync("go", buildArgs, { cwd: source, stdio: "inherit", env: { ...process.env, CGO_ENABLED: process.platform === "darwin" ? "1" : process.env.CGO_ENABLED } });
     return target;
   }

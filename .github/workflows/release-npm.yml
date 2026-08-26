@@ -13,6 +13,16 @@ name: release-npm
 # section on releasing) and npm >= 11.5.1 + Node >= 22.14, which the
 # default GitHub-hosted runner's bundled npm doesn't guarantee, hence the
 # explicit self-update step below.
+#
+# The published version comes from the tag itself (GITHUB_REF_NAME), not
+# the committed package.json -- same "derive from the tag, at build time"
+# approach release-hook.yml already uses for the Go hook binary's own
+# embedded version. `npm pkg set` below only edits the ephemeral checkout,
+# never committed back; the committed package.json files stop being
+# authoritative for what actually publishes. The only manual step left for
+# a release is `git tag vX.Y.Z && git push --tags` -- version-compatibility
+# enforcement (§17) depends on core/cli/server never drifting out of
+# lockstep, which a forgotten manual bump previously risked.
 
 on:
   push:
@@ -34,6 +44,11 @@ jobs:
       - name: Ensure npm supports trusted publishing (>= 11.5.1)
         run: npm install -g npm@latest
       - run: npm install
+      - name: Set package versions from the release tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm pkg set version="$VERSION" -w packages/core -w packages/cli
+          npm pkg set "dependencies.@twing/core=^$VERSION" -w packages/cli
       - run: npm run build
       - name: Publish @twing/core
         working-directory: packages/core

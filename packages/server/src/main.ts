@@ -68,6 +68,16 @@ const app = createApp({
   identities: new IdentityStore(db, dataDirOptions),
   noAuth,
   corsOrigins,
+  // Two callers, not one: the real production path now, and a test seam
+  // still. `packages/server/Dockerfile` bakes the release tag in here at
+  // build time (deploy/docker/README.md's redeploy flow) -- the actual
+  // source of truth for a real deployment's declared version, not a
+  // fallback. It's also how the simulator's integration test
+  // (version-gate.test.ts) spins up an ephemeral server declaring a
+  // deliberately different version than what's actually installed,
+  // without needing two real npm releases side by side. Undefined falls
+  // through to getServerVersion()'s own package.json read (app.ts).
+  version: process.env.TWING_SERVE_VERSION,
 });
 
 // §17 Phase 4: no_auth defaults to loopback-only -- an operator has to

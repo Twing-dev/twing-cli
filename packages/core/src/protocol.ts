@@ -33,9 +33,38 @@ export interface NoticeItem {
   message: string;
 }
 
+/** Populated on `get_notices` whenever the daemon has learned (via its own
+ * periodic `/v1/version` check against a known coordinator, `daemon/sync.ts`'s
+ * `Syncer.versionMismatch()`) that this machine's `@twing/cli` version
+ * doesn't match what the coordinator declares. Independent of `items`/the
+ * per-developer notice cache -- this must surface even for a session with no
+ * prior claims in this project (see `Syncer.versionMismatch()`'s doc
+ * comment for the one known gap: the very first `SessionStart` on a machine,
+ * before any claim has taught the daemon which server to check). */
+export interface VersionMismatchInfo {
+  clientVersion: string;
+  serverVersion: string;
+}
+
 export interface NoticesMessage {
   type: "notices";
   items: NoticeItem[];
+  versionMismatch?: VersionMismatchInfo;
+}
+
+/** CLI -> daemon: ask a running daemon (however it was started -- foreground,
+ * spawn-daemon.ts's detached fallback, or an installed OS service) to exit
+ * cleanly, so `twing daemon restart` doesn't rely on OS signals alone. Only
+ * used on the no-service-installed path (`daemon-restart.ts`) -- an
+ * installed launchd/systemd service is restarted via the service manager
+ * directly instead, since systemd's `Restart=on-failure` does not respawn
+ * on a clean exit. */
+export interface ShutdownMessage {
+  type: "shutdown";
+}
+
+export interface ShutdownAckMessage {
+  type: "shutdown_ack";
 }
 
 /** CLI -> daemon (§6): "ask it for the live claim set" for the repo at
@@ -52,9 +81,9 @@ export interface ClaimsMessage {
 }
 
 export type HookToDaemonMessage = EnqueueMessage | GetNoticesMessage;
-export type CliToDaemonMessage = GetClaimsMessage;
+export type CliToDaemonMessage = GetClaimsMessage | ShutdownMessage;
 export type DaemonToHookMessage = AckMessage | NoticesMessage;
-export type DaemonToCliMessage = ClaimsMessage;
+export type DaemonToCliMessage = ClaimsMessage | ShutdownAckMessage;
 export type ProtocolMessage = HookToDaemonMessage | CliToDaemonMessage | DaemonToHookMessage | DaemonToCliMessage;
 
 /**

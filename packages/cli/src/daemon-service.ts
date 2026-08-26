@@ -99,7 +99,7 @@ function sleep(ms: number): Promise<void> {
  * should be listening within a few hundred ms; this budget is generous
  * without making a routine `twing init` feel slow on the failure path
  * (which is rare by construction -- see the rollback this guards below). */
-async function waitForDaemonUp(socketPath: string): Promise<boolean> {
+export async function waitForDaemonUp(socketPath: string): Promise<boolean> {
   for (let i = 0; i < 8; i++) {
     if (await probeSocketOnce(socketPath)) return true;
     await sleep(250);
@@ -227,7 +227,7 @@ function systemdUnitPath(): string {
  * failure there still leaves the unit correctly auto-restarting/restarting
  * around every login/crash, just not literally at boot with nobody logged
  * in yet. */
-function installSystemdUnit(marker: DaemonLaunchMarker): ServiceInstallResult {
+async function installSystemdUnit(marker: DaemonLaunchMarker): Promise<ServiceInstallResult> {
   const unitPath = systemdUnitPath();
   const unit = `[Unit]
 Description=twing daemon
@@ -249,10 +249,34 @@ WantedBy=default.target
     } catch {
       // Best-effort, see doc comment above.
     }
-    return "installed";
+    // Verify the unit actually holds the socket before reporting success --
+    // ground truth over `systemctl`'s own "active" bookkeeping, same
+    // reasoning `installLaunchAgent`'s own `waitForDaemonUp` check already
+    // uses. Found live, 2026-08-26: with no check here and `init.ts`
+    // calling `ensureDaemonRunning` (the plain spawn fallback) *before*
+    // this, a daemon already holding the socket via that fallback made
+    // every systemd-managed start attempt lose the race and crash-loop
+    // forever underneath a silently-reported "installed". `init.ts` now
+    // calls this before the spawn fallback specifically so this check is
+    // what decides whether a fallback spawn is still needed, not a race
+    // between two independently-started daemons.
+    const cameUp = await waitForDaemonUp(defaultSocketPath());
+    return cameUp ? "installed" : "failed";
   } catch {
     return "failed";
   }
+}
+
+/** Which OS-level service (if any) is currently installed for this daemon --
+ * `daemon-restart.ts` uses this to decide whether to restart via the
+ * service manager directly (launchd/systemd) or fall back to the plain
+ * socket-shutdown + spawn path. Checks for the plist/unit file on disk,
+ * same ground-truth-over-bookkeeping preference `waitForDaemonUp` already
+ * uses for the socket itself. */
+export function isServiceInstalled(): "launchd" | "systemd" | "none" {
+  if (process.platform === "darwin" && fs.existsSync(launchAgentPlistPath())) return "launchd";
+  if (process.platform === "linux" && fs.existsSync(systemdUnitPath())) return "systemd";
+  return "none";
 }
 
 /** Best-effort OS-level service install so the daemon survives a machine
@@ -273,7 +297,7 @@ export async function installDaemonService(): Promise<ServiceInstallResult> {
     case "darwin":
       return installLaunchAgent(marker);
     case "linux":
-      return installSystemdUnit(marker);
+      return await installSystemdUnit(marker);
     default:
       return "unsupported";
   }

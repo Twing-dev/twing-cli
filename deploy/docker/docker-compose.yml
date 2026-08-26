@@ -13,6 +13,13 @@ services:
     build:
       context: ../..
       dockerfile: packages/server/Dockerfile
+      args:
+        # From the shell env or a .env file next to this compose file --
+        # docker compose interpolates ${VAR} into the YAML itself,
+        # separately from the env_file: runtime injection below. See
+        # deploy/docker/README.md's redeploy flow: checks out a release
+        # tag, then passes that tag's version through here.
+        VERSION: ${VERSION:-dev}
     restart: unless-stopped
     env_file:
       - .env
