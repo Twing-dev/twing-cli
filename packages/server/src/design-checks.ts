@@ -1,7 +1,13 @@
 /**
- * Overlap detection (design doc §17.4 / spec §6) -- cheapest, highest-
- * precision first: exact overlap, then constraint match, then a Jaccard
- * summary-similarity fallback that only runs if those found nothing.
+ * Overlap detection (design doc §17.4 / spec §6) -- the synchronous half of
+ * the four-bucket design-conflict model (2026-08-26 terminology
+ * simplification; see `DesignVerdict`'s doc comment in core/types.ts for
+ * the full model). Two tiers now, cheapest first: exact `creates`/`touches`
+ * overlap (`"file_overlap"`, always advisory, never blocks), then
+ * constraint match (`"constraint_violation"`, always blocks). `"symbol_conflict"`
+ * (real-edit collisions, sourced from Claims) lives in `checks.ts`/
+ * `design-divergence.ts`; `"llm_divergence"` lives in
+ * `design-semantic-check.ts`'s async comparator -- neither runs here.
  *
  * (2026-08-19, removed: a "dependency collision" tier that used to sit
  * between exact overlap and constraint match -- one design's `creates`
@@ -18,65 +24,58 @@
  * different name). Kept for now: `exactOverlap` below (creates/touches
  * exact-match, the same brittleness, but a strictly more common phrasing
  * choice -- a file path is close to canonical even before it exists,
- * unlike a not-yet-decided symbol name) and the summary-similarity/
- * semantic-comparator layers, which are the intended home for anything
- * needing real conceptual matching rather than exact-string matching.
+ * unlike a not-yet-decided symbol name).
  *
- * (2026-08-19, severity split: `exactOverlap` (tier 1) demoted from
- * blocking to `severity: "warning"` -- a same-file coincidence flags for
- * display (design detail, activity feed) but no longer demotes the design
- * to `"flagged"` or denies the Edit/Write gate. `constraintMatch` (tier 3)
- * unchanged, still `severity: "error"`, still blocking. See DesignSeverity's
- * doc comment in core/types.ts.)
+ * (2026-08-19, `exactOverlap` demoted from blocking to advisory-only -- a
+ * same-file coincidence flags for display (design detail, activity feed)
+ * but never demotes the design to `"flagged"` or denies the Edit/Write
+ * gate. `constraintMatch` unchanged, still blocking.)
  *
- * (2026-08-22, `summarySimilarity` (tier 4) also demoted to `severity:
- * "warning"`: by construction it only ever runs once tier 1 has already
- * found *zero* path-level overlap (see the early return in
- * `runDesignChecks` below), so every tier-4 hit was blocking on unvalidated
- * Jaccard word-overlap of free text alone, with no path corroboration --
- * the weakest-evidence tier carrying the same blocking weight as an actual
- * constraint violation, and stronger weight than tier 1's own exact path
- * collision. Real conceptual-overlap enforcement now belongs to the
- * semantic comparator's own `"conflict"` verdict instead (see
- * `runSemanticComparatorPass` in app.ts, and DesignVerdict's doc comment in
- * core/types.ts) -- unlike this tier, that one is at least an LLM judgment
- * over the designs' actual text, not a bag-of-words heuristic, and it
- * blocks by flagging the design once its async check returns, rather than
- * synchronously here.)
+ * (2026-08-26, tier 4 -- the Jaccard summary-similarity fallback -- removed
+ * entirely, not just demoted. It only ever ran once tier 1 found *zero*
+ * path-level overlap, on unvalidated bag-of-words similarity of free text
+ * alone with no path corroboration, and by then was already redundant:
+ * `"llm_divergence"` (the semantic comparator, `design-semantic-check.ts`)
+ * is a strictly stronger signal for the same question -- an actual LLM
+ * judgment over the designs' text, not a word-overlap heuristic -- and is
+ * the bucket this kind of conceptual-overlap detection now belongs to
+ * exclusively. `DesignSeverity`/`severity` is gone from the whole model as
+ * of this same change: with tier 4 dropped and `DesignConstraintType`
+ * collapsed to one value, whether a verdict blocks is now a pure, static
+ * function of which verdict it is (`file_overlap` never does; the other
+ * three always do), so a separately-varying severity field had nothing
+ * left to vary.
  *
- * (2026-08-22, same-developer pairs excluded from tiers 1 and 4: a usability
- * pass on twing-monitor found overlap/conflict signal between a single
- * developer's own two designs -- the common case once one person runs
- * several concurrent agents/sessions -- was pure noise in the activity feed,
- * not just a false-positive-prone blocker. Checked against this project's
- * own live history: every alignment thread this project has ever opened
- * (14/14) was a self-pair, and none was ever replied to or closed.
- * `constraintMatch` (tier 3, see structuralOverlaps and runDesignChecks
- * below) is untouched -- it's a path-vs-project-rule check with no "other
- * developer" involved at all, so there's nothing to exclude. Reversed from
- * `design-divergence.ts`'s and `checks.ts`'s prior convention of
- * deliberately *including* a developer's own concurrent sessions (§8) --
- * that convention is reversed there too, same day, same reasoning. A
- * dedicated same-developer-multi-agent-drift feature is deferred, not
- * rebuilt as a quieter variant of this one -- see those files' own
- * comments.)
+ * (2026-08-22, same-developer pairs excluded from tier 1 (and, historically,
+ * the now-removed tier 4): a usability pass on twing-monitor found overlap/
+ * conflict signal between a single developer's own two designs -- the
+ * common case once one person runs several concurrent agents/sessions --
+ * was pure noise in the activity feed, not just a false-positive-prone
+ * blocker. Checked against this project's own live history: every
+ * alignment thread this project has ever opened (14/14) was a self-pair,
+ * and none was ever replied to or closed. `constraintMatch` (tier 3, see
+ * structuralOverlaps and runDesignChecks below) is untouched -- it's a
+ * path-vs-project-rule check with no "other developer" involved at all, so
+ * there's nothing to exclude. Reversed from `design-divergence.ts`'s and
+ * `checks.ts`'s prior convention of deliberately *including* a developer's
+ * own concurrent sessions (§8) -- that convention is reversed there too,
+ * same day, same reasoning. A dedicated same-developer-multi-agent-drift
+ * feature is deferred, not rebuilt as a quieter variant of this one -- see
+ * those files' own comments.)
  */
 
 import { minimatch } from "minimatch";
-import type { DesignStatement, DesignConstraint, DesignConflict, DesignVerdict, DesignConstraintType, DesignSeverity } from "@twing/core";
+import type { DesignStatement, DesignConstraint, DesignConflict, DesignVerdict, DesignConstraintType } from "@twing/core";
 
 export interface DesignCheckOutcome {
   verdict: DesignVerdict;
   conflicts: DesignConflict[];
-  /** Always present (mirrors `conflicts` above), not just on `constraint_flag`
-   * -- empty everywhere else. See matchConstraintsForPaths's doc comment for
-   * why this is a list now, not a single optional hit. */
+  /** Always present (mirrors `conflicts` above), not just on
+   * `constraint_violation` -- empty everywhere else. See
+   * matchConstraintsForPaths's doc comment for why this is a list now, not
+   * a single optional hit. */
   constraints: ConstraintHit[];
-  /** See DesignSeverity (core/types.ts). Undefined for `"clean"`. */
-  severity?: DesignSeverity;
 }
-
-const SUMMARY_SIMILARITY_THRESHOLD = 0.5;
 
 /** ExitPlanMode retry dedup (design-store.ts's `openPlanModeDesignForSession`
  * / `reregisterFromPlan`, wired in app.ts's `POST /v1/designs/check`):
@@ -84,12 +83,11 @@ const SUMMARY_SIMILARITY_THRESHOLD = 0.5;
  * `rawPlanExcerpt` before being treated as "the same plan, retried" (update
  * in place) rather than a genuinely different plan that happens to share a
  * session id (register as a new row, leaving the candidate untouched).
- * Deliberately a separate, independent constant from
- * `SUMMARY_SIMILARITY_THRESHOLD` above, not a reuse of it -- that one gates
- * a low-stakes advisory flag for a human to look at; a false positive here
- * would silently overwrite a different design's content, so a false match
- * is a correctness bug, not just a missed hint, and needs a different risk
- * calculus.
+ * Deliberately its own constant, not shared with anything in the
+ * design-conflict model above -- a false positive here would silently
+ * overwrite a different design's content, so a false match is a
+ * correctness bug, not just a missed hint, and needs a different risk
+ * calculus than any conflict-detection threshold.
  *
  * 0.7 -- tested empirically against real data rather than picked blind (see
  * the plan this shipped from): full, untruncated plan text on both sides
@@ -181,26 +179,21 @@ export interface ConstraintHit {
  * session's self-reported `creates`/`touches` claimed at registration time.
  * See §17.9.
  */
-// When several constraints match the same path, `review_required` outranks
-// `canonical_abstraction`/`domain_fact` regardless of scope width (a
-// sign-off requirement shouldn't get silently masked by a broader
-// duplicate-abstraction rule seeded earlier -- found live, 2026-08-11:
-// packages/server/** correctly matched, but the earlier, broader
-// packages/** "don't invent a second wire format" rule won the race and
-// reported instead, which is a misleading reason even though the deny
-// itself was still correct).
-const CONSTRAINT_TYPE_PRIORITY: Record<DesignConstraintType, number> = {
-  review_required: 0,
-  canonical_abstraction: 1,
-  domain_fact: 2,
-};
+// 2026-08-26: `CONSTRAINT_TYPE_PRIORITY` (a three-way priority map so a
+// `review_required` match always outranked `canonical_abstraction`/
+// `domain_fact` when several constraints hit the same path) is gone --
+// `DesignConstraintType` collapsed to a single value the same day, so
+// there's no longer more than one type to rank. Sort by scope-specificity
+// alone now (see matchConstraintsForPaths below); every matching constraint
+// is returned regardless of order (2026-08-22), so this only ever affects
+// display order among simultaneous hits, never which are included.
 
 /**
  * Returns *every* distinct constraint (deduped by id) that matches at least
  * one of `targets`, not just one "best" hit -- fixed 2026-08-22 (design-gate
  * friction item 8, found live shipping the constraint-deletion work
  * 2026-08-20): this used to collapse to a single winner by
- * `CONSTRAINT_TYPE_PRIORITY` then scope specificity, so a candidate whose
+ * constraint-type priority then scope specificity, so a candidate whose
  * paths violated two *different* constraints only ever saw the
  * higher-priority one -- justify-and-approve that one, retry, and only then
  * discover the second. Every consumer (runDesignChecks, `/v1/designs/check`
@@ -208,10 +201,11 @@ const CONSTRAINT_TYPE_PRIORITY: Record<DesignConstraintType, number> = {
  * threads a list through instead of a single optional hit. See design doc
  * §17.11.
  *
- * Still sorted `(CONSTRAINT_TYPE_PRIORITY asc, scope-specificity desc)` --
- * most-severe-and-specific first -- so a caller that only wants "the one
- * that matters most" can still just take `[0]` (e.g. design-eval.test.ts's
- * eval cases, which only ever expect one constraint per case).
+ * Sorted by scope-specificity alone (2026-08-26 -- was also ranked by
+ * constraint-type priority before `DesignConstraintType` collapsed to one
+ * value) -- most-specific first, so a caller that only wants "the one that
+ * matters most" can still just take `[0]` (e.g. design-eval.test.ts's eval
+ * cases, which only ever expect one constraint per case).
  *
  * Deliberate behavior change from the old single-hit version: two
  * *same-type* constraints both matching the same path (e.g. a broad
@@ -244,10 +238,7 @@ export function matchConstraintsForPaths(
     }
   }
 
-  hits.sort((a, b) => {
-    const byPriority = CONSTRAINT_TYPE_PRIORITY[a.constraint.type] - CONSTRAINT_TYPE_PRIORITY[b.constraint.type];
-    return byPriority !== 0 ? byPriority : b.scopeLength - a.scopeLength;
-  });
+  hits.sort((a, b) => b.scopeLength - a.scopeLength);
 
   return hits.map((h) => ({ id: h.constraint.id, statement: h.constraint.statement, type: h.constraint.type }));
 }
@@ -266,7 +257,8 @@ function keywordSet(s: string): Set<string> {
  * "the"/"and" don't -- doesn't materially inflate scores for unrelated
  * English text in practice, see `PLAN_RETRY_SIMILARITY_THRESHOLD`'s empirical
  * notes). Exported for reuse by the ExitPlanMode retry-dedup check
- * (design-store.ts / app.ts) as well as `summarySimilarity` below. */
+ * (design-store.ts / app.ts) -- its only consumer now that tier 4
+ * (`summarySimilarity`) has been removed (2026-08-26). */
 export function jaccard(a: string, b: string): number {
   const setA = keywordSet(a);
   const setB = keywordSet(b);
@@ -275,23 +267,6 @@ export function jaccard(a: string, b: string): number {
   for (const w of setA) if (setB.has(w)) intersectionSize++;
   const unionSize = new Set([...setA, ...setB]).size;
   return intersectionSize / unionSize;
-}
-
-/** Tier 4: deliberately weak fallback net, only consulted when 1-3 find
- * nothing (design doc §17.4 / spec §6.4). Non-blocking (2026-08-22, see this
- * file's header comment) -- Jaccard word-overlap on free text with no path
- * evidence isn't strong enough grounds to deny real work on its own. */
-function summarySimilarity(candidate: DesignStatement, other: DesignStatement): DesignConflict | undefined {
-  const score = jaccard(candidate.summary, other.summary);
-  if (score < SUMMARY_SIMILARITY_THRESHOLD) return undefined;
-  return {
-    conflictingDesignId: other.id,
-    agentLabel: other.agentLabel,
-    overlapKind: "touches",
-    overlapDetail: `summaries are ${Math.round(score * 100)}% similar by keyword overlap (fallback signal, low confidence)`,
-    conflictingSummary: other.summary,
-    overlapPaths: [], // no specific path -- this tier flags on summary text, not scope
-  };
 }
 
 /**
@@ -383,14 +358,17 @@ export function runDesignChecks(
 
   const structuralConflicts = structuralOverlaps(candidate, others);
   if (structuralConflicts.length > 0) {
-    // 2026-08-19: demoted to "warning" -- a same-file coincidence between
-    // two designs' self-reported creates/touches isn't itself evidence of a
-    // real merge conflict (a design can decline to actually write to a path
-    // it named, or write something that doesn't collide with what the
-    // other one wrote). Still worth surfacing before either writes code --
-    // that's the one thing this tier can do that claims (§4) can't, since
-    // claims don't exist until code does -- just not worth blocking on.
-    return { verdict: "overlap", conflicts: structuralConflicts, constraints: [], severity: "warning" };
+    // Always advisory (2026-08-19, renamed from "overlap" 2026-08-26) -- a
+    // same-file coincidence between two designs' self-reported
+    // creates/touches isn't itself evidence of a real merge conflict (a
+    // design can decline to actually write to a path it named, or write
+    // something that doesn't collide with what the other one wrote). Still
+    // worth surfacing before either writes code -- that's the one thing
+    // this tier can do that claims (§4) can't, since claims don't exist
+    // until code does -- just never worth blocking on. Real edits landing
+    // on the same real symbol is a different, blocking bucket --
+    // `"symbol_conflict"`, see checks.ts/design-divergence.ts.
+    return { verdict: "file_overlap", conflicts: structuralConflicts, constraints: [] };
   }
 
   // §17 review-flow fix (2026-08): a constraint already justified and
@@ -403,24 +381,7 @@ export function runDesignChecks(
   // see matchConstraintsForPaths's doc comment.)
   const constraintHits = constraintMatch(candidate, constraints);
   if (constraintHits.length > 0) {
-    return { verdict: "constraint_flag", conflicts: [], constraints: constraintHits, severity: "error" };
-  }
-
-  const similarityConflicts: DesignConflict[] = [];
-  for (const other of others) {
-    if (other.developerId === candidate.developerId) continue; // see structuralOverlaps's doc comment
-    const sim = summarySimilarity(candidate, other);
-    if (sim) similarityConflicts.push(sim);
-  }
-  if (similarityConflicts.length > 0) {
-    // Demoted alongside tier 1 (2026-08-22, see this file's header
-    // comment) -- a conceptual-overlap fallback with no specific colliding
-    // path to point at (see summarySimilarity's own comment) isn't strong
-    // enough evidence to block on its own. Real conceptual-conflict
-    // enforcement now belongs to the semantic comparator's own `"conflict"`
-    // verdict (app.ts's runSemanticComparatorPass), which blocks by
-    // flagging the design once its async LLM check returns.
-    return { verdict: "overlap", conflicts: similarityConflicts, constraints: [], severity: "warning" };
+    return { verdict: "constraint_violation", conflicts: [], constraints: constraintHits };
   }
 
   return { verdict: "clean", conflicts: [], constraints: [] };

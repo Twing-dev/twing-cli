@@ -1,6 +1,8 @@
 /**
  * Alignment threads (statefulness redesign, 2026-08) -- the "conversation
- * layer" for a `design_divergence` finding (`design-divergence.ts`):
+ * layer" for a `symbol_conflict` or `llm_divergence` finding (see
+ * `checks.ts`/`design-divergence.ts` for the three finding kinds that feed
+ * `symbol_conflict`, and `design-semantic-check.ts` for `llm_divergence`):
  * async, mailbox-style, never live. A thread is a small current-state table
  * (id, parties, status), exactly like `designs`; every message in it,
  * including the auto-generated seed note, is an `activity_events` row
@@ -8,9 +10,14 @@
  * table -- same "current-state table + log entries" pattern as everything
  * else in this schema, and it keeps the history genuinely append-only.
  *
- * Deliberately advisory: nothing here ever blocks a tool call. Closing a
- * thread is unilateral -- either party can close it without the other
- * agreeing, since this is for voluntary reconciliation, not enforcement.
+ * The thread itself stays purely advisory -- closing it (below) is
+ * unilateral and never blocks or unblocks a tool call by itself. As of the
+ * 2026-08-26 terminology simplification, both `symbol_conflict` and
+ * `llm_divergence` *do* independently flag/block via `DesignRegistry.flag()`
+ * (see app.ts) -- the thread is the conversation about *why*, cleared via
+ * `twing design resolve --justify` (self-approvable for both buckets), not
+ * by closing the thread. See `DesignVerdict`'s doc comment in
+ * core/types.ts for the full model.
  */
 
 import * as crypto from "node:crypto";
@@ -19,14 +26,47 @@ import type { Db } from "./db/client.js";
 import { alignmentThreads as threadsTable } from "./db/schema.js";
 import { DrizzleActivityLog } from "./activity-log.js";
 
-/** What kind of divergence a thread represents -- 2026-08-23. The three
- * semantic values mirror `SemanticConflictKind` (`design-semantic-check.ts`)
- * exactly, since that's their only producer; `symbol_claim` is the
- * claims-path (`design-divergence.ts`) equivalent -- a real edit landing in
- * someone else's declared scope, as opposed to two designs' *content*
- * conflicting. Undefined on pre-2026-08-23 rows (never backfilled -- see
- * this file's header comment on why old threads stay as-is). */
-export type AlignmentCategory = "duplication" | "contradictory_assumptions" | "tension" | "symbol_claim";
+/** Which of the two self-approvable design-conflict buckets a thread
+ * represents (2026-08-26 terminology simplification -- see
+ * `DesignVerdict`'s doc comment in core/types.ts for the full four-bucket
+ * model). Collapsed from a four-way
+ * `"duplication" | "contradictory_assumptions" | "tension" | "symbol_claim"`
+ * union: those four were a bucket name and its sub-reason tangled into one
+ * field. The bucket name is now just these two values; the old four values
+ * survive as `subKind` below, detail text under the bucket rather than a
+ * competing top-level name. A pre-2026-08-26 row keeps its old value here
+ * unconverted -- never backfilled, same convention this table already
+ * followed for its pre-2026-08-23 rows; a reader that needs to treat old
+ * rows uniformly with new ones should go through `legacyCategoryBucket`
+ * below rather than compare `category` directly. */
+export type AlignmentCategory = "symbol_conflict" | "llm_divergence";
+
+/** Detail label shown under the bucket name -- `duplication` /
+ * `contradictory_assumptions` / `tension` for `llm_divergence` (mirrors
+ * `SemanticConflictKind`, `design-semantic-check.ts`, its only producer),
+ * or `real_edit_collision` / `scope_intrusion` / `contract_break` for
+ * `symbol_conflict` (mirrors the three finding kinds that now feed it --
+ * `textual_overlap` / `design_divergence` / `contract_divergence`, see
+ * `checks.ts`/`design-divergence.ts`). Undefined on any row that predates
+ * this column. */
+export type AlignmentSubKind = "duplication" | "contradictory_assumptions" | "tension" | "real_edit_collision" | "scope_intrusion" | "contract_break";
+
+/** Legacy pre-2026-08-26 `category` strings, mapped to which of the two
+ * current buckets they represent -- for any reader that needs to treat old
+ * rows uniformly with new ones (list-view filtering, etc.) without a
+ * backfill. */
+export function legacyCategoryBucket(raw: string): AlignmentCategory | undefined {
+  switch (raw) {
+    case "duplication":
+    case "contradictory_assumptions":
+    case "tension":
+      return "llm_divergence";
+    case "symbol_claim":
+      return "symbol_conflict";
+    default:
+      return undefined;
+  }
+}
 
 export interface AlignmentThread {
   id: string;
@@ -44,11 +84,14 @@ export interface AlignmentThread {
   closedAt?: number;
   closedBy?: string;
   category?: AlignmentCategory;
+  /** Detail label under the bucket name -- see `AlignmentSubKind`'s own
+   * doc comment. Undefined on any row that predates this column. */
+  subKind?: AlignmentSubKind;
   /** Short, list-view label -- distinct from `systemDescription`, which
    * stays the full-text description. Undefined on pre-2026-08-23 rows. */
   summary?: string;
   /** Every distinct overlapping path/symbol accumulated across amendments.
-   * Only meaningful for `category: "symbol_claim"`. Falls back to
+   * Only meaningful for `category: "symbol_conflict"`. Falls back to
    * `[symbolId]` for a pre-2026-08-23 row that never had this column. */
   symbolIds: string[];
   /** The initiating developer's own open design, when one resolves --
@@ -81,6 +124,7 @@ export interface FindOrCreateInput {
   designId?: string;
   systemDescription: string;
   category: AlignmentCategory;
+  subKind: AlignmentSubKind;
   summary: string;
   initiatingDesignId?: string;
   ts?: number;
@@ -99,6 +143,7 @@ interface ThreadRow {
   closedAt: number | null;
   closedBy: string | null;
   category: string | null;
+  subKind: string | null;
   summary: string | null;
   symbolIds: string;
   initiatingDesignId: string | null;
@@ -120,6 +165,7 @@ function fromRow(row: ThreadRow): AlignmentThread {
     closedAt: row.closedAt ?? undefined,
     closedBy: row.closedBy ?? undefined,
     category: (row.category as AlignmentCategory | null) ?? undefined,
+    subKind: (row.subKind as AlignmentSubKind | null) ?? undefined,
     summary: row.summary ?? undefined,
     symbolIds: parsedSymbolIds.length > 0 ? parsedSymbolIds : row.symbolId ? [row.symbolId] : [],
     initiatingDesignId: row.initiatingDesignId ?? undefined,
@@ -127,21 +173,27 @@ function fromRow(row: ThreadRow): AlignmentThread {
   };
 }
 
-/** Short list-view label per category -- deterministic, no LLM call (the
+/** Short list-view label per sub-kind -- deterministic, no LLM call (the
  * semantic comparator already spent one producing `systemDescription`'s
  * full reason; this just needs a title). Capped defensively so a long
- * design summary can't blow up the list view. */
-export function buildAlignmentSummary(category: AlignmentCategory, otherDesignSummary: string, symbolCount: number): string {
+ * design summary can't blow up the list view. Keyed by `subKind`, not the
+ * top-level `category` -- the label needs the specific reason
+ * ("duplicate work" vs. "contradicts"), which only the sub-kind carries. */
+export function buildAlignmentSummary(subKind: AlignmentSubKind, otherDesignSummary: string, symbolCount: number): string {
   const other = otherDesignSummary.length > 80 ? `${otherDesignSummary.slice(0, 79)}…` : otherDesignSummary || "(no summary)";
-  switch (category) {
+  switch (subKind) {
     case "duplication":
       return `Duplicate work with "${other}"`;
     case "contradictory_assumptions":
       return `Contradicts "${other}"`;
     case "tension":
       return `Tension with "${other}"`;
-    case "symbol_claim":
-      return `${symbolCount} overlapping path${symbolCount === 1 ? "" : "s"} with "${other}"`;
+    case "real_edit_collision":
+      return `${symbolCount} overlapping symbol${symbolCount === 1 ? "" : "s"} with "${other}"`;
+    case "scope_intrusion":
+      return `Edit landed inside "${other}"'s declared scope`;
+    case "contract_break":
+      return `Signature change breaks a live caller in "${other}"`;
   }
 }
 
@@ -202,6 +254,7 @@ export class AlignmentThreadStore {
       systemDescription: input.systemDescription,
       openedAt: ts,
       category: input.category,
+      subKind: input.subKind,
       summary: input.summary,
       symbolIds: input.symbolIds,
       initiatingDesignId: input.initiatingDesignId,
@@ -222,6 +275,7 @@ export class AlignmentThreadStore {
         closedAt: null,
         closedBy: null,
         category: thread.category ?? null,
+        subKind: thread.subKind ?? null,
         summary: thread.summary ?? null,
         symbolIds: JSON.stringify(thread.symbolIds),
         initiatingDesignId: thread.initiatingDesignId ?? null,
@@ -253,10 +307,10 @@ export class AlignmentThreadStore {
     const ts = input.ts ?? Date.now();
     const mergedSymbolIds = Array.from(new Set([...existing.symbolIds, ...input.symbolIds]));
     const newSymbolIds = input.symbolIds.filter((s) => !existing.symbolIds.includes(s));
-    // A symbol_claim thread only has something new to say when a symbol it
-    // hasn't seen before shows up; a semantic-conflict re-check is always
+    // A symbol_conflict thread only has something new to say when a symbol
+    // it hasn't seen before shows up; an llm_divergence re-check is always
     // itself a fresh LLM finding, so it's always worth a follow-up message.
-    const hasNewSignal = input.category !== "symbol_claim" || newSymbolIds.length > 0;
+    const hasNewSignal = input.category !== "symbol_conflict" || newSymbolIds.length > 0;
     const resolvedInitiatingDesignId = existing.initiatingDesignId ?? input.initiatingDesignId;
 
     this.db

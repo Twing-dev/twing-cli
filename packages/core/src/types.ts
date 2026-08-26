@@ -217,17 +217,39 @@ export interface DesignStatement {
    * a separate decision on that design's own row, if it ever comes up. */
   justifiedOverlaps: string[];
   /** Semantic comparator's counterpart to `justifiedOverlaps` above
-   * (2026-08-22) -- entries are bare `conflictingDesignId`s (no paths: a
-   * `"conflict"` verdict has no path evidence to key on, see
+   * (2026-08-22) -- entries are bare `conflictingDesignId`s (no paths: an
+   * `"llm_divergence"` verdict has no path evidence to key on, see
    * DesignVerdict's doc comment), so `runSemanticComparatorPass` skips
    * re-checking (and re-flagging) a pair once its conflict has been
    * justified and approved. Appended (never removed) by
    * `DesignRegistry.decideReview` when a review carrying
    * `conflictWaivers` is approved -- see `PendingReview.conflictWaivers`. */
   justifiedConflicts: string[];
+  /** `"symbol_conflict"`'s own approval memory (2026-08-26) -- same
+   * composite-key shape as `justifiedOverlaps` (`${conflictingDesignId}::${symbolId}`,
+   * via `overlapWaiverKey`), but kept as its own field rather than folded
+   * into `justifiedOverlaps`: a `file_overlap` warning (row 2, always
+   * advisory, self-reported scope) and a `symbol_conflict` block (row 3,
+   * always blocking, real edits) are philosophically different waivers
+   * even though the key shape coincides -- keeping them separate means a
+   * row-2 warning's justification history never gets conflated with a
+   * row-3 block's. Appended (never removed) by `DesignRegistry.decideReview`
+   * when a review carrying `symbolConflictWaivers` is approved -- see
+   * `PendingReview.symbolConflictWaivers`. */
+  justifiedSymbolConflicts: string[];
 }
 
-export type DesignConstraintType = "canonical_abstraction" | "domain_fact" | "review_required";
+/** 2026-08-26 terminology simplification: collapsed from a three-way
+ * `"canonical_abstraction" | "domain_fact" | "review_required"` union to a
+ * single value. Checked against every reader in the codebase (matching,
+ * severity, blocking, the admin-justify resolution flow) and found they
+ * treated all three identically -- the only thing `type` ever changed was
+ * which one-line phrase a deny message printed. The field stays on the wire
+ * (rather than being removed outright) specifically to avoid repeating the
+ * cross-repo break recorded for the `constraints` payload key rename
+ * (twing-monitor reads response shapes this repo doesn't control) -- only
+ * the number of values it can take collapses, not its presence. */
+export type DesignConstraintType = "constraint";
 
 export interface DesignConstraint {
   id: string;
@@ -241,46 +263,62 @@ export interface DesignConstraint {
   createdAt: number;
 }
 
-/** `"conflict"` (2026-08-22): the semantic comparator's own verdict
- * (design-semantic-check.ts's `checkSemanticConflict`, driven by app.ts's
- * `runSemanticComparatorPass`) -- an LLM judgment that two designs conflict
- * in intent, as opposed to `"overlap"`'s exact-path/keyword matching.
- * Distinct from `"overlap"` because it has different evidence (LLM
- * reasoning over free text, not paths) and a different justification shape
- * (see DesignStatement.justifiedConflicts / PendingReview.conflictWaivers,
- * keyed by conflicting design id alone, no paths -- there's nothing
- * path-shaped to waive). Never returned by `runDesignChecks`/
- * `DesignCheckResult` (design-checks.ts's tiers 1-4 run synchronously
- * against the request that triggered them); only ever set via
- * `DesignRegistry.flag()` from the async comparator pass, after its
- * response has already been sent.
+/**
+ * The four-bucket design-conflict model (2026-08-26 terminology
+ * simplification, superseding the prior five-verdict/severity/
+ * three-constraint-type/separate-align-vocabulary sprawl -- see
+ * docs/design-terminology.md and this repo's own memory of the design
+ * discussion that produced it). One principle: approval belongs to
+ * whoever's authority you'd be overriding.
  *
- * `"has_open_designs"` (2026-08-25): a pre-registration check, distinct from
- * the tiers above in that it runs *before* any row exists for this request
- * at all -- `overlap`/`constraint_flag`/`conflict` all presuppose a design
- * was already created and are about that design's relationship to others;
- * this one is about whether registration should even proceed. Only reachable
- * from `POST /v1/designs/check`'s structured (non-`rawPlanText`) path, i.e.
- * `twing design register`, never `ExitPlanMode` -- see
- * `DesignCheckResult.openDesigns`'s doc comment. */
-export type DesignVerdict = "clean" | "overlap" | "constraint_flag" | "conflict" | "has_open_designs";
+ * - `"file_overlap"`: two designs' *declared* plans (self-reported
+ *   `creates`/`touches`) name the same file, before either has written a
+ *   line. Always advisory -- never blocks, never flags, nothing to
+ *   resolve. (Was `"overlap"` tier 1; tier 4's Jaccard summary-similarity
+ *   fallback is dropped entirely as of this change, redundant with
+ *   `"llm_divergence"` below.)
+ * - `"constraint_violation"`: one design vs. a fixed project rule
+ *   (`DesignConstraintType`, now a single value -- see its own doc
+ *   comment). Always blocks. The one bucket where a third party (an
+ *   admin) approves an override, not the developer who hit it -- it's
+ *   someone else's rule, not theirs to waive alone. (Was
+ *   `"constraint_flag"`.)
+ * - `"symbol_conflict"`: two designs' *actual edits* collide -- a real
+ *   edit lands on a symbol another open design's owner also edited, or
+ *   declared as their own scope, or whose signature it silently broke.
+ *   Sourced from real `Claim`s (Tree-sitter), not self-reported scope --
+ *   see `checks.ts`/`design-divergence.ts`. Always blocks (whichever
+ *   side(s) have an open design at the time). Self-approvable: no third
+ *   party's rule is being overridden, just a peer collision, so whoever
+ *   ends up blocked can justify and clear their own block.
+ * - `"llm_divergence"`: two designs' *stated intent* conflict --
+ *   duplication, contradictory assumptions, or tension in shared system
+ *   behavior, judged by the semantic comparator
+ *   (`design-semantic-check.ts`'s `checkSemanticConflict`, driven by
+ *   app.ts's `runSemanticComparatorPass`) even when file lists never
+ *   overlap. Never returned synchronously by `runDesignChecks`
+ *   (design-checks.ts's tiers 1/3 run against the request that triggered
+ *   them); only ever set via `DesignRegistry.flag()` from the async
+ *   comparator pass, after its response has already been sent. Self-
+ *   approvable, same reasoning as `"symbol_conflict"`. (Was `"conflict"`.)
+ * - `"has_open_designs"`: not actually a conflict between two designs at
+ *   all -- a pre-registration hygiene check on one developer (too much of
+ *   their own work open at once), running *before* any row exists for
+ *   this request. Only reachable from `POST /v1/designs/check`'s
+ *   structured (non-`rawPlanText`) path, i.e. `twing design register`,
+ *   never `ExitPlanMode` -- see `DesignCheckResult.openDesigns`'s doc
+ *   comment.
+ *
+ * `DesignSeverity`/`severity` is gone as of this change: with tier 4 and
+ * the three-way constraint type both collapsed, whether a verdict blocks
+ * is now a pure, static function of the verdict itself (`file_overlap`
+ * never does; the other three always do) -- a field that can no longer
+ * vary independently of its own verdict was dead weight. Every former
+ * `severity === "error"` check becomes a static per-verdict table instead.
+ */
+export type DesignVerdict = "clean" | "file_overlap" | "constraint_violation" | "symbol_conflict" | "llm_divergence" | "has_open_designs";
 
-/** 2026-08-19: an `overlap`/`constraint_flag` verdict is no longer
- * uniformly blocking -- `severity` says which of the two it is. `"warning"`
- * is display-only: the conflict is recorded (activity feed, design detail)
- * but the design stays `"open"` and no gate denies anything. `"error"` is
- * today's original behavior, unchanged: the design gets demoted to
- * `"flagged"` (design-store.ts's `flag()`), which is what the Edit/Write
- * gate's `/v1/designs/scope-match` and ExitPlanMode's registration-time
- * check both key off to deny. As of 2026-08-22, both `exactOverlap` (tier 1)
- * and `summarySimilarity` (tier 4) are `"warning"` -- only `constraintMatch`
- * (tier 3) stays `"error"` among the synchronous tiers. Absent/undefined on
- * a `"clean"` verdict, where severity is moot. `"conflict"` verdicts don't
- * carry a `DesignSeverity` at all -- they're set directly via `flag()` from
- * the async comparator pass, never through `DesignCheckResult`. */
-export type DesignSeverity = "warning" | "error";
-
-export type DesignOverlapKind = "creates" | "touches" | "constraint";
+export type DesignOverlapKind = "creates" | "touches" | "constraint" | "symbol";
 
 export interface DesignConflict {
   conflictingDesignId: string;
@@ -312,8 +350,6 @@ export interface DesignCheckResult {
    * only discover the next one on retry. See design-checks.ts's own doc
    * comment on `matchConstraintsForPaths` for the full reasoning. */
   constraints?: { id: string; statement: string; type: DesignConstraintType }[];
-  /** See DesignSeverity. Undefined for `"clean"`. */
-  severity?: DesignSeverity;
   /** Set only for `"has_open_designs"` (2026-08-25) -- the developer's other
    * currently-open designs, cross-project, that a plain `twing design
    * register` call found before creating a new row. Lets the CLI print
@@ -329,9 +365,10 @@ export interface PendingReview {
   justification: string;
   createdAt: number;
   decision?: "approve" | "reject";
-  /** Set only when this review was created against a `constraint_flag`
-   * verdict (undefined for an `overlap`-triggered justified_divergence).
-   * Recorded so an approval can be attributed to the *specific* constraints
+  /** Set only when this review was created against a `constraint_violation`
+   * verdict (undefined for a `symbol_conflict`/`llm_divergence`-triggered
+   * justified_divergence). Recorded so an approval can be attributed to the
+   * *specific* constraints
    * it settled -- see DesignStatement.justifiedConstraintIds. Plural
    * (2026-08-22, was a single `constraintId`) for the same reason
    * `DesignCheckResult.constraints` is now a list -- one justified
@@ -352,14 +389,24 @@ export interface PendingReview {
    * this. */
   overlapWaivers?: { conflictingDesignId: string; paths: string[] }[];
   /** Semantic comparator's counterpart to `overlapWaivers` above
-   * (2026-08-22) -- set only when this design currently has a `"conflict"`
-   * flag against it (recorded conflicts, not recomputed live at
-   * justify-time: unlike `overlapWaivers`'s cheap local recompute, a live
-   * recheck here would mean a second synchronous LLM call inside
+   * (2026-08-22) -- set only when this design currently has an
+   * `"llm_divergence"` flag against it (recorded conflicts, not recomputed
+   * live at justify-time: unlike `overlapWaivers`'s cheap local recompute, a
+   * live recheck here would mean a second synchronous LLM call inside
    * `/v1/designs/:id/resolve`). One entry per conflicting design, no paths
    * -- see DesignStatement.justifiedConflicts for how an approval consumes
    * this. */
   conflictWaivers?: { conflictingDesignId: string }[];
+  /** `"symbol_conflict"`'s counterpart to `overlapWaivers` above
+   * (2026-08-26) -- sourced the same way `conflictWaivers` is: read back
+   * from this design's open `category: "symbol_conflict"` alignment
+   * threads (`symbolIds`/`designId`), not recomputed live -- there's no
+   * cheap local recompute for "which real edits collided" the way
+   * `structuralOverlaps` provides for `overlapWaivers`. One entry per
+   * conflicting design, naming the specific symbols that collided -- see
+   * DesignStatement.justifiedSymbolConflicts for how an approval consumes
+   * this. */
+  symbolConflictWaivers?: { conflictingDesignId: string; symbolIds: string[] }[];
 }
 
 /**
@@ -397,12 +444,13 @@ export interface ReviewConstraintSummary {
  * merged here, with `kind` preserving which check produced it. */
 export interface ReviewConflictSummary {
   designId: string;
-  kind: "overlap" | "conflict";
+  kind: "overlap" | "conflict" | "symbol_conflict";
   /** Absent if the conflicting design has since been deleted. */
   summary?: string;
   developerId?: string;
-  /** Only ever set for `kind: "overlap"` -- the semantic comparator has no
-   * specific path to point at. */
+  /** Set for `kind: "overlap"` and `kind: "symbol_conflict"` -- the
+   * semantic comparator (`kind: "conflict"`) has no specific path to point
+   * at. */
   paths?: string[];
 }
 

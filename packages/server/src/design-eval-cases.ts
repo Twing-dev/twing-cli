@@ -46,6 +46,7 @@ export function design(overrides: Partial<DesignStatement> = {}): DesignStatemen
     justifiedConstraintIds: [],
     justifiedOverlaps: [],
     justifiedConflicts: [],
+    justifiedSymbolConflicts: [],
     lastActivityAt: Date.now(),
     ...overrides,
   };
@@ -56,7 +57,9 @@ export function constraint(overrides: Partial<DesignConstraint> = {}): DesignCon
   return {
     id: "c1",
     projectId: "p1",
-    type: "canonical_abstraction",
+    // 2026-08-26: DesignConstraintType collapsed to a single value -- see
+    // DesignVerdict's doc comment, core/types.ts.
+    type: "constraint",
     statement: "constraint statement",
     scope: [],
     source: "seeded",
@@ -161,7 +164,7 @@ export const EVAL_CASES: EvalCase[] = [
         summary: "Add a reusable retry policy class for outbound calls",
       }),
     ],
-    expectedVerdict: "overlap",
+    expectedVerdict: "file_overlap",
     expectedOverlapKind: "creates",
     futureLlmExpectation: "should_flag_as_conflict",
   },
@@ -191,7 +194,7 @@ export const EVAL_CASES: EvalCase[] = [
         summary: "Add a circuit breaker around retry.ts so it stops retrying after repeated failures and fails fast",
       }),
     ],
-    expectedVerdict: "overlap",
+    expectedVerdict: "file_overlap",
     expectedOverlapKind: "touches",
     futureLlmExpectation: "should_flag_as_conflict",
     planModeProvenance: {
@@ -264,14 +267,14 @@ export const EVAL_CASES: EvalCase[] = [
     constraints: [
       constraint({
         id: "constraint-review-required",
-        type: "review_required",
+        type: "constraint",
         statement:
           "packages/server/**, especially design-*.ts/identity-store.ts -- a bug in the verdict logic blocks real Edit/Write calls across every gated session",
         scope: ["packages/server/src/design-*.ts"],
       }),
     ],
-    expectedVerdict: "constraint_flag",
-    expectedConstraintType: "review_required",
+    expectedVerdict: "constraint_violation",
+    expectedConstraintType: "constraint",
     futureLlmExpectation: "should_flag_as_conflict",
   },
 
@@ -474,15 +477,28 @@ export const EVAL_CASES: EvalCase[] = [
   // its own bucket rather than only proving the near-miss
   // ---------------------------------------------------------------------
   {
+    // 2026-08-26: moved from `known_false_positive`/`expectedVerdict:
+    // "overlap"` to `disparate`/`expectedVerdict: "clean"` -- tier 4
+    // (summarySimilarity, the Jaccard fallback this case was written to
+    // document a false positive from) was removed entirely as part of the
+    // terminology simplification (design-checks.ts's header comment;
+    // llm_divergence, the semantic comparator, is the intended real
+    // replacement). Per this harness's own top-of-file rule ("if one of
+    // those [semantic_gap/known_false_positive] ever starts failing, that's
+    // good news... move the case... rather than deleting the assertion"),
+    // this case correctly staying clean now is the fix, not a regression --
+    // kept as permanent regression coverage that a future tier doesn't
+    // reintroduce the same over-fire.
     id: "bonus-11-known-false-positive-boilerplate-refactor",
-    bucket: "known_false_positive",
-    category: "tier4_boilerplate_false_positive",
+    bucket: "disparate",
+    category: "disparate_borderline_vocabulary",
     source: "manual",
     rationale:
-      "Near-boilerplate refactor phrasing this generic crosses tier 4's threshold trivially, even though the two " +
-      "designs are completely unrelated. design-checks.ts's own comment calls tier 4 a 'deliberately weak/low-" +
-      "confidence fallback' -- this case makes that concrete. Recorded as a currently-true false positive: the " +
-      "future LLM path's precision must not inherit it.",
+      "Near-boilerplate refactor phrasing this generic used to cross tier 4's Jaccard threshold trivially, even " +
+      "though the two designs are completely unrelated -- design-checks.ts's own comment called tier 4 a " +
+      "'deliberately weak/low-confidence fallback', and this case made that concrete as a known false positive. " +
+      "Tier 4 is gone as of 2026-08-26; this now correctly stays clean, and stays in the suite as a regression " +
+      "guard against a future syntactic-similarity tier reintroducing the same over-fire.",
     candidate: design({
       id: "candidate",
       touches: ["src/auth/login.ts"],
@@ -496,7 +512,7 @@ export const EVAL_CASES: EvalCase[] = [
         summary: "Refactor the billing module to improve error handling and add tests",
       }),
     ],
-    expectedVerdict: "overlap",
+    expectedVerdict: "clean",
     futureLlmExpectation: "should_stay_clean",
   },
 
@@ -539,7 +555,7 @@ export const EVAL_CASES: EvalCase[] = [
         summary: "Add a FeatureFlagClient helper that wraps the flag-check API with caching, wired into checkout to gate the new payment method.",
       }),
     ],
-    expectedVerdict: "overlap",
+    expectedVerdict: "file_overlap",
     expectedOverlapKind: "creates",
     futureLlmExpectation: "should_flag_as_conflict",
     otherPlanModeProvenance: {
@@ -723,16 +739,26 @@ export const EVAL_CASES: EvalCase[] = [
   },
 
   // ---------------------------------------------------------------------
-  // constraint coverage -- case 4 only ever exercised review_required;
-  // canonical_abstraction/domain_fact never appeared, and neither did the
-  // priority/specificity tiebreak logic CONSTRAINT_TYPE_PRIORITY implements.
+  // constraint coverage -- case 4 only ever exercised one constraint's
+  // scope/statement shape. 2026-08-26: `DesignConstraintType` collapsed to
+  // a single value (`review_required`/`canonical_abstraction`/`domain_fact`
+  // were mechanically identical -- see DesignVerdict's doc comment,
+  // core/types.ts), and `CONSTRAINT_TYPE_PRIORITY`'s tiebreak logic was
+  // removed with it -- several matching constraints now sort by
+  // scope-specificity alone. Cases 16/17 predate that collapse (originally
+  // written to cover the two other type values) and are kept as scope/
+  // statement-shape variety coverage now that the type distinction is gone;
+  // 18/19 predate the priority removal and are kept as pure specificity-
+  // tiebreak coverage -- both still pass unchanged since the narrower/
+  // longer scope in each already happened to be the one the old priority
+  // rule picked too.
   // ---------------------------------------------------------------------
   {
     id: "obvious-16-constraint-canonical-abstraction",
     bucket: "obvious_conflict",
     category: "constraint_match",
     source: "manual",
-    rationale: "canonical_abstraction has never appeared in this eval -- case 4 only ever exercised review_required.",
+    rationale: "Constraint-match coverage with a distinct scope/statement shape from case 4.",
     candidate: design({
       id: "candidate",
       touches: ["src/net/http-client-v2.ts"],
@@ -742,13 +768,13 @@ export const EVAL_CASES: EvalCase[] = [
     constraints: [
       constraint({
         id: "constraint-canonical",
-        type: "canonical_abstraction",
+        type: "constraint",
         statement: "use the shared HTTP client wrapper in src/net/http-client.ts; don't build a second one",
         scope: ["src/net/**"],
       }),
     ],
-    expectedVerdict: "constraint_flag",
-    expectedConstraintType: "canonical_abstraction",
+    expectedVerdict: "constraint_violation",
+    expectedConstraintType: "constraint",
     futureLlmExpectation: "should_flag_as_conflict",
   },
   {
@@ -756,7 +782,7 @@ export const EVAL_CASES: EvalCase[] = [
     bucket: "obvious_conflict",
     category: "constraint_match",
     source: "manual",
-    rationale: "domain_fact has never appeared in this eval either.",
+    rationale: "Constraint-match coverage with another distinct scope/statement shape.",
     candidate: design({
       id: "candidate",
       touches: ["src/payments/refund-calculator.ts"],
@@ -766,13 +792,13 @@ export const EVAL_CASES: EvalCase[] = [
     constraints: [
       constraint({
         id: "constraint-domain-fact",
-        type: "domain_fact",
+        type: "constraint",
         statement: "prices are stored in integer cents, never floating-point dollars, across the whole codebase",
         scope: ["src/billing/**", "src/payments/**"],
       }),
     ],
-    expectedVerdict: "constraint_flag",
-    expectedConstraintType: "domain_fact",
+    expectedVerdict: "constraint_violation",
+    expectedConstraintType: "constraint",
     futureLlmExpectation: "should_flag_as_conflict",
   },
   {
@@ -781,27 +807,29 @@ export const EVAL_CASES: EvalCase[] = [
     category: "constraint_match",
     source: "manual",
     rationale:
-      "Two constraints both match; the broader, lower-priority canonical_abstraction one is seeded FIRST in the " +
-      "array (mirrors the shape of a real production incident this repo's own constraint file was fixed for) -- " +
-      "proves review_required wins by priority, not by array order.",
+      "Two constraints both match; the broader one is seeded FIRST in the array (mirrors the shape of a real " +
+      "production incident this repo's own constraint file was fixed for) -- proves the narrower/more specific " +
+      "scope wins by specificity, not by array order. (Pre-2026-08-26 this case asserted a type-priority win; " +
+      "CONSTRAINT_TYPE_PRIORITY is gone, but the narrower scope here already happens to be the one that rule also " +
+      "picked, so the assertion is unchanged.)",
     candidate: design({ id: "candidate", touches: ["src/payments/refund.ts"], summary: "Add a refund endpoint" }),
     openDesigns: [design({ id: "open-unrelated", touches: ["src/ui/theme.css"], summary: "Adjust dark mode contrast ratios" })],
     constraints: [
       constraint({
         id: "constraint-broad",
-        type: "canonical_abstraction",
+        type: "constraint",
         statement: "use the shared validation helpers in src/validation/** everywhere",
         scope: ["src/**"],
       }),
       constraint({
         id: "constraint-narrow-review",
-        type: "review_required",
+        type: "constraint",
         statement: "src/payments/** requires payments-team sign-off for any change",
         scope: ["src/payments/**"],
       }),
     ],
-    expectedVerdict: "constraint_flag",
-    expectedConstraintType: "review_required",
+    expectedVerdict: "constraint_violation",
+    expectedConstraintType: "constraint",
     expectedConstraintStatement: "src/payments/** requires payments-team sign-off for any change",
     futureLlmExpectation: "should_flag_as_conflict",
   },
@@ -810,25 +838,25 @@ export const EVAL_CASES: EvalCase[] = [
     bucket: "obvious_conflict",
     category: "constraint_match",
     source: "manual",
-    rationale: "Two same-priority (canonical_abstraction) constraints both match; the more specific/longer scope glob must win.",
+    rationale: "Two constraints both match; the more specific/longer scope glob must win.",
     candidate: design({ id: "candidate", touches: ["src/billing/invoice-renderer.ts"], summary: "Render invoice PDFs with a new layout" }),
     openDesigns: [design({ id: "open-unrelated", touches: ["src/ui/theme.css"], summary: "Adjust dark mode contrast ratios" })],
     constraints: [
       constraint({
         id: "constraint-wide",
-        type: "canonical_abstraction",
+        type: "constraint",
         statement: "general rule: avoid duplicating date-formatting logic, use src/utils/date.ts",
         scope: ["src/**"],
       }),
       constraint({
         id: "constraint-specific",
-        type: "canonical_abstraction",
+        type: "constraint",
         statement: "invoice PDFs must use the invoice-specific date formatter in src/billing/invoice-date.ts, not the general one",
         scope: ["src/billing/invoice-*.ts"],
       }),
     ],
-    expectedVerdict: "constraint_flag",
-    expectedConstraintType: "canonical_abstraction",
+    expectedVerdict: "constraint_violation",
+    expectedConstraintType: "constraint",
     expectedConstraintStatement: "invoice PDFs must use the invoice-specific date formatter in src/billing/invoice-date.ts, not the general one",
     futureLlmExpectation: "should_flag_as_conflict",
   },
@@ -860,7 +888,7 @@ export const EVAL_CASES: EvalCase[] = [
       design({ id: "open-tier2", developerId: "dev2", creates: ["Bar"], touches: ["src/unrelated-y.ts"], summary: "Builds Bar, which the candidate assumes exists" }),
       design({ id: "open-unrelated", developerId: "dev2", creates: ["Zzz"], touches: ["src/z.ts"], summary: "Genuinely unrelated third design" }),
     ],
-    expectedVerdict: "overlap",
+    expectedVerdict: "file_overlap",
     expectedConflictCount: 1,
     futureLlmExpectation: "should_flag_as_conflict",
   },
@@ -877,7 +905,7 @@ export const EVAL_CASES: EvalCase[] = [
       design({ id: "open-p", developerId: "dev2", creates: ["Alpha"], summary: "Also builds Alpha" }),
       design({ id: "open-q", developerId: "dev2", creates: ["Beta"], summary: "Also builds Beta" }),
     ],
-    expectedVerdict: "overlap",
+    expectedVerdict: "file_overlap",
     expectedConflictCount: 2,
     futureLlmExpectation: "should_flag_as_conflict",
   },

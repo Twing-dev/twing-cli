@@ -9,12 +9,15 @@
  * register honest, non-overlapping designs and then silently drift into
  * each other's territory with nothing noticing.
  *
- * Deliberately async/advisory only (§4's model, not §17's blocking one):
- * this runs from `POST /v1/claims`, the same request that already runs
- * `checks.ts`'s divergence checks, and produces ordinary `Finding`s
- * delivered through the existing notice pipeline -- never a deny. Flag, not
- * punish: divergence is expected and fine, this is for visibility and
- * voluntary reconciliation (see `alignment-store.ts`), not enforcement.
+ * This module's `Finding`s are one of the three real-edit sources
+ * (alongside `checks.ts`'s `textual_overlap`/`contract_divergence`) that
+ * `app.ts`'s `POST /v1/claims` turns into a `"symbol_conflict"` block
+ * (2026-08-26 terminology simplification -- see `DesignVerdict`'s doc
+ * comment in core/types.ts). This module itself stays purely a detector --
+ * it still just returns `Finding`s and the matched `design`, same shape as
+ * before; the flagging/blocking decision lives entirely in `app.ts`, which
+ * is also what makes it self-approvable rather than admin-gated: no third
+ * party's rule is being overridden here, just a peer's declared scope.
  */
 
 import { minimatch } from "minimatch";

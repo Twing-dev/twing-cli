@@ -171,11 +171,11 @@ test("DesignRegistry: flag demotes an open design to flagged and logs the verdic
   const log = new DrizzleActivityLog(db);
   const registry = new DesignRegistry(db);
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "retry helper", creates: [], touches: [], dependsOn: [] });
-  const flagged = registry.flag(a.id, "overlap");
+  const flagged = registry.flag(a.id, "file_overlap");
   assert.equal(flagged?.status, "flagged");
   const events = log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_flagged");
   assert.equal(events.length, 1);
-  assert.deepEqual(events[0].payload, { verdict: "overlap", summary: "retry helper" });
+  assert.deepEqual(events[0].payload, { verdict: "file_overlap", summary: "retry helper" });
   registry.stop();
 });
 
@@ -186,9 +186,9 @@ test("DesignRegistry: flag's optional detail persists the full conflicts/constra
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "retry helper", creates: [], touches: [], dependsOn: [] });
 
   const conflicts = [{ conflictingDesignId: "other-id", overlapKind: "touches" as const, overlapDetail: "both touch a.ts", conflictingSummary: "other design", overlapPaths: ["a.ts"] }];
-  registry.flag(a.id, "overlap", { conflicts });
+  registry.flag(a.id, "file_overlap", { conflicts });
   const events = log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_flagged");
-  assert.deepEqual(events[0].payload, { verdict: "overlap", summary: "retry helper", conflicts });
+  assert.deepEqual(events[0].payload, { verdict: "file_overlap", summary: "retry helper", conflicts });
   registry.stop();
 });
 
@@ -198,10 +198,10 @@ test("DesignRegistry: flag's optional detail persists a constraint match, and om
   const registry = new DesignRegistry(db);
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "retry helper", creates: [], touches: [], dependsOn: [] });
 
-  const constraint = { id: "c1", statement: "use pkg/retry", type: "canonical_abstraction" as const };
-  registry.flag(a.id, "constraint_flag", { conflicts: [], constraints: [constraint] });
+  const constraint = { id: "c1", statement: "use pkg/retry", type: "constraint" as const };
+  registry.flag(a.id, "constraint_violation", { conflicts: [], constraints: [constraint] });
   const events = log.eventsForRelatedId(a.id).filter((e) => e.kind === "design_flagged");
-  assert.deepEqual(events[0].payload, { verdict: "constraint_flag", summary: "retry helper", constraints: [constraint] });
+  assert.deepEqual(events[0].payload, { verdict: "constraint_violation", summary: "retry helper", constraints: [constraint] });
   registry.stop();
 });
 
@@ -209,7 +209,7 @@ test("DesignRegistry: flag is a no-op on a design that isn't open", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
   registry.close(a.id);
-  const result = registry.flag(a.id, "overlap");
+  const result = registry.flag(a.id, "file_overlap");
   assert.equal(result?.status, "closed"); // unchanged, not clobbered to "flagged"
   registry.stop();
 });
@@ -217,7 +217,7 @@ test("DesignRegistry: flag is a no-op on a design that isn't open", () => {
 test("DesignRegistry: openDesigns includes flagged designs, not just open ones", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
-  registry.flag(a.id, "overlap");
+  registry.flag(a.id, "file_overlap");
   const b = registry.register({ projectId: "p1", developerId: "d2", sessionId: "s2", summary: "", creates: [], touches: [], dependsOn: [] });
   registry.close(b.id);
 
@@ -247,7 +247,7 @@ test("DesignRegistry: amend merges scope, bumps scopeVersion, and logs the delta
 test("DesignRegistry: amend refuses a design that isn't open", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
-  registry.flag(a.id, "overlap");
+  registry.flag(a.id, "file_overlap");
   const result = registry.amend(a.id, { touches: ["b.ts"] });
   assert.equal(result, undefined);
   assert.deepEqual(registry.get(a.id)?.touches, []); // untouched
@@ -257,7 +257,7 @@ test("DesignRegistry: amend refuses a design that isn't open", () => {
 test("DesignRegistry: close also closes a flagged design, not just an open one", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
-  registry.flag(a.id, "overlap");
+  registry.flag(a.id, "file_overlap");
   const closed = registry.close(a.id);
   assert.equal(closed?.status, "closed");
   assert.ok(closed?.closedAt);
@@ -267,7 +267,7 @@ test("DesignRegistry: close also closes a flagged design, not just an open one",
 test("DesignRegistry: closeSession also closes flagged designs for the session", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] });
-  registry.flag(a.id, "overlap");
+  registry.flag(a.id, "file_overlap");
   const count = registry.closeSession("s1");
   assert.equal(count, 1);
   assert.equal(registry.get(a.id)?.status, "closed");
@@ -330,7 +330,7 @@ test("DesignRegistry: sweepExpired demotes an inactive open design to dormant, n
 test("DesignRegistry: sweepExpired also demotes an inactive flagged design to dormant", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 10 });
-  registry.flag(a.id, "overlap");
+  registry.flag(a.id, "file_overlap");
   registry.sweepExpired(a.createdAt + 1000);
   assert.equal(registry.get(a.id)?.status, "dormant");
   registry.stop();
@@ -441,7 +441,7 @@ test("DesignRegistry: openPlanModeDesignForSession ignores a different session o
 test("DesignRegistry: openPlanModeDesignForSession finds a flagged candidate too, not just open", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text" });
-  registry.flag(a.id, "overlap");
+  registry.flag(a.id, "file_overlap");
   const found = registry.openPlanModeDesignForSession("p1", "s1");
   assert.equal(found?.id, a.id);
   assert.equal(found?.status, "flagged");
@@ -481,7 +481,7 @@ test("DesignRegistry: reregisterFromPlan fully replaces scope, bumps scopeVersio
     dependsOn: [],
     rawPlanExcerpt: "old plan text",
   });
-  registry.flag(a.id, "overlap"); // a candidate the caller found via openPlanModeDesignForSession may be flagged
+  registry.flag(a.id, "file_overlap"); // a candidate the caller found via openPlanModeDesignForSession may be flagged
 
   const reregistered = registry.reregisterFromPlan(a.id, {
     summary: "new summary",
@@ -779,39 +779,41 @@ test("DesignRegistry: close's sibling fan-out logs a design_closed event with pr
 test("ConstraintStore: add is idempotent per (projectId, statement) and persists across instances", () => {
   const dataDir = tmpDataDir();
   const store1 = new ConstraintStore(createDb({ dataDir }));
-  const c1 = store1.add("p1", "use pkg/retry", ["src/**"], "canonical_abstraction", "seeded");
-  const c2 = store1.add("p1", "use pkg/retry", ["src/**"], "canonical_abstraction", "seeded");
+  const c1 = store1.add("p1", "use pkg/retry", ["src/**"], "constraint", "seeded");
+  const c2 = store1.add("p1", "use pkg/retry", ["src/**"], "constraint", "seeded");
   assert.equal(c1.id, c2.id);
 
   const store2 = new ConstraintStore(createDb({ dataDir }));
   assert.equal(store2.forProject("p1").length, 1);
 });
 
-test("ConstraintStore: add updates scope/type on an existing statement match instead of ignoring the change (2026-08-16 fix)", () => {
+// 2026-08-26: this test used to also cover a "type change on an existing
+// statement match" sub-case (`add`'s scope/type-update fix, 2026-08-16) --
+// dropped, not just renamed, since `DesignConstraintType` collapsed to a
+// single value ("constraint") the same day, so there's no second value left
+// to change *to*. The scope-update half of that same fix is still real
+// behavior and still covered below.
+test("ConstraintStore: add updates scope on an existing statement match instead of ignoring the change (2026-08-16 fix)", () => {
   const store = new ConstraintStore(createDb({ dataDir: tmpDataDir() }));
-  const original = store.add("p1", "use pkg/retry", ["packages/**"], "canonical_abstraction", "seeded");
+  const original = store.add("p1", "use pkg/retry", ["packages/**"], "constraint", "seeded");
 
   // Re-seeding the same statement with a narrower scope -- before the fix,
   // this silently returned the stale packages/** row unchanged.
-  const narrowed = store.add("p1", "use pkg/retry", ["packages/core/src/retry.ts"], "canonical_abstraction", "seeded");
+  const narrowed = store.add("p1", "use pkg/retry", ["packages/core/src/retry.ts"], "constraint", "seeded");
   assert.equal(narrowed.id, original.id, "same constraint identity, not a duplicate row");
   assert.deepEqual(narrowed.scope, ["packages/core/src/retry.ts"]);
   assert.equal(store.forProject("p1").length, 1, "still exactly one row, updated in place");
 
-  // A type change on the same statement also applies.
-  const retyped = store.add("p1", "use pkg/retry", ["packages/core/src/retry.ts"], "review_required", "seeded");
-  assert.equal(retyped.type, "review_required");
-
   // A no-op re-seed (identical scope and type) doesn't append a redundant update.
-  const unchanged = store.add("p1", "use pkg/retry", ["packages/core/src/retry.ts"], "review_required", "seeded");
-  assert.equal(unchanged.id, retyped.id);
+  const unchanged = store.add("p1", "use pkg/retry", ["packages/core/src/retry.ts"], "constraint", "seeded");
+  assert.equal(unchanged.id, narrowed.id);
 });
 
 test("ConstraintStore: get finds by id, remove deletes and logs constraint_removed, both are no-ops on an unknown id", () => {
   const dataDir = tmpDataDir();
   const activityLog = new DrizzleActivityLog(createDb({ dataDir }));
   const store = new ConstraintStore(createDb({ dataDir }), { activityLog });
-  const created = store.add("p1", "use pkg/retry", ["src/**"], "canonical_abstraction", "seeded");
+  const created = store.add("p1", "use pkg/retry", ["src/**"], "constraint", "seeded");
 
   assert.deepEqual(store.get(created.id), created);
   assert.equal(store.get("no-such-id"), undefined);

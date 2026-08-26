@@ -162,7 +162,6 @@ test("runDesignRegister: a has_open_designs verdict lists the other open designs
   const { fetch } = captureFetch(
     jsonResponse({
       verdict: "has_open_designs",
-      severity: "error",
       openDesigns: [{ id: "d-old", projectId: "proj-x", summary: "an older, still-open task", lastActivityAt: 1 }],
     }),
   );
@@ -237,7 +236,7 @@ test("runDesignClose: throws without --id", async () => {
 test("runDesignAmend: sends the split scope delta and prints conflict detail on overlap", async () => {
   const { fetch, calls } = captureFetch(
     jsonResponse({
-      verdict: "overlap",
+      verdict: "file_overlap",
       designId: "d1",
       conflicts: [{ conflictingDesignId: "d2", overlapKind: "touches", overlapDetail: "both touch b.ts", conflictingSummary: "someone else's work" }],
     }),

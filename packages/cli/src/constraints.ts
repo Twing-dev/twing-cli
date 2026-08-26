@@ -43,8 +43,12 @@ export async function runConstraintsList(options: ConstraintsListOptions): Promi
     return;
   }
   const body = (await res.json()) as { items?: ConstraintJSON[] };
+  // 2026-08-26: dropped the `[${c.type}]` bracket -- DesignConstraintType
+  // collapsed to a single value ("constraint"), so it no longer carries any
+  // information worth printing. See DesignVerdict's doc comment,
+  // core/types.ts, for the collapse rationale.
   for (const c of body.items ?? []) {
-    console.log(`${c.id}  [${c.type}]  ${c.statement}  scope=${c.scope.join(",")}`);
+    console.log(`${c.id}  ${c.statement}  scope=${c.scope.join(",")}`);
   }
 }
 

@@ -35,6 +35,7 @@ function makeDesign(overrides: Partial<DesignStatement> = {}): DesignStatement {
     justifiedConstraintIds: [],
     justifiedOverlaps: [],
     justifiedConflicts: [],
+    justifiedSymbolConflicts: [],
     lastActivityAt: 0,
     ...overrides,
   };

@@ -160,6 +160,12 @@ export const designs = sqliteTable(
      * `conflictingDesignId`s (no paths -- a `"conflict"` verdict has none to
      * key on), defaults to "[]" for pre-existing rows via the migration. */
     justifiedConflicts: text("justified_conflicts").notNull().default("[]"),
+    /** `"symbol_conflict"`'s own approval memory (2026-08-26 terminology
+     * simplification) -- see `DesignStatement.justifiedSymbolConflicts`'s
+     * own doc comment (@twing/core) for why this is a separate field from
+     * `justifiedOverlaps` rather than reusing it. JSON string[] of
+     * `${conflictingDesignId}::${symbolId}` keys, defaults to "[]". */
+    justifiedSymbolConflicts: text("justified_symbol_conflicts").notNull().default("[]"),
   },
   (t) => [
     index("designs_project_id_idx").on(t.projectId),
@@ -200,6 +206,13 @@ export const pendingReviews = sqliteTable(
      * `{conflictingDesignId}[]`, defaults to "[]". See
      * PendingReview.conflictWaivers. */
     conflictWaivers: text("conflict_waivers").notNull().default("[]"),
+    /** `"symbol_conflict"`'s counterpart to `overlapWaivers` above
+     * (2026-08-26 terminology simplification) -- sourced the same way
+     * `conflictWaivers` is: read back from this design's open
+     * `category: "symbol_conflict"` alignment threads, not recomputed
+     * live. JSON `{conflictingDesignId, symbolIds}[]`, defaults to "[]".
+     * See PendingReview.symbolConflictWaivers. */
+    symbolConflictWaivers: text("symbol_conflict_waivers").notNull().default("[]"),
   },
   (t) => [index("pending_reviews_project_id_idx").on(t.projectId)],
 );
@@ -209,7 +222,7 @@ export const constraints = sqliteTable(
   {
     id: text("id").primaryKey(),
     projectId: text("project_id").notNull(),
-    type: text("type").notNull(), // DesignConstraintType
+    type: text("type").notNull(), // DesignConstraintType -- collapsed to a single value 2026-08-26, column kept (see the type's own doc comment)
     statement: text("statement").notNull(),
     scope: text("scope").notNull(), // JSON string[]
     source: text("source").notNull(),
@@ -264,7 +277,14 @@ export const alignmentThreads = sqliteTable(
     // are all nullable-or-defaulted so pre-existing rows keep reading
     // correctly -- every new row gets real values, nothing here is backfilled
     // onto old rows.
-    category: text("category"), // "duplication" | "contradictory_assumptions" | "tension" | "symbol_claim"
+    // 2026-08-26 terminology simplification: category collapsed to the two
+    // bucket names; the old four values (duplication/contradictory_assumptions/
+    // tension/symbol_claim) survive as subKind below, detail under the
+    // bucket rather than a competing top-level name. Pre-2026-08-26 rows
+    // keep their old category string unconverted -- see AlignmentCategory's
+    // own doc comment (alignment-store.ts).
+    category: text("category"), // "symbol_conflict" | "llm_divergence" (or a legacy pre-2026-08-26 value)
+    subKind: text("sub_kind"), // AlignmentSubKind -- undefined on any row that predates this column
     summary: text("summary"), // short list-view label, distinct from systemDescription's full text
     symbolIds: text("symbol_ids").notNull().default("[]"), // JSON string[] -- every overlapping path accumulated across amendments
     initiatingDesignId: text("initiating_design_id"), // the initiating developer's own open design, when one resolves
