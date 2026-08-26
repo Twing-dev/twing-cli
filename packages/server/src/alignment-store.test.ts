@@ -80,6 +80,82 @@ test("AlignmentThreadStore: initiatingDesignId is set once resolved and never cl
   assert.equal(second.initiatingDesignId, "alice-design-1", "must not regress from known to unknown");
 });
 
+// Found live (2026-08-26): llm_divergence's one-directional detection
+// (runSemanticComparatorPass only ever checks the *current* design being
+// registered/amended against everything else open) meant the reverse
+// direction -- the other developer's own later registration getting
+// checked against *this* design -- never recognized it as the same
+// underlying tension, and forked a second thread for what was one
+// disagreement between one pair of designs.
+test("AlignmentThreadStore: findOrCreate reuses the same llm_divergence thread when the reverse direction reports the same design pair", () => {
+  const { store } = freshStore();
+  const semanticInput = {
+    ...baseInput,
+    category: "llm_divergence" as const,
+    subKind: "tension" as const,
+    symbolIds: [],
+    designId: "bobs-design", // the *other* design, from alice's point of view
+    initiatingDesignId: "alices-design", // alice's own design, the one flagged here
+    systemDescription: "alice's registration found tension with bob's open design",
+  };
+  const first = store.findOrCreate(semanticInput);
+  assert.equal(first.initiatingDesignId, "alices-design");
+  assert.equal(first.designId, "bobs-design");
+
+  // Bob's own registration later triggers its own one-directional check
+  // against alice's design -- developerId/otherDeveloperId reversed, and
+  // designId/initiatingDesignId swapped to match (bob's designId is now
+  // "the other design", alice's; bob's initiatingDesignId is his own).
+  const reverseInput = {
+    ...semanticInput,
+    developerId: "bob",
+    otherDeveloperId: "alice",
+    designId: "alices-design",
+    initiatingDesignId: "bobs-design",
+    systemDescription: "bob's registration found the same tension with alice's design",
+  };
+  const second = store.findOrCreate(reverseInput);
+
+  assert.equal(second.id, first.id, "must reuse the one existing thread, not fork a second one for the reverse direction");
+  assert.equal(second.initiatingDesignId, "alices-design", "must not regress the already-known initiator");
+  assert.equal(second.designId, "bobs-design", "designId is set at creation and never touched by amend");
+
+  const messages = store.messages(first.id);
+  assert.equal(messages.length, 2, "bob's own finding is still worth a follow-up message in the shared thread");
+  assert.equal(messages[1].message, "bob's registration found the same tension with alice's design");
+});
+
+// A genuinely different pair (or a pair that doesn't fully match on both
+// design ids) must not accidentally merge into someone else's thread --
+// the reverse match requires *both* initiatingDesignId and designId to
+// line up, not just the developer pair.
+test("AlignmentThreadStore: the reverse-direction match requires both design ids to line up, not just the developer pair", () => {
+  const { store } = freshStore();
+  const semanticInput = {
+    ...baseInput,
+    category: "llm_divergence" as const,
+    subKind: "tension" as const,
+    symbolIds: [],
+    designId: "bobs-design",
+    initiatingDesignId: "alices-design",
+  };
+  const first = store.findOrCreate(semanticInput);
+
+  // Same developer pair (reversed), but bob's own design here is a
+  // *different* one than the thread already knows about -- a genuinely
+  // separate, unrelated tension between the same two people.
+  const unrelated = store.findOrCreate({
+    ...semanticInput,
+    developerId: "bob",
+    otherDeveloperId: "alice",
+    designId: "alices-design",
+    initiatingDesignId: "bobs-other-design",
+    systemDescription: "an unrelated tension",
+  });
+
+  assert.notEqual(unrelated.id, first.id, "must not merge into a thread about a different design of bob's");
+});
+
 test("AlignmentThreadStore: findOrCreate opens a new thread once the prior one is closed", () => {
   const { store } = freshStore();
   const first = store.findOrCreate(baseInput);
@@ -118,6 +194,22 @@ test("AlignmentThreadStore: postMessage appends to the thread's message history 
   assert.equal(messages[1].authorId, "bob");
   assert.equal(messages[1].message, "ack, I'll rename mine");
   assert.equal(messages[2].authorId, "alice");
+});
+
+test("AlignmentThreadStore: postSystemMessage requires an existing thread", () => {
+  const { store } = freshStore();
+  assert.equal(store.postSystemMessage("no-such-thread", "resolved"), undefined);
+});
+
+test("AlignmentThreadStore: postSystemMessage appends an author-less message, same as the auto-generated seed note", () => {
+  const { store } = freshStore();
+  const thread = store.findOrCreate(baseInput);
+  store.postSystemMessage(thread.id, "Resolved: alice's design was approved");
+
+  const messages = store.messages(thread.id);
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].message, "Resolved: alice's design was approved");
+  assert.equal(messages[1].authorId, undefined, "a system note has no author, same as the seed message");
 });
 
 test("AlignmentThreadStore: close is idempotent -- closing twice doesn't double-log", () => {
