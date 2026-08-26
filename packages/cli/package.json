@@ -1,6 +1,6 @@
 {
   "name": "@twing/cli",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "bin": {
@@ -13,14 +13,20 @@
     "url": "https://github.com/Twing-dev/twing-cli.git",
     "directory": "packages/cli"
   },
-  "files": ["dist", "!dist/**/*.test.js", "!dist/**/*.test.js.map", "!dist/**/*.test.d.ts", "!dist/**/*.test.d.ts.map"],
+  "files": [
+    "dist",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.js.map",
+    "!dist/**/*.test.d.ts",
+    "!dist/**/*.test.d.ts.map"
+  ],
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
     "test": "node --test dist/*.test.js"
   },
   "dependencies": {
-    "@twing/core": "^0.2.5",
+    "@twing/core": "^0.2.6",
     "web-tree-sitter": "^0.26.12"
   }
 }
