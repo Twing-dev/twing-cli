@@ -1414,12 +1414,21 @@ export function createApp(options: CreateAppOptions = {}) {
   //    gets recorded, since this call already round-trips synchronously on
   //    every real Edit/Write).
   //  - "out_of_scope": an open design exists but none cover `path`.
-  //  - "dormant" (§17 design lifecycle, 2026-08): no open design (matching
-  //    or not), but a dormant one exists -- never silently allowed or
-  //    woken; points at `twing design resume`, which re-checks against
-  //    whatever's live before reactivating anything.
   //  - "flagged": something's registered, but its own verdict wasn't clean
   //    (DesignRegistry.flag) -- resolve it before it counts as usable.
+  //    Checked *before* "dormant" (found live, 2026-08-26 -- see the fix
+  //    note below): a flagged design is an active block, possibly
+  //    admin-gated, on work this session actually registered; a dormant
+  //    design is just idle, parked work nobody's asked to resume. Ranking
+  //    "idle" above "actively blocked" meant a session carrying any dormant
+  //    design at all could never learn about a real flagged/pending-review
+  //    block sitting right next to it -- it always got told to `design
+  //    resume` the dormant one instead, which silently reactivates
+  //    unrelated stale work while hiding the actual blocker.
+  //  - "dormant" (§17 design lifecycle, 2026-08): no open or flagged design
+  //    (matching or not), but a dormant one exists -- never silently
+  //    allowed or woken; points at `twing design resume`, which re-checks
+  //    against whatever's live before reactivating anything.
   //  - "no_design": nothing registered for this session at all (or
   //    everything's closed/superseded/expired).
   app.get("/v1/designs/scope-match", (c) => {
@@ -1463,36 +1472,50 @@ export function createApp(options: CreateAppOptions = {}) {
       });
     }
 
-    const dormantOnes = sessionDesigns.filter((d) => d.status === "dormant");
-    if (dormantOnes.length > 0) {
-      const now = Date.now();
-      const named = (path && dormantOnes.find((d) => pathInDesignScope(path, d))) || dormantOnes[dormantOnes.length - 1];
-      return c.json({ state: "dormant", designId: named.id, summary: named.summary, dormantSinceMs: now - named.lastActivityAt });
+    // Checked before "dormant" -- see this endpoint's own doc comment above
+    // for why an active block outranks idle/parked work. pendingReview
+    // distinguishes "never resolved" from "resolved, an admin just hasn't
+    // decided yet" (found live, 2026-08-16) -- both used to render as the
+    // identical deny telling you to run `twing design resolve`, even right
+    // after you'd already done so.
+    const flaggedOnes = sessionDesigns.filter((d) => d.status === "flagged");
+    if (flaggedOnes.length > 0) {
+      // The block itself is session-wide, not scoped to `path` -- once no
+      // open design covers the file, any unresolved flagged design blocks
+      // regardless of what it declared. But which *one* gets named in the
+      // deny message is still worth getting right when there's more than
+      // one: same "prefer an actual scope match, only then fall back to
+      // newest" shape as `openOnes`/`dormantOnes` above (found live,
+      // 2026-08-26) -- naming the flagged design that's actually about
+      // `path` is a more actionable deny than always naming whichever was
+      // flagged most recently, which could be about an unrelated file.
+      const flaggedDesign = (path && flaggedOnes.find((d) => pathInDesignScope(path, d))) || flaggedOnes[0];
+      // requiresAdmin (2026-08-26): which of the two self-approvable buckets
+      // vs. the one admin-gated bucket actually flagged this design --
+      // `designs.flag()` doesn't stamp `verdict` onto the design row itself
+      // (it's a `status` transition, not a field), so the only record of it
+      // is the `design_flagged` activity event's own payload. Read back the
+      // most recent one (a design can be flagged more than once across its
+      // lifetime -- amend, a later semantic-comparator pass, etc.) rather
+      // than the first, since only the *current* flag is what's actually
+      // blocking right now. Lets the Go hook's deny message tell "justify it
+      // and you're unblocked immediately" apart from "this goes to a project
+      // admin" instead of always saying the latter -- see DesignVerdict's doc
+      // comment (core/types.ts) for the full four-bucket model.
+      const flagEvents = activityLog.eventsForRelatedId(flaggedDesign.id).filter((e) => e.kind === "design_flagged");
+      const latestFlagVerdict = flagEvents.length > 0 ? (flagEvents[flagEvents.length - 1].payload as { verdict?: string } | undefined)?.verdict : undefined;
+      const requiresAdmin = latestFlagVerdict === "constraint_violation";
+      return c.json({ state: "flagged", designId: flaggedDesign.id, pendingReview: designs.hasPendingReview(flaggedDesign.id), requiresAdmin });
     }
 
-    // Only flagged designs remain, since sessionDesigns was non-empty and
-    // openOnes/dormantOnes were both empty. pendingReview distinguishes
-    // "never resolved" from "resolved, an admin just hasn't decided yet"
-    // (found live, 2026-08-16) -- both used to render as the identical
-    // deny telling you to run `twing design resolve`, even right after
-    // you'd already done so.
-    const flaggedDesign = sessionDesigns[sessionDesigns.length - 1];
-    // requiresAdmin (2026-08-26): which of the two self-approvable buckets
-    // vs. the one admin-gated bucket actually flagged this design --
-    // `designs.flag()` doesn't stamp `verdict` onto the design row itself
-    // (it's a `status` transition, not a field), so the only record of it
-    // is the `design_flagged` activity event's own payload. Read back the
-    // most recent one (a design can be flagged more than once across its
-    // lifetime -- amend, a later semantic-comparator pass, etc.) rather
-    // than the first, since only the *current* flag is what's actually
-    // blocking right now. Lets the Go hook's deny message tell "justify it
-    // and you're unblocked immediately" apart from "this goes to a project
-    // admin" instead of always saying the latter -- see DesignVerdict's doc
-    // comment (core/types.ts) for the full four-bucket model.
-    const flagEvents = activityLog.eventsForRelatedId(flaggedDesign.id).filter((e) => e.kind === "design_flagged");
-    const latestFlagVerdict = flagEvents.length > 0 ? (flagEvents[flagEvents.length - 1].payload as { verdict?: string } | undefined)?.verdict : undefined;
-    const requiresAdmin = latestFlagVerdict === "constraint_violation";
-    return c.json({ state: "flagged", designId: flaggedDesign.id, pendingReview: designs.hasPendingReview(flaggedDesign.id), requiresAdmin });
+    // Only dormant designs remain, since sessionDesigns was non-empty and
+    // openOnes/flaggedOnes were both empty.
+    const dormantOnes = sessionDesigns.filter((d) => d.status === "dormant");
+    const now = Date.now();
+    // Same newest-first pick as above -- `dormantOnes[0]`, not
+    // `[dormantOnes.length - 1]` (found live, 2026-08-26, same bug class).
+    const named = (path && dormantOnes.find((d) => pathInDesignScope(path, d))) || dormantOnes[0];
+    return c.json({ state: "dormant", designId: named.id, summary: named.summary, dormantSinceMs: now - named.lastActivityAt });
   });
 
   // §17.5: the human-facing queue -- justified divergences pending sign-off.
