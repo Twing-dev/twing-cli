@@ -345,6 +345,25 @@ test("runDesignList: appends ?status= and prints last-activity staleness", async
   });
 });
 
+test("runDesignList: prints blockedReason next to a flagged design's status, and omits it entirely for an unflagged one", async () => {
+  const { fetch } = captureFetch(
+    jsonResponse({
+      items: [
+        { id: "d1", status: "flagged", blockedReason: "symbol_conflict", summary: "collides with someone", creates: [], touches: [] },
+        { id: "d2", status: "open", summary: "clean work", creates: [], touches: [] },
+      ],
+    }),
+  );
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignList({ cwd: repo })));
+    assert.ok(logs.some((l) => l.includes("[flagged] (symbol_conflict)") && l.includes("collides with someone")));
+    const openLine = logs.find((l) => l.includes("clean work"));
+    assert.ok(openLine?.includes("[open]") && !openLine.includes("("), "an unflagged design must not print a dangling empty reason");
+  });
+});
+
 test("runDesignList: --mine filters to the caller's own developerId, client-side, sending no extra query param", async () => {
   const { fetch, calls } = captureFetch(
     jsonResponse({

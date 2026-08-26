@@ -2032,8 +2032,11 @@ test("GET /v1/designs/scope-match: no_design, in_scope, out_of_scope, and flagge
 
   const flagged = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s2&path=protected.ts`, { headers: bearer(admin.token) });
   // requiresAdmin: true because this design was flagged by a constraint
-  // violation -- the one bucket that still needs an admin to clear.
-  assert.deepEqual(await flagged.json(), { state: "flagged", designId: flaggedId, pendingReview: false, requiresAdmin: true });
+  // violation -- the one bucket that still needs an admin to clear. verdict
+  // (2026-08-26, second pass) mirrors requiresAdmin's own source, read
+  // directly off blockedReason now instead of reconstructed via an
+  // activity-log join -- see blockedReason's doc comment (@twing/core).
+  assert.deepEqual(await flagged.json(), { state: "flagged", designId: flaggedId, pendingReview: false, requiresAdmin: true, verdict: "constraint_violation" });
 
   // §17 review-flow fix (2026-08-16): pendingReview flips true once resolve
   // is called, without a decide -- the deny message needs to be able to
@@ -2046,7 +2049,7 @@ test("GET /v1/designs/scope-match: no_design, in_scope, out_of_scope, and flagge
   assert.equal(resolveRes.status, 200);
 
   const flaggedAfterResolve = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s2&path=protected.ts`, { headers: bearer(admin.token) });
-  assert.deepEqual(await flaggedAfterResolve.json(), { state: "flagged", designId: flaggedId, pendingReview: true, requiresAdmin: true });
+  assert.deepEqual(await flaggedAfterResolve.json(), { state: "flagged", designId: flaggedId, pendingReview: true, requiresAdmin: true, verdict: "constraint_violation" });
 });
 
 // Found live (2026-08-25): with more than one open design in the same
@@ -2601,6 +2604,62 @@ test("POST /v1/designs/:id/resolve: attributes constraintId even when the design
   // And the ground-truth backstop must now actually honor it.
   const matchRes = await app.request(`/v1/constraints/match?projectId=proj-1&path=shared.ts&sessionId=s1`, { headers: bearer(admin.token) });
   assert.deepEqual(await matchRes.json(), { matched: false, constraints: [] }, "an approved, attributed constraint must be excluded from the ground-truth check");
+});
+
+test("GET /v1/constraints/match: an already-approved constraint stays honored even after the design gets re-flagged for something unrelated", async () => {
+  // Regression test for a real bug found live, 2026-08-26: the exclude-list
+  // computation below only ever read `justifiedConstraintIds` off designs
+  // with `status === "open"`. A design's approval history is durable and
+  // never revoked -- but the moment that same design got re-flagged for
+  // anything else (e.g. a later, unrelated symbol_conflict from ongoing
+  // background activity), this endpoint stopped consulting its
+  // justifiedConstraintIds at all, so the already-approved constraint
+  // started matching again as if it had never been cleared. Fixed by
+  // widening the eligibility filter to match /v1/designs/scope-match's own
+  // (open, flagged, or dormant -- never closed/superseded/expired).
+  const { app, dataDir, designs, constraints } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const constraint = constraints.add("proj-1", "needs review", ["shared.ts"], "constraint", "seeded");
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  const resolveRes = await app.request(`/v1/designs/${designId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "reviewed path, approved" }),
+  });
+  const { reviewId } = (await resolveRes.json()) as { reviewId: string };
+  await app.request(`/v1/reviews/${reviewId}/decide`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ decision: "approve" }),
+  });
+
+  const beforeReflag = await app.request(`/v1/constraints/match?projectId=proj-1&path=shared.ts&sessionId=s1`, { headers: bearer(admin.token) });
+  assert.deepEqual(await beforeReflag.json(), { matched: false, constraints: [] }, "sanity check: approval honored while still open");
+
+  // Simulate the unrelated re-flag directly (mirrors what a later
+  // symbol_conflict/llm_divergence pass does via designs.flag()) --
+  // justifiedConstraintIds is untouched, only status moves off "open".
+  designs.flag(designId, "symbol_conflict", {});
+  assert.equal(designs.get(designId)?.status, "flagged", "sanity check: the design really is flagged now");
+  assert.deepEqual(
+    designs.get(designId)?.justifiedConstraintIds,
+    [constraint.id],
+    "sanity check: the earlier approval is still on the row, untouched by the re-flag",
+  );
+
+  const afterReflag = await app.request(`/v1/constraints/match?projectId=proj-1&path=shared.ts&sessionId=s1`, { headers: bearer(admin.token) });
+  assert.deepEqual(
+    await afterReflag.json(),
+    { matched: false, constraints: [] },
+    "an already-approved constraint must stay excluded even while the design is flagged for something else",
+  );
 });
 
 test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator pass from the prior registration (kill stale, retain findings, start fresh)", async () => {

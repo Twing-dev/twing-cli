@@ -69,6 +69,7 @@ interface DesignRow {
   justifiedOverlaps: string;
   justifiedConflicts: string;
   justifiedSymbolConflicts: string;
+  blockedReason: string | null;
 }
 
 function fromDesignRow(row: DesignRow): DesignStatement {
@@ -95,6 +96,7 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     justifiedOverlaps: JSON.parse(row.justifiedOverlaps),
     justifiedConflicts: JSON.parse(row.justifiedConflicts),
     justifiedSymbolConflicts: JSON.parse(row.justifiedSymbolConflicts),
+    blockedReason: (row.blockedReason as DesignStatement["blockedReason"]) ?? undefined,
   };
 }
 
@@ -195,6 +197,7 @@ export class DesignRegistry {
         justifiedOverlaps: JSON.stringify([] as string[]),
         justifiedConflicts: JSON.stringify([] as string[]),
         justifiedSymbolConflicts: JSON.stringify([] as string[]),
+        blockedReason: null,
       })
       .run();
     this.activityLog.append({
@@ -295,7 +298,7 @@ export class DesignRegistry {
   ): DesignStatement | undefined {
     const existing = this.get(id);
     if (!existing || existing.status !== "open") return existing;
-    this.db.update(designsTable).set({ status: "flagged" }).where(eq(designsTable.id, id)).run();
+    this.db.update(designsTable).set({ status: "flagged", blockedReason: verdict }).where(eq(designsTable.id, id)).run();
     this.activityLog.append({
       projectId: existing.projectId,
       developerId: existing.developerId,
@@ -469,6 +472,7 @@ export class DesignRegistry {
       .update(designsTable)
       .set({
         status: "open",
+        blockedReason: null,
         sessionId: args.sessionId,
         developerId: args.developerId,
         touches: JSON.stringify(merged.touches),
@@ -616,6 +620,7 @@ export class DesignRegistry {
       .update(designsTable)
       .set({
         status: "open",
+        blockedReason: null,
         summary: args.summary,
         creates: JSON.stringify(args.creates),
         touches: JSON.stringify(args.touches),
@@ -896,7 +901,7 @@ export class DesignRegistry {
       .update(designsTable)
       .set({
         reviewDecision: decision,
-        ...(decision === "approve" ? { status: "open" } : { status: "closed", closedAt: Date.now() }),
+        ...(decision === "approve" ? { status: "open", blockedReason: null } : { status: "closed", closedAt: Date.now() }),
         ...(justifiedConstraintIds ? { justifiedConstraintIds: JSON.stringify(justifiedConstraintIds) } : {}),
         ...(justifiedOverlaps ? { justifiedOverlaps: JSON.stringify(justifiedOverlaps) } : {}),
         ...(justifiedConflicts ? { justifiedConflicts: JSON.stringify(justifiedConflicts) } : {}),

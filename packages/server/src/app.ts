@@ -1550,22 +1550,27 @@ export function createApp(options: CreateAppOptions = {}) {
       // `path` is a more actionable deny than always naming whichever was
       // flagged most recently, which could be about an unrelated file.
       const flaggedDesign = (path && flaggedOnes.find((d) => pathInDesignScope(path, d))) || flaggedOnes[0];
-      // requiresAdmin (2026-08-26): which of the two self-approvable buckets
-      // vs. the one admin-gated bucket actually flagged this design --
-      // `designs.flag()` doesn't stamp `verdict` onto the design row itself
-      // (it's a `status` transition, not a field), so the only record of it
-      // is the `design_flagged` activity event's own payload. Read back the
-      // most recent one (a design can be flagged more than once across its
-      // lifetime -- amend, a later semantic-comparator pass, etc.) rather
-      // than the first, since only the *current* flag is what's actually
-      // blocking right now. Lets the Go hook's deny message tell "justify it
-      // and you're unblocked immediately" apart from "this goes to a project
-      // admin" instead of always saying the latter -- see DesignVerdict's doc
-      // comment (core/types.ts) for the full four-bucket model.
-      const flagEvents = activityLog.eventsForRelatedId(flaggedDesign.id).filter((e) => e.kind === "design_flagged");
-      const latestFlagVerdict = flagEvents.length > 0 ? (flagEvents[flagEvents.length - 1].payload as { verdict?: string } | undefined)?.verdict : undefined;
-      const requiresAdmin = latestFlagVerdict === "constraint_violation";
-      return c.json({ state: "flagged", designId: flaggedDesign.id, pendingReview: designs.hasPendingReview(flaggedDesign.id), requiresAdmin });
+      // requiresAdmin (2026-08-26) + verdict (2026-08-26, second pass): which
+      // of the two self-approvable buckets vs. the one admin-gated bucket
+      // actually flagged this design. Previously reconstructed by reading
+      // back the design's `design_flagged` activity events, since
+      // `designs.flag()` only stamped `verdict` onto that event's payload,
+      // never the design row itself -- `blockedReason` (core/types.ts) now
+      // carries it directly, set by the same `flag()` call, so this is a
+      // plain field read instead of an activity-log join. Lets the Go hook's
+      // deny message tell "justify it and you're unblocked immediately"
+      // apart from "this goes to a project admin," and now name the actual
+      // reason instead of one generic sentence for all three buckets -- see
+      // DesignVerdict's doc comment (core/types.ts) for the full four-bucket
+      // model.
+      const requiresAdmin = flaggedDesign.blockedReason === "constraint_violation";
+      return c.json({
+        state: "flagged",
+        designId: flaggedDesign.id,
+        pendingReview: designs.hasPendingReview(flaggedDesign.id),
+        requiresAdmin,
+        verdict: flaggedDesign.blockedReason,
+      });
     }
 
     // Only dormant designs remain, since sessionDesigns was non-empty and
@@ -1849,8 +1854,25 @@ export function createApp(options: CreateAppOptions = {}) {
     const sessionId = c.req.query("sessionId");
     let excludeConstraintIds: string[] = [];
     if (sessionId) {
-      const openDesigns = designs.listByProject(projectId).filter((d) => d.sessionId === sessionId && d.status === "open");
-      excludeConstraintIds = [...new Set(openDesigns.flatMap((d) => d.justifiedConstraintIds))];
+      // Found live, 2026-08-26: this used to filter to `d.status === "open"`
+      // only, so a design that had *already* been approved for this exact
+      // constraint (durably recorded in its own `justifiedConstraintIds`,
+      // set once by `decideReview(..., "approve")` and never revoked) lost
+      // that exemption the instant it got re-flagged for anything else --
+      // e.g. a later, unrelated `symbol_conflict` from ongoing background
+      // activity in another session. The design's approval history didn't
+      // change; this endpoint just stopped looking at it, so the same
+      // already-approved constraint started matching again as if it had
+      // never been cleared. Same eligibility filter `/v1/designs/scope-match`
+      // already uses for "this session's own live designs" (open, flagged,
+      // or dormant -- never closed/superseded/expired, whose justification
+      // history is moot since the design itself is done) -- a design being
+      // temporarily blocked for an unrelated reason should never erase an
+      // already-granted, unrelated approval.
+      const sessionDesigns = designs
+        .listByProject(projectId)
+        .filter((d) => d.sessionId === sessionId && (d.status === "open" || d.status === "flagged" || d.status === "dormant"));
+      excludeConstraintIds = [...new Set(sessionDesigns.flatMap((d) => d.justifiedConstraintIds))];
     }
 
     const hits = matchConstraintsForPaths([path], constraintStore.forProject(projectId), excludeConstraintIds);

@@ -179,6 +179,51 @@ test("DesignRegistry: flag demotes an open design to flagged and logs the verdic
   registry.stop();
 });
 
+test("DesignRegistry: flag stamps blockedReason directly on the design, and it survives being read back by get()", () => {
+  const db = createDb({ memory: true });
+  const registry = new DesignRegistry(db);
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "retry helper", creates: [], touches: [], dependsOn: [] });
+  assert.equal(registry.get(a.id)?.blockedReason, undefined, "sanity check: unset until flagged");
+  registry.flag(a.id, "symbol_conflict");
+  assert.equal(registry.get(a.id)?.blockedReason, "symbol_conflict");
+  registry.stop();
+});
+
+test("DesignRegistry: blockedReason clears on an approved resolve (back to open) but survives a rejected one (closed)", () => {
+  const db = createDb({ memory: true });
+  const registry = new DesignRegistry(db);
+  const approved = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "a", creates: [], touches: [], dependsOn: [] });
+  const rejected = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s2", summary: "b", creates: [], touches: [], dependsOn: [] });
+  registry.flag(approved.id, "llm_divergence");
+  registry.flag(rejected.id, "llm_divergence");
+
+  const approvedReview = registry.addReview(approved.id, "p1", "j");
+  registry.decideReview(approvedReview.id, "approve");
+  assert.equal(registry.get(approved.id)?.status, "open");
+  assert.equal(registry.get(approved.id)?.blockedReason, undefined, "an approved resolve must clear the stale reason -- the design is unblocked now");
+
+  const rejectedReview = registry.addReview(rejected.id, "p1", "j");
+  registry.decideReview(rejectedReview.id, "reject");
+  assert.equal(registry.get(rejected.id)?.status, "closed");
+  assert.equal(registry.get(rejected.id)?.blockedReason, "llm_divergence", "a rejected review closes the design -- the reason stays as meaningful history, not stale");
+  registry.stop();
+});
+
+test("DesignRegistry: resume clears a stale blockedReason left over from before the design went dormant", () => {
+  const db = createDb({ memory: true });
+  const registry = new DesignRegistry(db);
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "a", creates: [], touches: [], dependsOn: [] });
+  registry.flag(a.id, "symbol_conflict");
+  registry.sweepExpired(Date.now() + a.ttlMs + 1);
+  assert.equal(registry.get(a.id)?.status, "dormant", "sanity check: a flagged design demotes to dormant on TTL expiry, same as an open one");
+  assert.equal(registry.get(a.id)?.blockedReason, "symbol_conflict", "sanity check: dormancy alone must not erase the reason -- it's still meaningful history");
+
+  registry.resume(a.id, { sessionId: "s1", developerId: "d1", delta: {} });
+  assert.equal(registry.get(a.id)?.status, "open");
+  assert.equal(registry.get(a.id)?.blockedReason, undefined, "resuming to open must clear the now-stale reason");
+  registry.stop();
+});
+
 test("DesignRegistry: flag's optional detail persists the full conflicts/constraint onto the event, not just the bare verdict", () => {
   const db = createDb({ memory: true });
   const log = new DrizzleActivityLog(db);

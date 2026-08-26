@@ -449,12 +449,18 @@ export async function runDesignList(options: ListOptions): Promise<void> {
     return;
   }
   const body = (await res.json()) as {
-    items?: { id: string; status: string; summary: string; creates: string[]; touches: string[]; lastActivityAt?: number; developerId: string }[];
+    items?: { id: string; status: string; blockedReason?: string; summary: string; creates: string[]; touches: string[]; lastActivityAt?: number; developerId: string }[];
   };
   const items = options.mine ? (body.items ?? []).filter((d) => d.developerId === developerId) : (body.items ?? []);
   for (const d of items) {
     const activity = d.lastActivityAt ? `  last activity ${relativeTime(d.lastActivityAt)}` : "";
-    console.log(`${d.id}  [${d.status}]${activity}  ${d.summary || "(no summary)"}  creates=${d.creates.join(",")}  touches=${d.touches.join(",")}`);
+    // blockedReason (2026-08-26): only ever set while status is "flagged"
+    // -- see its own doc comment (@twing/core). Printed right next to the
+    // status bracket so `design list` says *why* a design is flagged
+    // instead of just that it is, same motivation as the hook's deny
+    // message now naming the bucket instead of one generic sentence.
+    const reason = d.blockedReason ? ` (${d.blockedReason})` : "";
+    console.log(`${d.id}  [${d.status}]${reason}${activity}  ${d.summary || "(no summary)"}  creates=${d.creates.join(",")}  touches=${d.touches.join(",")}`);
   }
 }
 

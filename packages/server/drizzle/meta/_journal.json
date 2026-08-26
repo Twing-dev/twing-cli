@@ -85,6 +85,13 @@
       "when": 1787730650542,
       "tag": "0011_design-conflict-model-simplification",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1787767415588,
+      "tag": "0012_design-blocked-reason",
+      "breakpoints": true
     }
   ]
 }

@@ -143,6 +143,28 @@ export interface DesignStatement {
    * back to `"open"`, and that always re-runs the full conflict check
    * first. */
   status: "open" | "flagged" | "dormant" | "superseded" | "closed" | "expired";
+  /** Which bucket actually flagged this design (2026-08-26) -- set by
+   * `DesignRegistry.flag()` alongside `status: "flagged"`, from the same
+   * `verdict` parameter that used to only survive as a `design_flagged`
+   * activity-log payload field. Before this, `status` alone couldn't say
+   * *why* a design was blocked -- every consumer (twing-monitor, the CLI,
+   * the Go hook) either had to separately join back to that activity event
+   * or, in the hook's case (`flaggedDesignReason`, `design_gate.go`),
+   * didn't bother and printed the same generic explanation for a
+   * `constraint_violation` block and an `llm_divergence` one alike. Safe to
+   * store directly because `flag()` only ever fires once per open period
+   * (`if (existing.status !== "open") return existing`) -- there is never
+   * more than one active reason to represent.
+   *
+   * Cleared back to `undefined` everywhere `status` is set back to
+   * `"open"` -- an approved self/admin resolve (`decideReview(...,
+   * "approve")`), a dormant `resume()`, and a retried-`ExitPlanMode`
+   * `reregisterFromPlan()` -- since a leftover reason would be stale the
+   * moment the design is open again. Left untouched by the dormancy sweep
+   * and by a rejected review's close -- both leave `status` as something
+   * other than plain `"open"`, so the reason stays meaningful history
+   * rather than going stale. */
+  blockedReason?: DesignVerdict;
   createdAt: number;
   closedAt?: number;
   summary: string;
