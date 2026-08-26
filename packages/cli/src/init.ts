@@ -303,8 +303,13 @@ async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: 
           githubOwner: github?.owner,
           githubRepo: github?.repo,
           constraints: [
-            ...manifest.constraints.map((c) => ({ statement: c.text, scope: [c.scope], type: "canonical_abstraction" })),
-            ...reviewRules.map((r) => ({ statement: r.reason, scope: [(r.path ?? r.symbol)!], type: "review_required" })),
+            // 2026-08-26: `type` collapsed to the single value "constraint"
+            // -- `canonical_abstraction`/`review_required` never had a real
+            // behavioral difference (see DesignVerdict's doc comment in
+            // core/types.ts). Still sent on the wire since the server
+            // accepts (but no longer branches on) it.
+            ...manifest.constraints.map((c) => ({ statement: c.text, scope: [c.scope], type: "constraint" as const })),
+            ...reviewRules.map((r) => ({ statement: r.reason, scope: [(r.path ?? r.symbol)!], type: "constraint" as const })),
           ],
         }),
       },

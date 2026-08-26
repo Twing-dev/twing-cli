@@ -182,12 +182,6 @@ type designCheckResponse struct {
 	// `Constraint` -- see design-checks.ts's matchConstraintsForPaths doc
 	// comment for why this is a list now).
 	Constraints []designConstraintInfo `json:"constraints,omitempty"`
-	// Severity (2026-08-19, design-checks.ts's severity split): "warning" |
-	// "error" | "" (empty on a "clean" verdict, where it's moot). Only an
-	// "error" verdict denies here -- a "warning" (currently tier 1's
-	// exactOverlap only) is display-only, same as "clean" as far as this
-	// gate is concerned. See DesignSeverity's doc comment in core/types.ts.
-	Severity string `json:"severity,omitempty"`
 	// GroupID (§17 design linking, 2026-08): echoes back the design's own
 	// groupId (self-assigned or caller-supplied). Not consumed by any
 	// gate decision today -- available for future logging/diagnostics.
@@ -195,10 +189,16 @@ type designCheckResponse struct {
 }
 
 // blocksGate reports whether this response's verdict should deny the tool
-// call. "clean" never blocks; a non-clean verdict blocks unless it's been
-// explicitly demoted to "warning" severity.
+// call. 2026-08-26: `Severity` is gone from the wire entirely -- blocking is
+// now a static function of `Verdict` alone (see DesignVerdict's doc comment,
+// core/types.ts). `/v1/designs/check`/`amend`/`resume` (design-checks.ts
+// tiers 1/3, the only source of a `designCheckResponse`) can only ever
+// return "clean", "file_overlap" (always advisory), or "constraint_violation"
+// (always blocks) -- anything else (e.g. "has_open_designs") falls through
+// to the caller's own "unknown verdict" fail-closed default, unchanged from
+// before this rename.
 func (r designCheckResponse) blocksGate() bool {
-	return r.Verdict != "clean" && r.Severity != "warning"
+	return r.Verdict != "clean" && r.Verdict != "file_overlap"
 }
 
 type designListResponse struct {
@@ -578,15 +578,14 @@ func handleExitPlanModeSingle(payload hookPayload, config twingConfig) {
 	case result.Verdict == "clean":
 		writeJSON(allowOutput("PreToolUse"))
 	case !result.blocksGate():
-		// 2026-08-19, severity split: an "overlap" verdict demoted to
-		// "warning" (tier 1's exactOverlap only, currently) registers and
-		// allows same as clean -- the conflict is still recorded server-side
-		// for display, just not gate-relevant. Only "overlap"/"error" and
-		// "constraint_flag" (always "error") reach the deny branch below.
+		// 2026-08-26: "file_overlap" (renamed from "overlap") is always
+		// advisory now -- registers and allows same as clean. The conflict
+		// is still recorded server-side for display, just never gate-relevant
+		// -- see DesignVerdict's doc comment, core/types.ts, for why blocking
+		// is now a static function of verdict alone with no separate
+		// severity to check.
 		writeJSON(allowOutput("PreToolUse"))
-	case result.Verdict == "overlap":
-		writeJSON(denyOutput("PreToolUse", overlapReason(result)))
-	case result.Verdict == "constraint_flag":
+	case result.Verdict == "constraint_violation":
 		writeJSON(denyOutput("PreToolUse", constraintReason(result)))
 	default:
 		logDesignGate("ExitPlanMode check: unknown verdict %q (blocking)", result.Verdict)
@@ -696,13 +695,10 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 			switch {
 			case result.Verdict == "clean", !result.blocksGate():
 				// no-op -- allowed overall unless something else denies.
-				// The second case is 2026-08-19's severity split: a
-				// "warning"-severity "overlap" (tier 1 only) registers and
-				// allows same as clean, same reasoning as the single-repo
-				// path above.
-			case result.Verdict == "overlap":
-				denyReasons = append(denyReasons, fmt.Sprintf("[%s] %s", cand.DirName, overlapReason(result)))
-			case result.Verdict == "constraint_flag":
+				// The second case is 2026-08-26: "file_overlap" (renamed from
+				// "overlap") always registers and allows, same as clean, same
+				// reasoning as the single-repo path above.
+			case result.Verdict == "constraint_violation":
 				denyReasons = append(denyReasons, fmt.Sprintf("[%s] %s", cand.DirName, constraintReason(result)))
 			default:
 				logDesignGate("ExitPlanMode multi-candidate check: unknown verdict %q for %s (blocking)", result.Verdict, cand.DirName)
@@ -907,36 +903,25 @@ func overlapReason(result designCheckResponse) string {
 	)
 }
 
-// constraintTypeText translates a constraint's machine type into something
-// a reader who has never opened .twing/twing.yml can act on.
-func constraintTypeText(t string) string {
-	switch t {
-	case "review_required":
-		return "a human must review changes here"
-	case "canonical_abstraction":
-		return "use the existing approach, don't add a second one"
-	case "domain_fact":
-		return "a fact about this codebase you should not contradict"
-	default:
-		return t
-	}
-}
-
 // constraintReason lists every matched constraint (2026-08-22, was a single
 // statement/type pair) -- mirrors overlapReason's own loop over
 // result.Conflicts just above it in this file, so a session sees every
 // violation from one ExitPlanMode call instead of discovering the next one
 // only after justifying and retrying.
+//
+// 2026-08-26: dropped the per-constraint `constraintTypeText(c.Type)`
+// parenthetical -- `DesignConstraintType` collapsed to a single value
+// ("constraint"), so there's no longer a type-specific phrase to pick
+// between (`review_required`/`canonical_abstraction`/`domain_fact` were
+// mechanically identical; see DesignVerdict's doc comment, core/types.ts).
+// The rule's own statement text already carries the substance.
 func constraintReason(result designCheckResponse) string {
 	details := []denyDetail{}
 	for i, c := range result.Constraints {
 		if i > 0 {
 			details = append(details, denyDetail{})
 		}
-		details = append(details,
-			denyDetail{"Rule", c.Statement},
-			denyDetail{"", "(" + constraintTypeText(c.Type) + ")"},
-		)
+		details = append(details, denyDetail{"Rule", c.Statement})
 	}
 
 	return denyMessage(
@@ -985,6 +970,12 @@ type designScopeMatchResponse struct {
 	// Both used to deny with the identical message telling you to run
 	// `twing design resolve`, even immediately after you already had.
 	PendingReview bool `json:"pendingReview,omitempty"`
+	// Set only for state "flagged" (2026-08-26 terminology simplification):
+	// true only when the flag came from "constraint_violation" -- the one
+	// bucket of the four that needs a project admin's decide. See
+	// flaggedDesignReason's own doc comment for the full branching this
+	// drives.
+	RequiresAdmin bool `json:"requiresAdmin,omitempty"`
 	// Set only for state "out_of_scope" (2026-08-25) -- every open design
 	// for this session, newest-first, not just the one `DesignID` names.
 	// Found live: with more than one open design in a session, silently
@@ -1045,18 +1036,48 @@ func checkDesignScope(serverURL, authToken, developerID, projectID, sessionID, f
 // wrong as of the async semantic comparator (2026-08-22): a design can be
 // flagged minutes after a clean registration, by runSemanticComparatorPass,
 // so the conflict frequently did not come from registration at all.
-func flaggedDesignReason(designID string, pendingReview bool) string {
+//
+// requiresAdmin (2026-08-26 terminology simplification): which of the four
+// buckets actually flagged this design -- only "constraint_violation" (one
+// design vs. a fixed project rule) needs a project admin's decide; a
+// "symbol_conflict"/"llm_divergence" flag (two designs vs. each other) is
+// self-approvable, so `twing design resolve --justify` clears it
+// immediately, no admin involved. See DesignVerdict's doc comment,
+// core/types.ts, for the full four-bucket model and "approval belongs to
+// whoever's authority you'd be overriding" principle this reflects. When
+// `pendingReview` is also true, `requiresAdmin` further distinguishes
+// "waiting on a person" from "already resolved, nothing more to do".
+func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool) string {
 	if pendingReview {
+		if requiresAdmin {
+			return denyMessage(
+				"You're waiting on a person, not on twing.",
+				"Your explanation has been sent to a project admin. There's nothing more to do "+
+					"on your end -- retrying won't help until someone decides.",
+				[]denyDetail{{"Your plan", designID}, {"Status", "waiting for review"}},
+				[]denyAction{
+					{Label: "Check where it stands", Command: "twing design reviews"},
+					{Label: "Or ask a project admin to take a look"},
+				},
+			)
+		}
+		// A self-approvable bucket's justification is decided the instant
+		// it's submitted (`/v1/designs/:id/resolve`'s auto-decide branch) --
+		// this state should be momentary, not something a retry should ever
+		// actually observe. Kept as its own message rather than folded into
+		// the "not yet justified" one below, in case of a race between the
+		// deny and the resolve call actually landing.
 		return denyMessage(
-			"You're waiting on a person, not on twing.",
-			"Your explanation has been sent to a project admin. There's nothing more to do "+
-				"on your end -- retrying won't help until someone decides.",
-			[]denyDetail{{"Your plan", designID}, {"Status", "waiting for review"}},
-			[]denyAction{
-				{Label: "Check where it stands", Command: "twing design reviews"},
-				{Label: "Or ask a project admin to take a look"},
-			},
+			"Your justification is still being processed.",
+			"This is self-approvable -- no admin needed. If this doesn't clear on the next "+
+				"try, something went wrong.",
+			[]denyDetail{{"Your plan", designID}, {"Status", "resolving"}},
+			[]denyAction{{Label: "Retry your edit"}},
 		)
+	}
+	note := "This is self-approvable -- you'll be unblocked as soon as you submit it, no admin needed."
+	if requiresAdmin {
+		note = "This goes to a project admin. You stay blocked until they decide."
 	}
 	return denyMessage(
 		"Someone else may already be doing this work.",
@@ -1071,7 +1092,7 @@ func flaggedDesignReason(designID string, pendingReview bool) string {
 			{
 				Label:   "Or explain why yours needs to be separate",
 				Command: fmt.Sprintf("twing design resolve --id %s --justify \"<reason>\"", designID),
-				Note:    "This goes to a project admin. You stay blocked until they decide.",
+				Note:    note,
 			},
 		},
 	)
@@ -1269,14 +1290,14 @@ func checkPathConstraint(serverURL, authToken, developerID, projectID, sessionID
 // Lists every matched constraint (2026-08-22, was a single statement/type
 // pair) -- a file covered by several rules at once should deny with all of
 // them named up front, not reveal the next one only after a retry.
+//
+// 2026-08-26: same `constraintTypeText` drop as constraintReason above --
+// `DesignConstraintType` collapsed to a single value, so there's no
+// type-specific phrase left to append.
 func pathConstraintReason(filePath string, constraints []designConstraintInfo) string {
 	details := []denyDetail{{"File", filePath}}
 	for _, c := range constraints {
-		details = append(details,
-			denyDetail{},
-			denyDetail{"Rule", c.Statement},
-			denyDetail{"", "(" + constraintTypeText(c.Type) + ")"},
-		)
+		details = append(details, denyDetail{}, denyDetail{"Rule", c.Statement})
 	}
 
 	return denyMessage(
@@ -1392,7 +1413,7 @@ func handleEditWriteGate(payload hookPayload) {
 	case "in_scope":
 		writeJSON(allowOutput("PreToolUse"))
 	case "flagged":
-		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch.DesignID, scopeMatch.PendingReview)))
+		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch.DesignID, scopeMatch.PendingReview, scopeMatch.RequiresAdmin)))
 	case "dormant":
 		writeJSON(denyOutput("PreToolUse", dormantDesignReason(scopeMatch.DesignID, scopeMatch.Summary, scopeMatch.DormantSinceMs)))
 	case "out_of_scope":

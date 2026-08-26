@@ -16,7 +16,8 @@ const baseInput = {
   otherDeveloperId: "bob",
   designId: "d1",
   systemDescription: "alice's edit falls inside bob's open design",
-  category: "symbol_claim" as const,
+  category: "symbol_conflict" as const,
+  subKind: "scope_intrusion" as const,
   summary: "1 overlapping path with \"bob's design\"",
   initiatingDesignId: "alice-design-1",
 };
@@ -25,7 +26,7 @@ test("AlignmentThreadStore: findOrCreate opens a new thread and seeds it with th
   const { store } = freshStore();
   const thread = store.findOrCreate(baseInput);
   assert.equal(thread.status, "open");
-  assert.equal(thread.category, "symbol_claim");
+  assert.equal(thread.category, "symbol_conflict");
   assert.equal(thread.summary, baseInput.summary);
   assert.deepEqual(thread.symbolIds, baseInput.symbolIds);
   assert.equal(thread.initiatingDesignId, "alice-design-1");
@@ -60,13 +61,13 @@ test("AlignmentThreadStore: a new overlapping symbol amends the existing open th
 
 test("AlignmentThreadStore: a semantic-conflict re-check always posts a follow-up message, even with no new symbols", () => {
   const { store } = freshStore();
-  const semanticInput = { ...baseInput, category: "tension" as const, symbolIds: [], systemDescription: "first tension finding" };
+  const semanticInput = { ...baseInput, category: "llm_divergence" as const, subKind: "tension" as const, symbolIds: [], systemDescription: "first tension finding" };
   const first = store.findOrCreate(semanticInput);
   const second = store.findOrCreate({ ...semanticInput, systemDescription: "re-checked after an amend, still tension" });
 
   assert.equal(first.id, second.id);
   const messages = store.messages(first.id);
-  assert.equal(messages.length, 2, "every semantic-conflict finding is fresh, unlike a repeated symbol_claim");
+  assert.equal(messages.length, 2, "every semantic-conflict finding is fresh, unlike a repeated symbol_conflict");
   assert.equal(messages[1].message, "re-checked after an amend, still tension");
 });
 
@@ -167,8 +168,8 @@ test("buildAlignmentSummary: templates a concise label per category, capping a l
   assert.equal(buildAlignmentSummary("duplication", "Add retry backoff", 0), 'Duplicate work with "Add retry backoff"');
   assert.equal(buildAlignmentSummary("contradictory_assumptions", "Add retry backoff", 0), 'Contradicts "Add retry backoff"');
   assert.equal(buildAlignmentSummary("tension", "Add retry backoff", 0), 'Tension with "Add retry backoff"');
-  assert.equal(buildAlignmentSummary("symbol_claim", "Add retry backoff", 1), '1 overlapping path with "Add retry backoff"');
-  assert.equal(buildAlignmentSummary("symbol_claim", "Add retry backoff", 3), '3 overlapping paths with "Add retry backoff"');
+  assert.equal(buildAlignmentSummary("real_edit_collision", "Add retry backoff", 1), '1 overlapping symbol with "Add retry backoff"');
+  assert.equal(buildAlignmentSummary("real_edit_collision", "Add retry backoff", 3), '3 overlapping symbols with "Add retry backoff"');
   assert.equal(buildAlignmentSummary("duplication", "(no summary)", 0), 'Duplicate work with "(no summary)"');
 
   const long = "x".repeat(120);

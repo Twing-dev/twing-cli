@@ -656,13 +656,13 @@ func TestHandleExitPlanModeSingle_NeverSetsGroupID(t *testing.T) {
 	}
 }
 
-// 2026-08-19 severity split (design-checks.ts): a "warning"-severity
-// "overlap" verdict (tier 1's exactOverlap only, currently) registers and
-// allows same as clean -- the conflict is still recorded server-side for
-// display, just not gate-relevant.
-func TestHandleExitPlanMode_OverlapWarningSeverity_Allows(t *testing.T) {
+// 2026-08-26 terminology simplification: blocking is a pure function of
+// verdict now -- file_overlap (tier 1's exactOverlap) never blocks, full
+// stop, no severity field to consult at all. The conflict is still recorded
+// server-side for display, just not gate-relevant.
+func TestHandleExitPlanMode_FileOverlap_Allows(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"verdict":"overlap","severity":"warning","designId":"d1","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"touches","overlapDetail":"both touch shared.ts","conflictingSummary":"another session's work"}]}`))
+		_, _ = w.Write([]byte(`{"verdict":"file_overlap","designId":"d1","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"touches","overlapDetail":"both touch shared.ts","conflictingSummary":"another session's work"}]}`))
 	}))
 	defer server.Close()
 
@@ -676,13 +676,12 @@ func TestHandleExitPlanMode_OverlapWarningSeverity_Allows(t *testing.T) {
 	}
 }
 
-// Companion to the warning-severity test above -- an "overlap" verdict with
-// no severity field at all (today's original response shape, still valid
-// for tier 4/constraint_flag, and any coordinator not yet upgraded) must
-// still deny, same as before this split.
-func TestHandleExitPlanMode_OverlapNoSeverity_StillDenies(t *testing.T) {
+// Companion to the test above -- a stray legacy "severity" field (an older
+// coordinator, or one not yet upgraded off the pre-2026-08-26 shape) must be
+// ignored rather than reintroducing severity-based branching.
+func TestHandleExitPlanMode_FileOverlap_IgnoresStraySeverityField(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"verdict":"overlap","designId":"d1","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"touches","overlapDetail":"summaries are 80% similar","conflictingSummary":"another session's work"}]}`))
+		_, _ = w.Write([]byte(`{"verdict":"file_overlap","severity":"warning","designId":"d1","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"touches","overlapDetail":"summaries are 80% similar","conflictingSummary":"another session's work"}]}`))
 	}))
 	defer server.Close()
 
@@ -691,8 +690,8 @@ func TestHandleExitPlanMode_OverlapNoSeverity_StillDenies(t *testing.T) {
 
 	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(repo, "sess1")) })
 	decision, _ := decisionOf(t, stdout)
-	if decision != "deny" {
-		t.Fatalf("decision = %q, want deny", decision)
+	if decision != "allow" {
+		t.Fatalf("decision = %q, want allow", decision)
 	}
 }
 
@@ -938,7 +937,10 @@ func TestHandleExitPlanMode_MultiCandidate_NoCandidatesAtAll_SilentNoOp(t *testi
 }
 
 // A denial from one matched candidate must still surface, naming which repo
-// it came from, even though the other candidate came back clean.
+// it came from. 2026-08-26: rewritten from an "overlap" fixture to
+// "constraint_violation" -- the only verdict that still blocks and denies
+// via constraintReason here (file_overlap never blocks at all now, see the
+// multi-candidate switch in handleExitPlanModeMultiCandidate).
 func TestHandleExitPlanMode_MultiCandidate_OneCandidateDenies_OverallDenies(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -949,7 +951,7 @@ func TestHandleExitPlanMode_MultiCandidate_OneCandidateDenies_OverallDenies(t *t
 			var body designCheckRequest
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			if len(body.Touches) == 1 && body.Touches[0] == "src/Inbox.tsx" {
-				_, _ = w.Write([]byte(`{"verdict":"overlap","designId":"d2","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"exact_overlap","overlapDetail":"src/Inbox.tsx","conflictingSummary":"another session's inbox work"}]}`))
+				_, _ = w.Write([]byte(`{"verdict":"constraint_violation","designId":"d2","constraints":[{"statement":"protected inbox path","type":"constraint"}]}`))
 				return
 			}
 			_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
@@ -965,16 +967,16 @@ func TestHandleExitPlanMode_MultiCandidate_OneCandidateDenies_OverallDenies(t *t
 	if decision != "deny" {
 		t.Fatalf("decision = %q, want deny", decision)
 	}
-	if !strings.Contains(reason, "twinmail-ui") || !strings.Contains(reason, "d-other") {
-		t.Errorf("reason = %q, want it to name twinmail-ui and the conflicting design", reason)
+	if !strings.Contains(reason, "twinmail-ui") || !strings.Contains(reason, "protected inbox path") {
+		t.Errorf("reason = %q, want it to name twinmail-ui and the violated rule", reason)
 	}
 }
 
-// 2026-08-19 severity split, multi-candidate counterpart to
-// TestHandleExitPlanMode_OverlapWarningSeverity_Allows: one candidate comes
-// back "overlap"/"warning" -- must not deny overall, same as if it had come
-// back clean.
-func TestHandleExitPlanMode_MultiCandidate_OneCandidateWarningSeverity_OverallAllows(t *testing.T) {
+// 2026-08-26 terminology simplification, multi-candidate counterpart to
+// TestHandleExitPlanMode_FileOverlap_Allows: one candidate comes back
+// "file_overlap" -- must not deny overall, same as if it had come back
+// clean, since file_overlap never blocks regardless of any other candidate.
+func TestHandleExitPlanMode_MultiCandidate_OneCandidateFileOverlap_OverallAllows(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		switch r.URL.Path {
@@ -984,7 +986,7 @@ func TestHandleExitPlanMode_MultiCandidate_OneCandidateWarningSeverity_OverallAl
 			var body designCheckRequest
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			if len(body.Touches) == 1 && body.Touches[0] == "src/Inbox.tsx" {
-				_, _ = w.Write([]byte(`{"verdict":"overlap","severity":"warning","designId":"d2","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"touches","overlapDetail":"src/Inbox.tsx","conflictingSummary":"another session's inbox work"}]}`))
+				_, _ = w.Write([]byte(`{"verdict":"file_overlap","designId":"d2","conflicts":[{"conflictingDesignId":"d-other","overlapKind":"touches","overlapDetail":"src/Inbox.tsx","conflictingSummary":"another session's inbox work"}]}`))
 				return
 			}
 			_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
@@ -1045,8 +1047,9 @@ func allDenyMessages(t *testing.T) map[string]string {
 	}
 	return map[string]string{
 		"noDesign":           noDesignReason(),
-		"flagged":            flaggedDesignReason("11111111-2222-3333-4444-555555555555", false),
-		"flaggedPendingRev":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", true),
+		"flagged":            flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true),
+		"flaggedPendingRev":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", true, true),
+		"flaggedSelfApprove": flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false),
 		"outOfScope":         outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", nil),
 		"outOfScopeMulti": outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", []designSummary{
 			{ID: "11111111-2222-3333-4444-555555555555", Summary: "add retry with backoff"},
@@ -1142,7 +1145,7 @@ func TestAuthRejectedReason_DistinguishesUnauthorizedFromForbidden(t *testing.T)
 // registration, so the old "conflict from its own registration" wording was
 // simply false in the common case.
 func TestFlaggedDesignReason_DoesNotClaimConflictCameFromRegistration(t *testing.T) {
-	msg := flaggedDesignReason("11111111-2222-3333-4444-555555555555", false)
+	msg := flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true)
 	if strings.Contains(msg, "registration") {
 		t.Errorf("should not attribute the conflict to registration time: %q", msg)
 	}
@@ -1200,6 +1203,10 @@ func TestDenyOutput_SeparatesAgentNoteFromUserText(t *testing.T) {
 // only by driving the real binary against a real coordinator. This asserts
 // both, so a third one can't hide the same way.
 func TestBothConstraintPaths_LeadWithPlainSentence(t *testing.T) {
+	// Type is still accepted on the wire (backward compat) but 2026-08-26
+	// dropped constraintTypeText's per-type phrase entirely -- there's only
+	// one DesignConstraintType value now, so the rule's own statement text
+	// is what carries the substance, not a type-derived phrase.
 	rules := []designConstraintInfo{{Statement: "money paths need a second pair of eyes", Type: "review_required"}}
 
 	planPath := constraintReason(designCheckResponse{DesignID: "11111111-2222-3333-4444-555555555555", Constraints: rules})
@@ -1213,8 +1220,11 @@ func TestBothConstraintPaths_LeadWithPlainSentence(t *testing.T) {
 		if !strings.Contains(msg, "What now") {
 			t.Errorf("%s: no 'What now' section", name)
 		}
-		if !strings.Contains(msg, "a human must review changes here") {
-			t.Errorf("%s: constraint type not translated to plain language", name)
+		if !strings.Contains(msg, "money paths need a second pair of eyes") {
+			t.Errorf("%s: the rule's own statement text is missing", name)
+		}
+		if strings.Contains(msg, "review_required") {
+			t.Errorf("%s: raw constraint type leaked into the message untranslated: %q", name, msg)
 		}
 	}
 

@@ -148,7 +148,16 @@ interface AlignmentThreadJSON {
   developerId: string;
   otherDeveloperId: string;
   systemDescription: string;
+  /** 2026-08-26: `"symbol_conflict" | "llm_divergence"` on any row created
+   * after the terminology simplification -- one of the old four values
+   * (`duplication`/`contradictory_assumptions`/`tension`/`symbol_claim`) on
+   * a row that predates it, never backfilled. See `subKind` below for the
+   * detail a pre-simplification row carried directly in this field. */
   category?: string;
+  /** Detail label under `category` -- absent on any row that predates the
+   * 2026-08-26 column. See AlignmentSubKind's own doc comment
+   * (alignment-store.ts). */
+  subKind?: string;
 }
 
 export async function runAlignThreads(options: AlignThreadsOptions): Promise<void> {
@@ -177,13 +186,18 @@ export async function runAlignThreads(options: AlignThreadsOptions): Promise<voi
     // category tag, which also restores info this line lost for a
     // semantic-conflict thread once the old symbolId-as-design-id stand-in
     // hack was removed server-side.
-    const categoryTag = t.category ? `  [${t.category}]` : "";
+    // 2026-08-26: `category` alone lost the detail it used to carry
+    // directly (four values collapsed to two bucket names) -- append
+    // `subKind` when present so a new-format row prints exactly as much
+    // information as an old-format row did.
+    const categoryTag = t.category ? `  [${t.category}${t.subKind ? `/${t.subKind}` : ""}]` : "";
     console.log(`${t.id}  [${t.status}]${categoryTag}  ${t.developerId} <-> ${t.otherDeveloperId}`);
     console.log(`  ${t.systemDescription}`);
     // Every accumulated overlapping file, not just the frozen first one --
-    // only worth a line once there's more than one to show.
+    // only worth a line once there's more than one to show. `symbol_claim`
+    // is the pre-2026-08-26 name for what's now `symbol_conflict`.
     const symbolIds = t.symbolIds ?? [];
-    if (t.category === "symbol_claim" && symbolIds.length > 1) {
+    if ((t.category === "symbol_conflict" || t.category === "symbol_claim") && symbolIds.length > 1) {
       console.log(`  files: ${symbolIds.join(", ")}`);
     }
   }

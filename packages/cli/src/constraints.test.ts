@@ -17,7 +17,7 @@ const PROJECT_ID = "proj-1";
 
 test("runConstraintsList: appends ?projectId= and prints one line per constraint", async () => {
   const { fetch, calls } = captureFetch(
-    jsonResponse({ items: [{ id: "c1", type: "canonical_abstraction", statement: "use pkg/retry", scope: ["src/**"] }] }),
+    jsonResponse({ items: [{ id: "c1", type: "constraint", statement: "use pkg/retry", scope: ["src/**"] }] }),
   );
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");

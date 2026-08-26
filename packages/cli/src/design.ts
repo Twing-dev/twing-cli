@@ -54,7 +54,15 @@ interface DesignConflictJSON {
 
 interface DesignCheckResponseJSON {
   error?: string;
-  verdict?: "clean" | "overlap" | "constraint_flag" | "has_open_designs";
+  /** 2026-08-26 terminology simplification: renamed from
+   * `"clean" | "overlap" | "constraint_flag" | "has_open_designs"`. Only
+   * `"file_overlap"` and `"constraint_violation"` can come back from
+   * `/v1/designs/check`/`amend`/`resume` (design-checks.ts tiers 1/3);
+   * `"symbol_conflict"`/`"llm_divergence"` only ever arise from
+   * `/v1/claims` or the async semantic-comparator pass, never this
+   * synchronous response. See DesignVerdict's own doc comment,
+   * core/types.ts, for the full four-bucket model. */
+  verdict?: "clean" | "file_overlap" | "constraint_violation" | "has_open_designs";
   /** Absent only for `"has_open_designs"` -- that verdict fires before any
    * row is created. See DesignVerdict's own doc comment in core/types.ts. */
   designId?: string;
@@ -67,10 +75,6 @@ interface DesignCheckResponseJSON {
    * `constraint` object -- see design-checks.ts's matchConstraintsForPaths
    * doc comment for the full reasoning). */
   constraints?: { statement: string; type: string }[];
-  /** 2026-08-19 severity split -- "warning" (tier 1's exactOverlap only,
-   * currently) is display-only, undefined/"error" means today's original
-   * blocking behavior. See DesignSeverity's doc comment in core/types.ts. */
-  severity?: "warning" | "error";
   /** Set only for `"has_open_designs"` (2026-08-25, "force a choice"
    * registration-sprawl fix) -- the developer's other currently-open
    * designs, cross-project, found before this registration was created. */
@@ -89,33 +93,27 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
   }
   // "has_open_designs" (2026-08-25) has no designId -- no row exists yet
   // for this verdict, see DesignCheckResult.designId's own doc comment.
-  console.log(
-    `verdict: ${result.verdict}${result.severity ? ` (${result.severity})` : ""}` + (result.designId ? `  design: ${result.designId}` : ""),
-  );
+  console.log(`verdict: ${result.verdict}` + (result.designId ? `  design: ${result.designId}` : ""));
   if (result.groupId) {
     // §17 design linking (2026-08): the copy-paste hint for linking a
     // sibling-repo registration to this one.
     console.log(`  group: ${result.groupId}  (registering a linked design in another repo? pass --group ${result.groupId})`);
   }
-  if (result.verdict === "overlap" && result.severity === "warning") {
-    // Display-only (2026-08-19 severity split): recorded for visibility,
-    // design stays open, no action required.
+  // 2026-08-26: blocking is now a static function of `verdict` alone --
+  // `"file_overlap"` (renamed from `"overlap"`) is always advisory-only,
+  // `"constraint_violation"` (renamed from `"constraint_flag"`) always
+  // blocks. No more severity branch to check within a single verdict.
+  if (result.verdict === "file_overlap") {
     for (const c of result.conflicts ?? []) {
       console.log(`  [${c.overlapKind}] conflicts with ${c.conflictingDesignId}: ${c.overlapDetail}`);
       console.log(`    their summary: ${c.conflictingSummary}`);
     }
-    console.log(`  (warning only -- no action needed; visible in the dashboard's design detail/activity feed)`);
-  } else if (result.verdict === "overlap") {
-    for (const c of result.conflicts ?? []) {
-      console.log(`  [${c.overlapKind}] conflicts with ${c.conflictingDesignId}: ${c.overlapDetail}`);
-      console.log(`    their summary: ${c.conflictingSummary}`);
-    }
-    console.log(`  -> adopt the existing design, or run: twing design resolve --id ${result.designId} --justify "<reason>"`);
-  } else if (result.verdict === "constraint_flag") {
+    console.log(`  (advisory only -- no action needed; visible in the dashboard's design detail/activity feed)`);
+  } else if (result.verdict === "constraint_violation") {
     for (const c of result.constraints ?? []) {
       console.log(`  [${c.type}] ${c.statement}`);
     }
-    console.log(`  -> adjust your plan, or run: twing design resolve --id ${result.designId} --justify "<reason>"`);
+    console.log(`  -> adjust your plan, or run: twing design resolve --id ${result.designId} --justify "<reason>" (a project admin will need to approve)`);
   } else if (result.verdict === "has_open_designs") {
     // "Force a choice" registration-sprawl fix (2026-08-25): no row was
     // created for this call -- nothing to point `resolve`/`close` at yet.
@@ -251,7 +249,21 @@ export async function runDesignResolve(options: ResolveOptions): Promise<void> {
     authToken,
     developerId,
   );
-  console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
+  const result = (await parseJsonOrUnauthorized(res)) as { error?: string; status?: string; reviewId?: string };
+  // 2026-08-26 self-approve: `/v1/designs/:id/resolve` now distinguishes
+  // "resolved" (no constraint hit in the mix -- decided immediately, the
+  // design is unblocked right now) from "pending_review" (a constraint
+  // violation is in the mix -- the only bucket where a project admin's
+  // decide is still required). See DesignVerdict's doc comment,
+  // core/types.ts, for the full four-bucket model this line reflects.
+  if (!result.error) {
+    if (result.status === "resolved") {
+      console.log(`twing design: unblocked -- self-approved, no admin needed (review ${result.reviewId}).`);
+    } else if (result.status === "pending_review") {
+      console.log(`twing design: waiting on a project admin -- run \`twing design reviews --decide ${result.reviewId} --decision approve\` (as an admin) to unblock.`);
+    }
+  }
+  console.log(JSON.stringify(result, null, 2));
 }
 
 export interface CloseOptions {

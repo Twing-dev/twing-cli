@@ -98,6 +98,45 @@ closed** -- the edit is blocked, with a message saying exactly why, rather
 than silently letting it through. Turn it off deliberately with
 `TWING_DESIGN_GATE=off` or `twing design disable-gate`.
 
+### The four conflict buckets
+
+Every conflict a design can hit collapses into exactly one of four buckets.
+One principle decides who resolves each: **approval belongs to whoever's
+authority you'd be overriding.** Overriding your own peer's declared or
+actual work is yours to waive; overriding a project-wide rule someone else
+wrote isn't.
+
+| # | Bucket | Between | Blocking? | Resolved by | Sub-kinds |
+|---|---|---|---|---|---|
+| 1 | `constraint_violation` | one design vs. a fixed project rule (`.twing/twing.yml`'s `constraints:`) | yes | **admin** approves (`twing design reviews --decide`) | *(none -- `DesignConstraintType` is a single value, `"constraint"`)* |
+| 2 | `file_overlap` | two designs' *declared* plans (self-reported `creates`/`touches`), before either has written a line | no -- advisory only, never flags | nothing to resolve | *(none)* |
+| 3 | `symbol_conflict` | two designs' *actual edits* -- a real edit lands on a symbol another open design's owner also edited, declared as their own scope, or whose signature it silently broke | yes, whichever side(s) have an open design at the time | **self** -- `twing design resolve --justify` clears your own block immediately, no admin needed | `real_edit_collision` (both sides genuinely wrote to the same symbol), `scope_intrusion` (your edit landed inside another design's *declared* scope), `contract_break` (you changed a signature a caller/callee's design depends on) |
+| 4 | `llm_divergence` | two designs' *stated intent* -- judged by an LLM (Bedrock) on what each plan actually does, even when file lists never overlap | yes | **self**, same as `symbol_conflict` | `duplication` (same problem solved twice), `contradictory_assumptions` (one plan assumes true what the other assumes false), `tension` (the two plans' changes to shared behavior/data/contracts don't agree on which wins) |
+
+Implications of the split:
+
+- **Only bucket 1 ever needs a human.** Buckets 3 and 4 exist because two
+  peers' own work collided -- neither has more authority than the other, so
+  whichever side is blocked can justify and clear it themselves
+  (`resolve --justify` auto-decides "approve" the instant the review has no
+  constraint hit in it). A justification that *also* touches a constraint
+  hit stays admin-gated regardless of what else is bundled with it.
+- **Bucket 2 never blocks anything.** It's a plan-vs-plan heads-up before
+  either side has actually touched a file -- useful context, never a gate.
+  If it later becomes real (someone actually edits the shared symbol), that
+  shows up separately as a bucket-3 `symbol_conflict`.
+- **Buckets 1 and 3/4 differ in what they're checked against.** Bucket 1 is
+  deterministic (a `.twing/twing.yml` rule, checked synchronously). Buckets
+  3 and 4 are sourced from real signal -- Tree-sitter-parsed `Claim`s for
+  bucket 3, an async Bedrock semantic-conflict pass for bucket 4 -- so
+  either can arrive *after* the triggering `Edit`/`Write` already succeeded,
+  surfaced via `twing align` / an alignment thread rather than a synchronous
+  deny.
+- There's a fifth value, `has_open_designs`, that isn't a conflict between
+  two designs at all -- a pre-registration hygiene check ("you already have
+  too much of your own work open") that runs before any new design row
+  exists.
+
 ```sh
 twing design register --summary "adds a retry wrapper" --touches src/net/retry.ts
 twing design amend --id <designId> --touches src/net/retry-config.ts
@@ -120,9 +159,9 @@ closes one on demand, right when the work it named is finished, same as
 `resolve`/`amend` targeting one specific design by id. Safe to call more
 than once; closing an already-closed/superseded/expired design is a no-op.
 
-Constraints (the `canonical_abstraction`/`review_required` rules a design
-gets checked against, seeded from `.twing/twing.yml`'s `constraints:`
-section by `twing init`) are separate from designs -- `twing constraints
+Constraints (the project rules a design gets checked against for bucket 1
+above, seeded from `.twing/twing.yml`'s `constraints:` section by
+`twing init`) are separate from designs -- `twing constraints
 list` shows what's currently enforced for a project, and any project admin
 can `twing constraints remove --id <constraintId>` to retire a stale one
 immediately. This is deliberately *unilateral* -- one admin acting alone,
@@ -150,12 +189,16 @@ on a fresh session's very first deny, to check `twing design list --mine
 new one for it. Follow whichever it tells you, then retry the original
 edit. Two things worth knowing before you do:
 
-- **`resolve --justify` records a justification, it does not itself unblock
-  you.** It queues a `PendingReview` for a project admin to approve or
-  reject (`twing design reviews --decide`); until that happens, the same
-  file stays denied, now with a different message telling you a review is
-  pending rather than that nothing's registered. Don't loop retrying it --
-  that's a stop-and-wait state, not a self-serviceable one.
+- **`resolve --justify` unblocks you immediately for a `symbol_conflict` or
+  `llm_divergence` deny, but not for `constraint_violation`.** The two
+  peer-vs-peer buckets self-approve on the spot -- no one else's authority
+  is being overridden, so the tool call reports `status: "resolved"` and
+  the same edit succeeds on retry right away. A `constraint_violation`
+  justification instead queues a `PendingReview` for a project admin
+  (`twing design reviews --decide`); until that happens, the file stays
+  denied with a message saying a review is pending. Don't loop retrying it
+  in that case -- that's a stop-and-wait state, not a self-serviceable one.
+  See "The four conflict buckets" above for which is which.
 - **Tell the human what happened.** Registering, amending, or resuming a
   design creates a real record on the coordinator, attributed to the
   operator's own identity, that other sessions' conflict checks get

@@ -222,8 +222,10 @@ test("runInit: seeds constraints and require_human_review rules when the manifes
     assert.match(calls[0].url, /\/v1\/constraints\/seed$/);
     const body = calls[0].body as { constraints: { statement: string; type: string }[] };
     assert.equal(body.constraints.length, 2);
-    assert.ok(body.constraints.some((c) => c.type === "canonical_abstraction"));
-    assert.ok(body.constraints.some((c) => c.type === "review_required"));
+    // 2026-08-26: `type` collapsed to a single value ("constraint") for both
+    // the manifest's `constraints:` entries and its `require_human_review:`
+    // entries -- see DesignVerdict's doc comment, core/types.ts.
+    assert.ok(body.constraints.every((c) => c.type === "constraint"));
     assert.ok(logs.some((l) => l.includes("seeded 2 constraint(s)")));
   });
 });

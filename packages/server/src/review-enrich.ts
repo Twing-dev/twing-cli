@@ -33,10 +33,15 @@ import type {
 export type DesignLookup = (id: string) => DesignStatement | undefined;
 export type ConstraintLookup = (id: string) => DesignConstraint | undefined;
 
-/** `overlapWaivers` and `conflictWaivers` answer the same human question --
- * "whose work does this collide with?" -- so they're merged into one list,
- * `kind` preserving which check produced each. Order is stable: overlaps
- * first, then semantic conflicts, each in the order recorded. */
+/** `overlapWaivers`, `conflictWaivers`, and (2026-08-26) `symbolConflictWaivers`
+ * all answer the same human question -- "whose work does this collide
+ * with?" -- so they're merged into one list, `kind` preserving which check
+ * produced each (`"overlap"`/`"conflict"` are this field's own waiver-kind
+ * labels, not `DesignVerdict` values -- `"conflict"` here means what's now
+ * called the `llm_divergence` bucket; left unrenamed to keep this field's
+ * diff bounded, see `ReviewConflictSummary`'s doc comment in core/types.ts).
+ * Order is stable: overlaps, then semantic conflicts, then symbol
+ * conflicts, each in the order recorded. */
 function collectConflicts(review: PendingReview, lookupDesign: DesignLookup): ReviewConflictSummary[] {
   const out: ReviewConflictSummary[] = [];
 
@@ -56,6 +61,16 @@ function collectConflicts(review: PendingReview, lookupDesign: DesignLookup): Re
       designId: waiver.conflictingDesignId,
       kind: "conflict",
       ...(other ? { summary: other.summary, developerId: other.developerId } : {}),
+    });
+  }
+
+  for (const waiver of review.symbolConflictWaivers ?? []) {
+    const other = lookupDesign(waiver.conflictingDesignId);
+    out.push({
+      designId: waiver.conflictingDesignId,
+      kind: "symbol_conflict",
+      ...(other ? { summary: other.summary, developerId: other.developerId } : {}),
+      ...(waiver.symbolIds.length > 0 ? { paths: waiver.symbolIds } : {}),
     });
   }
 

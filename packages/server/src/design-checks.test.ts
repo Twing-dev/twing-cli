@@ -29,40 +29,39 @@ function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
     justifiedConstraintIds: [],
     justifiedOverlaps: [],
     justifiedConflicts: [],
+    justifiedSymbolConflicts: [],
     lastActivityAt: Date.now(),
     ...overrides,
   };
 }
 
-test("clean when no overlap, no constraint match, no similarity", () => {
+test("clean when no overlap, no constraint match", () => {
   const candidate = design({ id: "a", creates: ["Foo"], touches: ["src/foo.ts"] });
   const other = design({ id: "b", sessionId: "s2", creates: ["Bar"], touches: ["src/bar.ts"], summary: "totally unrelated" });
   const outcome = runDesignChecks(candidate, [other], []);
   assert.equal(outcome.verdict, "clean");
 });
 
-test("tier 1: exact creates overlap -> overlap verdict, warning severity", () => {
+test("tier 1: exact creates overlap -> file_overlap verdict (always advisory)", () => {
   const candidate = design({ id: "a", creates: ["RetryPolicy"] });
   const other = design({ id: "b", sessionId: "s2", developerId: "dev2", creates: ["RetryPolicy"] });
   const outcome = runDesignChecks(candidate, [other], []);
-  assert.equal(outcome.verdict, "overlap");
-  assert.equal(outcome.severity, "warning", "2026-08-19 severity split: tier 1 is display-only, never blocking");
+  assert.equal(outcome.verdict, "file_overlap");
   assert.equal(outcome.conflicts[0].overlapKind, "creates");
   assert.equal(outcome.conflicts[0].conflictingDesignId, "b");
 });
 
-test("tier 1: exact touches overlap -> overlap verdict, warning severity", () => {
+test("tier 1: exact touches overlap -> file_overlap verdict (always advisory)", () => {
   const candidate = design({ id: "a", touches: ["src/net/retry.ts"] });
   const other = design({ id: "b", sessionId: "s2", developerId: "dev2", touches: ["src/net/retry.ts"] });
   const outcome = runDesignChecks(candidate, [other], []);
-  assert.equal(outcome.verdict, "overlap");
-  assert.equal(outcome.severity, "warning");
+  assert.equal(outcome.verdict, "file_overlap");
   assert.equal(outcome.conflicts[0].overlapKind, "touches");
 });
 
 // 2026-08-22: same-developer pairs are excluded from every overlap/conflict
-// tier that compares two designs (tiers 1 and 4 here; design-divergence.ts
-// and checks.ts separately) -- see design-checks.ts's top-of-file comment.
+// tier that compares two designs (tier 1 here; design-divergence.ts and
+// checks.ts separately) -- see design-checks.ts's top-of-file comment.
 test("tier 1: no overlap verdict when the 'other' design belongs to the same developer", () => {
   const candidate = design({ id: "a", developerId: "dev1", creates: ["RetryPolicy"], touches: ["src/net/retry.ts"] });
   const other = design({ id: "b", sessionId: "s2", developerId: "dev1", creates: ["RetryPolicy"], touches: ["src/net/retry.ts"] });
@@ -89,8 +88,7 @@ test("tier 1: a waived path stays quiet, but a second, different path on the sam
   const otherWithBoth = design({ id: "b", sessionId: "s2", developerId: "dev2", creates: ["file1.ts", "file2.ts"], summary: "totally unrelated" });
   const waivedOnlyFile1 = design({ id: "a", creates: ["file1.ts", "file2.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
   const outcome = runDesignChecks(waivedOnlyFile1, [otherWithBoth], []);
-  assert.equal(outcome.verdict, "overlap");
-  assert.equal(outcome.severity, "warning");
+  assert.equal(outcome.verdict, "file_overlap");
   assert.deepEqual(outcome.conflicts[0].overlapPaths, ["file2.ts"]);
 });
 
@@ -98,50 +96,32 @@ test("tier 1: a waiver against design B doesn't leak to design C sharing the sam
   const candidate = design({ id: "a", creates: ["file1.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
   const designC = design({ id: "c", sessionId: "s3", developerId: "dev3", creates: ["file1.ts"], summary: "totally unrelated" });
   const outcome = runDesignChecks(candidate, [designC], []);
-  assert.equal(outcome.verdict, "overlap");
-  assert.equal(outcome.severity, "warning");
+  assert.equal(outcome.verdict, "file_overlap");
   assert.equal(outcome.conflicts[0].conflictingDesignId, "c");
 });
 
-test("tier 3: constraint scope match -> constraint_flag", () => {
+test("tier 3: constraint scope match -> constraint_violation", () => {
   const candidate = design({ id: "a", touches: ["src/net/retry.ts"] });
   const constraint: DesignConstraint = {
     id: "c1",
     projectId: "p1",
-    type: "canonical_abstraction",
+    type: "constraint",
     statement: "use net/retry.ts, don't add another",
     scope: ["src/net/**"],
     source: "seeded",
     createdAt: Date.now(),
   };
   const outcome = runDesignChecks(candidate, [], [constraint]);
-  assert.equal(outcome.verdict, "constraint_flag");
-  assert.equal(outcome.severity, "error");
+  assert.equal(outcome.verdict, "constraint_violation");
   assert.equal(outcome.constraints[0]?.statement, constraint.statement);
 });
 
-test("tier 4: summary similarity fallback only fires when 1-3 found nothing", () => {
-  const candidate = design({ id: "a", summary: "adds a retry wrapper with exponential backoff for the payments client" });
-  const other = design({ id: "b", sessionId: "s2", developerId: "dev2", summary: "adds a retry wrapper with exponential backoff for the billing client" });
-  const outcome = runDesignChecks(candidate, [other], []);
-  assert.equal(outcome.verdict, "overlap");
-  assert.equal(outcome.severity, "warning", "2026-08-22: tier 4 demoted alongside tier 1 -- weakest-evidence tier, no path corroboration by construction");
-  assert.match(outcome.conflicts[0].overlapDetail, /similar/);
-});
-
-test("tier 4 does not fire below the similarity threshold", () => {
-  const candidate = design({ id: "a", summary: "adds a retry wrapper" });
-  const other = design({ id: "b", sessionId: "s2", developerId: "dev2", summary: "renames a css variable" });
-  const outcome = runDesignChecks(candidate, [other], []);
-  assert.equal(outcome.verdict, "clean");
-});
-
-test("tier 4: no overlap verdict when the similar-sounding 'other' design belongs to the same developer", () => {
-  const candidate = design({ id: "a", developerId: "dev1", summary: "adds a retry wrapper with exponential backoff for the payments client" });
-  const other = design({ id: "b", sessionId: "s2", developerId: "dev1", summary: "adds a retry wrapper with exponential backoff for the billing client" });
-  const outcome = runDesignChecks(candidate, [other], []);
-  assert.equal(outcome.verdict, "clean");
-});
+// 2026-08-26: tier 4 (summarySimilarity, the Jaccard fallback) was removed
+// entirely -- redundant now that "llm_divergence" (design-semantic-check.ts)
+// exists as the real, non-syntactic-guessing replacement. Two designs whose
+// *summaries* merely read as similar now correctly stay "clean" at this
+// syntactic layer; see design-eval-cases.ts's bonus-11 case for a case that
+// used to be a documented tier-4 false positive and now correctly passes.
 
 // §17.9: the ground-truth per-path check, independent of any DesignStatement
 // -- this is what backstops a review_required rule (e.g. packages/server/**)
@@ -151,7 +131,7 @@ test("matchConstraintsForPaths: matches a bare path against a constraint's scope
   const constraint: DesignConstraint = {
     id: "c1",
     projectId: "p1",
-    type: "review_required",
+    type: "constraint",
     statement: "the hosted coordinator -- do not remove without sign-off",
     scope: ["packages/server/**"],
     source: "seeded",
@@ -160,14 +140,14 @@ test("matchConstraintsForPaths: matches a bare path against a constraint's scope
   const hits = matchConstraintsForPaths(["packages/server/src/app.ts"], [constraint]);
   assert.equal(hits.length, 1);
   assert.equal(hits[0]?.statement, constraint.statement);
-  assert.equal(hits[0]?.type, "review_required");
+  assert.equal(hits[0]?.type, "constraint");
 });
 
 test("matchConstraintsForPaths: no match returns an empty list", () => {
   const constraint: DesignConstraint = {
     id: "c1",
     projectId: "p1",
-    type: "review_required",
+    type: "constraint",
     statement: "n/a",
     scope: ["packages/server/**"],
     source: "seeded",
@@ -185,7 +165,7 @@ test("matchConstraintsForPaths: fires even when the path was never declared by a
   const constraint: DesignConstraint = {
     id: "c1",
     projectId: "p1",
-    type: "review_required",
+    type: "constraint",
     statement: "protected",
     scope: ["packages/server/**"],
     source: "seeded",
@@ -200,46 +180,46 @@ test("matchConstraintsForPaths: fires even when the path was never declared by a
 // different constraint, both come back from one call -- previously only the
 // higher-priority hit surfaced, and the second was only discoverable by
 // justifying the first and retrying. See matchConstraintsForPaths' own doc
-// comment.
+// comment. Order-independent (2026-08-26): sort was type-priority-then-
+// specificity; type priority is gone (DesignConstraintType collapsed to one
+// value), so which of these two sorts first is just an artifact of their
+// scope strings' lengths, not something this test should assert on.
 test("matchConstraintsForPaths: two different paths hitting two different constraints both come back in one call", () => {
-  const reviewRequired: DesignConstraint = {
+  const serverRule: DesignConstraint = {
     id: "c1",
     projectId: "p1",
-    type: "review_required",
+    type: "constraint",
     statement: "the hosted coordinator -- do not remove without sign-off",
     scope: ["packages/server/**"],
     source: "seeded",
     createdAt: Date.now(),
   };
-  const canonicalAbstraction: DesignConstraint = {
+  const framingRule: DesignConstraint = {
     id: "c2",
     projectId: "p1",
-    type: "canonical_abstraction",
+    type: "constraint",
     statement: "use the shared frame codec; don't invent a second wire format",
     scope: ["packages/core/src/framing.ts"],
     source: "seeded",
     createdAt: Date.now(),
   };
-  const hits = matchConstraintsForPaths(
-    ["packages/server/src/app.ts", "packages/core/src/framing.ts"],
-    [canonicalAbstraction, reviewRequired],
-  );
-  assert.equal(hits.length, 2);
-  // review_required still sorts first (higher priority), even though
-  // canonical_abstraction was passed in first.
-  assert.equal(hits[0]?.id, "c1");
-  assert.equal(hits[1]?.id, "c2");
+  const hits = matchConstraintsForPaths(["packages/server/src/app.ts", "packages/core/src/framing.ts"], [framingRule, serverRule]);
+  assert.deepEqual(new Set(hits.map((h) => h.id)), new Set(["c1", "c2"]));
 });
 
-// Found live, 2026-08-11: a broad canonical_abstraction constraint on
-// packages/** was seeded before a narrower review_required rule on
+// Found live, 2026-08-11 (pre-2026-08-26 constraint-type collapse): a broad
+// constraint on packages/** was seeded before a narrower one on
 // packages/server/**, and the broad one won just by being first in the
-// array -- masking the more important sign-off requirement.
-test("matchConstraintsForPaths: review_required wins over canonical_abstraction even when the broader rule was seeded first", () => {
+// array -- masking the more important sign-off requirement. The original
+// fix ranked by type priority first, specificity second; type priority is
+// gone now (DesignConstraintType collapsed to one value), but the narrower
+// scope here already wins on specificity alone, so the expected outcome is
+// unchanged.
+test("matchConstraintsForPaths: the narrower/more specific rule wins even when the broader rule was seeded first", () => {
   const broad: DesignConstraint = {
     id: "c1",
     projectId: "p1",
-    type: "canonical_abstraction",
+    type: "constraint",
     statement: "use the shared frame codec; don't invent a second wire format",
     scope: ["packages/**"],
     source: "seeded",
@@ -248,28 +228,27 @@ test("matchConstraintsForPaths: review_required wins over canonical_abstraction 
   const narrow: DesignConstraint = {
     id: "c2",
     projectId: "p1",
-    type: "review_required",
+    type: "constraint",
     statement: "the hosted coordinator -- do not remove without sign-off",
     scope: ["packages/server/**"],
     source: "seeded",
     createdAt: Date.now(),
   };
   const hits = matchConstraintsForPaths(["packages/server/src/app.ts"], [broad, narrow]);
-  assert.equal(hits[0]?.type, "review_required");
   assert.equal(hits[0]?.statement, narrow.statement);
 });
 
 // Deliberate behavior change (2026-08-22): the old single-hit version
-// suppressed the broader same-type rule via this same specificity
-// tie-break, since it only needed to pick one winner. Now that the
-// function returns every match, both come back -- the tie-break just
-// controls sort order (more specific first), not which one survives. See
-// matchConstraintsForPaths' own doc comment.
-test("matchConstraintsForPaths: among same-type matches, both come back, more specific (longer) scope sorted first", () => {
+// suppressed the broader rule via this same specificity tie-break, since it
+// only needed to pick one winner. Now that the function returns every
+// match, both come back -- the tie-break just controls sort order (more
+// specific first), not which one survives. See matchConstraintsForPaths'
+// own doc comment.
+test("matchConstraintsForPaths: both matches come back, more specific (longer) scope sorted first", () => {
   const wide: DesignConstraint = {
     id: "c1",
     projectId: "p1",
-    type: "review_required",
+    type: "constraint",
     statement: "wide rule",
     scope: ["packages/**"],
     source: "seeded",
@@ -278,7 +257,7 @@ test("matchConstraintsForPaths: among same-type matches, both come back, more sp
   const specific: DesignConstraint = {
     id: "c2",
     projectId: "p1",
-    type: "review_required",
+    type: "constraint",
     statement: "specific rule",
     scope: ["packages/server/**"],
     source: "seeded",

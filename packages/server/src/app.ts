@@ -14,7 +14,7 @@ import { cors } from "hono/cors";
 import type { Claim, CallEdge, DesignStatement, DesignConstraintType, Finding } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
-import { runChecks } from "./checks.js";
+import { findClaimConflicts, type ClaimFindingMatch } from "./checks.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
 import {
   runDesignChecks,
@@ -31,7 +31,7 @@ import { extractDesign } from "./design-extract.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
 import { enrichReviews } from "./review-enrich.js";
-import { AlignmentThreadStore, buildAlignmentSummary } from "./alignment-store.js";
+import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind } from "./alignment-store.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role } from "./identity-store.js";
 import { fetchRepoPermissions } from "./github-client.js";
@@ -483,19 +483,22 @@ export function createApp(options: CreateAppOptions = {}) {
    * writeup.
    *
    * **2026-08-22: blocking.** A hit now also flags the candidate
-   * (`designs.flag(..., "conflict", ...)`) alongside the existing
+   * (`designs.flag(..., "llm_divergence", ...)`) alongside the existing
    * alignment-thread/notice/activity-log side effects -- see DesignVerdict's
-   * doc comment (core/types.ts) for why this is a distinct verdict from
-   * `"overlap"`. Deliberately *not* synchronous: this still runs after the
+   * doc comment (core/types.ts) for the full four-bucket model this belongs
+   * to. Deliberately *not* synchronous: this still runs after the
    * triggering response was already sent, so it can't deny the registration
    * itself (and a few files may already have been edited by the time it
    * lands) -- it flips the design's `status` to `"flagged"` so the *next*
    * `Edit`/`Write` in that session is denied by the existing, unchanged
-   * `/v1/designs/scope-match` check, same enforcement path `constraint_flag`
-   * and tier-4 `overlap` already use. Skips any `other.id` already in
-   * `current.justifiedConflicts` before even calling the LLM -- an approved
-   * justification must not just re-flag on the very next pass (mirrors how
-   * `structuralOverlaps` skips already-waived `justifiedOverlaps` paths).
+   * `/v1/designs/scope-match` check, same enforcement path `constraint_violation`
+   * and `symbol_conflict` already use. Unlike those two, an `llm_divergence`
+   * (and `symbol_conflict`) block is self-approvable -- see
+   * `/v1/designs/:id/resolve`'s auto-decide branch below. Skips any
+   * `other.id` already in `current.justifiedConflicts` before even calling
+   * the LLM -- an approved justification must not just re-flag on the very
+   * next pass (mirrors how `structuralOverlaps` skips already-waived
+   * `justifiedOverlaps` paths).
    */
   function runSemanticComparatorPass(candidateId: string, others: DesignStatement[]): void {
     const started = designs.get(candidateId);
@@ -512,9 +515,11 @@ export function createApp(options: CreateAppOptions = {}) {
         if (!result.conflict) continue;
         // `isValidResult` (design-semantic-check.ts) doesn't runtime-enforce
         // that a non-null `kind` accompanies `conflict: true` -- fall back to
-        // "tension" (the most generic category) rather than drop a genuine
-        // conflict signal over a model-schema inconsistency.
-        const category = result.kind ?? "tension";
+        // "tension" (the most generic sub-kind) rather than drop a genuine
+        // conflict signal over a model-schema inconsistency. `kind` is the
+        // detail label (`AlignmentSubKind`) under the `"llm_divergence"`
+        // bucket, not the thread's top-level category (2026-08-26).
+        const subKind = result.kind ?? "tension";
         const thread = alignmentThreads.findOrCreate({
           projectId: current.projectId,
           symbolIds: [], // no real symbol for a design-vs-design finding
@@ -522,8 +527,9 @@ export function createApp(options: CreateAppOptions = {}) {
           otherDeveloperId: other.developerId,
           designId: other.id,
           systemDescription: result.reason,
-          category,
-          summary: buildAlignmentSummary(category, other.summary, 0),
+          category: "llm_divergence",
+          subKind,
+          summary: buildAlignmentSummary(subKind, other.summary, 0),
           initiatingDesignId: current.id, // this path always has a real initiating design -- always resolvable
           ts: Date.now(),
         });
@@ -537,7 +543,7 @@ export function createApp(options: CreateAppOptions = {}) {
         });
         store.addNotice(current.developerId, result.reason, Date.now(), thread.id);
         store.addNotice(other.developerId, result.reason, Date.now(), thread.id);
-        designs.flag(current.id, "conflict", {
+        designs.flag(current.id, "llm_divergence", {
           conflicts: [
             {
               conflictingDesignId: other.id,
@@ -597,45 +603,75 @@ export function createApp(options: CreateAppOptions = {}) {
     const changed = store.upsert(projectId, claims, callEdges);
     const active = store.activeClaims(projectId);
     const edges = store.callEdgesFor(projectId);
-    const findings = runChecks(changed, active, edges);
 
-    // Cross-session design divergence (statefulness redesign, 2026-08): the
-    // first place a real Claim is checked against another session's
-    // self-reported open DesignStatement, not just against other designs'
-    // self-reported fields. Advisory only, same as every other finding here
-    // -- never a deny. Each match opens/reuses a persistent alignment
-    // thread (dedup handled by AlignmentThreadStore.findOrCreate) so both
-    // parties can reconcile asynchronously; the thread's id rides along on
-    // the Finding/Notice so `twing align respond` has something to point at.
+    // "symbol_conflict" (2026-08-26 terminology simplification -- see
+    // DesignVerdict's doc comment, core/types.ts): the one bucket sourced
+    // from real edits (Claims) rather than self-reported design scope.
+    // Three finding kinds feed it -- checks.ts's textual_overlap/
+    // contract_divergence (two developers' real edits colliding) and
+    // design-divergence.ts's design_divergence (a real edit landing inside
+    // another developer's *declared* scope, no code on their side yet).
+    // Always self-approvable (no third party's rule is being overridden,
+    // just a peer's work), and flags *both* sides whenever each has an
+    // open design at the time -- whichever side lacks one just gets the
+    // advisory notice below, same as it always has.
     const openDesignsForDivergence = designs.openDesigns(projectId);
-    const divergences = findDesignDivergences(changed, openDesignsForDivergence);
-    const divergenceFindings: Finding[] = divergences.map(({ finding, design }) => {
-      // Best-effort: the claiming developer's own open design, if they have
-      // one -- reused from the same list already fetched for the divergence
-      // check itself, no extra query. Genuinely absent (not a bug) when the
-      // edit had no design behind it at all -- `disable-gate`, or `Bash`,
-      // which skips both the gate and claim capture entirely
-      // (`wire-hooks.ts`'s matchers) -- see alignment-store.ts's
-      // `initiatingDesignId` doc comment.
-      const initiatingDesign = openDesignsForDivergence
-        .filter((d) => d.developerId === finding.developerId)
-        .sort((a, b) => b.lastActivityAt - a.lastActivityAt)[0];
+    const openDesignForDeveloper = (developerId: string): DesignStatement | undefined =>
+      openDesignsForDivergence.filter((d) => d.developerId === developerId).sort((a, b) => b.lastActivityAt - a.lastActivityAt)[0];
+
+    /** Flags whichever side(s) have an open design, opens/amends the
+     * shared alignment thread (the delivery mechanism for *why* each side
+     * is blocked), and returns the finding with its thread id attached.
+     * `designA`/`designB` may each independently be undefined -- a side
+     * with no open design simply can't be flagged, same as today. */
+    function recordSymbolConflict(finding: Finding, subKind: AlignmentSubKind, designA: DesignStatement | undefined, designB: DesignStatement | undefined): Finding {
+      for (const d of [designA, designB]) {
+        if (!d) continue;
+        const other = d === designA ? designB : designA;
+        designs.flag(d.id, "symbol_conflict", {
+          conflicts: other
+            ? [{ conflictingDesignId: other.id, agentLabel: other.agentLabel, overlapKind: "symbol", overlapDetail: finding.reason, conflictingSummary: other.summary, overlapPaths: [finding.symbolId] }]
+            : [],
+        });
+      }
       const thread = alignmentThreads.findOrCreate({
         projectId,
         symbolIds: [finding.symbolId],
         developerId: finding.developerId,
         otherDeveloperId: finding.otherDeveloperId,
-        designId: design.id,
+        designId: designB?.id,
         systemDescription: finding.reason,
-        category: "symbol_claim",
-        summary: buildAlignmentSummary("symbol_claim", design.summary, 1),
-        initiatingDesignId: initiatingDesign?.id,
+        category: "symbol_conflict",
+        subKind,
+        summary: buildAlignmentSummary(subKind, designB?.summary ?? "", 1),
+        initiatingDesignId: designA?.id,
         ts: finding.ts,
       });
       return { ...finding, threadId: thread.id };
-    });
+    }
 
-    const allFindings = [...findings, ...divergenceFindings];
+    const claimMatches: ClaimFindingMatch[] = findClaimConflicts(changed, active, edges);
+    const claimFindings: Finding[] = claimMatches.map((m) =>
+      recordSymbolConflict(
+        m.finding,
+        m.finding.kind === "contract_divergence" ? "contract_break" : "real_edit_collision",
+        openDesignForDeveloper(m.finding.developerId),
+        openDesignForDeveloper(m.finding.otherDeveloperId),
+      ),
+    );
+
+    // Cross-session design divergence (statefulness redesign, 2026-08): the
+    // first place a real Claim is checked against another session's
+    // self-reported open DesignStatement, not just against other designs'
+    // self-reported fields. `design` (the intruded scope's owner) is
+    // already resolved by findDesignDivergences itself, so it's used
+    // directly rather than re-resolved via openDesignForDeveloper.
+    const divergences = findDesignDivergences(changed, openDesignsForDivergence);
+    const divergenceFindings: Finding[] = divergences.map(({ finding, design }) =>
+      recordSymbolConflict(finding, "scope_intrusion", openDesignForDeveloper(finding.developerId), design),
+    );
+
+    const allFindings = [...claimFindings, ...divergenceFindings];
 
     console.log(
       `twing serve: project ${projectId.slice(0, 12)} -- received ${claims.length} claim(s), ${callEdges.length} edge(s) ` +
@@ -873,15 +909,15 @@ export function createApp(options: CreateAppOptions = {}) {
     // feature wrongly did. `groupId`/`force` are the two explicit escape
     // hatches: a caller who already knows which existing design this
     // continues, or one deliberately overriding, skips the check entirely.
-    // No row is created if this fires -- unlike overlap/constraint_flag,
-    // which register-then-flag, there's nothing yet worth flagging, so
-    // don't create the very clutter this exists to prevent.
+    // No row is created if this fires -- unlike file_overlap/
+    // constraint_violation, which register-then-flag, there's nothing yet
+    // worth flagging, so don't create the very clutter this exists to
+    // prevent.
     if (!body.rawPlanText && !body.groupId && !body.force) {
       const openForDeveloper = designs.openDesignsForDeveloper(identity.developerId, Date.now());
       if (openForDeveloper.length > 0) {
         return c.json({
           verdict: "has_open_designs",
-          severity: "error",
           openDesigns: openForDeveloper.map((d) => ({ id: d.id, projectId: d.projectId, summary: d.summary, lastActivityAt: d.lastActivityAt })),
         });
       }
@@ -928,7 +964,6 @@ export function createApp(options: CreateAppOptions = {}) {
       // response is sent.
       payload: {
         verdict: outcome.verdict,
-        severity: outcome.severity,
         conflictCount: outcome.conflicts.length,
         reregistered,
         summary: design.summary,
@@ -937,18 +972,20 @@ export function createApp(options: CreateAppOptions = {}) {
       },
     });
 
-    // §17 scope enforcement (2026-08): a non-clean, error-severity verdict
-    // demotes the design out of "open" immediately -- before this response
-    // is ever sent -- so it stops counting as a usable open design for the
+    // §17 scope enforcement (2026-08): a blocking verdict demotes the
+    // design out of "open" immediately -- before this response is ever
+    // sent -- so it stops counting as a usable open design for the
     // Edit/Write gate's own-session check (`/v1/designs/scope-match`
     // below), rather than staying "open" until someone resolves it.
     //
-    // 2026-08-19, severity split: a `"warning"` verdict (tier 1's
-    // exactOverlap only, currently) deliberately skips this -- the design
-    // stays "open" so nothing downstream blocks. The conflict is still
-    // fully recorded above (activity log) and in the response below; it's
+    // 2026-08-26: whether a verdict blocks is now a pure function of the
+    // verdict itself, not a separately-tracked severity -- `"file_overlap"`
+    // (the only verdict `runDesignChecks` can return besides
+    // `"constraint_violation"`/`"clean"`) never blocks; `"clean"` obviously
+    // doesn't either. The conflict is still fully recorded above (activity
+    // log) and in the response below either way; for `"file_overlap"` it's
     // display-only, not gate-relevant.
-    if (outcome.verdict !== "clean" && outcome.severity === "error") {
+    if (outcome.verdict === "constraint_violation") {
       designs.flag(design.id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
     }
 
@@ -1003,16 +1040,15 @@ export function createApp(options: CreateAppOptions = {}) {
     if (outcome.verdict === "clean") {
       return c.json({ verdict: "clean", designId: design.id, groupId: design.groupId });
     }
-    if (outcome.verdict === "constraint_flag") {
+    if (outcome.verdict === "constraint_violation") {
       return c.json({
-        verdict: "constraint_flag",
+        verdict: "constraint_violation",
         designId: design.id,
         groupId: design.groupId,
         constraints: outcome.constraints,
-        severity: outcome.severity,
       });
     }
-    return c.json({ verdict: "overlap", designId: design.id, groupId: design.groupId, conflicts: outcome.conflicts, severity: outcome.severity });
+    return c.json({ verdict: "file_overlap", designId: design.id, groupId: design.groupId, conflicts: outcome.conflicts });
   });
 
   // §17.5: adopt the conflicting design (superseded), or justify diverging
@@ -1074,16 +1110,48 @@ export function createApp(options: CreateAppOptions = {}) {
     // Semantic comparator's counterpart to overlapWaivers above (2026-08-22):
     // no cheap live recompute here (that would mean a second synchronous LLM
     // call inside this route) -- instead, read back which other designs this
-    // one currently has an *open* alignment thread against with this design
-    // as the `symbolId` (the same dedup key `runSemanticComparatorPass` uses
-    // when it calls `alignmentThreads.findOrCreate`), since that call runs
-    // unconditionally for every conflicting `other`, unlike `designs.flag()`
-    // itself which no-ops (and so drops the detail) once already flagged.
-    // See PendingReview.conflictWaivers' own doc comment (@twing/core).
+    // one currently has an *open* `llm_divergence` alignment thread against,
+    // filtered by `initiatingDesignId` (this design's own open design,
+    // stamped when `runSemanticComparatorPass` calls `findOrCreate` --
+    // `designs.flag()` only ever flags the *initiator* of a given comparator
+    // pass, never the design it was compared against, so `initiatingDesignId`
+    // is the only field that correctly identifies "this design is the one
+    // that got flagged here").
+    //
+    // 2026-08-26 fix: this used to filter on `t.symbolId === design.id`,
+    // matching `AlignmentThread.symbolId`'s doc comment calling it a
+    // "legacy...design-id-stand-in field" -- true before `initiatingDesignId`
+    // existed, when `symbolId` was overloaded to carry a design id for a
+    // symbol-less design-vs-design finding. `runSemanticComparatorPass`
+    // always passes `symbolIds: []` now, so `thread.symbolId` is always `""`
+    // for these threads and this comparison could never match -- confirmed
+    // dead since `initiatingDesignId` shipped: no llm_divergence resolve has
+    // ever actually populated `conflictWaivers`, so `justifiedConflicts`
+    // never got the approved design id and the semantic comparator kept
+    // re-flagging the same pair after every approval. Caught while adding
+    // `symbolConflictWaivers` below, which needed the same read-back and
+    // would otherwise have copied the same dead pattern next to a working
+    // one. See PendingReview.conflictWaivers' own doc comment (@twing/core).
     const conflictWaivers = alignmentThreads
       .listByProject(design.projectId, "open")
-      .filter((t) => t.symbolId === design.id && t.designId)
+      .filter((t) => t.category === "llm_divergence" && t.initiatingDesignId === design.id && t.designId)
       .map((t) => ({ conflictingDesignId: t.designId! }));
+    // `symbolConflictWaivers` (2026-08-26, new bucket): unlike llm_divergence
+    // above, a `symbol_conflict` finding can flag *both* sides independently
+    // (`recordSymbolConflict`, app.ts's `/v1/claims` handler) -- so this
+    // design can show up either as the initiator (`initiatingDesignId`) or
+    // as the referenced other side (`designId`) of a thread that flagged it.
+    // `symbolIds` on the thread is the accumulated set of real edits that
+    // collided; that's exactly what `DesignRegistry.decideReview` needs to
+    // build `justifiedSymbolConflicts`' composite waiver keys.
+    const symbolConflictWaivers = alignmentThreads
+      .listByProject(design.projectId, "open")
+      .filter((t) => t.category === "symbol_conflict" && (t.initiatingDesignId === design.id || t.designId === design.id))
+      .map((t) => ({
+        conflictingDesignId: (t.initiatingDesignId === design.id ? t.designId : t.initiatingDesignId)!,
+        symbolIds: t.symbolIds,
+      }))
+      .filter((w) => w.conflictingDesignId);
     const review = designs.addReview(
       id,
       design.projectId,
@@ -1091,8 +1159,22 @@ export function createApp(options: CreateAppOptions = {}) {
       constraintHits.map((h) => h.id),
       overlapWaivers,
       conflictWaivers.length > 0 ? conflictWaivers : undefined,
+      symbolConflictWaivers.length > 0 ? symbolConflictWaivers : undefined,
     );
     console.log(`twing serve: design ${id.slice(0, 8)} justified divergence -> pending review ${review.id.slice(0, 8)}`);
+    // 2026-08-26 self-approve: a review that carries no constraint hit at
+    // all is never overriding a third party's rule (constraint_violation is
+    // the only bucket where "whoever's authority you'd be overriding" is
+    // the project admin) -- so decide it immediately rather than waiting on
+    // `POST /v1/reviews/:id/decide`. `decideReview` still runs its normal
+    // approve path (unions the waivers into the design's justified* fields,
+    // reopens the design), so a repeat of the same conflict after this
+    // still gets suppressed the same way an admin-approved review always
+    // has.
+    if (constraintHits.length === 0) {
+      designs.decideReview(review.id, "approve");
+      return c.json({ status: "resolved", reviewId: review.id });
+    }
     return c.json({ status: "pending_review", reviewId: review.id });
   });
 
@@ -1181,19 +1263,21 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!amended) return c.json({ error: `design is ${design.status}, not open -- can't amend` }, 409);
 
     if (outcome.verdict !== "clean") {
-      // 2026-08-19, severity split: only an error-severity verdict flags the
-      // design out of "open" -- a warning (tier 1 only) stays open, already
-      // persisted above via designs.amend, surfaced here for display only.
-      const action = outcome.severity === "error" ? "rejected" : "flagged (warning only)";
+      // 2026-08-26: blocking is now a static function of `verdict` alone
+      // (see DesignVerdict's doc comment, core/types.ts) -- `file_overlap`
+      // (tier 1) stays advisory, already persisted above via designs.amend,
+      // surfaced here for display only; `constraint_violation` (tier 3)
+      // always flags out of "open".
+      const action = outcome.verdict === "constraint_violation" ? "rejected" : "flagged (advisory only)";
       console.log(`twing serve: design ${id.slice(0, 8)} amend ${action} -> ${outcome.verdict}`);
       // Found while updating twing-monitor for the severity split: a
-      // warning-severity amend previously left *no* activity record at all
-      // -- designs.flag()'s design_flagged event (the only place this
-      // outcome ever got logged) is now skipped for a warning on purpose,
-      // and designs.amend()'s own design_amended event only ever carries
-      // the scope delta, never the check outcome. Logged here unconditionally
+      // non-blocking amend previously left *no* activity record at all --
+      // designs.flag()'s design_flagged event (the only place this outcome
+      // ever got logged) is skipped when nothing gets flagged, and
+      // designs.amend()'s own design_amended event only ever carries the
+      // scope delta, never the check outcome. Logged here unconditionally
       // (matching registration's own design_checked, which fires regardless
-      // of verdict) so both severities leave a "why" a viewer can find.
+      // of verdict) so both cases leave a "why" a viewer can find.
       activityLog.append({
         projectId: design.projectId,
         developerId: identity.developerId,
@@ -1203,17 +1287,16 @@ export function createApp(options: CreateAppOptions = {}) {
         ts: Date.now(),
         payload: {
           verdict: outcome.verdict,
-          severity: outcome.severity,
           summary: amended.summary,
           ...(outcome.conflicts.length > 0 ? { conflicts: outcome.conflicts } : {}),
           ...(outcome.constraints.length > 0 ? { constraints: outcome.constraints } : {}),
         },
       });
-      if (outcome.severity === "error") {
+      if (outcome.verdict === "constraint_violation") {
         designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
       }
       runSemanticComparatorPass(id, open);
-      return c.json({ verdict: outcome.verdict, designId: id, groupId: amended.groupId, conflicts: outcome.conflicts, constraints: outcome.constraints, severity: outcome.severity });
+      return c.json({ verdict: outcome.verdict, designId: id, groupId: amended.groupId, conflicts: outcome.conflicts, constraints: outcome.constraints });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} amended -> scopeVersion ${amended.scopeVersion}`);
@@ -1266,11 +1349,12 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!resumed) return c.json({ error: `design is ${design.status}, not dormant -- can't resume` }, 409);
 
     if (outcome.verdict !== "clean") {
-      // Same severity split as amend above -- a warning stays "open"
-      // (designs.resume already persisted it above), only an error flags.
-      const action = outcome.severity === "error" ? "rejected" : "flagged (warning only)";
+      // Same 2026-08-26 static-per-verdict blocking as amend above -- a
+      // `file_overlap` stays "open" (designs.resume already persisted it
+      // above), only `constraint_violation` flags.
+      const action = outcome.verdict === "constraint_violation" ? "rejected" : "flagged (advisory only)";
       console.log(`twing serve: design ${id.slice(0, 8)} resume ${action} -> ${outcome.verdict}`);
-      // Same activity-trail gap as amend above -- a warning-severity resume
+      // Same activity-trail gap as amend above -- a non-blocking resume
       // previously left no record at all of what it found, since
       // design_flagged is skipped and design_resume's own event (below)
       // doesn't carry verdict/conflicts.
@@ -1283,17 +1367,16 @@ export function createApp(options: CreateAppOptions = {}) {
         ts: Date.now(),
         payload: {
           verdict: outcome.verdict,
-          severity: outcome.severity,
           summary: resumed.summary,
           ...(outcome.conflicts.length > 0 ? { conflicts: outcome.conflicts } : {}),
           ...(outcome.constraints.length > 0 ? { constraints: outcome.constraints } : {}),
         },
       });
-      if (outcome.severity === "error") {
+      if (outcome.verdict === "constraint_violation") {
         designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
       }
       runSemanticComparatorPass(id, open);
-      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraints: outcome.constraints, severity: outcome.severity });
+      return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraints: outcome.constraints });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} resumed by ${identity.developerId.slice(0, 12)}/${body.sessionId.slice(0, 12)}`);
@@ -1394,7 +1477,22 @@ export function createApp(options: CreateAppOptions = {}) {
     // deny telling you to run `twing design resolve`, even right after
     // you'd already done so.
     const flaggedDesign = sessionDesigns[sessionDesigns.length - 1];
-    return c.json({ state: "flagged", designId: flaggedDesign.id, pendingReview: designs.hasPendingReview(flaggedDesign.id) });
+    // requiresAdmin (2026-08-26): which of the two self-approvable buckets
+    // vs. the one admin-gated bucket actually flagged this design --
+    // `designs.flag()` doesn't stamp `verdict` onto the design row itself
+    // (it's a `status` transition, not a field), so the only record of it
+    // is the `design_flagged` activity event's own payload. Read back the
+    // most recent one (a design can be flagged more than once across its
+    // lifetime -- amend, a later semantic-comparator pass, etc.) rather
+    // than the first, since only the *current* flag is what's actually
+    // blocking right now. Lets the Go hook's deny message tell "justify it
+    // and you're unblocked immediately" apart from "this goes to a project
+    // admin" instead of always saying the latter -- see DesignVerdict's doc
+    // comment (core/types.ts) for the full four-bucket model.
+    const flagEvents = activityLog.eventsForRelatedId(flaggedDesign.id).filter((e) => e.kind === "design_flagged");
+    const latestFlagVerdict = flagEvents.length > 0 ? (flagEvents[flagEvents.length - 1].payload as { verdict?: string } | undefined)?.verdict : undefined;
+    const requiresAdmin = latestFlagVerdict === "constraint_violation";
+    return c.json({ state: "flagged", designId: flaggedDesign.id, pendingReview: designs.hasPendingReview(flaggedDesign.id), requiresAdmin });
   });
 
   // §17.5: the human-facing queue -- justified divergences pending sign-off.
@@ -1539,9 +1637,11 @@ export function createApp(options: CreateAppOptions = {}) {
       return c.json({ error: "not an admin of this project -- constraint changes to an existing project require admin role" }, 403);
     }
 
-    const added = body.constraints.map((entry) =>
-      constraintStore.add(projectId, entry.statement, entry.scope, entry.type ?? "canonical_abstraction", "seeded"),
-    );
+    // 2026-08-26: `entry.type` is accepted on the wire for backward
+    // compatibility (old CLI builds still send it) but no longer branches
+    // on anything -- `DesignConstraintType` collapsed to the single value
+    // "constraint" (see DesignVerdict's doc comment in core/types.ts).
+    const added = body.constraints.map((entry) => constraintStore.add(projectId, entry.statement, entry.scope, "constraint", "seeded"));
     return c.json({ seeded: added.length });
   });
 
