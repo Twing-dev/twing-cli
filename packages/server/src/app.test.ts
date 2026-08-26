@@ -2381,6 +2381,120 @@ test("GET /v1/designs/scope-match: dormant state end-to-end, with summary and do
   assert.ok(typeof body.dormantSinceMs === "number" && body.dormantSinceMs >= 0);
 });
 
+// Found live (2026-08-26): dormant was checked before flagged, so a session
+// carrying any dormant design at all could never learn about a real,
+// possibly admin-gated, flagged/pending-review block sitting right next to
+// it -- it always got told to `design resume` the dormant one instead,
+// which silently reactivates unrelated stale work while hiding the actual
+// blocker. Flagged must now win.
+test("GET /v1/designs/scope-match: a flagged design takes priority over a dormant one in the same session", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const dormantRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "old plan", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+  });
+  const { designId: dormantId } = (await dormantRes.json()) as { designId: string };
+  designs.sweepExpired(Date.now() + 1000); // -> dormant
+
+  await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "protected path", scope: ["protected.ts"], type: "constraint" }] }),
+  });
+  const flaggedRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "new plan", creates: [], touches: ["protected.ts"], dependsOn: [], force: true }),
+  });
+  const { designId: flaggedId, verdict } = (await flaggedRes.json()) as { designId: string; verdict: string };
+  assert.equal(verdict, "constraint_violation");
+
+  // Before the fix, this returned "dormant" and never mentioned the
+  // constraint-violation block right next to it.
+  const scopeMatch = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=z.ts`, { headers: bearer(admin.token) });
+  const body = (await scopeMatch.json()) as { state: string; designId?: string; requiresAdmin?: boolean };
+  assert.equal(body.state, "flagged");
+  assert.equal(body.designId, flaggedId);
+  assert.notEqual(body.designId, dormantId);
+  assert.equal(body.requiresAdmin, true);
+});
+
+// The block is session-wide regardless of which flagged design gets named,
+// but the named design should still be the one actually relevant to `path`
+// when more than one is flagged -- same "prefer a scope match, only then
+// fall back to newest" shape as the out_of_scope/dormant picks.
+test("GET /v1/designs/scope-match: with more than one flagged design, the one whose scope covers path is named, not just the newest", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      projectId: "proj-1",
+      constraints: [
+        { statement: "protected path A", scope: ["a-protected.ts"], type: "constraint" },
+        { statement: "protected path B", scope: ["b-protected.ts"], type: "constraint" },
+      ],
+    }),
+  });
+
+  const olderRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "older", creates: [], touches: ["a-protected.ts"], dependsOn: [], force: true }),
+  });
+  const { designId: olderId } = (await olderRes.json()) as { designId: string };
+
+  const newerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "newer", creates: [], touches: ["b-protected.ts"], dependsOn: [], force: true }),
+  });
+  const { designId: newerId } = (await newerRes.json()) as { designId: string };
+
+  // Asking about the *older* design's file must still name the older
+  // design, even though the newer one would win a plain newest-first pick.
+  const scopeMatch = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=a-protected.ts`, { headers: bearer(admin.token) });
+  const body = (await scopeMatch.json()) as { state: string; designId?: string };
+  assert.equal(body.state, "flagged");
+  assert.equal(body.designId, olderId, "must name the flagged design whose scope actually covers path, not just the newest");
+  assert.notEqual(body.designId, newerId);
+});
+
+// Same bug class as the out_of_scope newest-first fix above, applied to the
+// dormant fallback: `dormantOnes[dormantOnes.length - 1]` picked the oldest
+// dormant design, not the most recently parked one.
+test("GET /v1/designs/scope-match: dormant fallback picks the newest dormant design, not the oldest", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "oldest task", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+  });
+  const { designId: firstId } = (await firstRes.json()) as { designId: string };
+
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "newest task", creates: [], touches: ["b.ts"], dependsOn: [], ttlMs: 10, force: true }),
+  });
+  const { designId: secondId } = (await secondRes.json()) as { designId: string };
+
+  designs.sweepExpired(Date.now() + 1000); // both -> dormant
+
+  const scopeMatch = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=z.ts`, { headers: bearer(admin.token) });
+  const body = (await scopeMatch.json()) as { state: string; designId?: string };
+  assert.equal(body.state, "dormant");
+  assert.notEqual(body.designId, firstId);
+  assert.equal(body.designId, secondId, "must pick the newest dormant design, not the oldest");
+});
+
 test("GET /v1/designs/scope-match: a real in_scope hit bumps the design's lastActivityAt", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
