@@ -134,22 +134,49 @@ function fromReviewRow(row: ReviewRow): PendingReview {
 
 export interface DesignRegistryOptions {
   activityLog?: ActivityLogWriter;
+  /** Tightening alignment threads item 4 (2026-08-27): `sweepExpired`'s own
+   * dormancy trigger for `DesignRegistry`'s data -- alignment threads are a
+   * different family entirely (see this repo's own CLAUDE.md, "share a
+   * data model but never share logic"), so this stays a plain callback
+   * rather than `design-store.ts` importing `alignment-store.ts` directly.
+   * `app.ts` (the one place that constructs both stores together) wires
+   * this to demote any open thread naming a design in the list, once its
+   * counterpart has also gone quiet -- see `maybeDormThread`. Called once
+   * per `sweepExpired` invocation (not per design) with every design id
+   * that transitioned open/flagged -> dormant *in this pass*, and skipped
+   * entirely when that list is empty -- the sweep runs on every
+   * `SWEEP_INTERVAL_MS` tick regardless of whether anything actually
+   * happened. */
+  onDesignsWentDormant?: (designIds: string[]) => void;
 }
 
 export class DesignRegistry {
   private db: Db;
   private activityLog: ActivityLogWriter;
   private sweepTimer: NodeJS.Timeout | undefined;
+  private onDesignsWentDormant: ((designIds: string[]) => void) | undefined;
 
   constructor(db: Db, options: DesignRegistryOptions = {}) {
     this.db = db;
     this.activityLog = options.activityLog ?? new DrizzleActivityLog(db);
+    this.onDesignsWentDormant = options.onDesignsWentDormant;
     this.sweepTimer = setInterval(() => this.sweepExpired(), SWEEP_INTERVAL_MS);
     this.sweepTimer.unref?.();
   }
 
   stop(): void {
     clearInterval(this.sweepTimer);
+  }
+
+  /** Post-construction setter for `onDesignsWentDormant`, alongside the
+   * constructor option above -- `app.ts`'s `createApp` accepts an
+   * already-constructed `DesignRegistry` (every test's `freshApp()` does
+   * exactly this), so the constructor option alone can't reach that case;
+   * this lets `createApp` wire the callback either way, once its own
+   * `alignmentThreads` local is in scope, regardless of which path
+   * produced `designs`. */
+  setOnDesignsWentDormant(cb: (designIds: string[]) => void): void {
+    this.onDesignsWentDormant = cb;
   }
 
   register(input: NewDesignInput): DesignStatement {
@@ -954,6 +981,7 @@ export class DesignRegistry {
         ts: now,
       });
     }
+    if (goingDormant.length > 0) this.onDesignsWentDormant?.(goingDormant.map((row) => row.id));
 
     const expiring = this.db
       .select()

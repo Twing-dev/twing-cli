@@ -71,7 +71,18 @@ export type ActivityEventKind =
   | "design_semantic_conflict"
   | "alignment_thread_opened"
   | "alignment_message_posted"
-  | "alignment_thread_closed";
+  | "alignment_thread_closed"
+  /** Tightening alignment threads item 4 (2026-08-27): a thread's
+   * `initiatingDesignId`/`designId` design went dormant (see
+   * `design_dormant` above) and its counterpart was already
+   * resolved/closed/dormant too -- see `AlignmentThreadStore.dormant`'s own
+   * doc comment for why this is a distinct outcome from
+   * `alignment_thread_closed`. */
+  | "alignment_thread_dormant"
+  /** The symmetric wake-up: `design_resumed` reactivated a design, and a
+   * dormant thread naming it woke back up to "open" -- see
+   * `AlignmentThreadStore.wake`. */
+  | "alignment_thread_woken";
 
 export interface ActivityEvent {
   id: string;

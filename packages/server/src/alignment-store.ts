@@ -78,7 +78,16 @@ export interface AlignmentThread {
   developerId: string;
   otherDeveloperId: string;
   designId?: string;
-  status: "open" | "closed";
+  /** Tightening alignment threads item 4 (2026-08-27): widened from
+   * `"open" | "closed"` to add `"dormant"` -- distinct from `"closed"`
+   * because dormancy is explicitly reversible for a design (`resume()`
+   * exists specifically for this), and there's no reopen path anywhere in
+   * the UI/API for a closed thread. A thread goes dormant when the design
+   * lifecycle behind it goes quiet on its own (see `dormant()`/`wake()`
+   * below), never as a deliberate party action -- that distinction is
+   * exactly why it isn't folded into `"closed"`. Plain `text` column, no DB
+   * migration needed for the widen. */
+  status: "open" | "closed" | "dormant";
   systemDescription: string;
   openedAt: number;
   closedAt?: number;
@@ -450,19 +459,66 @@ export class AlignmentThreadStore {
   /** Unilateral -- either party can close a thread without the other
    * agreeing; this is advisory, not a negotiation with a required outcome.
    * Idempotent: closing an already-closed thread is a no-op, not a second
-   * log entry. */
-  close(threadId: string, closedBy: string): AlignmentThread | undefined {
+   * log entry. `closedBy` is optional (2026-08-27, tightening alignment
+   * threads item 3) -- omitted for the coordinator's own auto-close (both
+   * parties resolved-or-closed, see app.ts's `maybeAutoCloseThread`), same
+   * "author-less" convention `postSystemMessage` above already uses for a
+   * note the coordinator itself is making rather than a party. */
+  close(threadId: string, closedBy?: string): AlignmentThread | undefined {
     const thread = this.get(threadId);
     if (!thread) return undefined;
     if (thread.status === "closed") return thread;
     const closedAt = Date.now();
-    this.db.update(threadsTable).set({ status: "closed", closedAt, closedBy }).where(eq(threadsTable.id, threadId)).run();
+    this.db.update(threadsTable).set({ status: "closed", closedAt, closedBy: closedBy ?? null }).where(eq(threadsTable.id, threadId)).run();
     this.activityLog.append({
       projectId: thread.projectId,
       developerId: closedBy,
       kind: "alignment_thread_closed",
       relatedId: threadId,
       ts: closedAt,
+    });
+    return this.get(threadId);
+  }
+
+  /** Tightening alignment threads item 4 (2026-08-27): demotes an *open*
+   * thread to `"dormant"` -- called only from the design-lifecycle
+   * dormancy trigger (`DesignRegistry.sweepExpired`'s `onDesignsWentDormant`
+   * hook, reacted to in app.ts), never from a party's own action, so
+   * there's no `closedBy`-equivalent identity to record. No-op if the
+   * thread isn't currently `"open"` -- an already-closed thread has nothing
+   * to demote (closing is the more definitive outcome and always wins),
+   * and an already-dormant one is already there. */
+  dormant(threadId: string): AlignmentThread | undefined {
+    const thread = this.get(threadId);
+    if (!thread) return undefined;
+    if (thread.status !== "open") return thread;
+    this.db.update(threadsTable).set({ status: "dormant" }).where(eq(threadsTable.id, threadId)).run();
+    this.activityLog.append({
+      projectId: thread.projectId,
+      kind: "alignment_thread_dormant",
+      relatedId: threadId,
+      ts: Date.now(),
+    });
+    return this.get(threadId);
+  }
+
+  /** The symmetric wake-up for `dormant()` above -- `twing design resume`
+   * reactivating a design wakes every dormant thread naming it back to
+   * `"open"` (see app.ts's resume route), unconditionally: regardless of
+   * where the counterpart currently stands, the resumed side coming back
+   * makes the conversation relevant again, even if that conversation is
+   * now "the other side moved on while you were away." No-op if the thread
+   * isn't currently `"dormant"`. */
+  wake(threadId: string): AlignmentThread | undefined {
+    const thread = this.get(threadId);
+    if (!thread) return undefined;
+    if (thread.status !== "dormant") return thread;
+    this.db.update(threadsTable).set({ status: "open" }).where(eq(threadsTable.id, threadId)).run();
+    this.activityLog.append({
+      projectId: thread.projectId,
+      kind: "alignment_thread_woken",
+      relatedId: threadId,
+      ts: Date.now(),
     });
     return this.get(threadId);
   }

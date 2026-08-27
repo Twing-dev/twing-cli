@@ -1373,8 +1373,21 @@ test("POST /v1/designs/check: the async semantic-conflict comparator opens an al
 // (developerId/otherDeveloperId reversed) for what's really one
 // disagreement between one pair of designs -- confirmed live as two open
 // threads for the same tension. alignment-store.ts's findOrCreate now
-// recognizes the reverse direction and reuses the one thread instead.
-test("POST /v1/designs/check: a bidirectional llm_divergence -- both developers' own checks flagging the same pair -- lands in one shared thread, not two", async () => {
+// recognizes the reverse direction and reuses the one thread instead --
+// see alignment-store.test.ts's own dedicated reverse-match unit tests for
+// that mechanism in isolation. This test used to also re-trigger the same
+// pairing from alice's own side (via `amend`) to prove the two independent
+// directions converge on one thread; since the both-sides llm_divergence
+// blocking change (2026-08-27, tightening alignment threads item 1) that
+// second trigger is no longer reachable through the HTTP API at all --
+// alice's design is flagged by the very same pass that flags bob's, so her
+// `amend` 409s instead of re-running the comparator, and even if it didn't,
+// her `justifiedConflicts` (once she'd resolved) would suppress a repeat
+// check against the same design anyway. What's left to verify here is
+// simpler and, if anything, a stronger guarantee than before: one check
+// from either side flags *both* designs into exactly one shared thread, in
+// a single pass, with no window where a second thread could fork.
+test("POST /v1/designs/check: an llm_divergence flags both designs into one shared thread from a single check", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir); // alice
 
@@ -1420,46 +1433,30 @@ test("POST /v1/designs/check: a bidirectional llm_divergence -- both developers'
     );
   });
 
-  let threadsRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(admin.token) });
-  let threadsBody = (await threadsRes.json()) as { items: { id: string; initiatingDesignId?: string; designId?: string }[] };
-  assert.equal(threadsBody.items.length, 1, "sanity: bob's check opened exactly one thread");
-  const threadId = threadsBody.items[0].id;
+  const threadsRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(admin.token) });
+  const threadsBody = (await threadsRes.json()) as { items: { id: string; initiatingDesignId?: string; designId?: string }[] };
+  assert.equal(threadsBody.items.length, 1, "one check, one shared thread -- not one per side");
   assert.equal(threadsBody.items[0].initiatingDesignId, bobDesignId);
   assert.equal(threadsBody.items[0].designId, aliceDesignId);
 
-  // Alice's own work amends her original design -- her own one-directional
-  // check runs against bob's now-flagged (still counts as "open" for
-  // comparison purposes) design, reporting the same tension from the other
-  // side.
-  await withBedrockEnv(async () => {
-    await withMockFetch(
-      (async () =>
-        new Response(
-          JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: true, kind: "tension", reason: "still fighting over the same guarantee, alice's side" }) } }] }),
-          { status: 200 },
-        )) as typeof fetch,
-      async () => {
-        await app.request(`/v1/designs/${aliceDesignId}/amend`, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...bearer(admin.token) },
-          body: JSON.stringify({ addTouches: ["src/activity-log-extra.ts"] }),
-        });
-        await waitFor(async () => {
-          const res = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(admin.token) });
-          if (res.status !== 200) return false;
-          const body = (await res.json()) as { messages: { message: string }[] };
-          return body.messages.some((m) => m.message === "still fighting over the same guarantee, alice's side");
-        });
-      },
-    );
-  });
-
-  threadsRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(admin.token) });
-  threadsBody = (await threadsRes.json()) as { items: { id: string; initiatingDesignId?: string; designId?: string }[] };
-  assert.equal(threadsBody.items.length, 1, "bob-initiated and alice-initiated findings for the same pair must share one thread, not fork a second");
-  assert.equal(threadsBody.items[0].id, threadId);
-  assert.equal(threadsBody.items[0].initiatingDesignId, bobDesignId, "the first flagger stays the recorded initiator");
-  assert.equal(threadsBody.items[0].designId, aliceDesignId);
+  // Tightening alignment threads, item 1 (2026-08-27): llm_divergence used
+  // to only ever flag the design that triggered the async comparator pass
+  // -- symbol_conflict already blocked "both sides, whichever have an open
+  // design," and leaving llm_divergence as initiator-only was an
+  // unprincipled asymmetry under the four-bucket model's own "approval
+  // belongs to whoever's authority you'd be overriding" rule (a real,
+  // LLM-detected divergence is just as much the other side's problem). See
+  // shouldFlagOtherSide (design-checks.ts) for the pure decision function
+  // this exercises live.
+  assert.ok(bobDesignId, "sanity: bob's design was registered");
+  const flaggedRes = await app.request(`/v1/designs?projectId=proj-1&status=flagged`, { headers: bearer(admin.token) });
+  const flaggedBody = (await flaggedRes.json()) as { items: { id: string; blockedReason?: string }[] };
+  const flaggedIds = flaggedBody.items.map((d) => d.id);
+  assert.ok(flaggedIds.includes(bobDesignId), "bob's own design (the initiator) is flagged");
+  assert.ok(flaggedIds.includes(aliceDesignId), "alice's design (the other side) is flagged too -- both parties, not just the initiator");
+  for (const d of flaggedBody.items) {
+    assert.equal(d.blockedReason, "llm_divergence");
+  }
 });
 
 // Found live (2026-08-26): resolving a design's block (self-approve or
@@ -1525,7 +1522,13 @@ test("POST /v1/designs/:id/resolve: self-approving an llm_divergence block posts
 
   const threadRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(admin.token) });
   const threadBody = (await threadRes.json()) as { thread: { status: string }; messages: { message: string; authorId?: string }[] };
-  assert.equal(threadBody.thread.status, "open", "resolving the design must not itself close the conversation -- that stays a separate, human action");
+  // Only bob resolved -- both-sides llm_divergence blocking (2026-08-27,
+  // tightening alignment threads item 1) means alice's design is *also*
+  // flagged on this same pairing and she hasn't done anything about it yet,
+  // so item 3's auto-close correctly leaves this open: settling one side is
+  // not the same as settling the thread. See the "both sides independently
+  // self-approving" test below for the case where it does close.
+  assert.equal(threadBody.thread.status, "open", "only one side has resolved -- the thread must stay open until the other side settles too");
   const resolutionNote = threadBody.messages.find((m) => m.message.includes("Resolved"));
   assert.ok(resolutionNote, "the thread must show the block was actually cleared, not just look abandoned");
   assert.match(resolutionNote!.message, /bob@example\.com/);
@@ -1537,7 +1540,7 @@ test("POST /v1/designs/:id/resolve: self-approving an llm_divergence block posts
 // now land in the *same* thread -- this is what actually answers "who
 // unblocked themselves and who didn't" from one place, rather than two
 // disconnected threads each showing half the picture.
-test("POST /v1/designs/:id/resolve: both sides independently self-approving a shared llm_divergence thread each post their own resolution note", async () => {
+test("POST /v1/designs/:id/resolve: both sides independently self-approving a shared llm_divergence thread each post their own resolution note, then the thread auto-closes", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir); // alice
 
@@ -1593,29 +1596,12 @@ test("POST /v1/designs/:id/resolve: both sides independently self-approving a sh
     body: JSON.stringify({ resolution: "justified_divergence", justification: "bob's justification" }),
   });
 
-  // Alice's own registration also got flagged against bob's (reverse
-  // direction, same shared thread) -- resolve hers too.
-  await withBedrockEnv(async () => {
-    await withMockFetch(
-      (async () =>
-        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: true, kind: "tension", reason: "alice's side of the same tension" }) } }] }), {
-          status: 200,
-        })) as typeof fetch,
-      async () => {
-        await app.request(`/v1/designs/${aliceDesignId}/amend`, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...bearer(admin.token) },
-          body: JSON.stringify({ addTouches: ["src/activity-log-extra.ts"] }),
-        });
-        await waitFor(async () => {
-          const res = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(admin.token) });
-          const body = (await res.json()) as { messages: { message: string }[] };
-          return body.messages.some((m) => m.message === "alice's side of the same tension");
-        });
-      },
-    );
-  });
-
+  // Both-sides llm_divergence blocking (2026-08-27, tightening alignment
+  // threads item 1) means alice's design was already flagged by the very
+  // same comparator pass that flagged bob's -- there's no separate
+  // re-trigger step needed (or, post this change, even possible: her
+  // design is "flagged", not "open", so `amend` would 409) to get her into
+  // the same shared thread. She can resolve hers directly.
   const aliceResolveRes = await app.request(`/v1/designs/${aliceDesignId}/resolve`, {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
@@ -1624,14 +1610,22 @@ test("POST /v1/designs/:id/resolve: both sides independently self-approving a sh
   assert.equal((await aliceResolveRes.json() as { status: string }).status, "resolved");
 
   const threadRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(admin.token) });
-  const threadBody = (await threadRes.json()) as { messages: { message: string }[] };
+  const threadBody = (await threadRes.json()) as { thread: { status: string }; messages: { message: string }[] };
   const resolutionNotes = threadBody.messages.filter((m) => m.message.includes("Resolved"));
   assert.equal(resolutionNotes.length, 2, "both sides' resolutions must show up, in the one shared thread");
   assert.ok(resolutionNotes.some((m) => m.message.includes("bob@example.com") && m.message.includes("bob's justification")));
   assert.ok(resolutionNotes.some((m) => m.message.includes("alice@example.com") && m.message.includes("alice's justification")));
+
+  // Item 3 (2026-08-27): now that *both* sides have settled, the thread
+  // should auto-close -- the second resolve (alice's) is what tips it over.
+  assert.equal(threadBody.thread.status, "closed", "both sides settled -- the thread should auto-close");
+  assert.ok(
+    threadBody.messages.some((m) => m.message.includes("Auto-closed")),
+    "the auto-close should leave its own visible trail, same as a resolution note does",
+  );
 });
 
-test("POST /v1/designs/:id/resolve: self-approving a symbol_conflict block posts a system note into the shared thread, for either side", async () => {
+test("POST /v1/designs/:id/resolve: self-approving a symbol_conflict block posts a system note into the shared thread, for either side, then the thread auto-closes", async () => {
   const { app, dataDir } = freshApp();
   const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir); // alice's design already covers src/x.ts
 
@@ -1671,11 +1665,168 @@ test("POST /v1/designs/:id/resolve: self-approving a symbol_conflict block posts
   assert.equal((await aliceResolveRes.json() as { status: string }).status, "resolved");
 
   const afterRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
-  const afterBody = (await afterRes.json()) as { messages: { message: string }[] };
+  const afterBody = (await afterRes.json()) as { thread: { status: string }; messages: { message: string }[] };
   const resolutionNotes = afterBody.messages.filter((m) => m.message.includes("Resolved"));
   assert.equal(resolutionNotes.length, 2, "both the initiator and the referenced side must each show up as resolved");
   assert.ok(resolutionNotes.some((m) => m.message.includes("bob@example.com") && m.message.includes("bob's justification")));
   assert.ok(resolutionNotes.some((m) => m.message.includes("alice@example.com") && m.message.includes("alice's justification")));
+
+  // Item 3 (2026-08-27): same auto-close guarantee as the llm_divergence
+  // case above, exercised here for symbol_conflict instead.
+  assert.equal(afterBody.thread.status, "closed", "both sides settled -- the thread should auto-close");
+  assert.ok(
+    afterBody.messages.some((m) => m.message.includes("Auto-closed")),
+    "the auto-close should leave its own visible trail, same as a resolution note does",
+  );
+});
+
+// Item 3's other fix, found while scoping the auto-close work: a bundled
+// review (constraintIds *and* conflictWaivers together -- reachable
+// whenever a design has both an active constraint match and an open
+// llm_divergence thread at justify time) that an admin *rejects* used to
+// post "Resolved: alice's design was rejectd -- ..." into the paired
+// thread -- wrong grammar, and wrong semantics (a reject means the design
+// closes, it isn't a resolution; only approve ever appends to
+// justifiedConflicts). The alignment thread itself is built directly via
+// the store (not the real Bedrock-mocked comparator pass) since this test
+// is about the decide-path note text and auto-close eligibility, not the
+// LLM's own judgment -- same "simulate what the async pass does" pattern
+// `designs.flag()` gets used for elsewhere in this file.
+test("POST /v1/reviews/:id/decide: rejecting a bundled constraint+llm_divergence review closes the design and posts an accurate (not 'Resolved') note, without auto-closing the thread on its own", async () => {
+  const { app, dataDir, constraints, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+  const constraint = constraints.add("proj-1", "money paths need a second pair of eyes", ["shared.ts"], "constraint", "seeded");
+
+  const aliceRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+  });
+  const { designId: aliceDesignId, verdict } = (await aliceRes.json()) as { designId: string; verdict: string };
+  assert.equal(verdict, "constraint_violation", "sanity: registration itself must already see the constraint hit");
+
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
+  const bobRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's unrelated work", creates: [], touches: ["other.ts"], dependsOn: [] }),
+  });
+  const { designId: bobDesignId } = (await bobRes.json()) as { designId: string };
+
+  const thread = alignmentThreads.findOrCreate({
+    projectId: "proj-1",
+    symbolIds: [],
+    developerId: admin.developerId,
+    otherDeveloperId: "bob@example.com",
+    designId: bobDesignId,
+    systemDescription: "they fight over the same guarantee",
+    category: "llm_divergence",
+    subKind: "tension",
+    summary: "alice's work vs bob's unrelated work",
+    initiatingDesignId: aliceDesignId,
+    ts: Date.now(),
+  });
+
+  const resolveRes = await app.request(`/v1/designs/${aliceDesignId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "reviewed, proceeding anyway" }),
+  });
+  const resolveBody = (await resolveRes.json()) as { status: string; reviewId: string };
+  assert.equal(resolveBody.status, "pending_review", "a constraint hit in the mix means this can't self-approve, even bundled with the divergence waiver");
+
+  const pendingRes = await app.request(`/v1/reviews?projectId=proj-1&status=pending`, { headers: bearer(admin.token) });
+  const pendingBody = (await pendingRes.json()) as { items: { id: string; constraintIds: string[]; conflictWaivers?: { conflictingDesignId: string }[] }[] };
+  const review = pendingBody.items.find((r) => r.id === resolveBody.reviewId)!;
+  assert.deepEqual(review.constraintIds, [constraint.id]);
+  assert.deepEqual(review.conflictWaivers, [{ conflictingDesignId: bobDesignId }], "the bundled divergence waiver must be captured too, not dropped for having a constraint alongside it");
+
+  await app.request(`/v1/reviews/${resolveBody.reviewId}/decide`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ decision: "reject" }),
+  });
+
+  const designRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s-alice`, { headers: bearer(admin.token) });
+  const designBody = (await designRes.json()) as { items: { id: string; status: string; justifiedConflicts: string[] }[] };
+  const aliceDesign = designBody.items.find((d) => d.id === aliceDesignId)!;
+  assert.equal(aliceDesign.status, "closed", "a rejected review is terminal -- the design closes rather than staying flagged");
+  assert.deepEqual(aliceDesign.justifiedConflicts, [], "a reject must never populate justifiedConflicts -- only approve does");
+
+  const threadRes = await app.request(`/v1/alignment-threads/${thread.id}`, { headers: bearer(admin.token) });
+  const threadBody = (await threadRes.json()) as { thread: { status: string }; messages: { message: string }[] };
+  const note = threadBody.messages.find((m) => m.message.includes("rejected"));
+  assert.ok(note, "the thread must show what happened to this side, even on a reject");
+  assert.ok(!note!.message.startsWith("Resolved:"), `a reject is not a resolution -- must not be labeled "Resolved:", got ${JSON.stringify(note!.message)}`);
+  assert.ok(!note!.message.includes("rejectd"), `must not contain the old grammar bug, got ${JSON.stringify(note!.message)}`);
+  assert.match(note!.message, /rejected and closed/);
+
+  // Bob's side was never touched at all -- still genuinely open, not
+  // settled -- so even though alice's side is now "closed" (via the reject,
+  // not a resolution), the thread must not auto-close on her side alone.
+  assert.equal(threadBody.thread.status, "open", "the other side hasn't settled -- a reject-driven close on one side is not enough by itself");
+});
+
+// Item 3's other call site (2026-08-27): the design close route
+// (`PATCH /v1/designs/:id/close`), not just decide -- item 2's new
+// "close it if that work is done" deny option is exactly the case this
+// covers: bob doesn't resolve his side at all, he just closes the design
+// outright, which must count as settling his half just as much as an
+// approved justification would.
+test("PATCH /v1/designs/:id/close: closing a design instead of resolving it also settles its side of a shared llm_divergence thread, auto-closing once alice's side is already resolved", async () => {
+  const { app, dataDir, designs, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+
+  const aliceRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
+
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
+  const bobRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's work", creates: [], touches: ["b.ts"], dependsOn: [] }),
+  });
+  const { designId: bobDesignId } = (await bobRes.json()) as { designId: string };
+
+  const thread = alignmentThreads.findOrCreate({
+    projectId: "proj-1",
+    symbolIds: [],
+    developerId: admin.developerId,
+    otherDeveloperId: "bob@example.com",
+    designId: bobDesignId,
+    systemDescription: "they fight over the same guarantee",
+    category: "llm_divergence",
+    subKind: "tension",
+    summary: "alice's work vs bob's work",
+    initiatingDesignId: aliceDesignId,
+    ts: Date.now(),
+  });
+  designs.flag(aliceDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: bobDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "bob's work", overlapPaths: [] }] });
+  designs.flag(bobDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: aliceDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "alice's work", overlapPaths: [] }] });
+
+  // Alice resolves her side normally.
+  const resolveRes = await app.request(`/v1/designs/${aliceDesignId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "reviewed, proceeding" }),
+  });
+  assert.equal((await resolveRes.json() as { status: string }).status, "resolved");
+
+  const beforeRes = await app.request(`/v1/alignment-threads/${thread.id}`, { headers: bearer(admin.token) });
+  assert.equal(((await beforeRes.json()) as { thread: { status: string } }).thread.status, "open", "sanity: only one side settled so far");
+
+  // Bob closes instead of resolving.
+  const closeRes = await app.request(`/v1/designs/${bobDesignId}/close`, { method: "PATCH", headers: bearer(otherPat) });
+  assert.equal((await closeRes.json() as { status: string }).status, "closed");
+
+  const afterRes = await app.request(`/v1/alignment-threads/${thread.id}`, { headers: bearer(admin.token) });
+  const afterBody = (await afterRes.json()) as { thread: { status: string }; messages: { message: string }[] };
+  assert.equal(afterBody.thread.status, "closed", "both sides now settled (one resolved, one closed) -- the thread should auto-close");
+  assert.ok(afterBody.messages.some((m) => m.message.includes("Auto-closed")));
 });
 
 test("POST /v1/designs/check: the async semantic-conflict comparator produces no side effects when it finds nothing", async () => {
@@ -2731,6 +2882,125 @@ test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator
 });
 
 // --- §17 design lifecycle (2026-08): dormancy, touch, resume, stale-sibling notice ---
+
+// Tightening alignment threads, item 4 (2026-08-27): the alignment thread
+// itself is built directly via the store (not the real Bedrock-mocked
+// comparator pass) since this is about the dormancy trigger's plumbing
+// (DesignRegistry.sweepExpired's onDesignsWentDormant hook, reacted to in
+// app.ts's maybeDormThread), not the LLM's own judgment -- same pattern
+// used for the item 3 tests above.
+test("DesignRegistry.sweepExpired demoting a design to dormant also demotes its shared alignment thread, once the other side has already settled", async () => {
+  const { app, dataDir, designs, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+
+  const aliceRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
+
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
+  const bobRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's work", creates: [], touches: ["b.ts"], dependsOn: [], ttlMs: 10 }),
+  });
+  const { designId: bobDesignId } = (await bobRes.json()) as { designId: string };
+
+  const thread = alignmentThreads.findOrCreate({
+    projectId: "proj-1",
+    symbolIds: [],
+    developerId: admin.developerId,
+    otherDeveloperId: "bob@example.com",
+    designId: bobDesignId,
+    systemDescription: "they fight over the same guarantee",
+    category: "llm_divergence",
+    subKind: "tension",
+    summary: "alice's work vs bob's work",
+    initiatingDesignId: aliceDesignId,
+    ts: Date.now(),
+  });
+  designs.flag(aliceDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: bobDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "bob's work", overlapPaths: [] }] });
+  designs.flag(bobDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: aliceDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "alice's work", overlapPaths: [] }] });
+
+  // Alice resolves her side; bob just never comes back.
+  const resolveRes = await app.request(`/v1/designs/${aliceDesignId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "reviewed, proceeding" }),
+  });
+  assert.equal((await resolveRes.json() as { status: string }).status, "resolved");
+
+  const beforeRes = await app.request(`/v1/alignment-threads/${thread.id}`, { headers: bearer(admin.token) });
+  assert.equal(((await beforeRes.json()) as { thread: { status: string } }).thread.status, "open", "sanity: bob hasn't gone dormant yet");
+
+  designs.sweepExpired(Date.now() + 1000); // well past bob's 10ms ttlMs -- forces his design dormant
+
+  const afterRes = await app.request(`/v1/alignment-threads/${thread.id}`, { headers: bearer(admin.token) });
+  const afterBody = (await afterRes.json()) as { thread: { status: string }; messages: { message: string }[] };
+  assert.equal(afterBody.thread.status, "dormant", "alice already resolved, bob just went quiet -- the thread should follow him into dormant, not stay open or jump to closed");
+  assert.ok(afterBody.messages.some((m) => m.message.includes("Dormant")));
+
+  // The symmetric wake-up: resuming bob's design brings the thread back.
+  const resumeRes = await app.request(`/v1/designs/${bobDesignId}/resume`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
+    body: JSON.stringify({ sessionId: "s-bob-2" }),
+  });
+  assert.equal((await resumeRes.json() as { verdict: string }).verdict, "clean");
+
+  const wokenRes = await app.request(`/v1/alignment-threads/${thread.id}`, { headers: bearer(admin.token) });
+  const wokenBody = (await wokenRes.json()) as { thread: { status: string }; messages: { message: string }[] };
+  assert.equal(wokenBody.thread.status, "open", "resuming bob's design should wake the thread back up");
+  assert.ok(wokenBody.messages.some((m) => m.message.includes("Reopened")));
+});
+
+// The guard rail on the other side of the same trigger: one party going
+// quiet must not silently sweep a thread out of sight while the other side
+// is still genuinely blocked and waiting on it.
+test("DesignRegistry.sweepExpired demoting one side to dormant leaves the thread open while the other side is still actively flagged", async () => {
+  const { app, dataDir, designs, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+
+  const aliceRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
+
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
+  const bobRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's work", creates: [], touches: ["b.ts"], dependsOn: [], ttlMs: 10 }),
+  });
+  const { designId: bobDesignId } = (await bobRes.json()) as { designId: string };
+
+  const thread = alignmentThreads.findOrCreate({
+    projectId: "proj-1",
+    symbolIds: [],
+    developerId: admin.developerId,
+    otherDeveloperId: "bob@example.com",
+    designId: bobDesignId,
+    systemDescription: "they fight over the same guarantee",
+    category: "llm_divergence",
+    subKind: "tension",
+    summary: "alice's work vs bob's work",
+    initiatingDesignId: aliceDesignId,
+    ts: Date.now(),
+  });
+  // Neither side ever resolves -- alice's design stays actively flagged.
+  designs.flag(aliceDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: bobDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "bob's work", overlapPaths: [] }] });
+  designs.flag(bobDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: aliceDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "alice's work", overlapPaths: [] }] });
+
+  designs.sweepExpired(Date.now() + 1000); // only bob's 10ms ttlMs has elapsed -- alice's design has no ttlMs override, still fresh
+
+  const afterRes = await app.request(`/v1/alignment-threads/${thread.id}`, { headers: bearer(admin.token) });
+  const afterBody = (await afterRes.json()) as { thread: { status: string } };
+  assert.equal(afterBody.thread.status, "open", "alice's side is still actively flagged and live -- bob alone going quiet must not sweep this thread out of sight");
+});
 
 test("GET /v1/designs/scope-match: dormant state end-to-end, with summary and dormantSinceMs", async () => {
   const { app, dataDir, designs } = freshApp();
