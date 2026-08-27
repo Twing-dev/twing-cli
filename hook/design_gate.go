@@ -223,6 +223,15 @@ func setAuthHeader(req *http.Request, authToken, developerID string) {
 	}
 }
 
+// setVersionHeader sends this hook binary's own version on every gate call
+// (§17 version-compatibility enforcement), so the coordinator can respond
+// with 426 (StatusUpgradeRequired) rather than a stale binary silently
+// getting a verdict it may not correctly enforce. version is "dev" for a
+// plain unstamped local build -- see version.go's doc comment.
+func setVersionHeader(req *http.Request) {
+	req.Header.Set("x-twing-hook-version", version)
+}
+
 func postJSON(targetURL string, body any, timeout time.Duration, authToken, developerID string) (*http.Response, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -234,6 +243,7 @@ func postJSON(targetURL string, body any, timeout time.Duration, authToken, deve
 	}
 	req.Header.Set("content-type", "application/json")
 	setAuthHeader(req, authToken, developerID)
+	setVersionHeader(req)
 	client := &http.Client{Timeout: timeout}
 	return client.Do(req)
 }
@@ -244,6 +254,7 @@ func getJSON(targetURL string, authToken, developerID string) (*http.Response, e
 		return nil, err
 	}
 	setAuthHeader(req, authToken, developerID)
+	setVersionHeader(req)
 	client := &http.Client{Timeout: designGateTimeout}
 	return client.Do(req)
 }
@@ -496,6 +507,91 @@ func coordinatorErrorReason(detail string) string {
 	)
 }
 
+// hookVersionMismatchReason is the §17 version-compatibility enforcement
+// deny: exact match required (design doc, no min-version range), so any
+// drift -- older or newer -- blocks. Unlike the other three failure classes
+// above, this one has a real, self-serve fix that doesn't touch Edit/Write:
+// `npm install -g`/`twing daemon restart` are both Bash invocations, never
+// gated by this file (it has only ever hooked Edit, Write, and
+// ExitPlanMode), so remediation is always runnable even while this denies.
+// hookVersionMismatchReasonFromResponse reads a 426 response's body for the
+// coordinator's declared serverVersion (packages/server/src/app.ts's
+// version-mismatch middleware: {"error":"hook_version_mismatch","hookVersion":...,"serverVersion":...}).
+// A malformed/unreadable body still denies -- serverVersion just reads
+// "unknown" rather than falling through to coordinatorErrorReason, since
+// the status code alone already tells us definitively what happened.
+func hookVersionMismatchReasonFromResponse(res *http.Response) string {
+	var body struct {
+		ServerVersion string `json:"serverVersion"`
+	}
+	if data, err := io.ReadAll(res.Body); err == nil {
+		_ = json.Unmarshal(data, &body)
+	}
+	serverVersion := body.ServerVersion
+	if serverVersion == "" {
+		serverVersion = "unknown"
+	}
+	return hookVersionMismatchReason(version, serverVersion)
+}
+
+// hookVersionMismatchReason picks the direction-appropriate message: if
+// this machine is *behind*, the update command really does fix it -- all
+// three steps matter, not just npm install -g. Found live, 2026-08-27,
+// via a real sandboxed end-to-end test: `npm install -g @twing/cli@latest
+// && twing daemon restart` alone refreshes the npm-published CLI/daemon
+// code but never touches this machine's separately-fetched hook binary
+// (ensureHookInstalled() only runs as part of `twing init`) -- so a
+// Claude Code session that followed that exact two-step instruction still
+// failed the retry, since the hook is what actually sends the version
+// this gate checks. `twing init` is safe to re-run (idempotent, see
+// init.ts's own doc comment) and is what actually refreshes the hook.
+// If this machine is somehow *ahead* of the coordinator, that command can't help
+// -- "latest" on npm is what this machine already has; npm has no way to
+// move backwards to an older, coordinator-declared version, and shouldn't.
+// The operational invariant (documented in deploy/docker/README.md) is
+// that the coordinator is only ever updated to declare a version already
+// published to npm, so this branch should be unreachable in practice --
+// handled anyway, since "unreachable in practice" isn't "impossible."
+// Unparseable versions (compareVersions' ok=false -- "unknown", the
+// bootstrap-gap sentinel, or "dev", an unstamped local build) fall
+// through to the client-behind message, the safer default since it's
+// also the overwhelmingly more common real case.
+//
+// Deliberately omits gateOffAction, unlike every other reason function in
+// this file (found live, 2026-08-27: a genuinely fresh Claude Code session
+// with no established twing context, offered both "update" and "disable
+// the gate" as equally-weighted options in a real deny message, correctly
+// refused to pick either on its own -- but flagged "disables a safety/
+// conflict-check gate" as alarming enough to stop and ask a human, which
+// is the right call, and a sign the option shouldn't have been offered as
+// a peer to the real fix in the first place). The other four failure
+// classes (auth/network) keep it -- those can genuinely have no other
+// recourse (a down coordinator, broken local auth). A version mismatch
+// always has one: update. Suppressing the whole gate instead of just
+// updating is strictly worse and never actually necessary here.
+func hookVersionMismatchReason(hookVersion, serverVersion string) string {
+	if cmp, ok := compareVersions(hookVersion, serverVersion); ok && cmp > 0 {
+		return denyMessage(
+			"twing can't check for conflicts -- the coordination server needs an update.",
+			"This machine is newer than what the coordinator currently declares. There's "+
+				"nothing to fix here -- an operator needs to redeploy the coordinator to catch up.",
+			[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
+			[]denyAction{
+				{Label: "Please wait for the coordinator to update, then retry"},
+			},
+		)
+	}
+	return denyMessage(
+		"twing can't check for conflicts -- this machine's twing-cli is out of date.",
+		"A mismatched version might not understand the coordinator's current API, "+
+			"so twing blocks rather than risk enforcing conflict checks incorrectly.",
+		[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
+		[]denyAction{
+			{Label: "Update, then retry", Command: "npm install -g @twing/cli@latest && twing init && twing daemon restart"},
+		},
+	)
+}
+
 func authRequiredOutput(eventName, serverURL string) map[string]any {
 	return denyOutput(eventName, authRequiredReason(serverURL))
 }
@@ -739,6 +835,10 @@ func postDesignCheck(serverURL, authToken, developerID string, reqBody designChe
 		logDesignGate("designs/check returned status %d (blocking)", res.StatusCode)
 		return designCheckResponse{}, authRejectedReason(res.StatusCode, serverURL)
 	}
+	if res.StatusCode == http.StatusUpgradeRequired {
+		logDesignGate("designs/check: hook version mismatch (blocking)")
+		return designCheckResponse{}, hookVersionMismatchReasonFromResponse(res)
+	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("designs/check returned status %d (blocking)", res.StatusCode)
 		return designCheckResponse{}, coordinatorErrorReason(fmt.Sprintf("unexpected status %d", res.StatusCode))
@@ -774,6 +874,10 @@ func postDesignExtract(serverURL, authToken, developerID, planText string) (desi
 	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		logDesignGate("designs/extract returned status %d (blocking)", res.StatusCode)
 		return designExtractResponse{}, authRejectedReason(res.StatusCode, serverURL)
+	}
+	if res.StatusCode == http.StatusUpgradeRequired {
+		logDesignGate("designs/extract: hook version mismatch (blocking)")
+		return designExtractResponse{}, hookVersionMismatchReasonFromResponse(res)
 	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("designs/extract returned status %d (blocking)", res.StatusCode)
@@ -1025,6 +1129,10 @@ func checkDesignScope(serverURL, authToken, developerID, projectID, sessionID, f
 	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
 		return designScopeMatchResponse{}, authRejectedReason(res.StatusCode, serverURL)
+	}
+	if res.StatusCode == http.StatusUpgradeRequired {
+		logDesignGate("design scope check: hook version mismatch (blocking)")
+		return designScopeMatchResponse{}, hookVersionMismatchReasonFromResponse(res)
 	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("design scope check returned status %d (blocking)", res.StatusCode)
@@ -1298,6 +1406,10 @@ func checkPathConstraint(serverURL, authToken, developerID, projectID, sessionID
 	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		logDesignGate("constraint match check returned status %d (blocking)", res.StatusCode)
 		return constraintCheckFailed, authRejectedReason(res.StatusCode, serverURL)
+	}
+	if res.StatusCode == http.StatusUpgradeRequired {
+		logDesignGate("constraint match check: hook version mismatch (blocking)")
+		return constraintCheckFailed, hookVersionMismatchReasonFromResponse(res)
 	}
 	if res.StatusCode != http.StatusOK {
 		logDesignGate("constraint match check returned status %d (blocking)", res.StatusCode)

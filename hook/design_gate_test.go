@@ -236,6 +236,72 @@ func TestHandleEditWriteGate_CoordinatorUnreachable_Denies(t *testing.T) {
 	}
 }
 
+func TestHandleEditWriteGate_HookVersionMismatch_Denies(t *testing.T) {
+	var gotVersionHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVersionHeader = r.Header.Get("x-twing-hook-version")
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusUpgradeRequired)
+		_, _ = w.Write([]byte(`{"error":"hook_version_mismatch","hookVersion":"dev","serverVersion":"9.9.9"}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+	if !strings.Contains(reason, "out of date") {
+		t.Errorf("reason = %q, want it to mention the version mismatch", reason)
+	}
+	if !strings.Contains(reason, "9.9.9") {
+		t.Errorf("reason = %q, want it to name the coordinator's expected version", reason)
+	}
+	if gotVersionHeader == "" {
+		t.Error("outgoing request did not carry x-twing-hook-version")
+	}
+	// Found live, 2026-08-27, via a real sandboxed test: a Claude Code
+	// session that ran exactly "npm install -g @twing/cli@latest && twing
+	// daemon restart" (the command this used to suggest) still failed the
+	// retry, since neither step refreshes the separately-fetched hook
+	// binary -- only `twing init` does. Asserted explicitly so this exact
+	// regression can't silently reappear.
+	if !strings.Contains(reason, "twing init") {
+		t.Errorf("reason = %q, want the remediation command to include `twing init` (not just npm install -g), or the hook binary itself never actually gets refreshed", reason)
+	}
+}
+
+func TestHandleEditWriteGate_HookAheadOfServer_DeniesWithWaitMessage(t *testing.T) {
+	original := version
+	version = "9.9.9"
+	t.Cleanup(func() { version = original })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusUpgradeRequired)
+		_, _ = w.Write([]byte(`{"error":"hook_version_mismatch","hookVersion":"9.9.9","serverVersion":"0.2.5"}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+	if !strings.Contains(reason, "coordination server needs an update") {
+		t.Errorf("reason = %q, want the server-behind message, not the client-behind one", reason)
+	}
+	if strings.Contains(reason, "npm install") {
+		t.Errorf("reason = %q, should not suggest npm install -g when this machine is ahead, not behind", reason)
+	}
+}
+
 func TestHandleEditWriteGate_ConstraintMatched_DeniesAndSkipsOpenDesignsCall(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

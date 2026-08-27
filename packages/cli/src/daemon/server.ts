@@ -57,6 +57,18 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
   // sessionId (§4), not developerId.
   const developerBySession = new Map<string, string>();
 
+  // Socket-triggered equivalent of `close()`/the SIGINT handler
+  // (runDaemonForeground) -- lets `twing daemon restart` ask a running
+  // daemon to exit cleanly regardless of how it was started (foreground,
+  // spawn-daemon.ts's detached child, or an installed OS service).
+  const onShutdownRequested = async (): Promise<void> => {
+    syncer.stop();
+    server.close(() => {
+      if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
+      process.exit(0);
+    });
+  };
+
   const server = net.createServer((conn) => {
     const decoder = new FrameDecoder();
 
@@ -71,7 +83,7 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
       }
 
       for (const raw of messages) {
-        handleMessage(raw, conn, claims, callEdges, syncer, developerBySession);
+        handleMessage(raw, conn, claims, callEdges, syncer, developerBySession, onShutdownRequested);
       }
     });
 
@@ -111,6 +123,7 @@ function handleMessage(
   callEdges: CallEdge[],
   syncer: Syncer,
   developerBySession: Map<string, string>,
+  onShutdownRequested: () => Promise<void>,
 ): void {
   const message = raw as { type?: string };
 
@@ -162,7 +175,19 @@ function handleMessage(
     // No claims from this session yet, so no developerId to look up
     // notices for -- an honest empty answer, not a lookup failure.
     const items = developerId ? syncer.noticesFor(developerId) : [];
-    conn.write(encodeFrame({ type: "notices", items }));
+    // Independent of the developerId gate above -- versionMismatch() is
+    // daemon-wide, not per-developer, so it can surface even for a session
+    // with no prior claims (see its doc comment for the one remaining gap).
+    const versionMismatch = syncer.versionMismatch() ?? undefined;
+    conn.write(encodeFrame({ type: "notices", items, versionMismatch }));
+    return;
+  }
+
+  if (message.type === "shutdown") {
+    conn.write(encodeFrame({ type: "shutdown_ack" }));
+    conn.end();
+    // Let the ack flush before tearing the daemon down.
+    setTimeout(() => void onShutdownRequested(), 50);
     return;
   }
 

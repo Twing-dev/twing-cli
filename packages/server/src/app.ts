@@ -28,6 +28,7 @@ import {
   pathsOverlap,
 } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
+import { getServerVersion } from "./version.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
 import { enrichReviews } from "./review-enrich.js";
@@ -185,6 +186,11 @@ export interface CreateAppOptions {
    * on these routes, not public data, so the allowlist has to be explicit
    * origins a self-hosted operator opts in by name. */
   corsOrigins?: string[];
+  /** What `/v1/version` reports, and what the version-mismatch middleware
+   * below compares an incoming `x-twing-hook-version` header against.
+   * Defaults to this package's own `package.json` version -- injectable
+   * for tests that need a deliberately different value. */
+  version?: string;
 }
 
 type Variables = { identity: ResolvedIdentity };
@@ -200,6 +206,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const extractModel = options.extractModel ?? "google.gemma-4-31b";
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
   const noAuth = options.noAuth ?? false;
+  const version = options.version ?? getServerVersion();
 
   const app = new Hono<{ Variables: Variables }>();
 
@@ -213,6 +220,36 @@ export function createApp(options: CreateAppOptions = {}) {
     app.use("/v1/*", cors({ origin: options.corsOrigins, allowHeaders: ["Content-Type", "Authorization", "X-Twing-Developer-Id"] }));
   }
 
+  // Version-compatibility enforcement: mounted before the auth middleware
+  // below (source order matters in Hono) so a stale twing-hook binary gets
+  // this specific, actionable 426 even when its cached token would *also*
+  // be rejected -- "you're out of date" is more useful than "unauthorized"
+  // when both are true. Scoped precisely to requests that set this header;
+  // no other caller (align/design/admin/project commands, the daemon's sync
+  // loop, twing-monitor's browser calls) ever does, so this is a zero-risk
+  // addition to every other /v1/* code path.
+  //
+  // Deliberately does NOT try to treat a *missing* header as "must be an
+  // old hook binary, deny it" (attempted and reverted, 2026-08-27, found
+  // live via a real test failure): /v1/designs/check, /v1/designs/extract,
+  // and /v1/constraints/match aren't hook-exclusive -- the TS CLI's own
+  // design.ts/constraints.ts commands (twing design register/resolve/
+  // resume, etc.) call these same routes directly and never send this
+  // header either, since only the Go hook does. Route-scoping "missing =
+  // deny" to them 426'd real, legitimate CLI traffic. The bootstrap gap
+  // this would have closed (a pre-0.2.6 hook binary, with no code to send
+  // this header at all, is invisible to this check) is a one-time,
+  // first-release-only limitation, not an ongoing one -- every 0.2.6+
+  // hook binary always sends a header, so there is nothing left to
+  // retroactively detect once real installs move past this release.
+  app.use("/v1/*", async (c, next) => {
+    const hookVersion = c.req.header("x-twing-hook-version");
+    if (hookVersion && hookVersion !== version) {
+      return c.json({ error: "hook_version_mismatch", hookVersion, serverVersion: version }, 426);
+    }
+    return next();
+  });
+
   // §17.10: every /v1/* route requires a valid bearer PAT, except the two
   // that can't assume one exists yet -- bootstrap (nobody has a PAT before
   // their first one) and invite redemption (works both authenticated, for
@@ -222,6 +259,7 @@ export function createApp(options: CreateAppOptions = {}) {
     if (c.req.path === "/v1/admin/bootstrap") return next();
     if (/^\/v1\/invites\/[^/]+\/redeem$/.test(c.req.path)) return next();
     if (/^\/v1\/projects\/[^/]+\/join-via-github$/.test(c.req.path)) return next();
+    if (c.req.path === "/v1/version") return next();
     if (noAuth) {
       // §17 Phase 4: no bearer token at all -- a self-declared developerId
       // is still required on every request (attribution for align/§17's
@@ -245,6 +283,10 @@ export function createApp(options: CreateAppOptions = {}) {
   });
 
   app.get("/", (c) => c.text("twing serve"));
+
+  // Unauthenticated on purpose: a fresh install with no cached token yet
+  // still needs to learn it's out of date, not hit a 401 first.
+  app.get("/v1/version", (c) => c.json({ version }));
 
   // §17.10: who am I, and what am I a member of -- what `twing whoami` and
   // `twing login`'s validation step both call.

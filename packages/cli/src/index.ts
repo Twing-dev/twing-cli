@@ -1,10 +1,9 @@
 #!/usr/bin/env node
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { startDaemon } from "./daemon/server.js";
 import { defaultSocketPath, authFetch, computeDeveloperId, readConfig } from "@twing/core";
 import { runInit } from "./init.js";
+import { getCliVersion } from "./version.js";
+import { runDaemonRestart } from "./daemon-restart.js";
 import { runLogin } from "./login.js";
 import { runJoinGithub } from "./join.js";
 import { runAlign, runAlignRespond, runAlignThreads, runAlignClose } from "./align.js";
@@ -47,9 +46,7 @@ import {
  * executing right now (e.g. `node packages/cli/dist/index.js` against a
  * local build while some other version is npm-installed globally). */
 function getVersion(): string {
-  const packageJsonPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
-  const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as { version?: string };
-  return pkg.version ?? "unknown";
+  return getCliVersion();
 }
 
 function parseFlags(args: string[]): Record<string, string> {
@@ -82,6 +79,7 @@ function printUsage(): void {
       "  twing servers [--show-token]",
       "  twing join --github [--server <url>]",
       "  twing daemon",
+      "  twing daemon restart",
       "  twing align",
       "  twing align threads [--status open]",
       "  twing align respond --finding <threadId> --message \"...\"",
@@ -403,6 +401,10 @@ async function main(): Promise<void> {
       await runJoinGithub({ server: flags.server, cwd: process.cwd() });
       return;
     case "daemon":
+      if (rest[0] === "restart") {
+        await runDaemonRestart();
+        return;
+      }
       await runDaemonForeground();
       return;
     case "align":

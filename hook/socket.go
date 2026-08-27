@@ -49,17 +49,27 @@ func enqueue(sessionID, cwd, toolName string, toolInput []byte) {
 	_, _ = conn.Write(frame)
 }
 
+// cacheCheckResult is cacheCheck's reply -- notices plus an optional
+// version-mismatch signal, independent of each other (see
+// packages/cli/src/daemon/sync.ts's Syncer.versionMismatch() doc comment
+// for why VersionMismatch can be non-nil even when Items is empty).
+type cacheCheckResult struct {
+	Items           []noticeItem
+	VersionMismatch *versionMismatchInfo
+}
+
 // cacheCheck asks the daemon for anything cached for this session. Any
-// failure (no socket, daemon down, timeout) returns nil, which the caller
-// treats as "nothing cached" — an empty stdout, exit 0 no-op.
-func cacheCheck(sessionID string) []noticeItem {
+// failure (no socket, daemon down, timeout) returns a zero-value result,
+// which the caller treats as "nothing cached" — an empty stdout, exit 0
+// no-op.
+func cacheCheck(sessionID string) cacheCheckResult {
 	path := socketPath()
 	if path == "" {
-		return nil
+		return cacheCheckResult{}
 	}
 	conn, err := net.DialTimeout("unix", path, dialAndWriteTimeout)
 	if err != nil {
-		return nil
+		return cacheCheckResult{}
 	}
 	defer conn.Close()
 
@@ -68,15 +78,15 @@ func cacheCheck(sessionID string) []noticeItem {
 
 	frame, err := encodeFrame(newGetNoticesMessage(sessionID))
 	if err != nil {
-		return nil
+		return cacheCheckResult{}
 	}
 	if _, err := conn.Write(frame); err != nil {
-		return nil
+		return cacheCheckResult{}
 	}
 
 	var resp noticesMessage
 	if err := readFrame(conn, &resp); err != nil {
-		return nil
+		return cacheCheckResult{}
 	}
-	return resp.Items
+	return cacheCheckResult{Items: resp.Items, VersionMismatch: resp.VersionMismatch}
 }

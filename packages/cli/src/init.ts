@@ -158,24 +158,35 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     console.log(`twing init: removed legacy repo-local hook entries from ${repoRoot}/.claude/settings.json (superseded by the global wiring above)`);
   }
 
-  const daemonStatus = await deps.ensureDaemonRunning();
-  console.log(daemonStatus === "started" ? "twing init: daemon started" : "twing init: daemon already running");
-
   // §5 restart-survival: best-effort OS-level service install (launchd on
   // macOS, systemd --user on Linux) so the daemon comes back on its own
-  // after a reboot -- never fails init over this, same philosophy as
-  // seedConstraints below. Windows has no clean privilege-free service
-  // equivalent (installDaemonService returns "unsupported" there); the Go
-  // hook's SessionStart self-heal (hook/daemon_launch.go) is that
-  // platform's restart-survival story instead.
+  // after a reboot -- tried FIRST, before the plain spawn fallback below,
+  // so a supported platform's daemon is actually started/held by the
+  // service manager rather than by this process's own detached child.
+  // Found live, 2026-08-26: the reverse order (spawn fallback, then
+  // install-service) raced the two against the same socket -- the fallback
+  // always grabbed it first, so the systemd-managed instance crash-looped
+  // on every single init, permanently unable to hold the socket even
+  // though installDaemonService reported "installed". Never fails init
+  // over this, same philosophy as seedConstraints below. Windows has no
+  // clean privilege-free service equivalent (installDaemonService returns
+  // "unsupported" there); the Go hook's SessionStart self-heal
+  // (hook/daemon_launch.go) is that platform's restart-survival story
+  // instead, same as the spawn fallback below covers it meanwhile.
   const serviceStatus = await deps.installDaemonService();
   if (serviceStatus === "installed") {
     console.log("twing init: daemon installed as a persistent OS-level service (survives reboot)");
   } else if (serviceStatus === "failed") {
-    console.log("twing init: OS-level service install failed (non-fatal) -- daemon still runs, just won't auto-restart after a reboot without a new twing init/session self-heal");
+    console.log("twing init: OS-level service install failed (non-fatal) -- falling back to a plain spawn, won't auto-restart after a reboot without a new twing init/session self-heal");
   } else {
     console.log("twing init: no persistent OS-level service on this platform -- restart-survival relies on the hook's SessionStart self-heal instead");
   }
+
+  // Idempotent regardless of what happened above: a no-op if the service
+  // (or an earlier session) already has the daemon up, the actual startup
+  // path if not.
+  const daemonStatus = await deps.ensureDaemonRunning();
+  console.log(daemonStatus === "started" ? "twing init: daemon started" : "twing init: daemon already running");
 
   await seedConstraints(repoRoot, manifest, serverUrl, authToken, developerId);
 

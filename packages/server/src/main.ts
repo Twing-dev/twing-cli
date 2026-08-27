@@ -68,6 +68,13 @@ const app = createApp({
   identities: new IdentityStore(db, dataDirOptions),
   noAuth,
   corsOrigins,
+  // Test-only escape hatch, same pattern as db/client.ts's `memory: true`:
+  // real `twing serve` never sets this. Lets an integration test spin up
+  // an ephemeral server declaring a deliberately different version than
+  // what's actually installed, to exercise the version-mismatch path
+  // without needing two real npm releases side by side (simulator's
+  // version-gate.test.ts).
+  version: process.env.TWING_SERVE_VERSION,
 });
 
 // §17 Phase 4: no_auth defaults to loopback-only -- an operator has to

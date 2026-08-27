@@ -25,13 +25,19 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: hook/go.mod
+      # -X main.version=... stamps the release version into the binary
+      # (version.go) -- read by the §17 gate's version-compatibility check
+      # (design_gate.go's setVersionHeader). Stripped of the leading "v" so
+      # it matches npm's bare semver (tag v0.3.0 -> embedded "0.3.0"), same
+      # as packages/*/package.json's "version" field.
       - name: Build linux/amd64, linux/arm64, windows/amd64
         working-directory: hook
         run: |
           mkdir -p dist
-          GOOS=linux   GOARCH=amd64 go build -o dist/twing-hook-linux-amd64 .
-          GOOS=linux   GOARCH=arm64 go build -o dist/twing-hook-linux-arm64 .
-          GOOS=windows GOARCH=amd64 go build -o dist/twing-hook-windows-amd64.exe .
+          VERSION="${GITHUB_REF_NAME#v}"
+          GOOS=linux   GOARCH=amd64 go build -ldflags="-X main.version=${VERSION}" -o dist/twing-hook-linux-amd64 .
+          GOOS=linux   GOARCH=arm64 go build -ldflags="-X main.version=${VERSION}" -o dist/twing-hook-linux-arm64 .
+          GOOS=windows GOARCH=amd64 go build -ldflags="-X main.version=${VERSION}" -o dist/twing-hook-windows-amd64.exe .
       - uses: actions/upload-artifact@v4
         with:
           name: linux-windows-binaries
@@ -58,8 +64,9 @@ jobs:
           CGO_ENABLED: "1"
         run: |
           mkdir -p dist
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-linkmode=external" -o dist/twing-hook-darwin-amd64 .
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-linkmode=external" -o dist/twing-hook-darwin-arm64 .
+          VERSION="${GITHUB_REF_NAME#v}"
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-linkmode=external -X main.version=${VERSION}" -o dist/twing-hook-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-linkmode=external -X main.version=${VERSION}" -o dist/twing-hook-darwin-arm64 .
       # Ad-hoc signing, not notarization: free, no Apple Developer account,
       # no registration -- required for the arm64 binary to execute at all
       # on Apple Silicon (a hard OS requirement since Big Sur, separate
