@@ -138,6 +138,98 @@ export function pathsOverlap(a: DesignStatement, b: DesignStatement): boolean {
   return intersects(a.creates, b.creates).length > 0 || intersects(a.touches, b.touches).length > 0;
 }
 
+/** Whether the *other* side of an llm_divergence pair should also get
+ * flagged, alongside the design that triggered the comparator check
+ * (2026-08-27, both-sides blocking) -- mirrors symbol_conflict's existing
+ * "whichever side(s) have an open design" rule, an unprincipled asymmetry
+ * before this: both buckets are peer-vs-peer conflicts under the
+ * four-bucket model's own "approval belongs to whoever's authority you'd
+ * be overriding" principle, so there was no reason only one of the two
+ * ever blocked both parties.
+ *
+ * Exported and pure so this decision is directly unit-testable without
+ * exercising `runSemanticComparatorPass`'s real (network-dependent, Bedrock)
+ * LLM call -- `app.ts` re-fetches `other` live before calling this, since
+ * the comparator's `others` snapshot may be stale by the time an async pass
+ * reaches it.
+ *
+ * Two guards: `other` must still be genuinely `"open"` (closed/dormant/
+ * already-flagged-for-something-else designs aren't touched, same
+ * "whichever have an open design" rule symbol_conflict already uses), and
+ * `other` must not have already justified *this specific pairing* from
+ * their own side (`justifiedConflicts` -- findOrCreate's reverse-direction
+ * fix means the same thread is reused either way, so this is a real,
+ * checkable waiver, not a guess). */
+export function shouldFlagOtherSide(other: DesignStatement | undefined, currentId: string): boolean {
+  return other?.status === "open" && !other.justifiedConflicts.includes(currentId);
+}
+
+/** Tightening alignment threads, item 3 (2026-08-27): has this one design
+ * "settled" its own half of a specific conflict pairing, for the purpose of
+ * deciding whether the alignment thread the two sides share can auto-close?
+ * Per-side, not per-thread -- the caller (`maybeAutoCloseThread`, app.ts)
+ * checks both sides of a thread and only closes it once *both* come back
+ * true. Two independent ways to settle:
+ *  - **closed**: `status === "closed"` -- whether that was a deliberate
+ *    `twing design close` (item 2's new deny-message option) or the
+ *    terminal side-effect of an admin *rejecting* a review
+ *    (`DesignRegistry.decideReview` always closes on reject -- "the design
+ *    closes, the developer registers a fresh one"). Either way there's
+ *    nothing left to do on *this* design's row; a rejected pairing
+ *    genuinely counts as settled for the thread even though it wasn't
+ *    resolved in the developer's favor -- see
+ *    `notifyAlignmentThreadsOfDecision`'s own note about not conflating
+ *    "closed" with "resolved" in what gets *said*, which is a separate
+ *    concern from whether the thread can stop tracking it.
+ *  - **resolved**: `status !== "flagged"` (still-flagged is never settled,
+ *    belt-and-suspenders alongside the justified-list check below) AND
+ *    `counterpartDesignId` shows up in the justified-list for this
+ *    `category` -- proof this *specific* pairing was actually addressed,
+ *    not just that some unrelated flag on this design cleared. Only
+ *    `DesignRegistry.decideReview`'s *approve* path ever appends to either
+ *    justified list (see `justifiedConflicts`/`justifiedSymbolConflicts`,
+ *    core/types.ts) -- a reject never does, so a rejected design can only
+ *    ever settle via the closed branch above, never this one. That's the
+ *    fix for the bug found while scoping this: a reject must not look like
+ *    a resolution.
+ *
+ * `justifiedSymbolConflicts` is composite-keyed (`${conflictingDesignId}::
+ * ${symbolId}`, `overlapWaiverKey`) rather than a bare design-id list like
+ * `justifiedConflicts` -- checked here with a prefix match ("waived
+ * *something* against this counterpart") rather than requiring every
+ * symbolId the thread has ever accumulated to be individually present.
+ * `decideReview` always waives a symbol_conflict review's *entire* current
+ * `symbolIds` set in one shot (see `symbolConflictWaivers`'s own read-back
+ * comment, app.ts), so in practice "waived at all" and "waived as of the
+ * last justify" coincide -- this stays a light per-counterpart signal, not
+ * a strict per-symbol audit. */
+export function isDesignSideSettled(design: DesignStatement | undefined, counterpartDesignId: string, category: "llm_divergence" | "symbol_conflict"): boolean {
+  if (!design) return false;
+  if (design.status === "closed") return true;
+  if (design.status === "flagged") return false;
+  if (category === "llm_divergence") return design.justifiedConflicts.includes(counterpartDesignId);
+  return design.justifiedSymbolConflicts.some((key) => key.startsWith(`${counterpartDesignId}::`));
+}
+
+/** Tightening alignment threads, item 4 (2026-08-27): the looser sibling of
+ * `isDesignSideSettled` above, used for the *dormancy* decision rather than
+ * the closing one -- "has this side gone quiet, one way or another" instead
+ * of "has this side actually been dealt with". A design going merely
+ * `"dormant"` (inactivity alone, `DesignRegistry.sweepExpired`) is
+ * deliberately *not* enough to auto-close a thread (see
+ * `isDesignSideSettled`'s own doc comment and `maybeAutoCloseThread`,
+ * app.ts -- dormancy is reversible, closing shouldn't be a side-effect of
+ * someone merely going idle), but it's exactly enough to justify demoting
+ * an open thread to dormant alongside it: there's nothing productive left
+ * to surface about a conversation where every party involved is either
+ * done or not currently working on it. `maybeDormThread` (app.ts) requires
+ * this to be true for *both* sides before demoting -- one side going
+ * dormant while the other is still actively flagged/live must leave the
+ * thread open. */
+export function isDesignSideDormantOrSettled(design: DesignStatement | undefined, counterpartDesignId: string, category: "llm_divergence" | "symbol_conflict"): boolean {
+  return design?.status === "dormant" || isDesignSideSettled(design, counterpartDesignId, category);
+}
+
 /** Drops any path in `paths` already waived (`justifiedOverlaps`) for this
  * specific `otherId` -- item 7's fix (2026-08-18): a path *not* in the list
  * still flags normally, so this only ever narrows an already-detected

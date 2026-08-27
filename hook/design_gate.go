@@ -1212,6 +1212,21 @@ func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool
 				Command: fmt.Sprintf("twing design resolve --id %s --justify \"<reason>\"", designID),
 				Note:    note,
 			},
+			// Tightening alignment threads, item 2 (2026-08-27): the deny
+			// message used to only ever offer adopt/justify, with no way to
+			// say "this doesn't apply to me anymore" -- `designs.close()`
+			// (design-store.ts) already accepts a design out of any of
+			// open/flagged/dormant unconditionally, the gate just never told
+			// anyone that was an option. Mirrors the same three-way
+			// join/close/force shape `has_open_designs`'s own deny message
+			// (design.ts's printDesignVerdict) already uses, uniformly
+			// across all three flagging verdicts rather than special-cased
+			// per bucket -- closing is just as valid a response to "someone
+			// beat you to this" as it is to "you've since moved on".
+			{
+				Label:   "Or, if that work is done and this doesn't apply anymore",
+				Command: fmt.Sprintf("twing design close --id %s", designID),
+			},
 		},
 	)
 }

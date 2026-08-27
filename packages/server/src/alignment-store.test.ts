@@ -227,6 +227,70 @@ test("AlignmentThreadStore: close returns undefined for an unknown thread", () =
   assert.equal(store.close("no-such-thread", "alice"), undefined);
 });
 
+// Tightening alignment threads, item 3 (2026-08-27): `closedBy` is now
+// optional -- the coordinator's own auto-close (both parties
+// resolved-or-closed, app.ts's `maybeAutoCloseThread`) omits it entirely,
+// same "author-less" shape `postSystemMessage` above already uses for a
+// note the coordinator makes rather than a party.
+test("AlignmentThreadStore: close with no closedBy (an auto-close) leaves closedBy undefined, not a stringified 'undefined'", () => {
+  const { store } = freshStore();
+  const thread = store.findOrCreate(baseInput);
+  store.close(thread.id);
+  const closed = store.get(thread.id);
+  assert.equal(closed?.status, "closed");
+  assert.equal(closed?.closedBy, undefined);
+});
+
+// Tightening alignment threads, item 4 (2026-08-27): dormant()/wake() --
+// the design-lifecycle-driven counterpart to close(), see their own doc
+// comments for why this is a distinct status from "closed".
+test("AlignmentThreadStore: dormant demotes an open thread to 'dormant'", () => {
+  const { store } = freshStore();
+  const thread = store.findOrCreate(baseInput);
+  const demoted = store.dormant(thread.id);
+  assert.equal(demoted?.status, "dormant");
+  assert.equal(store.get(thread.id)?.status, "dormant");
+});
+
+test("AlignmentThreadStore: dormant is a no-op on an already-closed thread -- closing always wins over dormancy", () => {
+  const { store } = freshStore();
+  const thread = store.findOrCreate(baseInput);
+  store.close(thread.id, "alice");
+  store.dormant(thread.id);
+  assert.equal(store.get(thread.id)?.status, "closed", "dormant must never resurrect a closed thread into a lesser state");
+});
+
+test("AlignmentThreadStore: dormant returns undefined for an unknown thread", () => {
+  const { store } = freshStore();
+  assert.equal(store.dormant("no-such-thread"), undefined);
+});
+
+test("AlignmentThreadStore: wake reverses a dormant thread back to 'open'", () => {
+  const { store } = freshStore();
+  const thread = store.findOrCreate(baseInput);
+  store.dormant(thread.id);
+  const woken = store.wake(thread.id);
+  assert.equal(woken?.status, "open");
+  assert.equal(store.get(thread.id)?.status, "open");
+});
+
+test("AlignmentThreadStore: wake is a no-op on a thread that was never dormant (e.g. already open, or closed)", () => {
+  const { store } = freshStore();
+  const openThread = store.findOrCreate(baseInput);
+  store.wake(openThread.id);
+  assert.equal(store.get(openThread.id)?.status, "open", "waking an already-open thread must not do anything odd");
+
+  const closedThread = store.findOrCreate({ ...baseInput, otherDeveloperId: "carol" });
+  store.close(closedThread.id, "alice");
+  store.wake(closedThread.id);
+  assert.equal(store.get(closedThread.id)?.status, "closed", "wake must never resurrect a closed thread");
+});
+
+test("AlignmentThreadStore: wake returns undefined for an unknown thread", () => {
+  const { store } = freshStore();
+  assert.equal(store.wake("no-such-thread"), undefined);
+});
+
 test("AlignmentThreadStore: fromRow degrades a pre-2026-08-23 row gracefully -- symbolIds/lastActivityAt fall back, category/summary/initiatingDesignId stay undefined", () => {
   const { store, db } = freshStore();
   db.insert(threadsTable)

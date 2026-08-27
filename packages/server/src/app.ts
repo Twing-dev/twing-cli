@@ -26,13 +26,16 @@ import {
   PLAN_RETRY_SIMILARITY_THRESHOLD,
   structuralOverlaps,
   pathsOverlap,
+  shouldFlagOtherSide,
+  isDesignSideSettled,
+  isDesignSideDormantOrSettled,
 } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
 import { getServerVersion } from "./version.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
 import { enrichReviews } from "./review-enrich.js";
-import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind } from "./alignment-store.js";
+import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind, type AlignmentThread } from "./alignment-store.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role } from "./identity-store.js";
 import { fetchRepoPermissions } from "./github-client.js";
@@ -203,6 +206,23 @@ export function createApp(options: CreateAppOptions = {}) {
   const identities = options.identities ?? new IdentityStore(db, { dataDir: options.dataDir });
   const alignmentThreads = options.alignmentThreads ?? new AlignmentThreadStore(db);
   const activityLog = new DrizzleActivityLog(db);
+  // Tightening alignment threads item 4 (2026-08-27): wired here, after
+  // both `designs` and `alignmentThreads` locals exist, rather than only
+  // via `DesignRegistryOptions`'s constructor option -- `designs` may
+  // already be a caller-supplied, pre-constructed `DesignRegistry` (every
+  // test's `freshApp()` does this), so this is the one place that reaches
+  // both the self-constructed and injected cases alike. `maybeDormThread`
+  // is defined further down as a function declaration (hoisted), so it's
+  // already callable here despite the later textual position.
+  designs.setOnDesignsWentDormant((designIds) => {
+    for (const id of designIds) {
+      const design = designs.get(id); // still exists, now with status "dormant" -- just for its projectId
+      if (!design) continue;
+      for (const t of alignmentThreads.listByProject(design.projectId, "open")) {
+        if (t.initiatingDesignId === id || t.designId === id) maybeDormThread(t.id);
+      }
+    }
+  });
   const extractModel = options.extractModel ?? "google.gemma-4-31b";
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
   const noAuth = options.noAuth ?? false;
@@ -597,8 +617,82 @@ export function createApp(options: CreateAppOptions = {}) {
             },
           ],
         });
+        // Both-sides blocking (2026-08-27) -- see shouldFlagOtherSide's own
+        // doc comment (design-checks.ts) for the full reasoning. Re-fetch
+        // `other` live rather than trusting the `others` snapshot this async
+        // pass started with -- it may have closed/gone dormant/already been
+        // flagged for something else in the time this comparator call took.
+        const liveOther = designs.get(other.id);
+        if (shouldFlagOtherSide(liveOther, current.id)) {
+          designs.flag(other.id, "llm_divergence", {
+            conflicts: [
+              {
+                conflictingDesignId: current.id,
+                agentLabel: current.agentLabel,
+                overlapKind: "touches",
+                overlapDetail: result.reason,
+                conflictingSummary: current.summary,
+                overlapPaths: [],
+              },
+            ],
+          });
+        }
       }
     })().catch((err) => console.error("twing serve: semantic conflict check failed", err));
+  }
+
+  /** Tightening alignment threads, item 3 (2026-08-27): a thread can now
+   * auto-close once *both* parties have settled their own half of it --
+   * see `isDesignSideSettled` (design-checks.ts) for exactly what "settled"
+   * means per side (resolved via an approved justification, or simply
+   * closed -- including the terminal side-effect of a *rejected* one).
+   * Called after any event that could be the second side settling: a
+   * decide (below) or an explicit design close (the close route). No-op if
+   * the thread's already closed, not `symbol_conflict`/`llm_divergence`
+   * (pre-2026-08-26 uncategorized rows, or a `file_overlap` -- which never
+   * gets a thread at all, see alignment-store.ts's header comment), or
+   * missing either design id (same legacy-row guard). Closes author-less
+   * (`alignmentThreads.close(id)`, no `closedBy`) -- this is the
+   * coordinator's own conclusion, not one party's unilateral action, so it
+   * shouldn't read as either party having closed it themselves. */
+  function maybeAutoCloseThread(threadId: string): void {
+    const thread = alignmentThreads.get(threadId);
+    if (!thread || thread.status !== "open") return;
+    if (thread.category !== "llm_divergence" && thread.category !== "symbol_conflict") return;
+    if (!thread.initiatingDesignId || !thread.designId) return;
+    const initiatingSettled = isDesignSideSettled(designs.get(thread.initiatingDesignId), thread.designId, thread.category);
+    const otherSettled = isDesignSideSettled(designs.get(thread.designId), thread.initiatingDesignId, thread.category);
+    if (!initiatingSettled || !otherSettled) return;
+    alignmentThreads.postSystemMessage(threadId, "Auto-closed: both sides have resolved or closed their design -- nothing more to track here.");
+    alignmentThreads.close(threadId);
+  }
+
+  /** Tightening alignment threads, item 4 (2026-08-27): the dormancy
+   * counterpart to `maybeAutoCloseThread` above -- called only from
+   * `DesignRegistry`'s `onDesignsWentDormant` hook (wired near the top of
+   * `createApp`), never from a decide/close route, since dormancy is
+   * always an inactivity side-effect, never a deliberate action. Demotes
+   * an *open* thread to `"dormant"` once *both* sides are at least
+   * dormant-or-settled (`isDesignSideDormantOrSettled`, design-checks.ts --
+   * the looser sibling of `isDesignSideSettled`: a side that's merely gone
+   * idle counts here, unlike for closing). If both sides are actually
+   * fully settled (closed/resolved, not just dormant),
+   * `maybeAutoCloseThread` would already have closed this thread the
+   * moment the second side settled -- so by the time this ever runs on an
+   * `"open"` thread, at least one side going dormant is what's new. Same
+   * guard rails as `maybeAutoCloseThread` otherwise (must be `"open"`,
+   * must be a `symbol_conflict`/`llm_divergence` thread with both design
+   * ids present). */
+  function maybeDormThread(threadId: string): void {
+    const thread = alignmentThreads.get(threadId);
+    if (!thread || thread.status !== "open") return;
+    if (thread.category !== "llm_divergence" && thread.category !== "symbol_conflict") return;
+    if (!thread.initiatingDesignId || !thread.designId) return;
+    const initiatingQuiet = isDesignSideDormantOrSettled(designs.get(thread.initiatingDesignId), thread.designId, thread.category);
+    const otherQuiet = isDesignSideDormantOrSettled(designs.get(thread.designId), thread.initiatingDesignId, thread.category);
+    if (!initiatingQuiet || !otherQuiet) return;
+    alignmentThreads.postSystemMessage(threadId, "Dormant: both sides have gone quiet -- resolve, close, or resume a design to bring this back.");
+    alignmentThreads.dormant(threadId);
   }
 
   /** (2026-08-26) Resolving a design's block -- self-approve or admin-decide,
@@ -617,14 +711,24 @@ export function createApp(options: CreateAppOptions = {}) {
    * alignment-store.ts's `findOrCreate` reverse-direction fix): either
    * waiver list can point at a thread where this design is the
    * `initiatingDesignId` *or* the referenced `designId`, so both are
-   * checked. Deliberately does not close the thread -- closing stays a
-   * separate, human decision (see this repo's own plan doc's "explicitly
-   * out of scope" note); this only makes an already-resolved block visibly
-   * resolved instead of indistinguishable from an abandoned one. */
+   * checked. Also tries `maybeAutoCloseThread` on each thread touched
+   * (item 3, above) -- fires the moment the *second* side settles,
+   * whichever order the two sides happen to resolve in.
+   *
+   * The note text used to be one template shared by both decisions
+   * (`${decision}d`) -- "Resolved: X's design was rejectd" on a reject:
+   * wrong grammar, and wrong semantics. A reject isn't a resolution --
+   * `decideReview` never appends to either justified list on reject, only
+   * approve does (see `isDesignSideSettled`'s own doc comment) -- it's a
+   * terminal close instead, and the note now says exactly that, without
+   * the "Resolved:" label. */
   function notifyAlignmentThreadsOfDecision(review: PendingReview, decision: "approve" | "reject"): void {
     const design = designs.get(review.designId);
     const who = design?.developerId ?? review.projectId;
-    const note = `Resolved: ${who}'s design was ${decision}d -- "${review.justification}"`;
+    const note =
+      decision === "approve"
+        ? `Resolved: ${who}'s design was approved -- "${review.justification}"`
+        : `${who}'s design was rejected and closed -- "${review.justification}". A fresh design is needed to continue that work.`;
     const openThreads = alignmentThreads.listByProject(review.projectId, "open");
 
     for (const w of review.conflictWaivers ?? []) {
@@ -634,7 +738,10 @@ export function createApp(options: CreateAppOptions = {}) {
           ((t.initiatingDesignId === review.designId && t.designId === w.conflictingDesignId) ||
             (t.designId === review.designId && t.initiatingDesignId === w.conflictingDesignId)),
       );
-      if (thread) alignmentThreads.postSystemMessage(thread.id, note);
+      if (thread) {
+        alignmentThreads.postSystemMessage(thread.id, note);
+        maybeAutoCloseThread(thread.id);
+      }
     }
     for (const w of review.symbolConflictWaivers ?? []) {
       const thread = openThreads.find(
@@ -643,7 +750,10 @@ export function createApp(options: CreateAppOptions = {}) {
           ((t.initiatingDesignId === review.designId && t.designId === w.conflictingDesignId) ||
             (t.designId === review.designId && t.initiatingDesignId === w.conflictingDesignId)),
       );
-      if (thread) alignmentThreads.postSystemMessage(thread.id, note);
+      if (thread) {
+        alignmentThreads.postSystemMessage(thread.id, note);
+        maybeAutoCloseThread(thread.id);
+      }
     }
   }
 
@@ -1198,13 +1308,17 @@ export function createApp(options: CreateAppOptions = {}) {
     // Semantic comparator's counterpart to overlapWaivers above (2026-08-22):
     // no cheap live recompute here (that would mean a second synchronous LLM
     // call inside this route) -- instead, read back which other designs this
-    // one currently has an *open* `llm_divergence` alignment thread against,
-    // filtered by `initiatingDesignId` (this design's own open design,
-    // stamped when `runSemanticComparatorPass` calls `findOrCreate` --
-    // `designs.flag()` only ever flags the *initiator* of a given comparator
-    // pass, never the design it was compared against, so `initiatingDesignId`
-    // is the only field that correctly identifies "this design is the one
-    // that got flagged here").
+    // one currently has an *open* `llm_divergence` alignment thread against.
+    // 2026-08-27, both-sides blocking: `runSemanticComparatorPass` now flags
+    // *both* designs in a divergent pair (mirrors symbol_conflict's existing
+    // "whichever side(s) have an open design" rule -- was initiator-only
+    // before, an unprincipled asymmetry with symbol_conflict, no longer
+    // true). So `design.id` can legitimately be either `initiatingDesignId`
+    // *or* `designId` on the thread depending on which side got flagged --
+    // the `(t.initiatingDesignId === design.id || t.designId === design.id)`
+    // check just below already covers both (see the 2026-08-26 "second fix"
+    // note right after this comment for why that symmetric check exists at
+    // all), so this needed no further change beyond the comparator itself.
     //
     // 2026-08-26 fix: this used to filter on `t.symbolId === design.id`,
     // matching `AlignmentThread.symbolId`'s doc comment calling it a
@@ -1292,6 +1406,18 @@ export function createApp(options: CreateAppOptions = {}) {
       return c.json({ error: "not a member of this project" }, 403);
     }
     const closed = designs.close(id);
+    // Tightening alignment threads item 3 (2026-08-27): the other half of
+    // maybeAutoCloseThread's two call sites -- someone closing instead of
+    // resolving is just as valid a way to settle their side of a thread as
+    // an approved justification is (see isDesignSideSettled's "closed"
+    // branch). Every open thread naming this design, on either side, gets
+    // re-checked; each individually still requires the *other* side to
+    // also be settled before it actually closes.
+    if (closed) {
+      for (const t of alignmentThreads.listByProject(design.projectId, "open")) {
+        if (t.initiatingDesignId === id || t.designId === id) maybeAutoCloseThread(t.id);
+      }
+    }
     return c.json({ status: closed?.status });
   });
 
@@ -1449,6 +1575,18 @@ export function createApp(options: CreateAppOptions = {}) {
     // resolve/review flow every other non-clean verdict already uses.
     const resumed = designs.resume(id, { sessionId: body.sessionId, developerId: identity.developerId, delta });
     if (!resumed) return c.json({ error: `design is ${design.status}, not dormant -- can't resume` }, 409);
+
+    // Tightening alignment threads item 4 (2026-08-27): the symmetric
+    // wake-up for maybeDormThread above -- unconditional (doesn't wait to
+    // see whether this resume even comes back clean below), since the
+    // design itself just left "dormant" either way, and a dormant thread
+    // naming it is exactly as stale as the design it was demoted alongside.
+    for (const t of alignmentThreads.listByProject(resumed.projectId, "dormant")) {
+      if (t.initiatingDesignId === id || t.designId === id) {
+        alignmentThreads.postSystemMessage(t.id, `Reopened: ${resumed.developerId}'s design was resumed.`);
+        alignmentThreads.wake(t.id);
+      }
+    }
 
     if (outcome.verdict !== "clean") {
       // Same 2026-08-26 static-per-verdict blocking as amend above -- a

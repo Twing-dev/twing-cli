@@ -1220,6 +1220,31 @@ func TestFlaggedDesignReason_DoesNotClaimConflictCameFromRegistration(t *testing
 	}
 }
 
+// Tightening alignment threads, item 2 (2026-08-27): a flagged design used
+// to only ever offer adopt/justify -- no way to say "this doesn't apply to
+// me anymore" even though designs.close() already accepts a flagged design
+// unconditionally. Checked across all three flagging verdicts (not just
+// one), and only for the not-yet-justified/not-pending-review case -- once
+// a justification is already pending or resolving, closing isn't the
+// relevant next step.
+func TestFlaggedDesignReason_OffersCloseAcrossAllThreeVerdicts(t *testing.T) {
+	for _, verdict := range []string{"constraint_violation", "symbol_conflict", "llm_divergence"} {
+		msg := flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, verdict)
+		wantCmd := "twing design close --id 11111111-2222-3333-4444-555555555555"
+		if !strings.Contains(msg, wantCmd) {
+			t.Errorf("%s: expected a close action (%q), got %q", verdict, wantCmd, msg)
+		}
+		// Must not replace either existing action -- close is a third
+		// option, not a swap.
+		if !strings.Contains(msg, "twing design resolve --id 11111111-2222-3333-4444-555555555555 --adopt") {
+			t.Errorf("%s: adopt action must still be present alongside close, got %q", verdict, msg)
+		}
+		if !strings.Contains(msg, "twing design resolve --id 11111111-2222-3333-4444-555555555555 --justify") {
+			t.Errorf("%s: justify action must still be present alongside close, got %q", verdict, msg)
+		}
+	}
+}
+
 // Optional fields are genuinely absent in production (a design registered
 // without a summary, a zero dormant duration), and must not produce a
 // dangling label with no value.

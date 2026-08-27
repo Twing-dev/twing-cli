@@ -9,6 +9,9 @@ import {
   jaccard,
   PLAN_RETRY_SIMILARITY_THRESHOLD,
   overlapWaiverKey,
+  shouldFlagOtherSide,
+  isDesignSideSettled,
+  isDesignSideDormantOrSettled,
 } from "./design-checks.js";
 import type { DesignStatement, DesignConstraint } from "@twing/core";
 
@@ -368,4 +371,106 @@ test("jaccard: two different plans that happen to share domain vocabulary stay b
   const planB = "Add a debounce helper to src/ui/search-box.ts so keystrokes don't trigger a network call on every character, using the existing Clock abstraction for timing.";
   const similarity = jaccard(planA, planB);
   assert.ok(similarity < PLAN_RETRY_SIMILARITY_THRESHOLD, `expected two different plans (${similarity}) to stay below the threshold (${PLAN_RETRY_SIMILARITY_THRESHOLD})`);
+});
+
+test("shouldFlagOtherSide: an open, not-yet-justified other side should be flagged", () => {
+  const other = design({ id: "b", status: "open" });
+  assert.equal(shouldFlagOtherSide(other, "a"), true);
+});
+
+test("shouldFlagOtherSide: a closed other side should not be flagged", () => {
+  const other = design({ id: "b", status: "closed" });
+  assert.equal(shouldFlagOtherSide(other, "a"), false);
+});
+
+test("shouldFlagOtherSide: a dormant other side should not be flagged", () => {
+  const other = design({ id: "b", status: "dormant" });
+  assert.equal(shouldFlagOtherSide(other, "a"), false);
+});
+
+test("shouldFlagOtherSide: already flagged for this exact same pairing should not be flagged again", () => {
+  const other = design({ id: "b", status: "flagged" });
+  assert.equal(shouldFlagOtherSide(other, "a"), false);
+});
+
+test("shouldFlagOtherSide: an already-justified pairing (this current design's id is in the other's justifiedConflicts) should not be re-flagged", () => {
+  const other = design({ id: "b", status: "open", justifiedConflicts: ["a"] });
+  assert.equal(shouldFlagOtherSide(other, "a"), false);
+});
+
+test("shouldFlagOtherSide: a justified conflict against a different design's id doesn't suppress flagging against this one", () => {
+  const other = design({ id: "b", status: "open", justifiedConflicts: ["some-other-design-id"] });
+  assert.equal(shouldFlagOtherSide(other, "a"), true);
+});
+
+test("shouldFlagOtherSide: an undefined other design (not found / already gone) should not be flagged", () => {
+  assert.equal(shouldFlagOtherSide(undefined, "a"), false);
+});
+
+test("isDesignSideSettled: a still-flagged design is never settled, regardless of the justified list", () => {
+  const flagged = design({ id: "a", status: "flagged", justifiedConflicts: ["b"] });
+  assert.equal(isDesignSideSettled(flagged, "b", "llm_divergence"), false);
+});
+
+test("isDesignSideSettled: closed counts as settled even with no justification at all", () => {
+  const closed = design({ id: "a", status: "closed" });
+  assert.equal(isDesignSideSettled(closed, "b", "llm_divergence"), true);
+});
+
+test("isDesignSideSettled: llm_divergence -- open plus the counterpart id in justifiedConflicts is settled", () => {
+  const resolved = design({ id: "a", status: "open", justifiedConflicts: ["b"] });
+  assert.equal(isDesignSideSettled(resolved, "b", "llm_divergence"), true);
+});
+
+test("isDesignSideSettled: llm_divergence -- open but the counterpart id is NOT in justifiedConflicts is not settled", () => {
+  const notYet = design({ id: "a", status: "open", justifiedConflicts: [] });
+  assert.equal(isDesignSideSettled(notYet, "b", "llm_divergence"), false);
+});
+
+test("isDesignSideSettled: llm_divergence -- justified against a different design's id doesn't count for this one", () => {
+  const wrongPairing = design({ id: "a", status: "open", justifiedConflicts: ["some-other-design-id"] });
+  assert.equal(isDesignSideSettled(wrongPairing, "b", "llm_divergence"), false);
+});
+
+test("isDesignSideSettled: dormant plus a justified pairing still counts as settled (resolved, just gone quiet since)", () => {
+  const dormantButResolved = design({ id: "a", status: "dormant", justifiedConflicts: ["b"] });
+  assert.equal(isDesignSideSettled(dormantButResolved, "b", "llm_divergence"), true);
+});
+
+test("isDesignSideSettled: symbol_conflict -- justifiedSymbolConflicts is composite-keyed, checked with a prefix match against the counterpart", () => {
+  const resolved = design({ id: "a", status: "open", justifiedSymbolConflicts: [overlapWaiverKey("b", "src/net/retry.ts")] });
+  assert.equal(isDesignSideSettled(resolved, "b", "symbol_conflict"), true);
+});
+
+test("isDesignSideSettled: symbol_conflict -- a composite key for a different counterpart doesn't match", () => {
+  const wrongPairing = design({ id: "a", status: "open", justifiedSymbolConflicts: [overlapWaiverKey("some-other-design-id", "src/net/retry.ts")] });
+  assert.equal(isDesignSideSettled(wrongPairing, "b", "symbol_conflict"), false);
+});
+
+test("isDesignSideSettled: an undefined design (not found) is never settled", () => {
+  assert.equal(isDesignSideSettled(undefined, "b", "llm_divergence"), false);
+});
+
+test("isDesignSideDormantOrSettled: a merely dormant, never-justified design still counts (the whole point of the looser sibling)", () => {
+  const justIdle = design({ id: "a", status: "dormant" });
+  assert.equal(isDesignSideDormantOrSettled(justIdle, "b", "llm_divergence"), true);
+});
+
+test("isDesignSideDormantOrSettled: still flagged is not enough, same as isDesignSideSettled", () => {
+  const stillBlocking = design({ id: "a", status: "flagged" });
+  assert.equal(isDesignSideDormantOrSettled(stillBlocking, "b", "llm_divergence"), false);
+});
+
+test("isDesignSideDormantOrSettled: closed still counts, delegating to isDesignSideSettled", () => {
+  const closed = design({ id: "a", status: "closed" });
+  assert.equal(isDesignSideDormantOrSettled(closed, "b", "llm_divergence"), true);
+});
+
+test("isDesignSideDormantOrSettled: an open, unresolved design (neither dormant nor settled) is not quiet", () => {
+  const stillActive = design({ id: "a", status: "open", justifiedConflicts: [] });
+  assert.equal(isDesignSideDormantOrSettled(stillActive, "b", "llm_divergence"), false);
+});
+
+test("isDesignSideDormantOrSettled: an undefined design (not found) is never quiet", () => {
+  assert.equal(isDesignSideDormantOrSettled(undefined, "b", "llm_divergence"), false);
 });
