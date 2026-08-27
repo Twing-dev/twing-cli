@@ -228,6 +228,20 @@ export function createApp(options: CreateAppOptions = {}) {
   // no other caller (align/design/admin/project commands, the daemon's sync
   // loop, twing-monitor's browser calls) ever does, so this is a zero-risk
   // addition to every other /v1/* code path.
+  //
+  // Deliberately does NOT try to treat a *missing* header as "must be an
+  // old hook binary, deny it" (attempted and reverted, 2026-08-27, found
+  // live via a real test failure): /v1/designs/check, /v1/designs/extract,
+  // and /v1/constraints/match aren't hook-exclusive -- the TS CLI's own
+  // design.ts/constraints.ts commands (twing design register/resolve/
+  // resume, etc.) call these same routes directly and never send this
+  // header either, since only the Go hook does. Route-scoping "missing =
+  // deny" to them 426'd real, legitimate CLI traffic. The bootstrap gap
+  // this would have closed (a pre-0.2.6 hook binary, with no code to send
+  // this header at all, is invisible to this check) is a one-time,
+  // first-release-only limitation, not an ongoing one -- every 0.2.6+
+  // hook binary always sends a header, so there is nothing left to
+  // retroactively detect once real installs move past this release.
   app.use("/v1/*", async (c, next) => {
     const hookVersion = c.req.header("x-twing-hook-version");
     if (hookVersion && hookVersion !== version) {

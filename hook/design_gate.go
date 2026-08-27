@@ -534,7 +534,32 @@ func hookVersionMismatchReasonFromResponse(res *http.Response) string {
 	return hookVersionMismatchReason(version, serverVersion)
 }
 
+// hookVersionMismatchReason picks the direction-appropriate message: if
+// this machine is *behind*, npm install -g really does fix it. If this
+// machine is somehow *ahead* of the coordinator, that command can't help
+// -- "latest" on npm is what this machine already has; npm has no way to
+// move backwards to an older, coordinator-declared version, and shouldn't.
+// The operational invariant (documented in deploy/docker/README.md) is
+// that the coordinator is only ever updated to declare a version already
+// published to npm, so this branch should be unreachable in practice --
+// handled anyway, since "unreachable in practice" isn't "impossible."
+// Unparseable versions (compareVersions' ok=false -- "unknown", the
+// bootstrap-gap sentinel, or "dev", an unstamped local build) fall
+// through to the client-behind message, the safer default since it's
+// also the overwhelmingly more common real case.
 func hookVersionMismatchReason(hookVersion, serverVersion string) string {
+	if cmp, ok := compareVersions(hookVersion, serverVersion); ok && cmp > 0 {
+		return denyMessage(
+			"twing can't check for conflicts -- the coordination server needs an update.",
+			"This machine is newer than what the coordinator currently declares. There's "+
+				"nothing to fix here -- an operator needs to redeploy the coordinator to catch up.",
+			[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
+			[]denyAction{
+				{Label: "Please wait for the coordinator to update, then retry"},
+				gateOffAction,
+			},
+		)
+	}
 	return denyMessage(
 		"twing can't check for conflicts -- this machine's twing-cli is out of date.",
 		"A mismatched version might not understand the coordinator's current API, "+

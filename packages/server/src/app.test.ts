@@ -3827,3 +3827,19 @@ test("hook version-mismatch: a matching x-twing-hook-version falls through to th
   });
   assert.equal(res.status, 401);
 });
+
+test("hook version-mismatch: no x-twing-hook-version header at all falls through normally (401), not 426 -- these routes aren't hook-exclusive", async () => {
+  const { app } = freshApp({ version: "9.9.9" });
+
+  // /v1/designs/check is called directly by the TS CLI's own design.ts
+  // commands too, not just the Go hook -- they never send this header
+  // either, so a missing header here must never be treated as "must be an
+  // old hook binary, deny it" (attempted and reverted, see app.ts's
+  // comment on this middleware).
+  const res = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(res.status, 401);
+});

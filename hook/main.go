@@ -81,10 +81,23 @@ func handleCacheCheck(payload hookPayload) {
 		messages = append(messages, item.Message)
 	}
 	if vm := result.VersionMismatch; vm != nil {
-		messages = append(messages, fmt.Sprintf(
-			"twing: this machine's twing-cli (%s) does not match the coordinator's expected version (%s). "+
-				"Run `npm install -g @twing/cli@latest`, then `twing daemon restart`.",
-			vm.ClientVersion, vm.ServerVersion))
+		// Same direction-awareness as design_gate.go's hookVersionMismatchReason
+		// -- npm install -g only ever helps when this machine is the one
+		// behind. cmp>0 (ahead of the coordinator) should be unreachable in
+		// practice per the coordinator's own publish-then-deploy discipline,
+		// but is still handled rather than left to print a nonsense
+		// instruction if it ever isn't.
+		if cmp, ok := compareVersions(vm.ClientVersion, vm.ServerVersion); ok && cmp > 0 {
+			messages = append(messages, fmt.Sprintf(
+				"twing: this machine's twing-cli (%s) is newer than the coordinator (%s). "+
+					"Coordination server needs an update. Please wait.",
+				vm.ClientVersion, vm.ServerVersion))
+		} else {
+			messages = append(messages, fmt.Sprintf(
+				"twing: this machine's twing-cli (%s) does not match the coordinator's expected version (%s). "+
+					"Run `npm install -g @twing/cli@latest`, then `twing daemon restart`.",
+				vm.ClientVersion, vm.ServerVersion))
+		}
 	}
 	if len(messages) == 0 {
 		// Nothing cached: empty stdout, exit 0 — a clean no-op (§4).
