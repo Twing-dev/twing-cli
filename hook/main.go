@@ -95,7 +95,7 @@ func handleCacheCheck(payload hookPayload) {
 		} else {
 			messages = append(messages, fmt.Sprintf(
 				"twing: this machine's twing-cli (%s) does not match the coordinator's expected version (%s). "+
-					"Run `npm install -g @twing/cli@latest`, then `twing daemon restart`.",
+					"Run `npm install -g @twing/cli@latest && twing init && twing daemon restart`.",
 				vm.ClientVersion, vm.ServerVersion))
 		}
 	}

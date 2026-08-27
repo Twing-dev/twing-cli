@@ -27,6 +27,9 @@ func TestHandleCacheCheck_VersionMismatchOnly_StillEmitsOutput(t *testing.T) {
 	if !strings.Contains(stdout, "npm install -g @twing/cli@latest") {
 		t.Errorf("stdout = %q, want it to instruct npm install -g @twing/cli@latest", stdout)
 	}
+	if !strings.Contains(stdout, "twing init") {
+		t.Errorf("stdout = %q, want it to instruct twing init -- npm install -g and twing daemon restart alone never refresh the hook binary (found live, 2026-08-27)", stdout)
+	}
 	if !strings.Contains(stdout, "twing daemon restart") {
 		t.Errorf("stdout = %q, want it to instruct twing daemon restart", stdout)
 	}

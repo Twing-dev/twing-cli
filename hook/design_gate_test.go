@@ -263,6 +263,15 @@ func TestHandleEditWriteGate_HookVersionMismatch_Denies(t *testing.T) {
 	if gotVersionHeader == "" {
 		t.Error("outgoing request did not carry x-twing-hook-version")
 	}
+	// Found live, 2026-08-27, via a real sandboxed test: a Claude Code
+	// session that ran exactly "npm install -g @twing/cli@latest && twing
+	// daemon restart" (the command this used to suggest) still failed the
+	// retry, since neither step refreshes the separately-fetched hook
+	// binary -- only `twing init` does. Asserted explicitly so this exact
+	// regression can't silently reappear.
+	if !strings.Contains(reason, "twing init") {
+		t.Errorf("reason = %q, want the remediation command to include `twing init` (not just npm install -g), or the hook binary itself never actually gets refreshed", reason)
+	}
 }
 
 func TestHandleEditWriteGate_HookAheadOfServer_DeniesWithWaitMessage(t *testing.T) {

@@ -535,8 +535,17 @@ func hookVersionMismatchReasonFromResponse(res *http.Response) string {
 }
 
 // hookVersionMismatchReason picks the direction-appropriate message: if
-// this machine is *behind*, npm install -g really does fix it. If this
-// machine is somehow *ahead* of the coordinator, that command can't help
+// this machine is *behind*, the update command really does fix it -- all
+// three steps matter, not just npm install -g. Found live, 2026-08-27,
+// via a real sandboxed end-to-end test: `npm install -g @twing/cli@latest
+// && twing daemon restart` alone refreshes the npm-published CLI/daemon
+// code but never touches this machine's separately-fetched hook binary
+// (ensureHookInstalled() only runs as part of `twing init`) -- so a
+// Claude Code session that followed that exact two-step instruction still
+// failed the retry, since the hook is what actually sends the version
+// this gate checks. `twing init` is safe to re-run (idempotent, see
+// init.ts's own doc comment) and is what actually refreshes the hook.
+// If this machine is somehow *ahead* of the coordinator, that command can't help
 // -- "latest" on npm is what this machine already has; npm has no way to
 // move backwards to an older, coordinator-declared version, and shouldn't.
 // The operational invariant (documented in deploy/docker/README.md) is
@@ -578,7 +587,7 @@ func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 			"so twing blocks rather than risk enforcing conflict checks incorrectly.",
 		[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
 		[]denyAction{
-			{Label: "Update, then retry", Command: "npm install -g @twing/cli@latest && twing daemon restart"},
+			{Label: "Update, then retry", Command: "npm install -g @twing/cli@latest && twing init && twing daemon restart"},
 		},
 	)
 }
