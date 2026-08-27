@@ -547,6 +547,19 @@ func hookVersionMismatchReasonFromResponse(res *http.Response) string {
 // bootstrap-gap sentinel, or "dev", an unstamped local build) fall
 // through to the client-behind message, the safer default since it's
 // also the overwhelmingly more common real case.
+//
+// Deliberately omits gateOffAction, unlike every other reason function in
+// this file (found live, 2026-08-27: a genuinely fresh Claude Code session
+// with no established twing context, offered both "update" and "disable
+// the gate" as equally-weighted options in a real deny message, correctly
+// refused to pick either on its own -- but flagged "disables a safety/
+// conflict-check gate" as alarming enough to stop and ask a human, which
+// is the right call, and a sign the option shouldn't have been offered as
+// a peer to the real fix in the first place). The other four failure
+// classes (auth/network) keep it -- those can genuinely have no other
+// recourse (a down coordinator, broken local auth). A version mismatch
+// always has one: update. Suppressing the whole gate instead of just
+// updating is strictly worse and never actually necessary here.
 func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 	if cmp, ok := compareVersions(hookVersion, serverVersion); ok && cmp > 0 {
 		return denyMessage(
@@ -556,7 +569,6 @@ func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 			[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
 			[]denyAction{
 				{Label: "Please wait for the coordinator to update, then retry"},
-				gateOffAction,
 			},
 		)
 	}
@@ -567,7 +579,6 @@ func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 		[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
 		[]denyAction{
 			{Label: "Update, then retry", Command: "npm install -g @twing/cli@latest && twing daemon restart"},
-			gateOffAction,
 		},
 	)
 }
