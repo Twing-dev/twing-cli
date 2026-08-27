@@ -539,7 +539,7 @@ func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 		"twing can't check for conflicts -- this machine's twing-cli is out of date.",
 		"A mismatched version might not understand the coordinator's current API, "+
 			"so twing blocks rather than risk enforcing conflict checks incorrectly.",
-		[]denyDetail{{"This machine", hookVersion}, {"Coordinator expects", serverVersion}},
+		[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
 		[]denyAction{
 			{Label: "Update, then retry", Command: "npm install -g @twing/cli@latest && twing daemon restart"},
 			gateOffAction,
