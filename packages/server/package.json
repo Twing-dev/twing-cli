@@ -1,6 +1,6 @@
 {
   "name": "@twing/server",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "./dist/index.js",
