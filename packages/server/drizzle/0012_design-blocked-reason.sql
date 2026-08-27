@@ -1,0 +1,1 @@
+ALTER TABLE `designs` ADD `blocked_reason` text;

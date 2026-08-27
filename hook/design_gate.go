@@ -1080,6 +1080,16 @@ type designScopeMatchResponse struct {
 	// flaggedDesignReason's own doc comment for the full branching this
 	// drives.
 	RequiresAdmin bool `json:"requiresAdmin,omitempty"`
+	// Set only for state "flagged" (2026-08-26, second pass): which of the
+	// four buckets actually flagged this design -- "constraint_violation" |
+	// "symbol_conflict" | "llm_divergence" (never "file_overlap", which
+	// doesn't flag, or "clean"/"has_open_designs", which don't apply here).
+	// Lets flaggedDesignReason name the actual reason instead of one
+	// generic sentence for all three. Deliberately backward-compatible,
+	// same reasoning as OpenDesigns below: an older coordinator that
+	// doesn't send this field yet leaves it empty, and
+	// flaggedDesignReason falls back to its pre-2026-08-26 generic wording.
+	Verdict string `json:"verdict,omitempty"`
 	// Set only for state "out_of_scope" (2026-08-25) -- every open design
 	// for this session, newest-first, not just the one `DesignID` names.
 	// Found live: with more than one open design in a session, silently
@@ -1155,7 +1165,8 @@ func checkDesignScope(serverURL, authToken, developerID, projectID, sessionID, f
 // whoever's authority you'd be overriding" principle this reflects. When
 // `pendingReview` is also true, `requiresAdmin` further distinguishes
 // "waiting on a person" from "already resolved, nothing more to do".
-func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool) string {
+func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool, verdict string) string {
+	lead, detail := flaggedLeadAndDetail(verdict)
 	if pendingReview {
 		if requiresAdmin {
 			return denyMessage(
@@ -1188,9 +1199,8 @@ func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool
 		note = "This goes to a project admin. You stay blocked until they decide."
 	}
 	return denyMessage(
-		"Someone else may already be doing this work.",
-		"twing compared your plan against other active sessions and found a conflict, "+
-			"so this edit is on hold until that's settled.",
+		lead,
+		detail,
 		[]denyDetail{{"Your plan", designID}, {"Status", "on hold until resolved"}},
 		[]denyAction{
 			{
@@ -1204,6 +1214,39 @@ func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool
 			},
 		},
 	)
+}
+
+// flaggedLeadAndDetail (2026-08-26, second pass): per-bucket wording for
+// flaggedDesignReason's not-yet-justified case, keyed off the
+// designScopeMatchResponse.Verdict the coordinator now sends directly (see
+// its own doc comment) instead of the one generic "someone else may already
+// be doing this work" sentence every bucket used to share regardless of
+// whether the actual cause was a real edit collision, a stated-intent
+// conflict, or a project rule. Falls back to that original generic wording
+// for "" (an older coordinator that predates the Verdict field) and for any
+// verdict this deny path shouldn't structurally see (`"clean"` /
+// `"has_open_designs"` never flag; `"file_overlap"` never blocks) --
+// unrecognized is treated the same as unset rather than risking a blank
+// lead sentence.
+func flaggedLeadAndDetail(verdict string) (lead string, detail string) {
+	switch verdict {
+	case "constraint_violation":
+		return "This touches a project rule.",
+			"twing checked your edit against this project's own constraints and it matched " +
+				"one that needs a person's sign-off before it can go through."
+	case "symbol_conflict":
+		return "Someone else already touched this code.",
+			"twing found a real edit collision with another active session -- you're both " +
+				"changing the same symbol, so this edit is on hold until that's settled."
+	case "llm_divergence":
+		return "Someone else may already be doing this work.",
+			"twing compared your plan against another active session's and found it describes " +
+				"the same or contradictory work, so this edit is on hold until that's settled."
+	default:
+		return "Someone else may already be doing this work.",
+			"twing compared your plan against other active sessions and found a conflict, " +
+				"so this edit is on hold until that's settled."
+	}
 }
 
 // maxOutOfScopeCandidates caps how many of a session's open designs
@@ -1525,7 +1568,7 @@ func handleEditWriteGate(payload hookPayload) {
 	case "in_scope":
 		writeJSON(allowOutput("PreToolUse"))
 	case "flagged":
-		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch.DesignID, scopeMatch.PendingReview, scopeMatch.RequiresAdmin)))
+		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch.DesignID, scopeMatch.PendingReview, scopeMatch.RequiresAdmin, scopeMatch.Verdict)))
 	case "dormant":
 		writeJSON(denyOutput("PreToolUse", dormantDesignReason(scopeMatch.DesignID, scopeMatch.Summary, scopeMatch.DormantSinceMs)))
 	case "out_of_scope":

@@ -166,6 +166,14 @@ export const designs = sqliteTable(
      * `justifiedOverlaps` rather than reusing it. JSON string[] of
      * `${conflictingDesignId}::${symbolId}` keys, defaults to "[]". */
     justifiedSymbolConflicts: text("justified_symbol_conflicts").notNull().default("[]"),
+    /** Which bucket flagged this design (2026-08-26) -- see
+     * `DesignStatement.blockedReason`'s own doc comment (@twing/core) for
+     * the full reasoning. Nullable: unset on a design that's never been
+     * flagged, and cleared back to null on an approved resolve/`resume()`.
+     * No backfill for pre-existing flagged rows (this schema's usual
+     * "never backfilled" convention) -- a pre-migration flagged design just
+     * has no reason on file until its next flag/resolve cycle. */
+    blockedReason: text("blocked_reason"),
   },
   (t) => [
     index("designs_project_id_idx").on(t.projectId),

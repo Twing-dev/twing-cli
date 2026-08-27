@@ -1112,10 +1112,13 @@ func allDenyMessages(t *testing.T) map[string]string {
 		Constraints: []designConstraintInfo{{Statement: "money paths need a second pair of eyes", Type: "review_required"}},
 	}
 	return map[string]string{
-		"noDesign":           noDesignReason(),
-		"flagged":            flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true),
-		"flaggedPendingRev":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", true, true),
-		"flaggedSelfApprove": flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false),
+		"noDesign":              noDesignReason(),
+		"flagged":               flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true, "constraint_violation"),
+		"flaggedPendingRev":     flaggedDesignReason("11111111-2222-3333-4444-555555555555", true, true, "constraint_violation"),
+		"flaggedSelfApprove":    flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "symbol_conflict"),
+		"flaggedSymbolConflict": flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "symbol_conflict"),
+		"flaggedLlmDivergence":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "llm_divergence"),
+		"flaggedLegacyVerdict":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, ""),
 		"outOfScope":         outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", nil),
 		"outOfScopeMulti": outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", []designSummary{
 			{ID: "11111111-2222-3333-4444-555555555555", Summary: "add retry with backoff"},
@@ -1211,7 +1214,7 @@ func TestAuthRejectedReason_DistinguishesUnauthorizedFromForbidden(t *testing.T)
 // registration, so the old "conflict from its own registration" wording was
 // simply false in the common case.
 func TestFlaggedDesignReason_DoesNotClaimConflictCameFromRegistration(t *testing.T) {
-	msg := flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true)
+	msg := flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true, "constraint_violation")
 	if strings.Contains(msg, "registration") {
 		t.Errorf("should not attribute the conflict to registration time: %q", msg)
 	}
