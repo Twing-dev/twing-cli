@@ -29,6 +29,7 @@ import {
   shouldFlagOtherSide,
   isDesignSideSettled,
   isDesignSideDormantOrSettled,
+  isDesignLive,
 } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
 import { getServerVersion } from "./version.js";
@@ -582,6 +583,21 @@ export function createApp(options: CreateAppOptions = {}) {
         // detail label (`AlignmentSubKind`) under the `"llm_divergence"`
         // bucket, not the thread's top-level category (2026-08-26).
         const subKind = result.kind ?? "tension";
+        // Re-fetch both sides live, right before acting on the result --
+        // `current` (above) was fetched before the slow `checkSemanticConflict`
+        // await, and `other` is still the `others` snapshot this whole async
+        // pass started with; either may have closed/gone dormant/been
+        // reflagged in the meantime. `designs.flag()` already re-checks
+        // liveness itself (its own status guard, design-store.ts) so the
+        // actual block/no-block outcome below was always race-safe -- this
+        // is for `reopenEligible` (2026-08-28), which `alignment-store.ts`'s
+        // `findOrCreate` has no way to compute on its own: a design that
+        // closed mid-check must not silently reopen its own already-closed
+        // thread, but a genuinely new finding still deserves to reopen one
+        // if the *other* side is still live.
+        const liveCurrent = designs.get(current.id);
+        const liveOther = designs.get(other.id);
+        const reopenEligible = isDesignLive(liveCurrent) || isDesignLive(liveOther);
         const thread = alignmentThreads.findOrCreate({
           projectId: current.projectId,
           symbolIds: [], // no real symbol for a design-vs-design finding
@@ -594,6 +610,7 @@ export function createApp(options: CreateAppOptions = {}) {
           summary: buildAlignmentSummary(subKind, other.summary, 0),
           initiatingDesignId: current.id, // this path always has a real initiating design -- always resolvable
           ts: Date.now(),
+          reopenEligible,
         });
         activityLog.append({
           projectId: current.projectId,
@@ -618,11 +635,8 @@ export function createApp(options: CreateAppOptions = {}) {
           ],
         });
         // Both-sides blocking (2026-08-27) -- see shouldFlagOtherSide's own
-        // doc comment (design-checks.ts) for the full reasoning. Re-fetch
-        // `other` live rather than trusting the `others` snapshot this async
-        // pass started with -- it may have closed/gone dormant/already been
-        // flagged for something else in the time this comparator call took.
-        const liveOther = designs.get(other.id);
+        // doc comment (design-checks.ts) for the full reasoning. Reuses the
+        // `liveOther` fetched above rather than re-fetching a second time.
         if (shouldFlagOtherSide(liveOther, current.id)) {
           designs.flag(other.id, "llm_divergence", {
             conflicts: [
@@ -637,6 +651,15 @@ export function createApp(options: CreateAppOptions = {}) {
             ],
           });
         }
+        // Reopen-on-new-finding fix (2026-08-28): the thread may have just
+        // been created/reopened above (nothing to settle) or may have been
+        // an already-open one that this finding didn't actually change the
+        // settledness of -- either way, harmless to check. Only matters
+        // when `findOrCreate` matched an already-*open* thread whose both
+        // sides had, in the meantime, actually settled (closed/justified) --
+        // this is the other half of the 169d101e-class bug: posting a new
+        // message never used to re-run the close check at all.
+        maybeAutoCloseThread(thread.id);
       }
     })().catch((err) => console.error("twing serve: semantic conflict check failed", err));
   }
@@ -832,6 +855,12 @@ export function createApp(options: CreateAppOptions = {}) {
             : [],
         });
       }
+      // Reopen-on-new-finding fix (2026-08-28): `designA`/`designB` already
+      // only ever hold a design that's `openDesigns()`-live (open/flagged --
+      // see that function's own status filter), so their bare presence
+      // already answers `isDesignLive` for this call site, no extra fetch
+      // needed the way the async llm_divergence path (above) requires.
+      const reopenEligible = !!designA || !!designB;
       const thread = alignmentThreads.findOrCreate({
         projectId,
         symbolIds: [finding.symbolId],
@@ -844,7 +873,9 @@ export function createApp(options: CreateAppOptions = {}) {
         summary: buildAlignmentSummary(subKind, designB?.summary ?? "", 1),
         initiatingDesignId: designA?.id,
         ts: finding.ts,
+        reopenEligible,
       });
+      maybeAutoCloseThread(thread.id);
       return { ...finding, threadId: thread.id };
     }
 

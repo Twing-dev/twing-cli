@@ -1680,6 +1680,135 @@ test("POST /v1/designs/:id/resolve: self-approving a symbol_conflict block posts
   );
 });
 
+// Reopen-on-new-finding fix (2026-08-28): continues exactly the scenario
+// above (a symbol_conflict thread that both sides settled and that
+// auto-closed) one step further -- a decideReview approve unconditionally
+// reopens the *design* itself back to "open" (design-store.ts), so both
+// alice's and bob's designs are live again after that resolution, same ids
+// as before. A genuinely new collision between the same pair must reuse
+// (and reopen) that same closed thread, not silently fork a new one --
+// findOrCreate's dedup key is still the same design pair.
+test("POST /v1/claims: a new symbol_conflict finding against the same design pair reopens an already-closed thread instead of forking a new one, since both designs are live again", async () => {
+  const { app, dataDir } = freshApp();
+  const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir); // alice's design already covers src/x.ts
+
+  const bobDesignRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
+  });
+  const { designId: bobDesignId } = (await bobDesignRes.json()) as { designId: string };
+
+  const firstClaimRes = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
+  });
+  const { findings: firstFindings } = (await firstClaimRes.json()) as { findings: { kind: string; threadId?: string }[] };
+  const threadId = firstFindings.find((f) => f.kind === "design_divergence")!.threadId!;
+
+  const beforeRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
+  const aliceDesignId = ((await beforeRes.json()) as { thread: { designId?: string } }).thread.designId!;
+
+  // Both sides resolve, exactly as the auto-close test above -- the thread
+  // closes, and both designs flip back to "open" (decideReview's approve
+  // path is unconditional about this, same ids as before).
+  await app.request(`/v1/designs/${bobDesignId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "bob's justification" }),
+  });
+  await app.request(`/v1/designs/${aliceDesignId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(alice.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "alice's justification" }),
+  });
+  const midRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
+  assert.equal(((await midRes.json()) as { thread: { status: string } }).thread.status, "closed", "sanity check: same as the test above");
+
+  // A genuinely new collision -- a different symbol, still inside alice's
+  // declared scope, still outside bob's -- between the same still-live pair.
+  const secondClaimRes = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::g", ts: 2000 })] }),
+  });
+  const { findings: secondFindings } = (await secondClaimRes.json()) as { findings: { kind: string; threadId?: string }[] };
+  const secondThreadId = secondFindings.find((f) => f.kind === "design_divergence")!.threadId!;
+  assert.equal(secondThreadId, threadId, "must reuse the existing thread, not fork a new one, for the same design pair");
+
+  const listRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(alice.token) });
+  assert.equal(((await listRes.json()) as { items: unknown[] }).items.length, 1, "still exactly one thread for this pair");
+
+  const afterRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
+  const afterBody2 = (await afterRes.json()) as { thread: { status: string }; messages: { message: string }[] };
+  assert.equal(afterBody2.thread.status, "open", "both designs are live again -- the new finding reopens the conversation");
+  assert.ok(
+    afterBody2.messages.some((m) => m.message.includes("src/x.ts::g")),
+    `expected the new finding's own message in the reopened thread's history: ${JSON.stringify(afterBody2.messages)}`,
+  );
+
+  // And both designs are genuinely re-blocked -- the reopened thread isn't
+  // just a stale label, the underlying enforcement actually re-armed too.
+  const aliceListRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s-alice`, { headers: bearer(alice.token) });
+  const aliceDesigns = (await aliceListRes.json()) as { items: { id: string; status: string }[] };
+  assert.equal(aliceDesigns.items.find((d) => d.id === aliceDesignId)?.status, "flagged");
+});
+
+// The negative case: nobody's left to act on it, so the thread must stay
+// closed even though the finding is still recorded.
+// Uses `textual_overlap` (two developers writing the same symbol) rather
+// than `design_divergence` -- that check fires whether or not either side
+// has a design at all (design-divergence.ts's own check is gated on the
+// intruded-upon design still being open, so it can't reach a state where a
+// finding lands with the referenced design already closed; `textualOverlap`,
+// checks.ts, has no such gate). Neither alice nor bob ever registers a
+// design here, which is the simplest way to get `reopenEligible: false` on
+// both sides of every finding.
+test("POST /v1/claims: a new textual_overlap finding against a pair whose thread already closed leaves it closed when neither side has a live design", async () => {
+  const { app, dataDir, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+  const bobToken = await addProjectMember(app, admin.token, "proj-1");
+
+  await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-alice", symbolId: "src/shared.ts::f" })] }),
+  });
+  const firstRes = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/shared.ts::f" })] }),
+  });
+  const { findings } = (await firstRes.json()) as { findings: { kind: string; threadId?: string }[] };
+  const threadId = findings.find((f) => f.kind === "textual_overlap")!.threadId!;
+
+  alignmentThreads.close(threadId, "alice@example.com");
+
+  // A genuinely new overlap between the same pair, still neither side ever
+  // having registered a design.
+  await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-alice", symbolId: "src/shared.ts::g" })] }),
+  });
+  const secondRes = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(bobToken) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/shared.ts::g" })] }),
+  });
+  const { findings: secondFindings } = (await secondRes.json()) as { findings: { kind: string; threadId?: string }[] };
+  assert.equal(secondFindings.find((f) => f.kind === "textual_overlap")!.threadId, threadId, "still reuses the existing thread, not a fork");
+
+  const afterRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(admin.token) });
+  const afterBody = (await afterRes.json()) as { thread: { status: string }; messages: { message: string }[] };
+  assert.equal(afterBody.thread.status, "closed", "neither side ever had a live design -- nobody to act on it, so it stays closed");
+  assert.ok(
+    afterBody.messages.some((m) => m.message.includes("src/shared.ts::g")),
+    "the finding is still recorded even though the thread doesn't reopen",
+  );
+});
+
 // Item 3's other fix, found while scoping the auto-close work: a bundled
 // review (constraintIds *and* conflictWaivers together -- reachable
 // whenever a design has both an active constraint match and an open
@@ -1725,6 +1854,7 @@ test("POST /v1/reviews/:id/decide: rejecting a bundled constraint+llm_divergence
     summary: "alice's work vs bob's unrelated work",
     initiatingDesignId: aliceDesignId,
     ts: Date.now(),
+    reopenEligible: false,
   });
 
   const resolveRes = await app.request(`/v1/designs/${aliceDesignId}/resolve`, {
@@ -1804,6 +1934,7 @@ test("PATCH /v1/designs/:id/close: closing a design instead of resolving it also
     summary: "alice's work vs bob's work",
     initiatingDesignId: aliceDesignId,
     ts: Date.now(),
+    reopenEligible: false,
   });
   designs.flag(aliceDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: bobDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "bob's work", overlapPaths: [] }] });
   designs.flag(bobDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: aliceDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "alice's work", overlapPaths: [] }] });
@@ -2920,6 +3051,7 @@ test("DesignRegistry.sweepExpired demoting a design to dormant also demotes its 
     summary: "alice's work vs bob's work",
     initiatingDesignId: aliceDesignId,
     ts: Date.now(),
+    reopenEligible: false,
   });
   designs.flag(aliceDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: bobDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "bob's work", overlapPaths: [] }] });
   designs.flag(bobDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: aliceDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "alice's work", overlapPaths: [] }] });
@@ -2990,6 +3122,7 @@ test("DesignRegistry.sweepExpired demoting one side to dormant leaves the thread
     summary: "alice's work vs bob's work",
     initiatingDesignId: aliceDesignId,
     ts: Date.now(),
+    reopenEligible: false,
   });
   // Neither side ever resolves -- alice's design stays actively flagged.
   designs.flag(aliceDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: bobDesignId, overlapKind: "touches", overlapDetail: "tension", conflictingSummary: "bob's work", overlapPaths: [] }] });
