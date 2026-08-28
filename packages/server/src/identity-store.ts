@@ -108,6 +108,17 @@ export interface ResolvedIdentity {
   developerId: string;
   orgs: { orgId: string; role: Role }[];
   projects: { projectId: string; orgId: string; role: Role }[];
+  /** Public "observe twing getting built" demo (2026-08-28): true only for
+   * the synthetic identity `app.ts`'s auth middleware builds in-line for an
+   * unauthenticated GET request, when `TWING_PUBLIC_PROJECT_ID` is
+   * configured -- never resolved from a real token, so `resolveToken`
+   * itself never sets this. `projects` on that identity always names
+   * exactly the one allowlisted project with `role: "member"`, which is
+   * what actually enforces isolation (via the existing
+   * `isProjectMember`/`canManageProject` checks); this flag is only for
+   * the handful of routes that need to say no to a plain member too (see
+   * `GET /v1/reviews`). */
+  isPublicViewer?: boolean;
 }
 
 const DEFAULT_INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days -- long enough to survive a Slack handoff, short enough that a leaked-but-unused code doesn't linger indefinitely.

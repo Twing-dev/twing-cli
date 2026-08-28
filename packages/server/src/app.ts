@@ -195,6 +195,13 @@ export interface CreateAppOptions {
    * Defaults to this package's own `package.json` version -- injectable
    * for tests that need a deliberately different value. */
   version?: string;
+  /** Public "observe twing getting built" demo (2026-08-28,
+   * `TWING_PUBLIC_PROJECT_ID` in main.ts): the one project id an
+   * unauthenticated GET request is allowed to read, or undefined (the
+   * default) for zero behavior change from today -- no other project, and
+   * this repo doesn't expect any deployment but this one to ever set it.
+   * See the auth middleware below for the actual mechanism. */
+  publicProjectId?: string;
 }
 
 type Variables = { identity: ResolvedIdentity };
@@ -227,6 +234,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const extractModel = options.extractModel ?? "google.gemma-4-31b";
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
   const noAuth = options.noAuth ?? false;
+  const publicProjectId = options.publicProjectId;
   const version = options.version ?? getServerVersion();
 
   const app = new Hono<{ Variables: Variables }>();
@@ -295,6 +303,24 @@ export function createApp(options: CreateAppOptions = {}) {
     }
     const header = c.req.header("authorization") ?? "";
     const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+    // Public "observe twing getting built" demo (2026-08-28): an
+    // unauthenticated GET (no bearer token at all -- an empty one after
+    // stripping "Bearer " counts the same as a missing header, so
+    // twing-monitor's own apiFetch, which always sends *an*
+    // Authorization header, works unchanged with authToken: "") is met
+    // with a synthetic identity that's a member of exactly one
+    // project -- publicProjectId, undefined unless TWING_PUBLIC_PROJECT_ID
+    // is set (main.ts). This adds no new authorization logic: every route
+    // below still goes through isProjectMember/canManageProject exactly as
+    // it always has, and this identity is only ever a member of the one
+    // allowlisted project, so those checks already refuse anything else.
+    // GET-only by construction -- this branch is never reached for a
+    // mutating method, which falls through to the unchanged 401 below
+    // exactly as it would for any other missing/invalid credential.
+    if (!token && c.req.method === "GET" && publicProjectId) {
+      c.set("identity", { developerId: "public-viewer", orgs: [], projects: [{ projectId: publicProjectId, orgId: "", role: "member" }], isPublicViewer: true });
+      return next();
+    }
     const identity = token ? identities.resolveToken(token) : undefined;
     if (!identity) {
       return c.json({ error: "unauthorized -- run `twing login --token <pat>` (or `twing keygen --invite <code>` if you don't have one yet)" }, 401);
@@ -992,6 +1018,18 @@ export function createApp(options: CreateAppOptions = {}) {
    * reconciliation in their project but still can't act inside one they're
    * not named on. */
   function canViewThread(identity: ResolvedIdentity, thread: { projectId: string; developerId: string; otherDeveloperId: string }): boolean {
+    // Public "observe twing getting built" demo (2026-08-28): the synthetic
+    // public-viewer identity is deliberately a plain `member`, never
+    // `admin` -- granting admin would also unlock GET /v1/projects/:id/invites
+    // (real, redeemable invite codes) and /v1/admin/* for this project,
+    // which must stay closed to an unauthenticated visitor. It's also never
+    // a real thread party (no claim/design is ever authored as
+    // "public-viewer"). Without this explicit allowance, canViewThread would
+    // reject every thread and the Alignment threads tab would render empty
+    // for every visitor -- so it gets its own narrow read-only carve-out
+    // here, same shape as the GET /v1/reviews 404 guard is a narrow
+    // carve-out in the other direction.
+    if (identity.isPublicViewer) return true;
     return isThreadParty(identity, thread) || canManageProject(identity, thread.projectId);
   }
 
@@ -1800,6 +1838,13 @@ export function createApp(options: CreateAppOptions = {}) {
   // show decided history, not just the live queue.
   app.get("/v1/reviews", (c) => {
     const identity = c.get("identity");
+    // Public "observe twing getting built" demo (2026-08-28): excluded
+    // outright rather than filtered -- a pending review's own
+    // justification text can be more candid than a design summary ever
+    // is, and there's no version of this route's response that's fine to
+    // show a stranger. 404, not 403, so it reads as "this doesn't exist
+    // here" rather than inviting a login attempt.
+    if (identity.isPublicViewer) return c.json({ error: "not available" }, 404);
     const projectId = c.req.query("projectId");
     if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
     if (!isProjectMember(identity, projectId)) {

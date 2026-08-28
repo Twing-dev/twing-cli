@@ -23,6 +23,27 @@ coordination-server.twing.dev {
 		}
 	}
 
+	# Public "observe twing getting built" demo (2026-08-28): unauthenticated
+	# GET /v1/* traffic is genuinely zero-friction to hit once
+	# TWING_PUBLIC_PROJECT_ID is set server-side (see app.ts's publicProjectId
+	# doc comment) -- rate limit it the same way as @auth_sensitive above,
+	# per-remote-IP since this traffic has no identity by construction. A
+	# request that does carry an Authorization header (real daemons/hooks/
+	# monitor sessions) never matches this and keeps its normal, unlimited
+	# budget -- this only throttles the anonymous-viewer path.
+	@public_get {
+		method GET
+		path /v1/*
+		not header Authorization *
+	}
+	rate_limit @public_get {
+		zone public_get {
+			key {remote_host}
+			events 60
+			window 1m
+		}
+	}
+
 	reverse_proxy twing-serve:8787
 }
 

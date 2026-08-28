@@ -52,7 +52,7 @@ async function waitFor(predicate: () => Promise<boolean> | boolean, timeoutMs = 
   throw new Error(`waitFor: predicate never became true within ${timeoutMs}ms`);
 }
 
-function freshApp(options: { corsOrigins?: string[]; version?: string } = {}) {
+function freshApp(options: { corsOrigins?: string[]; version?: string; publicProjectId?: string } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-app-test-"));
   // In-memory DB for speed -- these tests don't need cross-instance
   // persistence (that's design-store.test.ts/identity-store.test.ts's job).
@@ -63,7 +63,17 @@ function freshApp(options: { corsOrigins?: string[]; version?: string } = {}) {
   const designs = new DesignRegistry(db);
   const constraints = new ConstraintStore(db);
   const alignmentThreads = new AlignmentThreadStore(db);
-  const app = createApp({ db, identities, store, designs, constraints, alignmentThreads, corsOrigins: options.corsOrigins, version: options.version });
+  const app = createApp({
+    db,
+    identities,
+    store,
+    designs,
+    constraints,
+    alignmentThreads,
+    corsOrigins: options.corsOrigins,
+    version: options.version,
+    publicProjectId: options.publicProjectId,
+  });
   return { app, dataDir, identities, store, designs, constraints, alignmentThreads };
 }
 
@@ -4303,5 +4313,65 @@ test("hook version-mismatch: no x-twing-hook-version header at all falls through
     headers: { "content-type": "application/json" },
     body: JSON.stringify({}),
   });
+  assert.equal(res.status, 401);
+});
+
+// Public "observe twing getting built" demo (2026-08-28) -- see app.ts's
+// publicProjectId doc comment on the auth middleware for the mechanism
+// this exercises: an unauthenticated GET is synthesized into an identity
+// that's a member of exactly publicProjectId, reusing isProjectMember's
+// existing check for isolation rather than any new authorization logic.
+test("GET /v1/designs: an unauthenticated request succeeds and returns data when publicProjectId is set, scoped to that project", async () => {
+  const { app, dataDir } = freshApp({ publicProjectId: "proj-1" });
+  const admin = await bootstrapAdmin(app, dataDir);
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "public demo project's own real work", creates: [], touches: ["src/x.ts"], dependsOn: [] }),
+  });
+
+  const res = await app.request("/v1/designs?projectId=proj-1");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { items: { summary: string }[] };
+  assert.equal(body.items.length, 1);
+  assert.equal(body.items[0].summary, "public demo project's own real work");
+});
+
+test("GET /v1/designs: an unauthenticated request against any project other than publicProjectId still 403s -- isolation comes from the same isProjectMember check every route already has, not new logic", async () => {
+  const { app, dataDir } = freshApp({ publicProjectId: "proj-1" });
+  await bootstrapAdmin(app, dataDir); // founds proj-1
+
+  const res = await app.request("/v1/designs?projectId=some-other-real-tenants-project");
+  assert.equal(res.status, 403);
+});
+
+test("GET /v1/reviews: 404s for the unauthenticated public viewer, never the real (possibly candid) review data", async () => {
+  const { app, dataDir } = freshApp({ publicProjectId: "proj-1" });
+  await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/reviews?projectId=proj-1");
+  assert.equal(res.status, 404);
+});
+
+test("an unauthenticated POST/PATCH still 401s exactly as before, even with publicProjectId set -- the synthetic identity is only ever built for GET", async () => {
+  const { app, dataDir } = freshApp({ publicProjectId: "proj-1" });
+  await bootstrapAdmin(app, dataDir);
+
+  const postRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] }),
+  });
+  assert.equal(postRes.status, 401);
+
+  const patchRes = await app.request("/v1/designs/some-id/close", { method: "PATCH" });
+  assert.equal(patchRes.status, 401);
+});
+
+test("GET /v1/designs: an unauthenticated request 401s exactly as before when publicProjectId is unset -- zero behavior change for every other deployment", async () => {
+  const { app, dataDir } = freshApp(); // no publicProjectId
+  await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/designs?projectId=proj-1");
   assert.equal(res.status, 401);
 });
