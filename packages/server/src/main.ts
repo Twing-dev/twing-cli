@@ -57,11 +57,16 @@ const corsOrigins = process.env.TWING_SERVE_CORS_ORIGINS?.split(",")
   .map((s) => s.trim())
   .filter((s) => s.length > 0);
 
-// Public "observe twing getting built" demo (2026-08-28): unset for every
-// deployment but this one's own coordinator -- a plain, hardcoded env var,
-// not a general "make any project public" admin feature. See app.ts's
-// publicProjectId doc comment for the actual mechanism.
-const publicProjectId = process.env.TWING_PUBLIC_PROJECT_ID;
+// Public "observe twing getting built" demo (2026-08-28, generalized to a
+// list the same day): unset for every deployment but this one's own
+// coordinator -- a plain, hardcoded env var, not a general "make any
+// project public" admin feature. Comma-separated, same pattern as
+// TWING_SERVE_CORS_ORIGINS above -- this coordinator hosts more than one
+// publicly-viewable project (twing-cli's and twing-monitor's own repos).
+// See app.ts's publicProjectIds doc comment for the actual mechanism.
+const publicProjectIds = process.env.TWING_PUBLIC_PROJECT_IDS?.split(",")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
 
 const app = createApp({
   db,
@@ -74,7 +79,7 @@ const app = createApp({
   identities: new IdentityStore(db, dataDirOptions),
   noAuth,
   corsOrigins,
-  publicProjectId,
+  publicProjectIds,
   // Test-only escape hatch, same pattern as db/client.ts's `memory: true`:
   // real `twing serve` never sets this. Lets an integration test spin up
   // an ephemeral server declaring a deliberately different version than

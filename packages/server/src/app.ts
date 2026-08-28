@@ -195,13 +195,13 @@ export interface CreateAppOptions {
    * Defaults to this package's own `package.json` version -- injectable
    * for tests that need a deliberately different value. */
   version?: string;
-  /** Public "observe twing getting built" demo (2026-08-28,
-   * `TWING_PUBLIC_PROJECT_ID` in main.ts): the one project id an
-   * unauthenticated GET request is allowed to read, or undefined (the
-   * default) for zero behavior change from today -- no other project, and
-   * this repo doesn't expect any deployment but this one to ever set it.
-   * See the auth middleware below for the actual mechanism. */
-  publicProjectId?: string;
+  /** Public "observe twing getting built" demo (2026-08-28, generalized
+   * from a single id to a list the same day, `TWING_PUBLIC_PROJECT_IDS` in
+   * main.ts): the project ids an unauthenticated GET request is allowed to
+   * read, or undefined/empty (the default) for zero behavior change from
+   * today -- this repo doesn't expect any deployment but this one to ever
+   * set it. See the auth middleware below for the actual mechanism. */
+  publicProjectIds?: string[];
 }
 
 type Variables = { identity: ResolvedIdentity };
@@ -234,7 +234,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const extractModel = options.extractModel ?? "google.gemma-4-31b";
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
   const noAuth = options.noAuth ?? false;
-  const publicProjectId = options.publicProjectId;
+  const publicProjectIds = options.publicProjectIds;
   const version = options.version ?? getServerVersion();
 
   const app = new Hono<{ Variables: Variables }>();
@@ -303,22 +303,28 @@ export function createApp(options: CreateAppOptions = {}) {
     }
     const header = c.req.header("authorization") ?? "";
     const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
-    // Public "observe twing getting built" demo (2026-08-28): an
-    // unauthenticated GET (no bearer token at all -- an empty one after
-    // stripping "Bearer " counts the same as a missing header, so
-    // twing-monitor's own apiFetch, which always sends *an*
-    // Authorization header, works unchanged with authToken: "") is met
-    // with a synthetic identity that's a member of exactly one
-    // project -- publicProjectId, undefined unless TWING_PUBLIC_PROJECT_ID
-    // is set (main.ts). This adds no new authorization logic: every route
-    // below still goes through isProjectMember/canManageProject exactly as
-    // it always has, and this identity is only ever a member of the one
-    // allowlisted project, so those checks already refuse anything else.
-    // GET-only by construction -- this branch is never reached for a
-    // mutating method, which falls through to the unchanged 401 below
-    // exactly as it would for any other missing/invalid credential.
-    if (!token && c.req.method === "GET" && publicProjectId) {
-      c.set("identity", { developerId: "public-viewer", orgs: [], projects: [{ projectId: publicProjectId, orgId: "", role: "member" }], isPublicViewer: true });
+    // Public "observe twing getting built" demo (2026-08-28, generalized
+    // from a single project to a list the same day): an unauthenticated
+    // GET (no bearer token at all -- an empty one after stripping "Bearer "
+    // counts the same as a missing header, so twing-monitor's own
+    // apiFetch, which always sends *an* Authorization header, works
+    // unchanged with authToken: "") is met with a synthetic identity that's
+    // a member of every project in publicProjectIds, undefined/empty
+    // unless TWING_PUBLIC_PROJECT_IDS is set (main.ts). This adds no new
+    // authorization logic: every route below still goes through
+    // isProjectMember/canManageProject exactly as it always has, and this
+    // identity is only ever a member of the allowlisted projects, so those
+    // checks already refuse anything else. GET-only by construction --
+    // this branch is never reached for a mutating method, which falls
+    // through to the unchanged 401 below exactly as it would for any other
+    // missing/invalid credential.
+    if (!token && c.req.method === "GET" && publicProjectIds && publicProjectIds.length > 0) {
+      c.set("identity", {
+        developerId: "public-viewer",
+        orgs: [],
+        projects: publicProjectIds.map((projectId) => ({ projectId, orgId: "", role: "member" as const })),
+        isPublicViewer: true,
+      });
       return next();
     }
     const identity = token ? identities.resolveToken(token) : undefined;
