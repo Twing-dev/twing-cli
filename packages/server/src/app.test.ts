@@ -2546,13 +2546,14 @@ test("POST /v1/designs/:id/amend: a groupId-only body joins a group after the fa
   assert.equal(items.find((d) => d.id === solo.designId)?.groupId, anchor.designId);
 });
 
-test("POST /v1/designs/:id/amend: groupId passes through checkAmendedScope's delta unused -- joining a group doesn't itself change the touches/creates/dependsOn conflict-check outcome", async () => {
-  // checkAmendedScope only ever reads touches/creates/dependsOn/summary off
-  // its delta (confirmed by reading it) -- this exercises that a
-  // groupId-only amend (no scope change at all) re-runs the same check
-  // registration already passed and still comes back clean, i.e. adding
-  // `groupId` to the delta shape didn't accidentally wire it into the
-  // conflict-detection candidate.
+test("POST /v1/designs/:id/amend: a groupId-only amend never touches conflict detection at all -- it's routed to relink(), not checkAmendedScope", async () => {
+  // §17 design linking follow-up (2026-08-28): a groupId-only delta now
+  // short-circuits to DesignRegistry.relink() before checkAmendedScope
+  // ever runs (see the amend route's hasScopeChange branch) -- this used
+  // to exercise "the delta reaches checkAmendedScope but is a no-op
+  // there"; now it exercises "checkAmendedScope is never reached in the
+  // first place". Still asserts the same clean/groupId outcome, which is
+  // what actually matters to a caller.
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
 
@@ -2579,6 +2580,73 @@ test("POST /v1/designs/:id/amend: groupId passes through checkAmendedScope's del
   const amendBody = (await amendRes.json()) as { verdict: string; groupId?: string };
   assert.equal(amendBody.verdict, "clean");
   assert.equal(amendBody.groupId, anchor.designId);
+});
+
+// §17 design linking follow-up (2026-08-28): groupId was previously only
+// settable at registration or via amend() on an *open* design -- an
+// already-closed design (the common terminal state) had no path at all to
+// join a group. relink() is the fix; these two exercise the route's new
+// branch directly.
+test("POST /v1/designs/:id/amend: a groupId-only body still succeeds against a CLOSED design -- this is the whole point of relink()", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const anchorRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "anchor", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const anchor = (await anchorRes.json()) as { designId: string };
+
+  const targetRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "target", creates: [], touches: ["b.ts"], dependsOn: [], force: true }),
+  });
+  const target = (await targetRes.json()) as { designId: string };
+
+  const closeRes = await app.request(`/v1/designs/${target.designId}/close`, { method: "PATCH", headers: bearer(admin.token) });
+  assert.equal((await closeRes.json() as { status?: string }).status, "closed");
+
+  const amendRes = await app.request(`/v1/designs/${target.designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ groupId: anchor.designId }),
+  });
+  assert.equal(amendRes.status, 200);
+  const amendBody = (await amendRes.json()) as { verdict: string; groupId?: string };
+  assert.equal(amendBody.verdict, "clean");
+  assert.equal(amendBody.groupId, anchor.designId);
+
+  const listRes = await app.request(`/v1/designs?projectId=proj-b`, { headers: bearer(admin.token) });
+  const { items } = (await listRes.json()) as { items: { id: string; groupId?: string; status: string }[] };
+  const persisted = items.find((d) => d.id === target.designId);
+  assert.equal(persisted?.groupId, anchor.designId);
+  assert.equal(persisted?.status, "closed", "relink doesn't reopen the design");
+});
+
+test("POST /v1/designs/:id/amend: a CLOSED design with a real scope change (not groupId-only) still 409s -- the escape hatch is groupId-only, not a general reopen", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const targetRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "target", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const target = (await targetRes.json()) as { designId: string };
+  await app.request(`/v1/designs/${target.designId}/close`, { method: "PATCH", headers: bearer(admin.token) });
+
+  // groupId + a real scope change together -- hasScopeChange is true, so
+  // this must NOT be treated as the groupId-only case.
+  const amendRes = await app.request(`/v1/designs/${target.designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ groupId: target.designId, addTouches: ["b.ts"] }),
+  });
+  assert.equal(amendRes.status, 409);
+  const body = (await amendRes.json()) as { error?: string };
+  assert.match(body.error ?? "", /closed, not open -- can't amend/);
 });
 
 test("POST /v1/designs/:id/amend: neither a scope delta nor a summary is a 400, not a silent no-op", async () => {

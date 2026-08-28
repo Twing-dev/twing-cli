@@ -471,6 +471,40 @@ export class DesignRegistry {
     return this.get(id);
   }
 
+  /** §17 design linking follow-up (2026-08-28): `groupId` was otherwise
+   * only ever settable at `register()` time or via `amend()` while a
+   * design is `"open"` -- once a design reaches its far more common
+   * terminal state (`"closed"`), there was no path at all to retroactively
+   * link it to a sibling design in another project. Found live trying to
+   * group two already-closed cross-repo observe-demo designs together.
+   *
+   * This is a narrow, metadata-only escape hatch: works regardless of
+   * status (`open`/`flagged`/`closed`/`dormant`/`superseded`/`expired`),
+   * touches only the `groupId` column -- no scope re-check, no
+   * `scopeVersion` bump, no verdict logic at all, unlike `amend()`.
+   * Linking two already-decided designs together carries none of
+   * `amend()`'s scope-expansion risk (no touches/creates/dependsOn/summary
+   * change, nothing for `design-checks.ts` to re-verify), so it doesn't
+   * need `amend()`'s "must be open" guard. Doesn't fan out a summary
+   * update to the new group's other siblings the way `amend()`'s
+   * `summaryUpdate` param does -- deliberately minimal, just the link
+   * itself. Returns `undefined` only if the design doesn't exist. */
+  relink(id: string, groupId: string): DesignStatement | undefined {
+    const existing = this.get(id);
+    if (!existing) return undefined;
+    this.db.update(designsTable).set({ groupId }).where(eq(designsTable.id, id)).run();
+    this.activityLog.append({
+      projectId: existing.projectId,
+      developerId: existing.developerId,
+      sessionId: existing.sessionId,
+      kind: "design_amended",
+      relatedId: id,
+      ts: Date.now(),
+      payload: { newGroupId: groupId },
+    });
+    return this.get(id);
+  }
+
   /** §17 design lifecycle (2026-08): reactivates a *dormant* design, always
    * as an explicit, deliberate act -- never called silently by a mere file
    * match (see `/v1/designs/scope-match`'s `"dormant"` state and the
