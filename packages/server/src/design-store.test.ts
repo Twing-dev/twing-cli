@@ -783,6 +783,44 @@ test("DesignRegistry: amend's design_amended activity payload carries newGroupId
   registry.stop();
 });
 
+// §17 design linking follow-up (2026-08-28): relink() is the escape hatch
+// for the case amend() can't handle -- a CLOSED design joining a group.
+test("DesignRegistry: relink() joins a CLOSED design into a group -- amend() can't do this, that's the whole point", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const anchor = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "anchor", creates: [], touches: [], dependsOn: [] });
+  const target = registry.register({ projectId: "p2", developerId: "d2", sessionId: "s2", summary: "target", creates: ["a.ts"], touches: ["b.ts"], dependsOn: [] });
+  registry.close(target.id);
+  assert.equal(registry.get(target.id)?.status, "closed");
+
+  // amend() itself still refuses -- confirms relink() isn't just a
+  // permissive rename of the existing path.
+  assert.equal(registry.amend(target.id, { groupId: anchor.id }), undefined);
+
+  const relinked = registry.relink(target.id, anchor.id);
+  assert.equal(relinked?.groupId, anchor.id);
+  assert.equal(relinked?.status, "closed", "relink doesn't reopen the design");
+  assert.deepEqual(relinked?.touches, ["b.ts"], "scope is untouched -- this is metadata-only");
+
+  const group = registry.listByGroup(anchor.id);
+  assert.deepEqual(
+    group.map((d) => d.id).sort(),
+    [anchor.id, target.id].sort(),
+  );
+
+  const events = log.eventsForRelatedId(target.id).filter((e) => e.kind === "design_amended");
+  assert.equal(events.length, 1);
+  assert.equal((events[0].payload as { newGroupId?: string }).newGroupId, anchor.id);
+  registry.stop();
+});
+
+test("DesignRegistry: relink() returns undefined for a design that doesn't exist", () => {
+  const registry = freshRegistry();
+  assert.equal(registry.relink("no-such-id", "some-group"), undefined);
+  registry.stop();
+});
+
 test("DesignRegistry: close propagates to every open/flagged/dormant sibling across projects, leaves an already-closed sibling's closedAt untouched", () => {
   const registry = freshRegistry();
   // `c` closes first, *while solo* (same reasoning as the amend/propagation

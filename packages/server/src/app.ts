@@ -1517,11 +1517,28 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!isProjectMember(identity, design.projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
+
+    const body = await c.req.json<AmendRequestBody>().catch(() => null);
+
+    // §17 design linking follow-up (2026-08-28): a groupId-only delta (no
+    // scope or summary change) is pure metadata, not a scope expansion --
+    // route it to DesignRegistry.relink() instead, which works regardless
+    // of status (see relink()'s own doc comment for why that's safe). This
+    // has to be checked before the "must be open" gate below, since its
+    // whole purpose is letting a *closed* design join a group. Every other
+    // amend shape (any actual scope/summary change) falls through
+    // unchanged to the existing open-only path.
+    const hasScopeChange = Boolean((body?.addTouches?.length ?? 0) > 0 || (body?.addCreates?.length ?? 0) > 0 || (body?.addDependsOn?.length ?? 0) > 0 || body?.summary !== undefined);
+    if (body?.groupId !== undefined && !hasScopeChange) {
+      const relinked = designs.relink(id, body.groupId);
+      if (!relinked) return c.json({ error: "no such design" }, 404);
+      return c.json({ verdict: "clean", designId: relinked.id, groupId: relinked.groupId });
+    }
+
     if (design.status !== "open") {
       return c.json({ error: `design is ${design.status}, not open -- can't amend` }, 409);
     }
 
-    const body = await c.req.json<AmendRequestBody>().catch(() => null);
     // Computed once, here -- not inside checkAmendedScope/designs.amend
     // individually -- so the pre-persist check and the actual persist act
     // on the exact same final string rather than each independently calling
