@@ -230,6 +230,23 @@ export function isDesignSideDormantOrSettled(design: DesignStatement | undefined
   return design?.status === "dormant" || isDesignSideSettled(design, counterpartDesignId, category);
 }
 
+/** Reopen-on-new-finding fix (2026-08-28): is this design currently
+ * live -- someone could plausibly still act on a fresh finding against it?
+ * `"open"` and `"flagged"` both count (a flagged design still has a real
+ * session/developer behind it, just currently blocked on something else --
+ * the same set `DesignRegistry.openDesigns()` already treats as "open" for
+ * every other purpose in this file). `"closed"`/`"dormant"`/`"superseded"`/
+ * `"expired"` don't -- nobody's coming back to a closed design (it never
+ * reopens, see `flag()`'s own status guard, design-store.ts), and a merely
+ * dormant one has already gone quiet on its own. Used by
+ * `alignment-store.ts`'s `findOrCreate` (via `reopenEligible`, its caller's
+ * responsibility to compute since the store itself has no design state) to
+ * decide whether a new finding against an already-closed/dormant thread is
+ * still worth reopening the conversation for, or just worth recording. */
+export function isDesignLive(design: DesignStatement | undefined): boolean {
+  return design?.status === "open" || design?.status === "flagged";
+}
+
 /** Drops any path in `paths` already waived (`justifiedOverlaps`) for this
  * specific `otherId` -- item 7's fix (2026-08-18): a path *not* in the list
  * still flags normally, so this only ever narrows an already-detected

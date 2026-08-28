@@ -82,7 +82,16 @@ export type ActivityEventKind =
   /** The symmetric wake-up: `design_resumed` reactivated a design, and a
    * dormant thread naming it woke back up to "open" -- see
    * `AlignmentThreadStore.wake`. */
-  | "alignment_thread_woken";
+  | "alignment_thread_woken"
+  /** Reopen-on-new-finding fix (2026-08-28): a genuinely new finding landed
+   * against a pair whose thread had already `alignment_thread_closed`, and
+   * at least one of the two designs behind it is still live -- see
+   * `AlignmentThreadStore.reopen` and `FindOrCreateInput.reopenEligible`'s
+   * own doc comment. Distinct from `alignment_thread_woken` above (that's
+   * specifically the dormant-thread path, triggered by `design resume`) --
+   * this is the closed-thread path, triggered by `findOrCreate` reacting to
+   * a fresh finding, not a party's own action. */
+  | "alignment_thread_reopened";
 
 export interface ActivityEvent {
   id: string;

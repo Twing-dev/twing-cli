@@ -81,12 +81,17 @@ export interface AlignmentThread {
   /** Tightening alignment threads item 4 (2026-08-27): widened from
    * `"open" | "closed"` to add `"dormant"` -- distinct from `"closed"`
    * because dormancy is explicitly reversible for a design (`resume()`
-   * exists specifically for this), and there's no reopen path anywhere in
-   * the UI/API for a closed thread. A thread goes dormant when the design
+   * exists specifically for this). A thread goes dormant when the design
    * lifecycle behind it goes quiet on its own (see `dormant()`/`wake()`
    * below), never as a deliberate party action -- that distinction is
    * exactly why it isn't folded into `"closed"`. Plain `text` column, no DB
-   * migration needed for the widen. */
+   * migration needed for the widen.
+   *
+   * 2026-08-28: `"closed"` also gained a reopen path (`reopen()`, below) --
+   * `findOrCreate` uses it when a genuinely new finding lands against a
+   * pair whose thread already closed, but only while at least one of the
+   * two designs behind it is still live; see `FindOrCreateInput.reopenEligible`'s
+   * own doc comment for the full reasoning. */
   status: "open" | "closed" | "dormant";
   systemDescription: string;
   openedAt: number;
@@ -137,6 +142,20 @@ export interface FindOrCreateInput {
   summary: string;
   initiatingDesignId?: string;
   ts?: number;
+  /** Reopen-on-new-finding fix (2026-08-28): whether *this* finding is still
+   * actionable by someone right now -- true when at least one of the two
+   * designs behind it is currently live (`"open"` or `"flagged"`; computed
+   * by the caller, which has live design state this store doesn't). Only
+   * consulted when `findOrCreate` matches an existing thread that's already
+   * `"closed"`/`"dormant"`: `true` reopens/wakes it before amending, `false`
+   * leaves its status exactly where it was (the finding still gets recorded
+   * -- `amend()` posts its message unconditionally regardless of status --
+   * there's just nobody left to act on it, so reopening would only be
+   * noise). Never reopens a *design* itself -- designs never leave
+   * `"closed"` once there; this only ever changes the advisory thread's own
+   * status. Irrelevant (and ignored) when the match is already `"open"` or
+   * when there's no match at all. */
+  reopenEligible: boolean;
 }
 
 interface ThreadRow {
@@ -260,13 +279,31 @@ export class AlignmentThreadStore {
    * merge two genuinely-different conflicts that happen to share only one
    * side; either id being unresolved (as `checkAmendedScope`'s callers
    * sometimes are) just skips the reverse match, same forward-only
-   * fallback as before this fix. */
+   * fallback as before this fix.
+   *
+   * 2026-08-28: dropped `status === "open"` from the match itself -- a
+   * thread that already closed or went dormant for this exact design pair
+   * used to be invisible here, so a genuinely new finding against it forked
+   * *another* thread rather than reopening the existing conversation, the
+   * same fan-out bug class as 2026-08-23's `symbolId`-keyed one above, just
+   * triggered by "closed" instead of "never existed" -- confirmed live
+   * against a thread whose async `llm_divergence` check landed a few ms
+   * after the initiating design closed. Found while investigating a
+   * different-looking symptom: `runSemanticComparatorPass` still posting a
+   * fresh-looking message into an *already-open* thread whose both sides
+   * had genuinely settled, with nothing to re-run the close check
+   * afterward (see `maybeAutoCloseThread`'s call site, app.ts). A matched
+   * row that's closed/dormant is reopened/woken here -- but only when
+   * `input.reopenEligible` says the finding is still actionable (see its
+   * own doc comment); otherwise `amend()` below still records the finding
+   * (it posts unconditionally, regardless of status) without touching the
+   * thread's own status. Designs themselves are never reopened by this --
+   * only the advisory thread. */
   findOrCreate(input: FindOrCreateInput): AlignmentThread {
     const forward = [
       eq(threadsTable.projectId, input.projectId),
       eq(threadsTable.developerId, input.developerId),
       eq(threadsTable.otherDeveloperId, input.otherDeveloperId),
-      eq(threadsTable.status, "open"),
     ];
     if (input.designId) forward.push(eq(threadsTable.designId, input.designId));
 
@@ -277,7 +314,6 @@ export class AlignmentThreadStore {
           eq(threadsTable.projectId, input.projectId),
           eq(threadsTable.developerId, input.otherDeveloperId),
           eq(threadsTable.otherDeveloperId, input.developerId),
-          eq(threadsTable.status, "open"),
           eq(threadsTable.initiatingDesignId, input.designId),
           eq(threadsTable.designId, input.initiatingDesignId),
         )!,
@@ -288,7 +324,18 @@ export class AlignmentThreadStore {
       .from(threadsTable)
       .where(or(...conditions))
       .get() as ThreadRow | undefined;
-    if (existingRow) return this.amend(existingRow, input);
+    if (existingRow) {
+      if (input.reopenEligible && existingRow.status === "closed") {
+        this.reopen(existingRow.id);
+        existingRow.status = "open";
+        existingRow.closedAt = null;
+        existingRow.closedBy = null;
+      } else if (input.reopenEligible && existingRow.status === "dormant") {
+        this.wake(existingRow.id);
+        existingRow.status = "open";
+      }
+      return this.amend(existingRow, input);
+    }
 
     const ts = input.ts ?? Date.now();
     const thread: AlignmentThread = {
@@ -476,6 +523,32 @@ export class AlignmentThreadStore {
       kind: "alignment_thread_closed",
       relatedId: threadId,
       ts: closedAt,
+    });
+    return this.get(threadId);
+  }
+
+  /** Reopen-on-new-finding fix (2026-08-28) -- the counterpart to `close()`
+   * that its own doc comment used to say didn't exist ("there's no reopen
+   * path anywhere in the UI/API for a closed thread", `AlignmentThread`'s
+   * doc comment above). Only ever called from `findOrCreate` reacting to a
+   * fresh finding that's still actionable (`input.reopenEligible`), never a
+   * party's own action -- same "author-less" reasoning as `dormant()`
+   * below, so there's no `closedBy`-equivalent identity to record here
+   * either. Clears `closedAt`/`closedBy` back to null rather than leaving
+   * stale values from the previous close sitting on a now-open thread.
+   * No-op if the thread isn't currently `"closed"` (a `"dormant"` thread
+   * has its own reopen path, `wake()` below, already reused by
+   * `findOrCreate` for that case). */
+  reopen(threadId: string): AlignmentThread | undefined {
+    const thread = this.get(threadId);
+    if (!thread) return undefined;
+    if (thread.status !== "closed") return thread;
+    this.db.update(threadsTable).set({ status: "open", closedAt: null, closedBy: null }).where(eq(threadsTable.id, threadId)).run();
+    this.activityLog.append({
+      projectId: thread.projectId,
+      kind: "alignment_thread_reopened",
+      relatedId: threadId,
+      ts: Date.now(),
     });
     return this.get(threadId);
   }

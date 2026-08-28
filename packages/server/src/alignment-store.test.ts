@@ -20,6 +20,7 @@ const baseInput = {
   subKind: "scope_intrusion" as const,
   summary: "1 overlapping path with \"bob's design\"",
   initiatingDesignId: "alice-design-1",
+  reopenEligible: false,
 };
 
 test("AlignmentThreadStore: findOrCreate opens a new thread and seeds it with the system description as the first message", () => {
@@ -156,12 +157,53 @@ test("AlignmentThreadStore: the reverse-direction match requires both design ids
   assert.notEqual(unrelated.id, first.id, "must not merge into a thread about a different design of bob's");
 });
 
-test("AlignmentThreadStore: findOrCreate opens a new thread once the prior one is closed", () => {
+// Reopen-on-new-finding fix (2026-08-28): superseded the old "opens a new
+// thread once the prior one is closed" behavior -- that was the actual bug
+// (a duplicate-thread fork, same class as the symbolId/reverse-direction
+// ones above, just triggered by "closed" instead of "never matched"/"wrong
+// direction"). findOrCreate now always reuses the same thread for a given
+// design pair regardless of its current status; only whether it flips back
+// to "open" depends on `reopenEligible`.
+test("AlignmentThreadStore: findOrCreate reuses (never forks) a closed thread for the same design pair, but leaves it closed when reopenEligible is false", () => {
   const { store } = freshStore();
   const first = store.findOrCreate(baseInput);
   store.close(first.id, "alice");
-  const second = store.findOrCreate(baseInput);
-  assert.notEqual(first.id, second.id);
+  const second = store.findOrCreate({ ...baseInput, symbolIds: ["src/net/retry.ts::RetryPolicy.jitter"], systemDescription: "the same tension resurfaced", reopenEligible: false });
+  assert.equal(second.id, first.id, "must reuse the existing thread, not fork a new one");
+  assert.equal(second.status, "closed", "reopenEligible: false -- nobody's around to act, so the status stays put");
+  const messages = store.messages(first.id);
+  assert.equal(messages.length, 2, "the finding is still recorded even though the thread doesn't reopen");
+  assert.equal(messages[1].message, "the same tension resurfaced");
+});
+
+test("AlignmentThreadStore: findOrCreate reopens a closed thread for the same design pair when reopenEligible is true", () => {
+  const { store } = freshStore();
+  const first = store.findOrCreate(baseInput);
+  store.close(first.id, "alice");
+  const second = store.findOrCreate({ ...baseInput, systemDescription: "a fresh finding, and someone's still around", reopenEligible: true });
+  assert.equal(second.id, first.id, "must reuse the existing thread, not fork a new one");
+  assert.equal(second.status, "open");
+  assert.equal(second.closedAt, undefined, "reopen() clears the stale close bookkeeping");
+  assert.equal(second.closedBy, undefined);
+});
+
+test("AlignmentThreadStore: findOrCreate wakes a dormant thread for the same design pair when reopenEligible is true", () => {
+  const { store } = freshStore();
+  const first = store.findOrCreate(baseInput);
+  store.dormant(first.id);
+  const second = store.findOrCreate({ ...baseInput, systemDescription: "work resumed and found the same tension again", reopenEligible: true });
+  assert.equal(second.id, first.id, "must reuse the existing thread, not fork a new one");
+  assert.equal(second.status, "open");
+});
+
+test("AlignmentThreadStore: reopen is a no-op on a thread that isn't currently closed", () => {
+  const { store } = freshStore();
+  const open = store.findOrCreate(baseInput);
+  assert.equal(store.reopen(open.id)?.status, "open");
+  const dormant = store.findOrCreate({ ...baseInput, otherDeveloperId: "carol" });
+  store.dormant(dormant.id);
+  assert.equal(store.reopen(dormant.id)?.status, "dormant", "reopen() is specifically the closed-thread path -- dormant has its own wake()");
+  assert.equal(store.reopen("does-not-exist"), undefined);
 });
 
 test("AlignmentThreadStore: listByProject filters by status", () => {
