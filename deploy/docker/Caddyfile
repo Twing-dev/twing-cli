@@ -6,6 +6,17 @@
 }
 
 coordination-server.twing.dev {
+	# twing-monitor's list routes (/v1/designs, /v1/alignment-threads, ...)
+	# return uncompressed JSON that's mostly repeated field names/text --
+	# gzip/zstd shrinks them 5-10x. Found live, 2026-08-29, investigating
+	# monitor UI load times: this response was going out with no
+	# content-encoding at all even when the client advertised
+	# `Accept-Encoding: gzip, br`, so every KB was crossing the wire raw.
+	# `encode` is a built-in Caddy directive with a fixed position in the
+	# default directive order (always before `reverse_proxy`), unlike
+	# `rate_limit` above -- no `order` entry needed for this one.
+	encode zstd gzip
+
 	# Rate limiting on the abuse-prone, pre-authentication routes: the
 	# break-glass bootstrap token, invite redemption, and GitHub-founding/
 	# joining -- all reachable without a cached token, so all brute-forceable
@@ -53,5 +64,10 @@ coordination-server.twing.dev {
 # /v1/* API routes -- the coordinator's own auth-sensitive-route limiting
 # above is unaffected and unrelated.
 monitor.twing.dev {
+	# Same finding as coordination-server.twing.dev above: the JS bundle
+	# (~250KB) was also going out with no content-encoding at all. The
+	# nginx image serving it (twing-monitor's own deploy/docker) has no
+	# gzip config of its own, so this is the only place compressing it.
+	encode zstd gzip
 	reverse_proxy twing-monitor:80
 }
