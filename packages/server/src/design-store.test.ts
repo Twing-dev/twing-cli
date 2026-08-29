@@ -912,3 +912,106 @@ test("ConstraintStore: get finds by id, remove deletes and logs constraint_remov
   assert.equal(store.remove(created.id), undefined);
   assert.equal(store.remove("never-existed"), undefined);
 });
+
+test("DesignRegistry: listByProjectPage paginates newest-first with a rowid tiebreak, nextBefore only when more remain", async () => {
+  const registry = freshRegistry();
+  const ids: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    ids.push(registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: `d${i}`, creates: [], touches: [], dependsOn: [] }).id);
+    // A tight loop can register several rows within the same millisecond,
+    // and `before` (an exclusive bound on that shared `createdAt`) would
+    // then drop *all* same-millisecond rows at once, not just the ones
+    // already returned -- the same accepted tie gap `eventsForProjectPage`
+    // documents (activity-log.ts). A real page boundary needs distinct
+    // `createdAt` values to actually test the cursor, hence the delay.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  ids.reverse(); // newest-first is registration order reversed
+
+  const page1 = registry.listByProjectPage("p1", { limit: 2 });
+  assert.deepEqual(
+    page1.items.map((d) => d.id),
+    ids.slice(0, 2),
+  );
+  assert.ok(page1.nextBefore !== undefined, "more rows remain -- nextBefore must be present");
+
+  const page2 = registry.listByProjectPage("p1", { limit: 2, before: page1.nextBefore });
+  assert.deepEqual(
+    page2.items.map((d) => d.id),
+    ids.slice(2, 4),
+  );
+  assert.ok(page2.nextBefore !== undefined);
+
+  const page3 = registry.listByProjectPage("p1", { limit: 2, before: page2.nextBefore });
+  assert.deepEqual(
+    page3.items.map((d) => d.id),
+    ids.slice(4, 5),
+  );
+  assert.equal(page3.nextBefore, undefined, "last page must not carry a cursor");
+
+  // Concatenating every page reproduces the full unpaginated list exactly.
+  assert.deepEqual(
+    [...page1.items, ...page2.items, ...page3.items].map((d) => d.id),
+    registry.listByProject("p1").map((d) => d.id),
+  );
+  registry.stop();
+});
+
+test("DesignRegistry: listByProjectPage composes status/sessionId/developerId filters with pagination", () => {
+  const registry = freshRegistry();
+  registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "a", creates: [], touches: [], dependsOn: [] });
+  const b = registry.register({ projectId: "p1", developerId: "d2", sessionId: "s2", summary: "b", creates: [], touches: [], dependsOn: [] });
+  registry.close(b.id);
+  registry.register({ projectId: "p2", developerId: "d1", sessionId: "s3", summary: "wrong project", creates: [], touches: [], dependsOn: [] });
+
+  assert.deepEqual(
+    registry.listByProjectPage("p1", { developerId: "d1" }).items.map((d) => d.summary),
+    ["a"],
+  );
+  assert.deepEqual(
+    registry.listByProjectPage("p1", { status: "closed" }).items.map((d) => d.summary),
+    ["b"],
+  );
+  assert.deepEqual(
+    registry.listByProjectPage("p1", { sessionId: "s2" }).items.map((d) => d.summary),
+    ["b"],
+  );
+  registry.stop();
+});
+
+test("DesignRegistry: listByProjectPage clamps limit to the 100-row cap and defaults to 20", () => {
+  const registry = freshRegistry();
+  for (let i = 0; i < 25; i++) {
+    registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: `d${i}`, creates: [], touches: [], dependsOn: [] });
+  }
+  assert.equal(registry.listByProjectPage("p1").items.length, 20, "default limit is 20");
+  assert.equal(registry.listByProjectPage("p1", { limit: 500 }).items.length, 25, "clamped to 100 cap, but only 25 rows exist");
+  registry.stop();
+});
+
+test("DesignRegistry: listReviewsPage paginates and composes with the pending/decided/all filter", () => {
+  const registry = freshRegistry();
+  const designId = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] }).id;
+  const r1 = registry.addReview(designId, "p1", "first");
+  const r2 = registry.addReview(designId, "p1", "second");
+  const r3 = registry.addReview(designId, "p1", "third");
+  registry.decideReview(r2.id, "approve");
+
+  const pending = registry.listReviewsPage("p1", { filter: "pending", limit: 2 });
+  assert.deepEqual(
+    pending.items.map((r) => r.id),
+    [r3.id, r1.id],
+  );
+  assert.equal(pending.nextBefore, undefined, "only 2 pending reviews exist -- no further page");
+
+  const decided = registry.listReviewsPage("p1", { filter: "decided" });
+  assert.deepEqual(
+    decided.items.map((r) => r.id),
+    [r2.id],
+  );
+
+  const all = registry.listReviewsPage("p1", { filter: "all", limit: 1 });
+  assert.equal(all.items.length, 1);
+  assert.ok(all.nextBefore !== undefined);
+  registry.stop();
+});

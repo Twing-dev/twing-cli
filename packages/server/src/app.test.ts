@@ -572,6 +572,68 @@ test("GET /v1/reviews: an invalid ?status= is a 400, not a silent fallback", asy
   assert.equal(res.status, 400);
 });
 
+// Pagination (monitor UI load-time fix, 2026-08-29): GET /v1/reviews used to
+// return every review matching the status filter, unbounded.
+test("GET /v1/reviews: ?limit= paginates newest-first with a nextBefore cursor", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const ids: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    ids.push(await makePendingReview(app, admin.token, "proj-1"));
+    await new Promise((resolve) => setTimeout(resolve, 2)); // distinct createdAt per page boundary
+  }
+  ids.reverse();
+
+  const page1Res = await app.request("/v1/reviews?projectId=proj-1&limit=2", { headers: bearer(admin.token) });
+  const page1 = (await page1Res.json()) as { items: { id: string }[]; nextBefore?: number };
+  assert.deepEqual(
+    page1.items.map((r) => r.id),
+    ids.slice(0, 2),
+  );
+  assert.ok(page1.nextBefore !== undefined);
+
+  const page2Res = await app.request(`/v1/reviews?projectId=proj-1&limit=2&before=${page1.nextBefore}`, { headers: bearer(admin.token) });
+  const page2 = (await page2Res.json()) as { items: { id: string }[]; nextBefore?: number };
+  assert.deepEqual(
+    page2.items.map((r) => r.id),
+    ids.slice(2, 3),
+  );
+  assert.equal(page2.nextBefore, undefined, "last page carries no cursor");
+});
+
+test("GET /v1/reviews/:id: returns one enriched review by id, 404 for an unknown id or a project the caller isn't a member of", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const reviewId = await makePendingReview(app, admin.token, "proj-1");
+
+  const res = await app.request(`/v1/reviews/${reviewId}`, { headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { item: { id: string; design?: { summary: string } } };
+  assert.equal(body.item.id, reviewId);
+  assert.ok(body.item.design, "same enrichReviews treatment as the list route");
+
+  const notFoundRes = await app.request(`/v1/reviews/no-such-id`, { headers: bearer(admin.token) });
+  assert.equal(notFoundRes.status, 404);
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-other", sessionId: "s-other", summary: "", creates: ["z.ts"], touches: [], dependsOn: [] }),
+  });
+  const outsiderPat = await addProjectMember(app, admin.token, "proj-other");
+  const outsiderRes = await app.request(`/v1/reviews/${reviewId}`, { headers: bearer(outsiderPat) });
+  assert.equal(outsiderRes.status, 404);
+});
+
+test("GET /v1/reviews/:id: 404s for the unauthenticated public viewer, same as the list route", async () => {
+  const { app, dataDir } = freshApp({ publicProjectIds: ["proj-1"] });
+  const admin = await bootstrapAdmin(app, dataDir);
+  const reviewId = await makePendingReview(app, admin.token, "proj-1");
+
+  const res = await app.request(`/v1/reviews/${reviewId}`);
+  assert.equal(res.status, 404);
+});
+
 test("GET /v1/activity: newest-first, respects ?limit=, ?before= pages backward, and ?kind= filters", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
@@ -2002,6 +2064,68 @@ test("POST /v1/designs/check: the async semantic-conflict comparator produces no
   assert.equal(threadsBody.items.length, 0);
 });
 
+// Pagination (monitor UI load-time fix, 2026-08-29): GET /v1/alignment-threads
+// used to return every thread ever opened for a project, unbounded -- seeds
+// threads directly via the store (findOrCreate, not the full claims/design
+// pipeline -- that's already covered by every test above) purely to
+// exercise the new ?before=/?limit= route wiring.
+test("GET /v1/alignment-threads: ?limit= paginates newest-first with a nextBefore cursor", async () => {
+  const { app, dataDir, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  // proj-1 needs to actually be founded (admin a real member of it) before
+  // GET /v1/alignment-threads?projectId=proj-1 will pass isProjectMember --
+  // seeding threads directly via the store below bypasses the founding
+  // that a real /v1/designs/check or /v1/claims call would otherwise do.
+  await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [] }),
+  });
+  // admin is the `developerId` party on every seeded thread, so
+  // canViewThread accepts them without any extra setup.
+  const ids: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const t = alignmentThreads.findOrCreate({
+      projectId: "proj-1",
+      symbolIds: [`src/f${i}.ts`],
+      developerId: admin.developerId,
+      otherDeveloperId: "bob@example.com",
+      designId: `d${i}`,
+      systemDescription: `divergence ${i}`,
+      category: "symbol_conflict",
+      subKind: "scope_intrusion",
+      summary: `overlap ${i}`,
+      reopenEligible: false,
+    });
+    ids.push(t.id);
+    await new Promise((resolve) => setTimeout(resolve, 2)); // distinct lastActivityAt per page boundary
+  }
+  ids.reverse();
+
+  const page1Res = await app.request("/v1/alignment-threads?projectId=proj-1&limit=2", { headers: bearer(admin.token) });
+  const page1 = (await page1Res.json()) as { items: { id: string }[]; nextBefore?: number };
+  assert.deepEqual(
+    page1.items.map((t) => t.id),
+    ids.slice(0, 2),
+  );
+  assert.ok(page1.nextBefore !== undefined);
+
+  const page2Res = await app.request(`/v1/alignment-threads?projectId=proj-1&limit=2&before=${page1.nextBefore}`, { headers: bearer(admin.token) });
+  const page2 = (await page2Res.json()) as { items: { id: string }[]; nextBefore?: number };
+  assert.deepEqual(
+    page2.items.map((t) => t.id),
+    ids.slice(2, 4),
+  );
+
+  const page3Res = await app.request(`/v1/alignment-threads?projectId=proj-1&limit=2&before=${page2.nextBefore}`, { headers: bearer(admin.token) });
+  const page3 = (await page3Res.json()) as { items: { id: string }[]; nextBefore?: number };
+  assert.deepEqual(
+    page3.items.map((t) => t.id),
+    ids.slice(4, 5),
+  );
+  assert.equal(page3.nextBefore, undefined, "last page carries no cursor");
+});
+
 // --- §17 scope enforcement (2026-08): flag / scope-match / amend ---
 
 test("designs.flag(..., 'llm_divergence', ...) persists as status 'flagged', not 'open' (§17 scope enforcement, async semantic-conflict path)", async () => {
@@ -2112,6 +2236,153 @@ test("GET /v1/designs: newest-first, optionally filtered by status/sessionId", a
     filtered.map((d) => d.id),
     [second.designId],
   );
+});
+
+// Pagination (monitor UI load-time fix, 2026-08-29): GET /v1/designs used to
+// return every design ever registered for a project, unbounded -- this
+// exercises the new ?before=/?limit= cursor, mirroring GET /v1/activity's
+// own shape.
+test("GET /v1/designs: ?limit= paginates with a nextBefore cursor, walking every page reproduces the full unfiltered list", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const register = async (sessionId: string) => {
+    const res = await app.request("/v1/designs/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ projectId: "proj-1", sessionId, summary: sessionId, creates: [], touches: [`${sessionId}.ts`], dependsOn: [], force: true }),
+    });
+    return ((await res.json()) as { designId: string }).designId;
+  };
+  const ids: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    ids.push(await register(`s${i}`));
+    await new Promise((resolve) => setTimeout(resolve, 2)); // distinct createdAt per page boundary
+  }
+  ids.reverse();
+
+  const fullRes = await app.request("/v1/designs?projectId=proj-1", { headers: bearer(admin.token) });
+  const full = (await fullRes.json()) as { items: { id: string }[]; nextBefore?: number };
+  assert.equal(full.items.length, 5, "default limit (20) covers all 5 -- no cursor needed");
+  assert.equal(full.nextBefore, undefined);
+
+  const page1Res = await app.request("/v1/designs?projectId=proj-1&limit=2", { headers: bearer(admin.token) });
+  const page1 = (await page1Res.json()) as { items: { id: string }[]; nextBefore?: number };
+  assert.deepEqual(
+    page1.items.map((d) => d.id),
+    ids.slice(0, 2),
+  );
+  assert.ok(page1.nextBefore !== undefined);
+
+  const page2Res = await app.request(`/v1/designs?projectId=proj-1&limit=2&before=${page1.nextBefore}`, { headers: bearer(admin.token) });
+  const page2 = (await page2Res.json()) as { items: { id: string }[]; nextBefore?: number };
+  assert.deepEqual(
+    page2.items.map((d) => d.id),
+    ids.slice(2, 4),
+  );
+
+  const page3Res = await app.request(`/v1/designs?projectId=proj-1&limit=2&before=${page2.nextBefore}`, { headers: bearer(admin.token) });
+  const page3 = (await page3Res.json()) as { items: { id: string }[]; nextBefore?: number };
+  assert.deepEqual(
+    page3.items.map((d) => d.id),
+    ids.slice(4, 5),
+  );
+  assert.equal(page3.nextBefore, undefined, "last page carries no cursor");
+});
+
+test("GET /v1/designs: ?developerId= filters server-side, so 'mine only' stays correct across pages", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
+
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "admin's", creates: [], touches: ["a.ts"], dependsOn: [], force: true }),
+  });
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "other's", creates: [], touches: ["b.ts"], dependsOn: [], force: true }),
+  });
+
+  const res = await app.request(`/v1/designs?projectId=proj-1&developerId=${admin.developerId}`, { headers: bearer(admin.token) });
+  const body = (await res.json()) as { items: { summary: string }[] };
+  assert.deepEqual(
+    body.items.map((d) => d.summary),
+    ["admin's"],
+  );
+});
+
+test("GET /v1/designs: an invalid ?before= or ?limit= is a 400", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1" })] }),
+  });
+
+  const badBefore = await app.request("/v1/designs?projectId=proj-1&before=not-a-number", { headers: bearer(admin.token) });
+  assert.equal(badBefore.status, 400);
+  const badLimit = await app.request("/v1/designs?projectId=proj-1&limit=not-a-number", { headers: bearer(admin.token) });
+  assert.equal(badLimit.status, 400);
+});
+
+test("GET /v1/designs/:id: returns the design plus every groupMembers sibling the caller can see, omitting siblings in a project they can't", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const firstRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const first = (await firstRes.json()) as { designId: string; groupId?: string };
+
+  const secondRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
+  });
+  const second = (await secondRes.json()) as { designId: string };
+
+  const res = await app.request(`/v1/designs/${first.designId}`, { headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { design: { id: string }; groupMembers: { id: string }[] };
+  assert.equal(body.design.id, first.designId);
+  assert.deepEqual(
+    body.groupMembers.map((d) => d.id),
+    [second.designId],
+  );
+
+  const notFoundRes = await app.request(`/v1/designs/no-such-id`, { headers: bearer(admin.token) });
+  assert.equal(notFoundRes.status, 404);
+});
+
+test("GET /v1/designs/:id: 404s for a caller who's a member of some other real project, but not this design's own -- doesn't leak whether the id exists", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const checkRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const { designId } = (await checkRes.json()) as { designId: string };
+
+  // Founds a second, unrelated project (admin becomes its member/admin too,
+  // which doesn't matter here) purely so addProjectMember has a real
+  // project to invite an outsider into -- that outsider is then a genuine
+  // member of *something*, just never of proj-1.
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-other", sessionId: "s-other", summary: "", creates: ["z.ts"], touches: [], dependsOn: [] }),
+  });
+  const outsiderPat = await addProjectMember(app, admin.token, "proj-other");
+
+  const res = await app.request(`/v1/designs/${designId}`, { headers: bearer(outsiderPat) });
+  assert.equal(res.status, 404);
 });
 
 // ---------------------------------------------------------------------------
