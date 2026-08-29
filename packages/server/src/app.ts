@@ -1044,6 +1044,13 @@ export function createApp(options: CreateAppOptions = {}) {
   // (design-divergence.ts). Purely additive to the notice pipeline above --
   // no PreToolUse/deny semantics anywhere on this path, and hook/design_gate.go
   // needs no changes for any of these.
+  // Paginated (monitor UI load-time fix, 2026-08-29) -- same ?before=/
+  // ?limit= cursor shape as GET /v1/designs above, backed by
+  // AlignmentThreadStore.listByProjectPage. The `canViewThread` filter
+  // still runs *after* the page comes back, same as before this change --
+  // a party-only thread being filtered out of a page just makes that page
+  // smaller, it never causes a page to silently skip an item the caller
+  // *can* see, since `canViewThread` only excludes, never reorders.
   app.get("/v1/alignment-threads", (c) => {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
@@ -1051,9 +1058,15 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!isProjectMember(identity, projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
-    const status = c.req.query("status") as "open" | "closed" | undefined;
-    const items = alignmentThreads.listByProject(projectId, status).filter((t) => canViewThread(identity, t));
-    return c.json({ items });
+    const status = c.req.query("status") as "open" | "closed" | "dormant" | undefined;
+    const beforeParam = c.req.query("before");
+    const before = beforeParam !== undefined ? Number(beforeParam) : undefined;
+    if (before !== undefined && !Number.isFinite(before)) return c.json({ error: "invalid ?before=" }, 400);
+    const limitParam = c.req.query("limit");
+    const limit = limitParam !== undefined ? Number(limitParam) : undefined;
+    if (limit !== undefined && !Number.isFinite(limit)) return c.json({ error: "invalid ?limit=" }, 400);
+    const { items, nextBefore } = alignmentThreads.listByProjectPage(projectId, { status, before, limit });
+    return c.json({ items: items.filter((t) => canViewThread(identity, t)), nextBefore });
   });
 
   app.get("/v1/alignment-threads/:id", (c) => {
@@ -1720,6 +1733,16 @@ export function createApp(options: CreateAppOptions = {}) {
   // used to check "is there an open design for my session" -- superseded by
   // /v1/designs/scope-match below (§17 scope enforcement, 2026-08), which
   // additionally checks the specific file against that design's own scope.
+  // twing-monitor v1: DesignsView's card list (and, via the same client
+  // code, the public "observe" route). Paginated (monitor UI load-time
+  // fix, 2026-08-29) -- ?before=/?limit= mirror GET /v1/activity's own
+  // cursor shape, backed by DesignRegistry.listByProjectPage (see its own
+  // doc comment for why this is a separate method from the unpaginated
+  // listByProject every other caller in this file still uses).
+  // ?developerId= is new here: lets DesignsView's "mine only" toggle
+  // filter server-side instead of client-side, which pagination requires
+  // for correctness (a client-side filter over one page can look wrongly
+  // empty while more matching rows sit on later pages).
   app.get("/v1/designs", (c) => {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
@@ -1728,10 +1751,16 @@ export function createApp(options: CreateAppOptions = {}) {
       return c.json({ error: "not a member of this project" }, 403);
     }
     const status = c.req.query("status") as DesignStatement["status"] | undefined;
-    const sessionId = c.req.query("sessionId");
-    let items = designs.listByProject(projectId, status);
-    if (sessionId) items = items.filter((d) => d.sessionId === sessionId);
-    return c.json({ items });
+    const sessionId = c.req.query("sessionId") || undefined;
+    const developerId = c.req.query("developerId") || undefined;
+    const beforeParam = c.req.query("before");
+    const before = beforeParam !== undefined ? Number(beforeParam) : undefined;
+    if (before !== undefined && !Number.isFinite(before)) return c.json({ error: "invalid ?before=" }, 400);
+    const limitParam = c.req.query("limit");
+    const limit = limitParam !== undefined ? Number(limitParam) : undefined;
+    if (limit !== undefined && !Number.isFinite(limit)) return c.json({ error: "invalid ?limit=" }, 400);
+    const { items, nextBefore } = designs.listByProjectPage(projectId, { status, sessionId, developerId, before, limit });
+    return c.json({ items, nextBefore });
   });
 
   // §17 scope enforcement (2026-08): the design equivalent of
@@ -1855,6 +1884,31 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ state: "dormant", designId: named.id, summary: named.summary, dormantSinceMs: now - named.lastActivityAt });
   });
 
+  // Single-design fetch (monitor UI load-time fix, 2026-08-29): added so
+  // the dashboard's copy-link/jump-to-design focus page and its
+  // semantic-overlap-counterpart lookups no longer need to pull every
+  // design in a project just to resolve one id -- see DesignsView.tsx's
+  // own comments for the two call sites this replaces. `groupMembers` is
+  // every other design sharing this one's `groupId` (§17 design linking,
+  // via the existing `listByGroup`) that the caller is authorized to see --
+  // filtered per-sibling since a linked group can span projects; a sibling
+  // in a project the caller can't see is silently omitted, not a 403 for
+  // the whole request. `isProjectMember` already handles the public
+  // "observe" viewer correctly here (its identity's `projects` list *is*
+  // `publicProjectIds`), same as every other route on this path.
+  // MUST be registered after every other static /v1/designs/<literal> GET
+  // route above (scope-match) -- Hono matches routes in registration
+  // order, and a bare `:id` segment would otherwise swallow a literal path
+  // like `scope-match` before it ever reaches its real handler (found
+  // live, via a full scope-match test regression, while building this).
+  app.get("/v1/designs/:id", (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    if (!design || !isProjectMember(identity, design.projectId)) return c.json({ error: "no such design" }, 404);
+    const groupMembers = design.groupId ? designs.listByGroup(design.groupId).filter((d) => d.id !== design.id && isProjectMember(identity, d.projectId)) : [];
+    return c.json({ design, groupMembers });
+  });
+
   // §17.5: the human-facing queue -- justified divergences pending sign-off.
   // twing-monitor v1: ?status= (pending/decided/all, defaults to pending --
   // unchanged from before this query param existed) lets ReviewsView also
@@ -1877,18 +1931,47 @@ export function createApp(options: CreateAppOptions = {}) {
     if (status !== "pending" && status !== "decided" && status !== "all") {
       return c.json({ error: "expected ?status= to be pending, decided, or all" }, 400);
     }
+    const beforeParam = c.req.query("before");
+    const before = beforeParam !== undefined ? Number(beforeParam) : undefined;
+    if (before !== undefined && !Number.isFinite(before)) return c.json({ error: "invalid ?before=" }, 400);
+    const limitParam = c.req.query("limit");
+    const limit = limitParam !== undefined ? Number(limitParam) : undefined;
+    if (limit !== undefined && !Number.isFinite(limit)) return c.json({ error: "invalid ?limit=" }, 400);
     // Enriched (2026-08-25): a bare review row names the argument for
     // letting work through without naming the work, so a reviewer had
     // nothing to decide on. Assembled per request from rows that already
     // exist -- no schema change, and no stored copy that could drift from
     // the design it describes. Every added field is optional, so an older
     // dashboard reading this is unaffected. See review-enrich.ts.
+    // Paginated (monitor UI load-time fix, 2026-08-29) -- same ?before=/
+    // ?limit= cursor shape as designs/alignment-threads above, backed by
+    // DesignRegistry.listReviewsPage.
+    const { items: page, nextBefore } = designs.listReviewsPage(projectId, { filter: status, before, limit });
     const items = enrichReviews(
-      designs.listReviews(projectId, status),
+      page,
       (id) => designs.get(id),
       (id) => constraintStore.get(id),
     );
-    return c.json({ items });
+    return c.json({ items, nextBefore });
+  });
+
+  // Single-review fetch (monitor UI load-time fix, 2026-08-29): added so
+  // ReviewsView's copy-link/jump-to-review focus page no longer needs to
+  // pull every review in a project just to resolve one id. Same
+  // isPublicViewer 404 exclusion as GET /v1/reviews above (a pending
+  // review's justification text can be more candid than a design summary
+  // ever is), same enrichReviews treatment as the list route.
+  app.get("/v1/reviews/:id", (c) => {
+    const identity = c.get("identity");
+    if (identity.isPublicViewer) return c.json({ error: "not available" }, 404);
+    const review = designs.getReview(c.req.param("id"));
+    if (!review || !isProjectMember(identity, review.projectId)) return c.json({ error: "no such review" }, 404);
+    const [enriched] = enrichReviews(
+      [review],
+      (id) => designs.get(id),
+      (id) => constraintStore.get(id),
+    );
+    return c.json({ item: enriched });
   });
 
   // twing-monitor v1: the dashboard's ActivityView -- newest-first,

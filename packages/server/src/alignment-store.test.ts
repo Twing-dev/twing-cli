@@ -362,6 +362,59 @@ test("AlignmentThreadStore: fromRow degrades a pre-2026-08-23 row gracefully -- 
   assert.equal(legacy?.initiatingDesignId, undefined);
 });
 
+test("AlignmentThreadStore: listByProjectPage paginates newest-first (by lastActivityAt, falling back to openedAt) with a rowid tiebreak", async () => {
+  const { store } = freshStore();
+  const ids: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    ids.push(store.findOrCreate({ ...baseInput, designId: `d${i}`, initiatingDesignId: `alice-design-${i}` }).id);
+    // Same reasoning as design-store.test.ts's own pagination test: a tight
+    // loop can land several rows in the same millisecond, and `before`
+    // (an exclusive bound on that shared cursor) would then drop every
+    // same-millisecond row at once, not just the ones already returned.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  ids.reverse(); // newest-first is creation order reversed (none amended, so lastActivityAt === openedAt)
+
+  const page1 = store.listByProjectPage("p1", { limit: 2 });
+  assert.deepEqual(
+    page1.items.map((t) => t.id),
+    ids.slice(0, 2),
+  );
+  assert.ok(page1.nextBefore !== undefined);
+
+  const page2 = store.listByProjectPage("p1", { limit: 2, before: page1.nextBefore });
+  assert.deepEqual(
+    page2.items.map((t) => t.id),
+    ids.slice(2, 4),
+  );
+
+  const page3 = store.listByProjectPage("p1", { limit: 2, before: page2.nextBefore });
+  assert.deepEqual(
+    page3.items.map((t) => t.id),
+    ids.slice(4, 5),
+  );
+  assert.equal(page3.nextBefore, undefined, "last page must not carry a cursor");
+});
+
+test("AlignmentThreadStore: listByProjectPage's status filter composes with pagination, listByProject stays unordered/unpaginated", () => {
+  const { store } = freshStore();
+  const open = store.findOrCreate({ ...baseInput, designId: "d-open" });
+  const toClose = store.findOrCreate({ ...baseInput, designId: "d-closed" });
+  store.close(toClose.id);
+
+  assert.deepEqual(
+    store.listByProjectPage("p1", { status: "open" }).items.map((t) => t.id),
+    [open.id],
+  );
+  assert.deepEqual(
+    store.listByProjectPage("p1", { status: "closed" }).items.map((t) => t.id),
+    [toClose.id],
+  );
+  // listByProject (unpaginated, internal-callers-only) is untouched by this
+  // change -- still returns both regardless of order.
+  assert.equal(store.listByProject("p1").length, 2);
+});
+
 test("buildAlignmentSummary: templates a concise label per category, capping a long design summary", () => {
   assert.equal(buildAlignmentSummary("duplication", "Add retry backoff", 0), 'Duplicate work with "Add retry backoff"');
   assert.equal(buildAlignmentSummary("contradictory_assumptions", "Add retry backoff", 0), 'Contradicts "Add retry backoff"');

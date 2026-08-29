@@ -21,7 +21,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, or, lt, sql } from "drizzle-orm";
 import type { Db } from "./db/client.js";
 import { alignmentThreads as threadsTable } from "./db/schema.js";
 import { DrizzleActivityLog } from "./activity-log.js";
@@ -224,6 +224,14 @@ export function buildAlignmentSummary(subKind: AlignmentSubKind, otherDesignSumm
       return `Signature change breaks a live caller in "${other}"`;
   }
 }
+
+/** Dashboard pagination (monitor UI load-time fix, 2026-08-29) -- same
+ * default/cap as `design-store.ts`'s own copy of these constants, kept as
+ * a second literal pair rather than a shared import since this is the only
+ * other place they're needed and a shared constants module would be
+ * overkill for two integers. */
+const DEFAULT_PAGE_LIMIT = 20;
+const MAX_PAGE_LIMIT = 100;
 
 export interface AlignmentThreadStoreOptions {
   /** Typed against the concrete `DrizzleActivityLog`, not the write-only
@@ -451,6 +459,38 @@ export class AlignmentThreadStore {
       .where(and(...conditions))
       .all() as ThreadRow[];
     return rows.map(fromRow);
+  }
+
+  /** twing-monitor's `GET /v1/alignment-threads` -- the paginated
+   * counterpart to `listByProject` above, same reasoning as
+   * `DesignRegistry.listByProjectPage` (design-store.ts): a new, separate
+   * method, since every other caller of `listByProject` in app.ts (open
+   * design flag/resume/dormancy flows) needs the complete set for real
+   * correctness, not a page of it. Cursor is `COALESCE(lastActivityAt,
+   * openedAt)` -- the same "most recent activity, falling back to when it
+   * opened" ordering `AlignmentThreadsView` already computes client-side
+   * today (`fromRow`'s own fallback, above), just moved server-side so it
+   * composes with a page boundary. `listByProject` itself stays exactly as
+   * today -- unpaginated *and* unordered, since its internal callers only
+   * ever filter/iterate. */
+  listByProjectPage(
+    projectId: string,
+    options: { status?: AlignmentThread["status"]; before?: number; limit?: number } = {},
+  ): { items: AlignmentThread[]; nextBefore?: number } {
+    const limit = Math.min(options.limit ?? DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
+    const conditions = [eq(threadsTable.projectId, projectId)];
+    if (options.status) conditions.push(eq(threadsTable.status, options.status));
+    if (options.before !== undefined) conditions.push(lt(sql`COALESCE(${threadsTable.lastActivityAt}, ${threadsTable.openedAt})`, options.before));
+    const rows = this.db
+      .select()
+      .from(threadsTable)
+      .where(and(...conditions))
+      .orderBy(sql`COALESCE(${threadsTable.lastActivityAt}, ${threadsTable.openedAt}) DESC, rowid DESC`)
+      .limit(limit + 1)
+      .all() as ThreadRow[];
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit).map(fromRow);
+    return { items, nextBefore: hasMore ? items[items.length - 1].lastActivityAt : undefined };
   }
 
   /** Full message history for a thread, oldest first -- the system seed

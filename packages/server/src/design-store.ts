@@ -10,7 +10,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { and, eq, isNull, isNotNull, sql } from "drizzle-orm";
+import { and, eq, lt, isNull, isNotNull, sql } from "drizzle-orm";
 import {
   DEFAULT_DESIGN_ACTIVE_TTL_MS,
   DEFAULT_DESIGN_DORMANT_TTL_MS,
@@ -27,6 +27,14 @@ import { DrizzleActivityLog, type ActivityLogWriter } from "./activity-log.js";
 import { mergeDesignScope, appendSummaryUpdate, overlapWaiverKey, type ConstraintHit } from "./design-checks.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
+
+/** Dashboard pagination (monitor UI load-time fix, 2026-08-29): default/cap
+ * for `listByProjectPage`/`listReviewsPage`, same `{before, limit}` cursor
+ * shape as `activity-log.ts`'s `eventsForProjectPage`. Smaller cap than
+ * activity's 200 -- a design/review row carries a full plan excerpt plus
+ * several string arrays, much heavier per row than an activity event. */
+const DEFAULT_PAGE_LIMIT = 20;
+const MAX_PAGE_LIMIT = 100;
 
 export type NewDesignInput = Omit<
   DesignStatement,
@@ -584,6 +592,43 @@ export class DesignRegistry {
     return rows.map(fromDesignRow);
   }
 
+  /** twing-monitor's `GET /v1/designs` (dashboard's DesignsView, and the
+   * public "observe" route via the same client code) -- the paginated
+   * counterpart to `listByProject` above. Deliberately a *separate* method
+   * rather than a change to `listByProject` itself: every other caller of
+   * `listByProject` in this codebase (scope-match, registration-time
+   * overlap checks, dormancy/resume flows) needs the *complete* set for
+   * real correctness, not a page of it -- confirmed every call site before
+   * adding this (`grep -n "listByProject" app.ts`). Same `{before, limit}`
+   * cursor shape as `eventsForProjectPage` (activity-log.ts): `before` is
+   * an exclusive upper bound on `createdAt` (the same column `listByProject`
+   * already sorts on), one extra row fetched to know whether `nextBefore`
+   * is worth returning. `developerId` (new here, not on `listByProject`)
+   * lets DesignsView's "mine only" toggle become a server-side filter
+   * instead of a client-side one -- a client-side filter over a single page
+   * would wrongly look empty while more matching rows sit on later pages. */
+  listByProjectPage(
+    projectId: string,
+    options: { status?: DesignStatement["status"]; sessionId?: string; developerId?: string; before?: number; limit?: number } = {},
+  ): { items: DesignStatement[]; nextBefore?: number } {
+    const limit = Math.min(options.limit ?? DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
+    const conditions = [eq(designsTable.projectId, projectId)];
+    if (options.status) conditions.push(eq(designsTable.status, options.status));
+    if (options.sessionId) conditions.push(eq(designsTable.sessionId, options.sessionId));
+    if (options.developerId) conditions.push(eq(designsTable.developerId, options.developerId));
+    if (options.before !== undefined) conditions.push(lt(designsTable.createdAt, options.before));
+    const rows = this.db
+      .select()
+      .from(designsTable)
+      .where(and(...conditions))
+      .orderBy(sql`${designsTable.createdAt} DESC, rowid DESC`)
+      .limit(limit + 1)
+      .all() as DesignRow[];
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit).map(fromDesignRow);
+    return { items, nextBefore: hasMore ? items[items.length - 1].createdAt : undefined };
+  }
+
   /** §17 design linking (2026-08): every row sharing a `groupId`, across
    * every project -- the cross-project counterpart to `listByProject`
    * above. No status filter (unlike `openDesigns`): a linked-group view
@@ -877,6 +922,35 @@ export class DesignRegistry {
       .where(and(...conditions))
       .all() as ReviewRow[];
     return rows.map(fromReviewRow);
+  }
+
+  /** twing-monitor's `GET /v1/reviews` -- the paginated counterpart to
+   * `listReviews` above, same reasoning/shape as `listByProjectPage`
+   * (design-store.ts): a new, separate method, cursor on `createdAt`
+   * (`listReviews` itself has no `ORDER BY` at all today, so this is the
+   * first place review rows get an explicit order). `listReviews` stays
+   * unpaginated/unordered -- its own callers (§17.5's pending-review gate
+   * checks) need the complete set, not a page. */
+  listReviewsPage(
+    projectId: string,
+    options: { filter?: "pending" | "decided" | "all"; before?: number; limit?: number } = {},
+  ): { items: PendingReview[]; nextBefore?: number } {
+    const limit = Math.min(options.limit ?? DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
+    const conditions = [eq(reviewsTable.projectId, projectId)];
+    const filter = options.filter ?? "pending";
+    if (filter === "pending") conditions.push(isNull(reviewsTable.decision));
+    else if (filter === "decided") conditions.push(isNotNull(reviewsTable.decision));
+    if (options.before !== undefined) conditions.push(lt(reviewsTable.createdAt, options.before));
+    const rows = this.db
+      .select()
+      .from(reviewsTable)
+      .where(and(...conditions))
+      .orderBy(sql`${reviewsTable.createdAt} DESC, rowid DESC`)
+      .limit(limit + 1)
+      .all() as ReviewRow[];
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit).map(fromReviewRow);
+    return { items, nextBefore: hasMore ? items[items.length - 1].createdAt : undefined };
   }
 
   /** `/v1/designs/scope-match`'s "flagged" state needs this to tell "you
