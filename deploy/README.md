@@ -35,39 +35,37 @@ build yet.
 
 `start-server.sh` just inherits whatever's already in your shell's
 environment, so export these first if you want the design-conflict gate's
-plan-text extraction working. AWS Bedrock (`bedrock-mantle`) is the default
-LLM provider; Bifrost, OpenRouter, and GCP Vertex AI are also selectable
-(`TWING_LLM_PROVIDER=bedrock|bifrost|openrouter|vertex`, or auto-detected
-from whichever provider's vars are set -- Bedrock wins ties):
+plan-text extraction working. The LLM provider is **auto-detected** from
+which vars are set, in precedence order **AWS → GCP → OpenRouter →
+Bifrost**. Each provider carries its own model via
+`TWING_<PROVIDER>_EXTRACT_MODEL` / `TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL`
+(each with a provider-appropriate default).
 
 ```sh
+# One provider block. AWS Bedrock (bedrock-mantle):
 export AWS_BEARER_TOKEN_BEDROCK=...
 export AWS_REGION=us-east-1
-export TWING_EXTRACT_MODEL=google.gemma-4-31b   # optional, this is the default
+# export TWING_BEDROCK_EXTRACT_MODEL=google.gemma-4-31b   # default
+
+# ...or GCP Vertex AI -- credentials via google-auth-library
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+export GOOGLE_CLOUD_PROJECT=my-project      # or resolved from the credentials
+export GOOGLE_CLOUD_LOCATION=us-central1    # optional, this is the default
+# export TWING_VERTEX_EXTRACT_MODEL=google/gemini-2.0-flash   # default
+
+# ...or OpenRouter
+export OPENROUTER_API_KEY=...
+export OPENROUTER_BASE_URL=...              # optional, defaults to https://openrouter.ai/api/v1
+
+# ...or Bifrost -- https://docs.getbifrost.ai
+export TWING_BIFROST_BASE_URL=http://localhost:8080
+export TWING_BIFROST_API_KEY=...            # optional; sk-bf-* -> x-bf-vk header, else Bearer
+
 export TWING_SERVE_DATA_DIR=~/.twing/serve-data  # optional, this is the default -- where ratified constraints persist
 deploy/start-server.sh
 ```
 
-Alternative providers (set `TWING_EXTRACT_MODEL` / `TWING_SEMANTIC_CHECK_MODEL`
-to that provider's own model string, e.g. `openai/gpt-4o-mini`, not the
-Bedrock default):
-
-```sh
-# Bifrost -- https://docs.getbifrost.ai
-export TWING_BIFROST_BASE_URL=http://localhost:8080
-export TWING_BIFROST_API_KEY=...        # optional; sk-bf-* -> x-bf-vk header, else Bearer
-
-# OpenRouter
-export OPENROUTER_API_KEY=...
-export OPENROUTER_BASE_URL=...          # optional, defaults to https://openrouter.ai/api/v1
-
-# GCP Vertex AI -- service-account JSON, no google-auth-library dependency
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
-export GOOGLE_CLOUD_PROJECT=my-project
-export GOOGLE_CLOUD_LOCATION=us-central1   # optional, this is the default
-```
-
-None of these are required to start the server -- with no LLM provider fully
+None of these are required to start the server -- with no LLM provider
 configured, `ExitPlanMode` checks fail soft to "clean" (logged), and the
 `Edit`/`Write` "you need a registered design" check still works either way,
 since it doesn't need extraction.

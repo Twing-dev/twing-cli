@@ -289,37 +289,38 @@ unprivileged user instead -- see `deploy/README.md`.
 
 **Design checks made from plan text** (`ExitPlanMode`) need an LLM call to
 turn the plan into structured fields, so wherever this runs needs an LLM
-provider configured. AWS Bedrock (`bedrock-mantle`) is the default:
+provider configured. The provider is **auto-detected** from which of these
+env vars is set, in precedence order **AWS → GCP → OpenRouter → Bifrost**;
+if none is set the plan-text check fails soft to "clean" (the
+`Edit`/`Write` "must have a registered design" rule still applies). Each
+provider also carries its own model config -- `TWING_<PROVIDER>_EXTRACT_MODEL`
+/ `TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL`, each defaulting to something
+sensible for that provider -- so switching providers doesn't leave a
+stale model id behind.
 
 ```sh
+# AWS Bedrock (bedrock-mantle)
 export AWS_BEARER_TOKEN_BEDROCK=...
 export AWS_REGION=us-east-1
+# export TWING_BEDROCK_EXTRACT_MODEL=google.gemma-4-31b   # default
 npm run start --workspace packages/server
-```
 
-Three alternatives are also selectable -- pick one explicitly with
-`TWING_LLM_PROVIDER=bedrock|bifrost|openrouter|vertex`, or just set that
-provider's vars and let the server auto-detect (Bedrock wins if more than
-one is configured). For Bifrost/OpenRouter/Vertex you must also point
-`TWING_EXTRACT_MODEL` / `TWING_SEMANTIC_CHECK_MODEL` at a model string that
-provider understands (e.g. `openai/gpt-4o-mini`), since the default is a
-Bedrock model id.
-
-```sh
-# Bifrost gateway (https://docs.getbifrost.ai)
-export TWING_BIFROST_BASE_URL=http://localhost:8080
-export TWING_BIFROST_API_KEY=...        # optional; sk-bf-* sent as x-bf-vk, else Bearer
-export TWING_EXTRACT_MODEL=openai/gpt-4o-mini
-export TWING_SEMANTIC_CHECK_MODEL=openai/gpt-4o-mini
+# GCP Vertex AI -- credentials via google-auth-library
+# (GOOGLE_APPLICATION_CREDENTIALS / gcloud ADC / GCE metadata server)
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+export GOOGLE_CLOUD_PROJECT=my-project      # or resolved from the credentials
+export GOOGLE_CLOUD_LOCATION=us-central1    # optional, this is the default
+# export TWING_VERTEX_EXTRACT_MODEL=google/gemini-2.0-flash   # default
 
 # OpenRouter
 export OPENROUTER_API_KEY=...
-export OPENROUTER_BASE_URL=...          # optional, defaults to https://openrouter.ai/api/v1
+export OPENROUTER_BASE_URL=...              # optional, defaults to https://openrouter.ai/api/v1
+# export TWING_OPENROUTER_EXTRACT_MODEL=openai/gpt-4o-mini    # default
 
-# GCP Vertex AI (service-account JSON; no google-auth-library needed)
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
-export GOOGLE_CLOUD_PROJECT=my-project
-export GOOGLE_CLOUD_LOCATION=us-central1   # optional, this is the default
+# Bifrost gateway (https://docs.getbifrost.ai)
+export TWING_BIFROST_BASE_URL=http://localhost:8080
+export TWING_BIFROST_API_KEY=...            # optional; sk-bf-* sent as x-bf-vk, else Bearer
+# export TWING_BIFROST_EXTRACT_MODEL=openai/gpt-4o-mini       # default
 ```
 
 **Onboarding a non-GitHub-hosted project** (GitLab, self-hosted git, no

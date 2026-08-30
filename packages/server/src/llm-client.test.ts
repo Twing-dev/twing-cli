@@ -1,10 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { callLlm, callLlmMessages, describeLlmProvider, selectProvider } from "./llm-client.js";
+import {
+  callLlm,
+  callLlmMessages,
+  describeLlmProvider,
+  resolveExtractModel,
+  resolveSemanticCheckModel,
+  selectProvider,
+  __setVertexCredentialsForTests,
+  type VertexCredentials,
+} from "./llm-client.js";
 
 function withMockFetch<T>(impl: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
@@ -87,16 +92,16 @@ test("callLlm: unmapped model defaults to the plain /v1 path", async () => {
   assert.equal(capturedUrl, "https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions");
 });
 
-test("callLlm: no AWS_BEARER_TOKEN_BEDROCK set throws before any network call", async () => {
+test("callLlm: no AWS_BEARER_TOKEN_BEDROCK (and no other provider) throws before any network call", async () => {
   let called = false;
-  await withBedrockToken(undefined, () =>
+  await withEnv({}, () =>
     withMockFetch(
       (async () => {
         called = true;
         throw new Error("should not be called");
       }) as typeof fetch,
       async () => {
-        await assert.rejects(() => callLlm("s", "u", { model: "m", region: "us-east-1" }), /no credentials/);
+        await assert.rejects(() => callLlm("s", "u", { model: "m", region: "us-east-1" }), /no LLM provider configured/);
       },
     ),
   );
@@ -140,23 +145,30 @@ test("callLlm: missing/unknown content resolves to empty string, not a throw", a
 });
 
 // ---------------------------------------------------------------------------
-// Multi-provider dispatch (design a4937c29): Bifrost / OpenRouter / Vertex
-// alongside the default Bedrock path above.
+// Multi-provider dispatch (design a4937c29, PR #11 review follow-up): auto-
+// detect among Bedrock / Vertex / OpenRouter / Bifrost, per-provider models.
 // ---------------------------------------------------------------------------
 
 const PROVIDER_ENV_KEYS = [
-  "TWING_LLM_PROVIDER",
   "AWS_BEARER_TOKEN_BEDROCK",
   "AWS_REGION",
   "AWS_DEFAULT_REGION",
-  "TWING_BIFROST_BASE_URL",
-  "TWING_BIFROST_API_KEY",
-  "OPENROUTER_API_KEY",
-  "OPENROUTER_BASE_URL",
   "GOOGLE_APPLICATION_CREDENTIALS",
   "GOOGLE_CLOUD_PROJECT",
   "GCLOUD_PROJECT",
   "GOOGLE_CLOUD_LOCATION",
+  "OPENROUTER_API_KEY",
+  "OPENROUTER_BASE_URL",
+  "TWING_BIFROST_BASE_URL",
+  "TWING_BIFROST_API_KEY",
+  "TWING_BEDROCK_EXTRACT_MODEL",
+  "TWING_BEDROCK_SEMANTIC_CHECK_MODEL",
+  "TWING_VERTEX_EXTRACT_MODEL",
+  "TWING_VERTEX_SEMANTIC_CHECK_MODEL",
+  "TWING_OPENROUTER_EXTRACT_MODEL",
+  "TWING_OPENROUTER_SEMANTIC_CHECK_MODEL",
+  "TWING_BIFROST_EXTRACT_MODEL",
+  "TWING_BIFROST_SEMANTIC_CHECK_MODEL",
 ] as const;
 
 /** Clears every provider-selecting env var, applies `vars`, runs, restores.
@@ -177,30 +189,69 @@ function withEnv<T>(vars: Partial<Record<(typeof PROVIDER_ENV_KEYS)[number], str
   });
 }
 
-test("selectProvider: explicit TWING_LLM_PROVIDER wins over any detected credentials", async () => {
-  await withEnv({ TWING_LLM_PROVIDER: "bifrost", AWS_BEARER_TOKEN_BEDROCK: "t", TWING_BIFROST_BASE_URL: "http://x" }, async () => {
-    assert.equal(selectProvider(), "bifrost");
-  });
-  await withEnv({ TWING_LLM_PROVIDER: "  VERTEX  ", OPENROUTER_API_KEY: "k" }, async () => {
-    assert.equal(selectProvider(), "vertex");
+/** Swaps in a fake Vertex credential source for the body of `run`. */
+function withVertexCreds<T>(creds: VertexCredentials, run: () => Promise<T>): Promise<T> {
+  __setVertexCredentialsForTests(creds);
+  return run().finally(() => __setVertexCredentialsForTests(undefined));
+}
+
+test("selectProvider: precedence is AWS -> GCP -> OpenRouter -> Bifrost", async () => {
+  await withEnv(
+    { AWS_BEARER_TOKEN_BEDROCK: "t", GOOGLE_APPLICATION_CREDENTIALS: "/sa.json", OPENROUTER_API_KEY: "k", TWING_BIFROST_BASE_URL: "http://x" },
+    async () => assert.equal(selectProvider(), "bedrock"),
+  );
+  await withEnv(
+    { GOOGLE_APPLICATION_CREDENTIALS: "/sa.json", OPENROUTER_API_KEY: "k", TWING_BIFROST_BASE_URL: "http://x" },
+    async () => assert.equal(selectProvider(), "vertex"),
+  );
+  await withEnv({ OPENROUTER_API_KEY: "k", TWING_BIFROST_BASE_URL: "http://x" }, async () =>
+    assert.equal(selectProvider(), "openrouter"),
+  );
+  await withEnv({ TWING_BIFROST_BASE_URL: "http://x" }, async () => assert.equal(selectProvider(), "bifrost"));
+});
+
+test("selectProvider: throws when no provider credential/base-URL is set (no default)", async () => {
+  await withEnv({}, async () => {
+    assert.throws(() => selectProvider(), /no LLM provider configured/);
   });
 });
 
-test("selectProvider: auto-detect precedence is bedrock > bifrost > openrouter > vertex, bedrock as the fallback", async () => {
-  await withEnv({ AWS_BEARER_TOKEN_BEDROCK: "t", TWING_BIFROST_BASE_URL: "http://x", OPENROUTER_API_KEY: "k" }, async () => {
-    assert.equal(selectProvider(), "bedrock");
+test("callLlm: with no provider configured, throws before any network call (caller fails soft)", async () => {
+  let called = false;
+  await withEnv({}, () =>
+    withMockFetch(
+      (async () => {
+        called = true;
+        throw new Error("should not be called");
+      }) as typeof fetch,
+      async () => {
+        await assert.rejects(() => callLlm("s", "u", { model: "m" }), /no LLM provider configured/);
+      },
+    ),
+  );
+  assert.equal(called, false);
+});
+
+test("resolveExtractModel / resolveSemanticCheckModel: per-provider default, overridable per provider", async () => {
+  await withEnv({ AWS_BEARER_TOKEN_BEDROCK: "t" }, async () => {
+    assert.equal(resolveExtractModel(), "google.gemma-4-31b");
+    assert.equal(resolveSemanticCheckModel(), "google.gemma-4-31b");
   });
-  await withEnv({ TWING_BIFROST_BASE_URL: "http://x", OPENROUTER_API_KEY: "k" }, async () => {
-    assert.equal(selectProvider(), "bifrost");
+  await withEnv({ TWING_BIFROST_BASE_URL: "http://x" }, async () => {
+    assert.equal(resolveExtractModel(), "openai/gpt-4o-mini");
   });
-  await withEnv({ OPENROUTER_API_KEY: "k", GOOGLE_APPLICATION_CREDENTIALS: "/tmp/sa.json" }, async () => {
-    assert.equal(selectProvider(), "openrouter");
+  await withEnv({ GOOGLE_APPLICATION_CREDENTIALS: "/sa.json" }, async () => {
+    assert.equal(resolveExtractModel(), "google/gemini-2.0-flash");
   });
-  await withEnv({ GOOGLE_APPLICATION_CREDENTIALS: "/tmp/sa.json" }, async () => {
-    assert.equal(selectProvider(), "vertex");
-  });
+  await withEnv(
+    { OPENROUTER_API_KEY: "k", TWING_OPENROUTER_EXTRACT_MODEL: "anthropic/claude-3-5-haiku", TWING_OPENROUTER_SEMANTIC_CHECK_MODEL: "openai/gpt-4o" },
+    async () => {
+      assert.equal(resolveExtractModel(), "anthropic/claude-3-5-haiku");
+      assert.equal(resolveSemanticCheckModel(), "openai/gpt-4o");
+    },
+  );
   await withEnv({}, async () => {
-    assert.equal(selectProvider(), "bedrock");
+    assert.throws(() => resolveExtractModel(), /no LLM provider configured/);
   });
 });
 
@@ -319,96 +370,114 @@ test("openrouter: OPENROUTER_BASE_URL override is honoured", async () => {
   assert.equal(capturedUrl, "https://proxy.internal/or/v1/chat/completions");
 });
 
-test("openrouter: no OPENROUTER_API_KEY throws before any network call", async () => {
-  let called = false;
-  await withEnv({ TWING_LLM_PROVIDER: "openrouter" }, () =>
-    withMockFetch(
-      (async () => {
-        called = true;
-        throw new Error("should not be called");
-      }) as typeof fetch,
-      async () => {
-        await assert.rejects(() => callLlm("s", "u", { model: "m" }), /no credentials/);
-      },
-    ),
-  );
-  assert.equal(called, false);
-});
+test("vertex: gets a token + project from google-auth-library, calls the OpenAI-compat endpoint with Bearer", async () => {
+  let projectCalls = 0;
+  let tokenCalls = 0;
+  const creds: VertexCredentials = {
+    accessToken: async () => {
+      tokenCalls++;
+      return "ya29.fake";
+    },
+    projectId: async () => {
+      projectCalls++;
+      return "proj-from-adc";
+    },
+  };
 
-test("vertex: mints an access token from the SA key via jwt-bearer, then calls the OpenAI-compat endpoint; token is cached", async () => {
-  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  const pem = privateKey.export({ type: "pkcs8", format: "pem" }) as string;
-  const dir = mkdtempSync(join(tmpdir(), "twing-vertex-"));
-  const saPath = join(dir, "sa.json");
-  writeFileSync(saPath, JSON.stringify({ client_email: "svc@proj.iam.gserviceaccount.com", private_key: pem }));
-
-  let tokenExchangeCalls = 0;
-  let aiCalls = 0;
   let aiUrl = "";
   let aiAuth = "";
   let aiBody: unknown;
-  const impl = (async (url: string, init?: RequestInit) => {
-    if (url === "https://oauth2.googleapis.com/token") {
-      tokenExchangeCalls++;
-      const params = new URLSearchParams(init!.body as string);
-      assert.equal(params.get("grant_type"), "urn:ietf:params:oauth:grant-type:jwt-bearer");
-      assert.match(params.get("assertion") ?? "", /^[\w-]+\.[\w-]+\.[\w-]+$/);
-      return new Response(JSON.stringify({ access_token: "ya29.fake", expires_in: 3600 }), { status: 200 });
-    }
-    aiCalls++;
-    aiUrl = url;
-    aiAuth = (init!.headers as Record<string, string>).authorization;
-    aiBody = JSON.parse(init!.body as string);
-    return new Response(JSON.stringify({ choices: [{ message: { content: "  hi from vertex  " } }] }), { status: 200 });
-  }) as typeof fetch;
-
-  await withEnv(
-    { GOOGLE_APPLICATION_CREDENTIALS: saPath, GOOGLE_CLOUD_PROJECT: "proj", GOOGLE_CLOUD_LOCATION: "us-central1" },
-    () =>
-      withMockFetch(impl, async () => {
-        const a = await callLlm("s", "u", { model: "google/gemini-2.0-flash" });
-        const b = await callLlm("s", "u", { model: "google/gemini-2.0-flash" });
-        assert.equal(a, "hi from vertex");
-        assert.equal(b, "hi from vertex");
-      }),
+  await withEnv({ GOOGLE_APPLICATION_CREDENTIALS: "/sa.json" }, () =>
+    withVertexCreds(creds, () =>
+      withMockFetch(
+        (async (url: string, init?: RequestInit) => {
+          aiUrl = url;
+          aiAuth = (init!.headers as Record<string, string>).authorization;
+          aiBody = JSON.parse(init!.body as string);
+          return new Response(JSON.stringify({ choices: [{ message: { content: "  hi from vertex  " } }] }), { status: 200 });
+        }) as typeof fetch,
+        async () => {
+          const text = await callLlm("s", "u", { model: "google/gemini-2.0-flash" });
+          assert.equal(text, "hi from vertex");
+        },
+      ),
+    ),
   );
 
   assert.equal(
     aiUrl,
-    "https://us-central1-aiplatform.googleapis.com/v1/projects/proj/locations/us-central1/endpoints/openapi/chat/completions",
+    "https://us-central1-aiplatform.googleapis.com/v1/projects/proj-from-adc/locations/us-central1/endpoints/openapi/chat/completions",
   );
   assert.equal(aiAuth, "Bearer ya29.fake");
   assert.deepEqual((aiBody as { model: string }).model, "google/gemini-2.0-flash");
-  assert.equal(aiCalls, 2);
-  assert.equal(tokenExchangeCalls, 1, "access token should be cached across calls");
+  assert.equal(tokenCalls, 1);
+  assert.equal(projectCalls, 1);
 });
 
-test("vertex: no GOOGLE_APPLICATION_CREDENTIALS throws before any network call", async () => {
-  let called = false;
-  await withEnv({ TWING_LLM_PROVIDER: "vertex", GOOGLE_CLOUD_PROJECT: "proj" }, () =>
-    withMockFetch(
-      (async () => {
-        called = true;
-        throw new Error("should not be called");
-      }) as typeof fetch,
-      async () => {
-        await assert.rejects(() => callLlm("s", "u", { model: "m" }), /no credentials/);
-      },
+test("vertex: GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION override the auto-resolved project + region", async () => {
+  let projectCalls = 0;
+  const creds: VertexCredentials = {
+    accessToken: async () => "ya29.fake",
+    projectId: async () => {
+      projectCalls++;
+      return "should-not-be-used";
+    },
+  };
+  let aiUrl = "";
+  await withEnv(
+    { GOOGLE_APPLICATION_CREDENTIALS: "/sa.json", GOOGLE_CLOUD_PROJECT: "explicit-proj", GOOGLE_CLOUD_LOCATION: "europe-west4" },
+    () =>
+      withVertexCreds(creds, () =>
+        withMockFetch(
+          (async (url: string) => {
+            aiUrl = url;
+            return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+          }) as typeof fetch,
+          () => callLlm("s", "u", { model: "google/gemini-2.0-flash" }),
+        ),
+      ),
+  );
+  assert.equal(
+    aiUrl,
+    "https://europe-west4-aiplatform.googleapis.com/v1/projects/explicit-proj/locations/europe-west4/endpoints/openapi/chat/completions",
+  );
+  assert.equal(projectCalls, 0, "explicit GOOGLE_CLOUD_PROJECT should short-circuit the credential lookup");
+});
+
+test("vertex: a credential error propagates (caller's retry loop is responsible for failing soft)", async () => {
+  const creds: VertexCredentials = {
+    accessToken: async () => {
+      throw new Error("google-auth-library returned no access token");
+    },
+    projectId: async () => "proj",
+  };
+  await withEnv({ GOOGLE_APPLICATION_CREDENTIALS: "/sa.json" }, () =>
+    withVertexCreds(creds, () =>
+      withMockFetch(
+        (async () => new Response("{}", { status: 200 })) as typeof fetch,
+        async () => {
+          await assert.rejects(() => callLlm("s", "u", { model: "m" }), /no access token/);
+        },
+      ),
     ),
   );
-  assert.equal(called, false);
 });
 
-test("describeLlmProvider: reports the active provider and whether it looks configured", async () => {
+test("describeLlmProvider: null when nothing is configured, otherwise the detected provider", async () => {
+  await withEnv({}, async () => {
+    const d = describeLlmProvider();
+    assert.equal(d.provider, null);
+    assert.equal(d.ready, false);
+  });
   await withEnv({ TWING_BIFROST_BASE_URL: "http://localhost:8080", TWING_BIFROST_API_KEY: "sk-bf-x" }, async () => {
     const d = describeLlmProvider();
     assert.equal(d.provider, "bifrost");
     assert.equal(d.ready, true);
     assert.match(d.summary, /virtual key/);
   });
-  await withEnv({ TWING_LLM_PROVIDER: "vertex" }, async () => {
+  await withEnv({ GOOGLE_APPLICATION_CREDENTIALS: "/sa.json" }, async () => {
     const d = describeLlmProvider();
     assert.equal(d.provider, "vertex");
-    assert.equal(d.ready, false);
+    assert.equal(d.ready, true);
   });
 });

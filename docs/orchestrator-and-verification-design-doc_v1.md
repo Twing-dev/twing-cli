@@ -781,22 +781,34 @@ signal, only consulted when the structured checks find nothing (§17.4).
 chat-completions request/response shape, so there is one call shape and one
 response parser regardless of which is active.
 
-**Provider** — AWS Bedrock (`bedrock-mantle`, a plain Bearer-token
-OpenAI-compat shim, not the Bedrock Runtime `Converse` API) is the default.
-Bifrost (`TWING_BIFROST_BASE_URL`, optional `TWING_BIFROST_API_KEY` — an
-`sk-bf-*` value goes as the `x-bf-vk` header, anything else as
-`Authorization: Bearer`), OpenRouter (`OPENROUTER_API_KEY`), and GCP Vertex
-AI (`GOOGLE_APPLICATION_CREDENTIALS` service-account JSON + `GOOGLE_CLOUD_PROJECT`
-/ `GOOGLE_CLOUD_LOCATION`) are also selectable. `TWING_LLM_PROVIDER`
-(`bedrock|bifrost|openrouter|vertex`) forces the choice; unset, `selectProvider`
-auto-detects from which credential/base-URL vars are present, Bedrock winning
-ties. Vertex mints its short-lived OAuth token from the service-account key
-via an RS256 JWT bearer grant done with `node:crypto` (no `google-auth-library`),
-cached in-process; the other three are single unauthenticated-SDK `fetch`
-calls. **Model**: `TWING_EXTRACT_MODEL` / `TWING_SEMANTIC_CHECK_MODEL`,
-default `google.gemma-4-31b` (a Bedrock model id — an operator pointing at
-Bifrost/OpenRouter/Vertex must set these to that provider's own
-`provider/model` string, e.g. `openai/gpt-4o-mini`).
+**Provider** — auto-detected by `selectProvider`, no `TWING_LLM_PROVIDER`
+override, from which credential/base-URL var is present, in precedence
+order:
+
+1. `AWS_BEARER_TOKEN_BEDROCK` → AWS Bedrock (`bedrock-mantle`, a plain
+   Bearer-token OpenAI-compat shim, not the Bedrock Runtime `Converse` API).
+2. `GOOGLE_APPLICATION_CREDENTIALS` → GCP Vertex AI's OpenAI-compat
+   endpoint. Auth is `google-auth-library`'s `GoogleAuth` (service-account
+   JSON / gcloud ADC / GCE metadata server; it refreshes and caches the
+   token itself). `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` override
+   the project (else resolved from the credentials) and region (default
+   `us-central1`).
+3. `OPENROUTER_API_KEY` → OpenRouter (`OPENROUTER_BASE_URL` optional).
+4. `TWING_BIFROST_BASE_URL` → Bifrost gateway (optional `TWING_BIFROST_API_KEY`
+   — an `sk-bf-*` value goes as the `x-bf-vk` header, anything else as
+   `Authorization: Bearer`, unset means no auth header).
+
+`selectProvider` **throws** when none is set — there is no default provider
+— and the throw is caught by the fail-soft path below.
+
+**Model** — per provider, not global: `resolveExtractModel` /
+`resolveSemanticCheckModel` read `TWING_<PROVIDER>_EXTRACT_MODEL` /
+`TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL` and fall back to a
+provider-appropriate default (`google.gemma-4-31b` for Bedrock,
+`google/gemini-2.0-flash` for Vertex, `openai/gpt-4o-mini` for
+OpenRouter/Bifrost). A single top-level model id was dropped in PR #11
+review — the same model has different ids on different providers, so it
+couldn't survive a provider switch.
 
 Schema-validated by hand on the way out (matches `manifest.ts`'s existing manual-parse
 style — no new dependency); one retry on malformed JSON. Unlike

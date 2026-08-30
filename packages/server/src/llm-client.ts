@@ -14,52 +14,65 @@
  * removed 2026-08-17, then folded back in here 2026-08-30 alongside Bifrost
  * and Vertex -- see design a4937c29):
  *
- *   - bedrock     `bedrock-mantle`, the default. Plain Bearer-token HTTPS
- *                 shim, *not* the Bedrock Runtime `Converse` API (that SDK
- *                 path doesn't work for the models on the account we have
- *                 credits on: `google.gemma-4-31b` isn't in
- *                 `ListFoundationModels` at all, `zai.glm-5` returns
- *                 "Operation not allowed" on `ConverseCommand` -- both are
- *                 only reachable through this shim, confirmed live 2026-08).
- *                 Per-model path differs (`gemma-4-31b` -> `/openai/v1`,
- *                 everything else -> `/v1`), same pattern as TwingMail's own
+ *   - bedrock     `bedrock-mantle`, a plain Bearer-token HTTPS shim, *not*
+ *                 the Bedrock Runtime `Converse` API (that SDK path doesn't
+ *                 work for the models on the account we have credits on:
+ *                 `google.gemma-4-31b` isn't in `ListFoundationModels` at
+ *                 all, `zai.glm-5` returns "Operation not allowed" on
+ *                 `ConverseCommand` -- both are only reachable through this
+ *                 shim, confirmed live 2026-08). Per-model path differs
+ *                 (`gemma-4-31b` -> `/openai/v1`, everything else -> `/v1`),
+ *                 same pattern as TwingMail's own
  *                 `packages/core/src/lib/ai.ts` `BEDROCK_MODEL_MAP`.
+ *   - vertex      GCP Vertex AI's OpenAI-compatible endpoint. Auth is a
+ *                 short-lived OAuth token from `google-auth-library`'s
+ *                 `GoogleAuth` (picks up `GOOGLE_APPLICATION_CREDENTIALS` /
+ *                 ADC / the GCE metadata server, and handles token refresh
+ *                 and caching itself) -- the hand-rolled RS256-JWT bearer
+ *                 grant this used to do with `node:crypto` was more surface
+ *                 area than it was worth (PR #11 review).
+ *   - openrouter  `https://openrouter.ai/api/v1/chat/completions`; `model`
+ *                 is a `provider/model` string.
  *   - bifrost     A self-hosted LLM gateway (https://docs.getbifrost.ai).
  *                 OpenAI-shaped `POST {base}/v1/chat/completions`; `model`
  *                 is a `provider/model` string (e.g. `openai/gpt-4o-mini`).
- *   - openrouter  `https://openrouter.ai/api/v1/chat/completions`; `model`
- *                 is a `provider/model` string.
- *   - vertex      GCP Vertex AI's OpenAI-compatible endpoint. Auth is a
- *                 short-lived OAuth token minted from a service-account JSON
- *                 via an RS256 JWT bearer grant -- done here with `node:crypto`
- *                 rather than pulling in `google-auth-library`, matching this
- *                 module's no-SDK stance (same reason `callBedrock` hand-rolls
- *                 its Bearer call instead of using the AWS SDK). Token cached
- *                 in-process until ~1min before expiry.
  *
  * Provider selection is ambient -- there is no caller-supplied `provider`
- * field, same way credentials are read from `process.env` rather than
- * threaded through `LlmCallOptions`. `TWING_LLM_PROVIDER` forces the choice
- * when set to a known value; otherwise `selectProvider` auto-detects from
- * which credential/base-URL vars are present, Bedrock winning ties (the
- * assumption is only one provider's config is present at a time and Bedrock
- * is the default). A misconfigured deployment finds out when the real call
- * throws and the caller falls soft -- there is no separate presence
- * precheck here (main.ts logs one advisory line at startup, that's all).
+ * field and no `TWING_LLM_PROVIDER` override, same way credentials are read
+ * from `process.env` rather than threaded through `LlmCallOptions`.
+ * `selectProvider` picks the first provider whose credential/base-URL var
+ * is present, in precedence order **AWS -> GCP -> OpenRouter -> Bifrost**,
+ * and **throws** if none is set (there is no default). The throw propagates
+ * to the caller, whose retry loop (`design-extract.ts` /
+ * `design-semantic-check.ts`) catches it and fails soft -- extraction to
+ * empty fields ("clean"), the comparator to "no conflict". So a server with
+ * no LLM provider configured still runs; it just never blocks on a
+ * plan-text check. `main.ts` logs one advisory line at startup.
+ *
+ * Model is chosen per provider, not globally (PR #11 review: the same model
+ * has different ids on different providers, so a single top-level default
+ * can't survive a provider switch). `resolveExtractModel` /
+ * `resolveSemanticCheckModel` read `TWING_<PROVIDER>_EXTRACT_MODEL` /
+ * `TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL` and fall back to a
+ * provider-appropriate default (see `PROVIDER_MODELS`).
  *
  * Env, by provider:
- *   bedrock     AWS_BEARER_TOKEN_BEDROCK, AWS_REGION / AWS_DEFAULT_REGION
+ *   bedrock     AWS_BEARER_TOKEN_BEDROCK, AWS_REGION / AWS_DEFAULT_REGION,
+ *               TWING_BEDROCK_EXTRACT_MODEL / TWING_BEDROCK_SEMANTIC_CHECK_MODEL
+ *   vertex      GOOGLE_APPLICATION_CREDENTIALS (service-account JSON path;
+ *               also what selection keys off), GOOGLE_CLOUD_PROJECT /
+ *               GCLOUD_PROJECT (or resolved from the credentials),
+ *               GOOGLE_CLOUD_LOCATION (optional, default us-central1),
+ *               TWING_VERTEX_EXTRACT_MODEL / TWING_VERTEX_SEMANTIC_CHECK_MODEL
+ *   openrouter  OPENROUTER_API_KEY, OPENROUTER_BASE_URL (optional),
+ *               TWING_OPENROUTER_EXTRACT_MODEL / TWING_OPENROUTER_SEMANTIC_CHECK_MODEL
  *   bifrost     TWING_BIFROST_BASE_URL, TWING_BIFROST_API_KEY (optional;
  *               unset -> no auth header, `sk-bf-` prefix -> `x-bf-vk`
- *               header, anything else -> `Authorization: Bearer <key>`)
- *   openrouter  OPENROUTER_API_KEY, OPENROUTER_BASE_URL (optional)
- *   vertex      GOOGLE_APPLICATION_CREDENTIALS (service-account JSON path),
- *               GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT,
- *               GOOGLE_CLOUD_LOCATION (optional, default us-central1)
+ *               header, anything else -> `Authorization: Bearer <key>`),
+ *               TWING_BIFROST_EXTRACT_MODEL / TWING_BIFROST_SEMANTIC_CHECK_MODEL
  */
 
-import { createSign } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { GoogleAuth } from "google-auth-library";
 
 // gemma-4-31b is only reachable via bedrock-mantle's OpenAI-compat route,
 // not its plain-Bedrock-model route -- everything else (glm-5, and per
@@ -77,55 +90,114 @@ export interface LlmCallOptions {
   /** Model id, in whatever form the selected provider expects -- a
    * Bedrock model id (`google.gemma-4-31b`), or a `provider/model` string
    * for Bifrost/OpenRouter/Vertex (`openai/gpt-4o-mini`,
-   * `google/gemini-2.0-flash`). */
+   * `google/gemini-2.0-flash`). Callers normally pass the result of
+   * `resolveExtractModel()` / `resolveSemanticCheckModel()`. */
   model: string;
   /** Bedrock only: omit to fall back to AWS_REGION/AWS_DEFAULT_REGION. */
   region?: string;
 }
 
-export type LlmProvider = "bedrock" | "bifrost" | "openrouter" | "vertex";
-
-const KNOWN_PROVIDERS: readonly LlmProvider[] = ["bedrock", "bifrost", "openrouter", "vertex"];
+export type LlmProvider = "bedrock" | "vertex" | "openrouter" | "bifrost";
 
 /**
- * Which provider a call will use right now, given the environment. An
- * explicit `TWING_LLM_PROVIDER` wins; otherwise the first provider whose
- * config is present, in precedence order, with Bedrock as the final
- * fallback (so a fully unconfigured server still throws "no credentials"
- * from `callBedrock` and the caller fails soft, unchanged behavior).
+ * Which provider a call will use right now, given the environment: the
+ * first one whose credential/base-URL var is present, in precedence order
+ * AWS -> GCP -> OpenRouter -> Bifrost. **Throws** if none is set -- there is
+ * no default provider. The throw is expected to reach a caller that fails
+ * soft (see this file's header comment).
  */
 export function selectProvider(): LlmProvider {
-  const explicit = process.env.TWING_LLM_PROVIDER?.trim().toLowerCase();
-  if (explicit && (KNOWN_PROVIDERS as readonly string[]).includes(explicit)) {
-    return explicit as LlmProvider;
-  }
   if (process.env.AWS_BEARER_TOKEN_BEDROCK) return "bedrock";
-  if (process.env.TWING_BIFROST_BASE_URL) return "bifrost";
-  if (process.env.OPENROUTER_API_KEY) return "openrouter";
   if (process.env.GOOGLE_APPLICATION_CREDENTIALS) return "vertex";
-  return "bedrock";
+  if (process.env.OPENROUTER_API_KEY) return "openrouter";
+  if (process.env.TWING_BIFROST_BASE_URL) return "bifrost";
+  throw new Error(
+    "no LLM provider configured -- set one of AWS_BEARER_TOKEN_BEDROCK, GOOGLE_APPLICATION_CREDENTIALS, OPENROUTER_API_KEY, or TWING_BIFROST_BASE_URL",
+  );
+}
+
+interface ProviderModels {
+  extractEnv: string;
+  extractDefault: string;
+  semanticEnv: string;
+  semanticDefault: string;
+}
+
+const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
+  bedrock: {
+    extractEnv: "TWING_BEDROCK_EXTRACT_MODEL",
+    extractDefault: "google.gemma-4-31b",
+    semanticEnv: "TWING_BEDROCK_SEMANTIC_CHECK_MODEL",
+    semanticDefault: "google.gemma-4-31b",
+  },
+  vertex: {
+    extractEnv: "TWING_VERTEX_EXTRACT_MODEL",
+    extractDefault: "google/gemini-2.0-flash",
+    semanticEnv: "TWING_VERTEX_SEMANTIC_CHECK_MODEL",
+    semanticDefault: "google/gemini-2.0-flash",
+  },
+  openrouter: {
+    extractEnv: "TWING_OPENROUTER_EXTRACT_MODEL",
+    extractDefault: "openai/gpt-4o-mini",
+    semanticEnv: "TWING_OPENROUTER_SEMANTIC_CHECK_MODEL",
+    semanticDefault: "openai/gpt-4o-mini",
+  },
+  bifrost: {
+    extractEnv: "TWING_BIFROST_EXTRACT_MODEL",
+    extractDefault: "openai/gpt-4o-mini",
+    semanticEnv: "TWING_BIFROST_SEMANTIC_CHECK_MODEL",
+    semanticDefault: "openai/gpt-4o-mini",
+  },
+};
+
+/** The extraction model for the active provider: `TWING_<PROVIDER>_EXTRACT_MODEL`
+ * if set, else the provider's default. Throws (via `selectProvider`) when no
+ * provider is configured. */
+export function resolveExtractModel(): string {
+  const m = PROVIDER_MODELS[selectProvider()];
+  return process.env[m.extractEnv]?.trim() || m.extractDefault;
+}
+
+/** The semantic-conflict-check model for the active provider:
+ * `TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL` if set, else the provider's default. */
+export function resolveSemanticCheckModel(): string {
+  const m = PROVIDER_MODELS[selectProvider()];
+  return process.env[m.semanticEnv]?.trim() || m.semanticDefault;
 }
 
 /** One-line, secret-free description of the active provider config, for
- * main.ts's startup log. `ready` is a best-effort "the obvious required
- * vars are present" check -- not a live call. */
-export function describeLlmProvider(): { provider: LlmProvider; ready: boolean; summary: string } {
-  const provider = selectProvider();
+ * main.ts's startup log. `provider` is null when none is configured. `ready`
+ * is a best-effort "the obvious required vars are present" check -- not a
+ * live call. */
+export function describeLlmProvider(): { provider: LlmProvider | null; ready: boolean; summary: string } {
+  let provider: LlmProvider;
+  try {
+    provider = selectProvider();
+  } catch {
+    return {
+      provider: null,
+      ready: false,
+      summary:
+        "no provider detected (need AWS_BEARER_TOKEN_BEDROCK / GOOGLE_APPLICATION_CREDENTIALS / OPENROUTER_API_KEY / TWING_BIFROST_BASE_URL)",
+    };
+  }
   switch (provider) {
     case "bedrock": {
       const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
-      const ready = Boolean(process.env.AWS_BEARER_TOKEN_BEDROCK && region);
       return {
         provider,
-        ready,
+        ready: Boolean(process.env.AWS_BEARER_TOKEN_BEDROCK && region),
         summary: `Bedrock (bedrock-mantle)${region ? `, region ${region}` : ", region unset"}`,
       };
     }
-    case "bifrost": {
-      const base = process.env.TWING_BIFROST_BASE_URL;
-      const key = process.env.TWING_BIFROST_API_KEY;
-      const auth = !key ? "no auth" : key.startsWith("sk-bf-") ? "virtual key" : "bearer token";
-      return { provider, ready: Boolean(base), summary: `Bifrost gateway at ${base ?? "(TWING_BIFROST_BASE_URL unset)"} (${auth})` };
+    case "vertex": {
+      const project = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT;
+      const location = process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
+      return {
+        provider,
+        ready: Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS),
+        summary: `Vertex AI (project ${project ?? "from credentials"}, location ${location})`,
+      };
     }
     case "openrouter":
       return {
@@ -133,15 +205,11 @@ export function describeLlmProvider(): { provider: LlmProvider; ready: boolean; 
         ready: Boolean(process.env.OPENROUTER_API_KEY),
         summary: `OpenRouter at ${process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1"}`,
       };
-    case "vertex": {
-      const project = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT;
-      const location = process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
-      const ready = Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS && project);
-      return {
-        provider,
-        ready,
-        summary: `Vertex AI (project ${project ?? "unset"}, location ${location})`,
-      };
+    case "bifrost": {
+      const base = process.env.TWING_BIFROST_BASE_URL;
+      const key = process.env.TWING_BIFROST_API_KEY;
+      const auth = !key ? "no auth" : key.startsWith("sk-bf-") ? "virtual key" : "bearer token";
+      return { provider, ready: Boolean(base), summary: `Bifrost gateway at ${base ?? "(TWING_BIFROST_BASE_URL unset)"} (${auth})` };
     }
   }
 }
@@ -179,6 +247,79 @@ async function callBedrock(messages: ChatMessage[], options: LlmCallOptions): Pr
   return parseChatCompletion(res, "Bedrock");
 }
 
+/** The bits of `google-auth-library` `callVertex` needs. Behind an
+ * interface only so `llm-client.test.ts` can swap in a fake via
+ * `__setVertexCredentialsForTests` instead of standing up real GCP
+ * credentials -- production always uses `googleAuthCredentials()`. */
+export interface VertexCredentials {
+  accessToken(): Promise<string>;
+  projectId(): Promise<string | undefined>;
+}
+
+let googleAuth: GoogleAuth | undefined;
+let vertexCredentialsOverride: VertexCredentials | undefined;
+
+/** Test-only: swap the credential source (pass `undefined` to restore). */
+export function __setVertexCredentialsForTests(v: VertexCredentials | undefined): void {
+  vertexCredentialsOverride = v;
+}
+
+/** `google-auth-library` loads `GOOGLE_APPLICATION_CREDENTIALS` / ADC /
+ * metadata-server credentials and caches + refreshes the token itself, so
+ * there is nothing to cache here. */
+function googleAuthCredentials(): VertexCredentials {
+  googleAuth ??= new GoogleAuth({ scopes: "https://www.googleapis.com/auth/cloud-platform" });
+  const auth = googleAuth;
+  return {
+    async accessToken() {
+      const token = await auth.getAccessToken();
+      if (!token) {
+        throw new Error(
+          "Vertex request failed: google-auth-library returned no access token -- check GOOGLE_APPLICATION_CREDENTIALS / application default credentials",
+        );
+      }
+      return token;
+    },
+    projectId: () => auth.getProjectId().catch(() => undefined),
+  };
+}
+
+async function callVertex(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
+  const creds = vertexCredentialsOverride ?? googleAuthCredentials();
+  const project =
+    process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT ?? (await creds.projectId());
+  if (!project) {
+    throw new Error("Vertex request failed: no project -- set GOOGLE_CLOUD_PROJECT (or use credentials that carry one)");
+  }
+  const location = process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
+  const token = await creds.accessToken();
+
+  const res = await fetch(
+    `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/endpoints/openapi/chat/completions`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ model: options.model, messages }),
+    },
+  );
+  return parseChatCompletion(res, "Vertex");
+}
+
+async function callOpenRouter(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) {
+    throw new Error("OpenRouter request failed: no credentials -- set OPENROUTER_API_KEY");
+  }
+  const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+
+  const res = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    body: JSON.stringify({ model: options.model, messages }),
+  });
+  return parseChatCompletion(res, "OpenRouter");
+}
+
 /** `sk-bf-...` -> Bifrost virtual key header; any other value -> bearer;
  * unset -> no auth header at all (a keyless localhost gateway). */
 function bifrostAuthHeaders(key: string | undefined): Record<string, string> {
@@ -202,135 +343,20 @@ async function callBifrost(messages: ChatMessage[], options: LlmCallOptions): Pr
   return parseChatCompletion(res, "Bifrost");
 }
 
-async function callOpenRouter(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
-  const key = process.env.OPENROUTER_API_KEY;
-  if (!key) {
-    throw new Error("OpenRouter request failed: no credentials -- set OPENROUTER_API_KEY");
-  }
-  const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
-
-  const res = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model: options.model, messages }),
-  });
-  return parseChatCompletion(res, "OpenRouter");
-}
-
-interface ServiceAccountKey {
-  client_email: string;
-  private_key: string;
-  token_uri?: string;
-}
-
-let vertexTokenCache: { key: string; token: string; expiresAt: number } | null = null;
-
-function base64url(input: string | Buffer): string {
-  return (typeof input === "string" ? Buffer.from(input) : input).toString("base64url");
-}
-
-/** Mint (and cache) a cloud-platform access token from a service-account
- * key via the RS256 JWT bearer grant -- no `google-auth-library`. Cached
- * per `client_email` until ~1min before the token's own expiry. */
-async function vertexAccessToken(sa: ServiceAccountKey): Promise<string> {
-  const now = Date.now();
-  if (vertexTokenCache && vertexTokenCache.key === sa.client_email && vertexTokenCache.expiresAt > now + 60_000) {
-    return vertexTokenCache.token;
-  }
-  const tokenUri = sa.token_uri ?? "https://oauth2.googleapis.com/token";
-  const iat = Math.floor(now / 1000);
-  const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const claims = base64url(
-    JSON.stringify({
-      iss: sa.client_email,
-      scope: "https://www.googleapis.com/auth/cloud-platform",
-      aud: tokenUri,
-      iat,
-      exp: iat + 3600,
-    }),
-  );
-  const signingInput = `${header}.${claims}`;
-  const signature = base64url(createSign("RSA-SHA256").update(signingInput).sign(sa.private_key));
-  const assertion = `${signingInput}.${signature}`;
-
-  const res = await fetch(tokenUri, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion,
-    }),
-  });
-  const body = (await res.json().catch(() => ({}))) as {
-    access_token?: string;
-    expires_in?: number;
-    error?: string;
-    error_description?: string;
-  };
-  if (!res.ok || !body.access_token) {
-    throw new Error(
-      `Vertex token exchange failed (${res.status}): ${body.error_description ?? body.error ?? JSON.stringify(body)}`,
-    );
-  }
-  vertexTokenCache = {
-    key: sa.client_email,
-    token: body.access_token,
-    expiresAt: now + (body.expires_in ?? 3600) * 1000,
-  };
-  return body.access_token;
-}
-
-async function callVertex(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
-  const credPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  if (!credPath) {
-    throw new Error(
-      "Vertex request failed: no credentials -- set GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON path",
-    );
-  }
-  const project = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT;
-  if (!project) {
-    throw new Error("Vertex request failed: no project -- set GOOGLE_CLOUD_PROJECT");
-  }
-  const location = process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
-
-  let sa: ServiceAccountKey;
-  try {
-    sa = JSON.parse(await readFile(credPath, "utf8")) as ServiceAccountKey;
-  } catch (err) {
-    throw new Error(
-      `Vertex request failed: could not read GOOGLE_APPLICATION_CREDENTIALS (${credPath}): ${err instanceof Error ? err.message : err}`,
-    );
-  }
-  if (!sa.client_email || !sa.private_key) {
-    throw new Error("Vertex request failed: GOOGLE_APPLICATION_CREDENTIALS is not a service-account key (no client_email/private_key)");
-  }
-  const token = await vertexAccessToken(sa);
-
-  const res = await fetch(
-    `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/endpoints/openapi/chat/completions`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ model: options.model, messages }),
-    },
-  );
-  return parseChatCompletion(res, "Vertex");
-}
-
 /** The general form: a full message list (system + any few-shot user/
  * assistant example turns + the real user turn). `callLlm` below is a thin
  * convenience wrapper for the common single-system-message-plus-user-turn
- * case. Provider is chosen ambiently -- see `selectProvider`. */
+ * case. Provider is chosen ambiently -- see `selectProvider` (throws when
+ * none is configured). */
 export async function callLlmMessages(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
   switch (selectProvider()) {
-    case "bifrost":
-      return callBifrost(messages, options);
-    case "openrouter":
-      return callOpenRouter(messages, options);
     case "vertex":
       return callVertex(messages, options);
+    case "openrouter":
+      return callOpenRouter(messages, options);
+    case "bifrost":
+      return callBifrost(messages, options);
     case "bedrock":
-    default:
       return callBedrock(messages, options);
   }
 }

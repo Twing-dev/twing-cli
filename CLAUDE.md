@@ -282,15 +282,19 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     `design-checks.ts` (verdict logic: `clean`/`overlap`/`constraint_flag`),
     `design-store.ts` (`DesignRegistry`, `ConstraintStore`), `design-extract.ts`
     (turns free-text plan into structured `creates`/`touches`/`dependsOn` via
-    one LLM chat-completion call routed by `llm-client.ts`. AWS Bedrock
-    (`bedrock-mantle`, `AWS_BEARER_TOKEN_BEDROCK`) is the default provider;
-    Bifrost (`TWING_BIFROST_BASE_URL`), OpenRouter (`OPENROUTER_API_KEY`),
-    and GCP Vertex AI (`GOOGLE_APPLICATION_CREDENTIALS`) are also selectable
-    via `TWING_LLM_PROVIDER` or credential auto-detection, Bedrock winning
-    ties — all four share the OpenAI chat-completions shape; Vertex mints its
-    OAuth token from the service-account key with `node:crypto`, no
-    `google-auth-library`. Missing/misconfigured credentials fail soft to
-    "clean", never deny over it). `/v1/constraints/match` is
+    one LLM chat-completion call routed by `llm-client.ts`. The provider is
+    auto-detected — no `TWING_LLM_PROVIDER` — from which credential/base-URL
+    var is set, precedence `AWS_BEARER_TOKEN_BEDROCK` (Bedrock/`bedrock-mantle`)
+    → `GOOGLE_APPLICATION_CREDENTIALS` (GCP Vertex AI) → `OPENROUTER_API_KEY`
+    → `TWING_BIFROST_BASE_URL`; `selectProvider` **throws** when none is set
+    (no default) and the caller's retry loop fails soft over it. All four
+    share the OpenAI chat-completions shape; Vertex auth is
+    `google-auth-library` (`GoogleAuth` — service-account JSON / ADC / GCE
+    metadata). Model is per-provider: `resolveExtractModel` /
+    `resolveSemanticCheckModel` read `TWING_<PROVIDER>_EXTRACT_MODEL` /
+    `TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL` with a provider-appropriate
+    default. Missing/misconfigured credentials fail soft to "clean", never
+    deny over it). `/v1/constraints/match` is
     the §17.9 ground-truth backstop: checks the literal file path against the
     Constraint Store directly, independent of what the session's registered
     design claims to touch (closes a bypass where a session registers an
@@ -456,10 +460,14 @@ Claude Code tool call
   different clones/worktrees.
 - `developerId` — server-issued and auth-derived (§17.10 hardening): resolved
   from the authenticated PAT on every request, not read from a client-supplied
-  field. `computeDeveloperId()` (git-email-derived, local) survives only as
-  the suggested label at `keygen`/`admin bootstrap` time and for `align.ts`'s
-  no-server git-diff fallback, which never talks to a server to verify
-  anything against.
+  field. The *label* it's minted from is chosen once, client-side, at
+  identity-creation time, resolving in order: an explicit `--label`, then the
+  caller's GitHub username (via the OAuth token `join.ts` already holds, or a
+  best-effort `computeGithubUsername()` — `gh` CLI / `git config github.user`
+  — on the `keygen`/`admin bootstrap` paths that have no token), then
+  `computeDeveloperId()` (git-email-derived, local), then a persisted random
+  id. `computeDeveloperId()` also still backs `align.ts`'s no-server git-diff
+  fallback, which never talks to a server to verify anything against.
 - `sessionId` — Claude Code's real session id. The design gate's `Edit`/
   `Write` check looks open designs up by exact session id; it comes from
   `CLAUDE_CODE_SESSION_ID` by default (confirmed live against a real gated

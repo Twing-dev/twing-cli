@@ -3,7 +3,7 @@ import { createApp } from "./app.js";
 import { createDb } from "./db/client.js";
 import { ConstraintStore } from "./design-store.js";
 import { IdentityStore } from "./identity-store.js";
-import { describeLlmProvider } from "./llm-client.js";
+import { describeLlmProvider, resolveExtractModel, resolveSemanticCheckModel } from "./llm-client.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const dataDirOptions = process.env.TWING_SERVE_DATA_DIR ? { dataDir: process.env.TWING_SERVE_DATA_DIR } : {};
@@ -37,21 +37,23 @@ if (process.argv.includes("--regenerate-bootstrap-token")) {
 const db = createDb(dataDirOptions);
 
 // §17.3/§17.6: design-gate extraction and constraint persistence config.
-// Bedrock (bedrock-mantle) is the default LLM path; Bifrost, OpenRouter,
-// and GCP Vertex AI are also selectable -- picked ambiently by
-// TWING_LLM_PROVIDER or credential auto-detection in llm-client.ts (see
-// its header comment for the env vars and precedence). No API-key precheck
-// here: every provider reads its own credentials from the environment, and
-// a misconfigured deployment finds out when the real call fails and falls
-// soft, not from a separate presence check. The model default below is a
-// Bedrock model id -- an operator pointing at Bifrost/OpenRouter/Vertex
-// must set TWING_EXTRACT_MODEL / TWING_SEMANTIC_CHECK_MODEL to that
-// provider's own model string (e.g. `openai/gpt-4o-mini`).
-const extractModel = process.env.TWING_EXTRACT_MODEL ?? "google.gemma-4-31b";
-
-// design-semantic-check.ts's async comparator -- same ambient-credential
-// resolution, same model default (this repo's own eval settled on it).
-const semanticCheckModel = process.env.TWING_SEMANTIC_CHECK_MODEL ?? "google.gemma-4-31b";
+// The LLM provider is auto-detected from the environment by llm-client.ts
+// (AWS -> GCP -> OpenRouter -> Bifrost precedence; no TWING_LLM_PROVIDER
+// override), and the model is chosen per provider from
+// TWING_<PROVIDER>_EXTRACT_MODEL / TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL
+// with provider-appropriate defaults -- see llm-client.ts's header. When no
+// provider is configured, `resolve*Model()` throws (via `selectProvider`);
+// we swallow that here so the server still starts (extraction just fails
+// soft to "clean", logged below), and pass empty model ids the real call
+// path never gets far enough to use.
+let extractModel = "";
+let semanticCheckModel = "";
+try {
+  extractModel = resolveExtractModel();
+  semanticCheckModel = resolveSemanticCheckModel();
+} catch {
+  // no provider configured -- handled by the startup log + fail-soft path
+}
 
 // twing-monitor v1: comma-separated browser-origin allowlist, e.g.
 // "https://app.twing.dev,http://localhost:5173". Unset/empty -- the
@@ -116,22 +118,21 @@ serve({ fetch: app.fetch, port, hostname }, (info) => {
     }
   }
   const llm = describeLlmProvider();
-  if (llm.ready) {
+  if (!llm.provider) {
+    console.log(
+      `twing serve: no LLM provider configured (${llm.summary}) -- ExitPlanMode design extraction and async semantic-conflict checks ` +
+        "will fail soft to 'clean' / 'no conflict'. The gate still enforces the Edit|Write \"must have a registered design\" rule either way.",
+    );
+  } else if (llm.ready) {
     console.log(
       `twing serve: LLM provider ${llm.provider} -- ${llm.summary}. Design extraction uses model ${extractModel}, ` +
         `semantic-conflict checks use model ${semanticCheckModel}.`,
     );
   } else {
     console.log(
-      `twing serve: LLM provider ${llm.provider} (${llm.summary}) is not fully configured -- ExitPlanMode design extraction (model ${extractModel}) ` +
+      `twing serve: LLM provider ${llm.provider} (${llm.summary}) detected but not fully configured -- design extraction (model ${extractModel}) ` +
         `will fail soft to 'clean', and async semantic-conflict checks (model ${semanticCheckModel}) will fail soft to 'no conflict'. ` +
         "The gate still enforces the Edit|Write \"must have a registered design\" rule either way.",
-    );
-  }
-  if (llm.ready && llm.provider !== "bedrock" && !extractModel.includes("/")) {
-    console.log(
-      `twing serve: WARNING -- LLM provider is ${llm.provider} but TWING_EXTRACT_MODEL/TWING_SEMANTIC_CHECK_MODEL still look Bedrock-shaped ` +
-        `(${extractModel}). Set them to a ${llm.provider} model string (e.g. "openai/gpt-4o-mini") or extraction will fail soft to 'clean'.`,
     );
   }
 });

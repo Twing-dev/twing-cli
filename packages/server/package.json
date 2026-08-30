@@ -16,6 +16,7 @@
     "@twing/core": "*",
     "better-sqlite3": "^11.10.0",
     "drizzle-orm": "^0.44.6",
+    "google-auth-library": "^9.15.1",
     "hono": "^4.13.1",
     "minimatch": "^10.0.1"
   },
