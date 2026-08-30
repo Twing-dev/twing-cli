@@ -241,7 +241,7 @@ test("resolveExtractModel / resolveSemanticCheckModel: per-provider default, ove
     assert.equal(resolveExtractModel(), "openai/gpt-4o-mini");
   });
   await withEnv({ GOOGLE_APPLICATION_CREDENTIALS: "/sa.json" }, async () => {
-    assert.equal(resolveExtractModel(), "google/gemini-2.0-flash");
+    assert.equal(resolveExtractModel(), "google/gemini-2.5-flash");
   });
   await withEnv(
     { OPENROUTER_API_KEY: "k", TWING_OPENROUTER_EXTRACT_MODEL: "anthropic/claude-3-5-haiku", TWING_OPENROUTER_SEMANTIC_CHECK_MODEL: "openai/gpt-4o" },
