@@ -309,8 +309,10 @@ npm run start --workspace packages/server
 # (GOOGLE_APPLICATION_CREDENTIALS / gcloud ADC / GCE metadata server)
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
 export GOOGLE_CLOUD_PROJECT=my-project      # or resolved from the credentials
-export GOOGLE_CLOUD_LOCATION=us-central1    # optional; default "global" (uses the location-less aiplatform.googleapis.com host)
-# export TWING_VERTEX_EXTRACT_MODEL=google/gemini-2.0-flash   # default
+export GOOGLE_CLOUD_LOCATION=global         # optional; "global" (the default) uses the location-less aiplatform.googleapis.com host
+# Gemma via Vertex MaaS, for example (default when unset: google/gemini-2.0-flash):
+export TWING_VERTEX_EXTRACT_MODEL="google/gemma-4-26b-a4b-it-maas"
+export TWING_VERTEX_SEMANTIC_CHECK_MODEL="google/gemma-4-26b-a4b-it-maas"
 
 # OpenRouter
 export OPENROUTER_API_KEY=...
