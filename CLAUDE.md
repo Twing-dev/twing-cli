@@ -282,9 +282,15 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     `design-checks.ts` (verdict logic: `clean`/`overlap`/`constraint_flag`),
     `design-store.ts` (`DesignRegistry`, `ConstraintStore`), `design-extract.ts`
     (turns free-text plan into structured `creates`/`touches`/`dependsOn` via
-    a Bedrock LLM call (the sole LLM provider — OpenRouter support was
-    removed 2026-08-17) — `AWS_BEARER_TOKEN_BEDROCK`; missing credentials
-    fail soft to "clean", never deny over it). `/v1/constraints/match` is
+    one LLM chat-completion call routed by `llm-client.ts`. AWS Bedrock
+    (`bedrock-mantle`, `AWS_BEARER_TOKEN_BEDROCK`) is the default provider;
+    Bifrost (`TWING_BIFROST_BASE_URL`), OpenRouter (`OPENROUTER_API_KEY`),
+    and GCP Vertex AI (`GOOGLE_APPLICATION_CREDENTIALS`) are also selectable
+    via `TWING_LLM_PROVIDER` or credential auto-detection, Bedrock winning
+    ties — all four share the OpenAI chat-completions shape; Vertex mints its
+    OAuth token from the service-account key with `node:crypto`, no
+    `google-auth-library`. Missing/misconfigured credentials fail soft to
+    "clean", never deny over it). `/v1/constraints/match` is
     the §17.9 ground-truth backstop: checks the literal file path against the
     Constraint Store directly, independent of what the session's registered
     design claims to touch (closes a bypass where a session registers an

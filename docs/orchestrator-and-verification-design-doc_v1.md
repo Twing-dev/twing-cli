@@ -775,18 +775,35 @@ signal, only consulted when the structured checks find nothing (§17.4).
 
 ### 17.3 Extraction
 
-`rawPlanText` → structured fields via one OpenRouter chat-completion call
-(`packages/server/src/design-extract.ts`), same call shape already used by
-`simulator/src/drivers/openrouter-driver.ts` (duplicated, not imported — the server
-package shouldn't depend on the simulator). Model: `TWING_EXTRACT_MODEL`, default
-`openai/gpt-oss-20b:free` (the simulator's existing default, kept for consistency and
-zero marginal cost while dogfooding). Key: `OPENROUTER_API_KEY` env var on the machine
-running `twing serve`.
+`rawPlanText` → structured fields via one chat-completion call
+(`packages/server/src/design-extract.ts`), routed through
+`packages/server/src/llm-client.ts`. All providers speak the OpenAI
+chat-completions request/response shape, so there is one call shape and one
+response parser regardless of which is active.
+
+**Provider** — AWS Bedrock (`bedrock-mantle`, a plain Bearer-token
+OpenAI-compat shim, not the Bedrock Runtime `Converse` API) is the default.
+Bifrost (`TWING_BIFROST_BASE_URL`, optional `TWING_BIFROST_API_KEY` — an
+`sk-bf-*` value goes as the `x-bf-vk` header, anything else as
+`Authorization: Bearer`), OpenRouter (`OPENROUTER_API_KEY`), and GCP Vertex
+AI (`GOOGLE_APPLICATION_CREDENTIALS` service-account JSON + `GOOGLE_CLOUD_PROJECT`
+/ `GOOGLE_CLOUD_LOCATION`) are also selectable. `TWING_LLM_PROVIDER`
+(`bedrock|bifrost|openrouter|vertex`) forces the choice; unset, `selectProvider`
+auto-detects from which credential/base-URL vars are present, Bedrock winning
+ties. Vertex mints its short-lived OAuth token from the service-account key
+via an RS256 JWT bearer grant done with `node:crypto` (no `google-auth-library`),
+cached in-process; the other three are single unauthenticated-SDK `fetch`
+calls. **Model**: `TWING_EXTRACT_MODEL` / `TWING_SEMANTIC_CHECK_MODEL`,
+default `google.gemma-4-31b` (a Bedrock model id — an operator pointing at
+Bifrost/OpenRouter/Vertex must set these to that provider's own
+`provider/model` string, e.g. `openai/gpt-4o-mini`).
 
 Schema-validated by hand on the way out (matches `manifest.ts`'s existing manual-parse
-style — no new dependency); one retry with a stricter prompt on malformed JSON. Unlike
+style — no new dependency); one retry on malformed JSON. Unlike
 the spec's "reject/retry," a second failure **fails soft**: empty `creates`/`touches`/
-`dependsOn`, verdict proceeds as `clean`, failure logged server-side. An extraction bug
+`dependsOn`, verdict proceeds as `clean`, failure logged server-side. This covers a
+missing/misconfigured provider too — the real call throws, retries once, then falls
+soft; there is no separate credential precheck. An extraction bug
 degrading to "no check ran" is the right failure mode for a blocking gate — degrading to
 "deny everyone" is not.
 
