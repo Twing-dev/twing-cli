@@ -135,9 +135,13 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
   },
   vertex: {
     extractEnv: "TWING_VERTEX_EXTRACT_MODEL",
-    extractDefault: "google/gemini-2.0-flash",
+    // gemini-2.0-flash 404s on the live twing-app Vertex catalog (both
+    // "global" and a regional location) with no operator override --
+    // confirmed live 2026-08-30. gemini-2.5-flash is live-verified working
+    // against the same project via this exact callVertex path.
+    extractDefault: "google/gemini-2.5-flash",
     semanticEnv: "TWING_VERTEX_SEMANTIC_CHECK_MODEL",
-    semanticDefault: "google/gemini-2.0-flash",
+    semanticDefault: "google/gemini-2.5-flash",
   },
   openrouter: {
     extractEnv: "TWING_OPENROUTER_EXTRACT_MODEL",
