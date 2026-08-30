@@ -309,7 +309,7 @@ npm run start --workspace packages/server
 # (GOOGLE_APPLICATION_CREDENTIALS / gcloud ADC / GCE metadata server)
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
 export GOOGLE_CLOUD_PROJECT=my-project      # or resolved from the credentials
-export GOOGLE_CLOUD_LOCATION=us-central1    # optional, this is the default
+export GOOGLE_CLOUD_LOCATION=us-central1    # optional; default "global" (uses the location-less aiplatform.googleapis.com host)
 # export TWING_VERTEX_EXTRACT_MODEL=google/gemini-2.0-flash   # default
 
 # OpenRouter

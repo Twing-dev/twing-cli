@@ -62,7 +62,10 @@
  *   vertex      GOOGLE_APPLICATION_CREDENTIALS (service-account JSON path;
  *               also what selection keys off), GOOGLE_CLOUD_PROJECT /
  *               GCLOUD_PROJECT (or resolved from the credentials),
- *               GOOGLE_CLOUD_LOCATION (optional, default us-central1),
+ *               GOOGLE_CLOUD_LOCATION (optional, default "global" -- which,
+ *               like an explicit "global", hits the location-less host
+ *               aiplatform.googleapis.com; a regional value gets the
+ *               "{location}-" DNS prefix),
  *               TWING_VERTEX_EXTRACT_MODEL / TWING_VERTEX_SEMANTIC_CHECK_MODEL
  *   openrouter  OPENROUTER_API_KEY, OPENROUTER_BASE_URL (optional),
  *               TWING_OPENROUTER_EXTRACT_MODEL / TWING_OPENROUTER_SEMANTIC_CHECK_MODEL
@@ -192,7 +195,7 @@ export function describeLlmProvider(): { provider: LlmProvider | null; ready: bo
     }
     case "vertex": {
       const project = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT;
-      const location = process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
+      const location = process.env.GOOGLE_CLOUD_LOCATION?.trim() || "global";
       return {
         provider,
         ready: Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS),
@@ -291,11 +294,15 @@ async function callVertex(messages: ChatMessage[], options: LlmCallOptions): Pro
   if (!project) {
     throw new Error("Vertex request failed: no project -- set GOOGLE_CLOUD_PROJECT (or use credentials that carry one)");
   }
-  const location = process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
+  // Default and `global` both use the location-less host
+  // `aiplatform.googleapis.com` (the path still carries `locations/global`);
+  // any regional value gets the `{location}-` DNS prefix.
+  const location = process.env.GOOGLE_CLOUD_LOCATION?.trim() || "global";
+  const host = location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`;
   const token = await creds.accessToken();
 
   const res = await fetch(
-    `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/endpoints/openapi/chat/completions`,
+    `https://${host}/v1/projects/${project}/locations/${location}/endpoints/openapi/chat/completions`,
     {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },

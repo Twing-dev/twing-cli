@@ -404,14 +404,36 @@ test("vertex: gets a token + project from google-auth-library, calls the OpenAI-
     ),
   );
 
+  // No GOOGLE_CLOUD_LOCATION -> defaults to "global" -> location-less host,
+  // path still carries locations/global.
   assert.equal(
     aiUrl,
-    "https://us-central1-aiplatform.googleapis.com/v1/projects/proj-from-adc/locations/us-central1/endpoints/openapi/chat/completions",
+    "https://aiplatform.googleapis.com/v1/projects/proj-from-adc/locations/global/endpoints/openapi/chat/completions",
   );
   assert.equal(aiAuth, "Bearer ya29.fake");
   assert.deepEqual((aiBody as { model: string }).model, "google/gemini-2.0-flash");
   assert.equal(tokenCalls, 1);
   assert.equal(projectCalls, 1);
+});
+
+test("vertex: an explicit GOOGLE_CLOUD_LOCATION=global also uses the location-less host", async () => {
+  const creds: VertexCredentials = { accessToken: async () => "ya29.fake", projectId: async () => "p" };
+  let aiUrl = "";
+  await withEnv({ GOOGLE_APPLICATION_CREDENTIALS: "/sa.json", GOOGLE_CLOUD_PROJECT: "proj", GOOGLE_CLOUD_LOCATION: "global" }, () =>
+    withVertexCreds(creds, () =>
+      withMockFetch(
+        (async (url: string) => {
+          aiUrl = url;
+          return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+        }) as typeof fetch,
+        () => callLlm("s", "u", { model: "google/gemini-2.0-flash" }),
+      ),
+    ),
+  );
+  assert.equal(
+    aiUrl,
+    "https://aiplatform.googleapis.com/v1/projects/proj/locations/global/endpoints/openapi/chat/completions",
+  );
 });
 
 test("vertex: GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION override the auto-resolved project + region", async () => {

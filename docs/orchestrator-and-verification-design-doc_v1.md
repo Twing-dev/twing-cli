@@ -790,9 +790,12 @@ order:
 2. `GOOGLE_APPLICATION_CREDENTIALS` → GCP Vertex AI's OpenAI-compat
    endpoint. Auth is `google-auth-library`'s `GoogleAuth` (service-account
    JSON / gcloud ADC / GCE metadata server; it refreshes and caches the
-   token itself). `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` override
-   the project (else resolved from the credentials) and region (default
-   `us-central1`).
+   token itself). `GOOGLE_CLOUD_PROJECT` overrides the project (else
+   resolved from the credentials). `GOOGLE_CLOUD_LOCATION` defaults to
+   `global`, which — like an explicit `global` — uses the location-less
+   host `aiplatform.googleapis.com` (the request path still carries
+   `locations/global`); any regional value gets the `{location}-` DNS
+   prefix.
 3. `OPENROUTER_API_KEY` → OpenRouter (`OPENROUTER_BASE_URL` optional).
 4. `TWING_BIFROST_BASE_URL` → Bifrost gateway (optional `TWING_BIFROST_API_KEY`
    — an `sk-bf-*` value goes as the `x-bf-vk` header, anything else as

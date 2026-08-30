@@ -50,7 +50,7 @@ export AWS_REGION=us-east-1
 # ...or GCP Vertex AI -- credentials via google-auth-library
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
 export GOOGLE_CLOUD_PROJECT=my-project      # or resolved from the credentials
-export GOOGLE_CLOUD_LOCATION=us-central1    # optional, this is the default
+export GOOGLE_CLOUD_LOCATION=us-central1    # optional; default "global" (uses the location-less aiplatform.googleapis.com host)
 # export TWING_VERTEX_EXTRACT_MODEL=google/gemini-2.0-flash   # default
 
 # ...or OpenRouter
