@@ -288,13 +288,41 @@ scripts for running it as a systemd service under an isolated,
 unprivileged user instead -- see `deploy/README.md`.
 
 **Design checks made from plan text** (`ExitPlanMode`) need an LLM call to
-turn the plan into structured fields, so wherever this runs needs Bedrock
-credentials (the sole LLM provider):
+turn the plan into structured fields, so wherever this runs needs an LLM
+provider configured. The provider is **auto-detected** from which of these
+env vars is set, in precedence order **AWS → GCP → OpenRouter → Bifrost**;
+if none is set the plan-text check fails soft to "clean" (the
+`Edit`/`Write` "must have a registered design" rule still applies). Each
+provider also carries its own model config -- `TWING_<PROVIDER>_EXTRACT_MODEL`
+/ `TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL`, each defaulting to something
+sensible for that provider -- so switching providers doesn't leave a
+stale model id behind.
 
 ```sh
+# AWS Bedrock (bedrock-mantle)
 export AWS_BEARER_TOKEN_BEDROCK=...
 export AWS_REGION=us-east-1
+# export TWING_BEDROCK_EXTRACT_MODEL=google.gemma-4-31b   # default
 npm run start --workspace packages/server
+
+# GCP Vertex AI -- credentials via google-auth-library
+# (GOOGLE_APPLICATION_CREDENTIALS / gcloud ADC / GCE metadata server)
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+export GOOGLE_CLOUD_PROJECT=my-project      # or resolved from the credentials
+export GOOGLE_CLOUD_LOCATION=global         # optional; "global" (the default) uses the location-less aiplatform.googleapis.com host
+# Gemma via Vertex MaaS, for example (default when unset: google/gemini-2.0-flash):
+export TWING_VERTEX_EXTRACT_MODEL="google/gemma-4-26b-a4b-it-maas"
+export TWING_VERTEX_SEMANTIC_CHECK_MODEL="google/gemma-4-26b-a4b-it-maas"
+
+# OpenRouter
+export OPENROUTER_API_KEY=...
+export OPENROUTER_BASE_URL=...              # optional, defaults to https://openrouter.ai/api/v1
+# export TWING_OPENROUTER_EXTRACT_MODEL=openai/gpt-4o-mini    # default
+
+# Bifrost gateway (https://docs.getbifrost.ai)
+export TWING_BIFROST_BASE_URL=http://localhost:8080
+export TWING_BIFROST_API_KEY=...            # optional; sk-bf-* sent as x-bf-vk, else Bearer
+# export TWING_BIFROST_EXTRACT_MODEL=openai/gpt-4o-mini       # default
 ```
 
 **Onboarding a non-GitHub-hosted project** (GitLab, self-hosted git, no

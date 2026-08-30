@@ -2,10 +2,12 @@
 // Live-network regression run of design-semantic-check.ts's comparator
 // against the full labeled eval set (design-eval-cases.ts). NOT part of
 // `npm test` (same reasoning as simulator/ needing real credentials) --
-// this hits Bedrock for real, once per (candidate, openDesigns[i]) pair.
+// this hits whichever LLM provider llm-client.ts auto-detects, once per
+// (candidate, openDesigns[i]) pair.
 //
 // Usage:
 //   npm run build   # this imports from dist, not src
+//   # any provider llm-client.ts detects, e.g. Bedrock:
 //   AWS_BEARER_TOKEN_BEDROCK=... AWS_REGION=us-east-1 node packages/server/scripts/run-semantic-eval.mjs
 //
 // Excludes the constraint_match category -- that's a deterministic
@@ -15,14 +17,17 @@
 
 import { checkSemanticConflict } from "../dist/design-semantic-check.js";
 import { EVAL_CASES } from "../dist/design-eval-cases.js";
+import { describeLlmProvider, resolveSemanticCheckModel } from "../dist/llm-client.js";
 
-const model = process.env.TWING_SEMANTIC_CHECK_MODEL ?? "google.gemma-4-31b";
-const region = process.env.AWS_REGION;
-
-if (!process.env.AWS_BEARER_TOKEN_BEDROCK) {
-  console.error("AWS_BEARER_TOKEN_BEDROCK not set -- this script needs real Bedrock credentials, exiting.");
+if (!describeLlmProvider().provider) {
+  console.error(
+    "no LLM provider configured -- set one of AWS_BEARER_TOKEN_BEDROCK / GOOGLE_APPLICATION_CREDENTIALS / OPENROUTER_API_KEY / TWING_BIFROST_BASE_URL, exiting.",
+  );
   process.exit(1);
 }
+
+const model = resolveSemanticCheckModel();
+const region = process.env.AWS_REGION;
 
 // Per-pair expected overrides where a case's single futureLlmExpectation
 // doesn't apply uniformly across multiple openDesigns entries.

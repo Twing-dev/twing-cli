@@ -126,11 +126,11 @@ export interface EvalCase {
 
 export interface PlanModeProvenance {
   rawPlanText: string;
-  /** Hand-authored, honestly NOT live-verified -- no Bedrock credentials
-   * (see llm-client.ts) existed in this environment at the time. Regenerate
-   * for real via extractDesign(rawPlanText, {model, region}) once real
-   * credentials are available, and confirm the result isn't
-   * EMPTY_EXTRACTION before replacing this field. */
+  /** Hand-authored, honestly NOT live-verified -- no LLM provider
+   * (see llm-client.ts) was configured in this environment at the time.
+   * Regenerate for real via extractDesign(rawPlanText, { model:
+   * resolveExtractModel() }) once a provider is configured, and confirm the
+   * result isn't EMPTY_EXTRACTION before replacing this field. */
   simulatedExtraction: ExtractedDesign;
 }
 

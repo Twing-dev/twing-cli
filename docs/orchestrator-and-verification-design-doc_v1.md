@@ -775,18 +775,50 @@ signal, only consulted when the structured checks find nothing (§17.4).
 
 ### 17.3 Extraction
 
-`rawPlanText` → structured fields via one OpenRouter chat-completion call
-(`packages/server/src/design-extract.ts`), same call shape already used by
-`simulator/src/drivers/openrouter-driver.ts` (duplicated, not imported — the server
-package shouldn't depend on the simulator). Model: `TWING_EXTRACT_MODEL`, default
-`openai/gpt-oss-20b:free` (the simulator's existing default, kept for consistency and
-zero marginal cost while dogfooding). Key: `OPENROUTER_API_KEY` env var on the machine
-running `twing serve`.
+`rawPlanText` → structured fields via one chat-completion call
+(`packages/server/src/design-extract.ts`), routed through
+`packages/server/src/llm-client.ts`. All providers speak the OpenAI
+chat-completions request/response shape, so there is one call shape and one
+response parser regardless of which is active.
+
+**Provider** — auto-detected by `selectProvider`, no `TWING_LLM_PROVIDER`
+override, from which credential/base-URL var is present, in precedence
+order:
+
+1. `AWS_BEARER_TOKEN_BEDROCK` → AWS Bedrock (`bedrock-mantle`, a plain
+   Bearer-token OpenAI-compat shim, not the Bedrock Runtime `Converse` API).
+2. `GOOGLE_APPLICATION_CREDENTIALS` → GCP Vertex AI's OpenAI-compat
+   endpoint. Auth is `google-auth-library`'s `GoogleAuth` (service-account
+   JSON / gcloud ADC / GCE metadata server; it refreshes and caches the
+   token itself). `GOOGLE_CLOUD_PROJECT` overrides the project (else
+   resolved from the credentials). `GOOGLE_CLOUD_LOCATION` defaults to
+   `global`, which — like an explicit `global` — uses the location-less
+   host `aiplatform.googleapis.com` (the request path still carries
+   `locations/global`); any regional value gets the `{location}-` DNS
+   prefix.
+3. `OPENROUTER_API_KEY` → OpenRouter (`OPENROUTER_BASE_URL` optional).
+4. `TWING_BIFROST_BASE_URL` → Bifrost gateway (optional `TWING_BIFROST_API_KEY`
+   — an `sk-bf-*` value goes as the `x-bf-vk` header, anything else as
+   `Authorization: Bearer`, unset means no auth header).
+
+`selectProvider` **throws** when none is set — there is no default provider
+— and the throw is caught by the fail-soft path below.
+
+**Model** — per provider, not global: `resolveExtractModel` /
+`resolveSemanticCheckModel` read `TWING_<PROVIDER>_EXTRACT_MODEL` /
+`TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL` and fall back to a
+provider-appropriate default (`google.gemma-4-31b` for Bedrock,
+`google/gemini-2.0-flash` for Vertex, `openai/gpt-4o-mini` for
+OpenRouter/Bifrost). A single top-level model id was dropped in PR #11
+review — the same model has different ids on different providers, so it
+couldn't survive a provider switch.
 
 Schema-validated by hand on the way out (matches `manifest.ts`'s existing manual-parse
-style — no new dependency); one retry with a stricter prompt on malformed JSON. Unlike
+style — no new dependency); one retry on malformed JSON. Unlike
 the spec's "reject/retry," a second failure **fails soft**: empty `creates`/`touches`/
-`dependsOn`, verdict proceeds as `clean`, failure logged server-side. An extraction bug
+`dependsOn`, verdict proceeds as `clean`, failure logged server-side. This covers a
+missing/misconfigured provider too — the real call throws, retries once, then falls
+soft; there is no separate credential precheck. An extraction bug
 degrading to "no check ran" is the right failure mode for a blocking gate — degrading to
 "deny everyone" is not.
 
