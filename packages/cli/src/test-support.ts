@@ -70,6 +70,15 @@ export function cacheToken(serverUrl: string, token: string): void {
   fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ servers: { [serverUrl]: { authToken: token } } }));
 }
 
+/** §17 Phase 4 counterpart to `cacheToken`: marks `serverUrl` as a no-auth
+ * coordinator in the current $HOME's config.json (no token, `noAuth: true`)
+ * -- must be called after `withHome` has repointed $HOME. */
+export function cacheNoAuth(serverUrl: string): void {
+  const configDir = path.join(os.homedir(), ".twing");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ servers: { [serverUrl]: { noAuth: true } } }));
+}
+
 export function withMockFetch<T>(impl: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
   globalThis.fetch = impl;

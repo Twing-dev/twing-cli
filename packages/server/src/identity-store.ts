@@ -488,6 +488,19 @@ export class IdentityStore {
     return { ...row, orgId: row.orgId ?? undefined, githubOwner: row.githubOwner ?? undefined, githubRepo: row.githubRepo ?? undefined };
   }
 
+  /** Every project record on this coordinator, unscoped. Only for the §17
+   * Phase 4 no_auth `GET /v1/projects` listing, which has no per-caller
+   * membership to filter by (the no_auth identity's `projects` is always
+   * `[]`). Never call this on the authed path -- it would leak project ids
+   * across orgs. */
+  listAllProjectRecords(): ProjectRecord[] {
+    return this.db
+      .select()
+      .from(projectRecordsTable)
+      .all()
+      .map((row) => ({ ...row, orgId: row.orgId ?? undefined, githubOwner: row.githubOwner ?? undefined, githubRepo: row.githubRepo ?? undefined }));
+  }
+
   /** §boundary-1: the first PAT-holding developer to touch a never-seen
    * `projectId` founds it, attached to their own org, and becomes its
    * project-admin. `github` (§17 Phase 3) is best-effort, forwarded only by
@@ -591,6 +604,43 @@ export class IdentityStore {
       .run();
     this.db.insert(projectMembershipsTable).values({ projectId, developerId, role: "admin" }).run();
     return { developerId };
+  }
+
+  /**
+   * §17 Phase 4 no_auth founding: a `--no-auth` coordinator populates no
+   * identity tables at all, so neither `foundProject` (needs an
+   * org-membership row for the founder) nor `foundProjectViaGithub` (needs a
+   * token/tokenHash + a live GitHub permission check) can run. This is the
+   * no_auth equivalent: founds a bare `project_records` row straight from
+   * the self-declared `developerId` every no_auth request already carries
+   * (`X-Twing-Developer-Id`, attribution only) -- `orgId` null, GitHub
+   * binding best-effort from whichever call founds first (normally
+   * `/v1/constraints/seed` from `twing init`, which carries owner/repo; a
+   * hook gate call that founds first carries none and is never backfilled --
+   * the same one-shot founding limitation the other two paths have).
+   *
+   * Unlike `foundProject`/`foundProjectViaGithub` this is reachable on every
+   * Edit/Write gate call (via `authorizeProject`), not just once at
+   * onboarding, so it uses `onConflictDoNothing()` rather than their plain
+   * check-then-insert -- two agent sessions racing first contact with a new
+   * project must not 500 the second one. Idempotent; the caller still guards
+   * with `isProjectFounded` so the common case does no writes at all.
+   */
+  foundProjectNoAuth(projectId: string, developerId: string, github?: { owner: string; repo: string }): ProjectRecord {
+    this.db
+      .insert(projectRecordsTable)
+      .values({
+        projectId,
+        orgId: null,
+        foundedBy: developerId,
+        foundedAt: Date.now(),
+        githubOwner: github?.owner ?? null,
+        githubRepo: github?.repo ?? null,
+      })
+      .onConflictDoNothing()
+      .run();
+    this.grantProjectMembership(projectId, developerId, "admin");
+    return this.getProjectRecord(projectId)!;
   }
 
   getProjectRole(projectId: string, developerId: string): Role | undefined {

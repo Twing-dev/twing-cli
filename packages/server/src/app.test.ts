@@ -4462,6 +4462,97 @@ test("no_auth mode: role-gated routes (review decide) succeed regardless of \"ro
   assert.equal(decideRes.status, 200, "no_auth must not require project-admin role for review decisions");
 });
 
+test("no_auth mode: /v1/constraints/seed founds a ProjectRecord attributed to X-Twing-Developer-Id, with the GitHub binding from the body", async () => {
+  const { app, identities } = freshNoAuthApp();
+  const res = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...developerHeader("dev@example.com") },
+    body: JSON.stringify({ projectId: "proj-na", githubOwner: "acme", githubRepo: "widgets", constraints: [] }),
+  });
+  assert.equal(res.status, 200);
+
+  assert.equal(identities.isProjectFounded("proj-na"), true, "the seed call must register the project on a no_auth coordinator");
+  const record = identities.getProjectRecord("proj-na");
+  assert.equal(record?.foundedBy, "dev@example.com", "foundedBy is the self-declared developer id");
+  assert.equal(record?.githubOwner, "acme");
+  assert.equal(record?.githubRepo, "widgets");
+  assert.equal(record?.orgId, undefined, "a no_auth-founded project has no org");
+});
+
+test("no_auth mode: GET /v1/projects lists every founded project with its GitHub binding", async () => {
+  const { app, identities } = freshNoAuthApp();
+  const dev = developerHeader("dev@example.com");
+
+  await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...dev },
+    body: JSON.stringify({ projectId: "proj-na", githubOwner: "acme", githubRepo: "widgets", constraints: [] }),
+  });
+  await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...dev },
+    body: JSON.stringify({ projectId: "proj-na2", claims: [] }),
+  });
+
+  const res = await app.request("/v1/projects", { headers: { ...dev } });
+  assert.equal(res.status, 200);
+  const { items } = (await res.json()) as { items: { projectId: string; githubOwner?: string; foundedBy?: string; role: string }[] };
+  assert.equal(items.length, 2, "both founded projects are listed on a no_auth coordinator");
+
+  const na = items.find((p) => p.projectId === "proj-na");
+  assert.equal(na?.githubOwner, "acme");
+  assert.equal(na?.foundedBy, "dev@example.com");
+  assert.equal(na?.role, "admin", "no_auth reports a flat admin capability");
+  const na2 = items.find((p) => p.projectId === "proj-na2");
+  assert.equal(na2?.githubOwner, undefined, "a project founded via a bare /v1/claims call has no GitHub binding");
+
+  assert.equal(identities.listAllProjectRecords().length, 2);
+});
+
+test("no_auth mode: re-seeding an already-founded project is idempotent -- one record, original founder kept", async () => {
+  const { app, identities } = freshNoAuthApp();
+
+  const first = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...developerHeader("first@example.com") },
+    body: JSON.stringify({ projectId: "proj-na", githubOwner: "acme", githubRepo: "widgets", constraints: [] }),
+  });
+  assert.equal(first.status, 200);
+
+  const second = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...developerHeader("second@example.com") },
+    body: JSON.stringify({ projectId: "proj-na", constraints: [{ statement: "x", scope: ["a.ts"], type: "constraint" }] }),
+  });
+  assert.equal(second.status, 200);
+
+  assert.equal(identities.listAllProjectRecords().filter((r) => r.projectId === "proj-na").length, 1);
+  assert.equal(identities.getProjectRecord("proj-na")?.foundedBy, "first@example.com", "founding is one-shot -- the first caller stays the founder");
+});
+
+test("no_auth mode: a bare /v1/claims call founds the project with no GitHub binding", async () => {
+  const { app, identities } = freshNoAuthApp();
+  const res = await app.request("/v1/claims", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...developerHeader("dev@example.com") },
+    body: JSON.stringify({ projectId: "p-claims", claims: [] }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(identities.isProjectFounded("p-claims"), true);
+  assert.equal(identities.getProjectRecord("p-claims")?.githubOwner, undefined);
+});
+
+test("no_auth mode: /v1/designs/check founds the project", async () => {
+  const { app, identities } = freshNoAuthApp();
+  const res = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...developerHeader("dev@example.com") },
+    body: JSON.stringify({ projectId: "p-design", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(identities.isProjectFounded("p-design"), true);
+});
+
 // --- §17 Phase 3: GitHub-verified project join ---
 
 function mockGithubRepoResponse(permissions: Record<string, boolean>): typeof fetch {

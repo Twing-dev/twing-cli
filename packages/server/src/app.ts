@@ -357,6 +357,23 @@ export function createApp(options: CreateAppOptions = {}) {
   // method needed, getProjectRecord already exists.
   app.get("/v1/projects", (c) => {
     const identity = c.get("identity");
+    // §17 Phase 4: a no_auth identity has no per-caller memberships
+    // (identity.projects is always []), so list every founded project
+    // instead -- there's no cross-org isolation to preserve on a no_auth
+    // coordinator. role is reported "admin" to match no_auth's flat
+    // capability model (canManageProject returns true for everyone here).
+    if (noAuth) {
+      const items = identities.listAllProjectRecords().map((record) => ({
+        projectId: record.projectId,
+        orgId: record.orgId,
+        role: "admin" as const,
+        foundedBy: record.foundedBy,
+        foundedAt: record.foundedAt,
+        githubOwner: record.githubOwner,
+        githubRepo: record.githubRepo,
+      }));
+      return c.json({ items });
+    }
     const items = identity.projects.map((membership) => {
       const record = identities.getProjectRecord(membership.projectId);
       return {
@@ -532,7 +549,18 @@ export function createApp(options: CreateAppOptions = {}) {
     projectId: string,
     github?: { owner: string; repo: string },
   ): { ok: true } | { ok: false; status: 403; error: string } {
-    if (noAuth) return { ok: true };
+    if (noAuth) {
+      // §17 Phase 4: no identity tables exist to found from the normal way
+      // (foundProject needs an org row, foundProjectViaGithub needs a token
+      // + GitHub check), but the project still has to get a record so it
+      // shows up in GET /v1/projects and carries its GitHub binding. Every
+      // project-scoped route reaches here, so this is the same lazy-founding
+      // breadth the authed path gets below. Idempotent via isProjectFounded.
+      if (!identities.isProjectFounded(projectId)) {
+        identities.foundProjectNoAuth(projectId, identity.developerId, github);
+      }
+      return { ok: true };
+    }
     if (identity.projects.some((p) => p.projectId === projectId)) return { ok: true };
     if (!identities.isProjectFounded(projectId)) {
       const founded = identities.foundProject(projectId, identity.developerId, github);
