@@ -320,7 +320,7 @@ export TWING_BIFROST_API_KEY=...            # optional; sk-bf-* sent as x-bf-vk,
 # export TWING_BIFROST_EXTRACT_MODEL=openai/gpt-4o-mini       # default
 ```
 
-#### Onboarding a non-GitHub-hosted project
+### Onboarding a non-GitHub-hosted project
 
 (GitLab, self-hosted git, no remote at all) on a full-auth server -- or
 founding/inviting on your own full-auth server generally, since the
