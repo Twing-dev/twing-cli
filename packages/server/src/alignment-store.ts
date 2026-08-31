@@ -450,6 +450,27 @@ export class AlignmentThreadStore {
     return row ? fromRow(row) : undefined;
   }
 
+  /** `DesignRegistry.reassignProject`'s guard (Change D, 2026-08-31): a
+   * design already named in a reconciliation thread -- as either the party
+   * whose claim triggered it (`designId`) or the initiator whose own open
+   * design it was checked against (`initiatingDesignId`) -- has real
+   * cross-developer conversation attached under its current project;
+   * moving it out from under that thread would leave the thread's own
+   * `projectId` pointing at a project the design itself no longer belongs
+   * to. Any status (open or closed) counts, matching
+   * `DesignRegistry.hasReviewForDesign`'s same reasoning. Uses the new
+   * `alignment_threads_design_id_idx`/`alignment_threads_initiating_design_id_idx`
+   * (`db/schema.ts`). */
+  hasThreadForDesign(designId: string): boolean {
+    const row = this.db
+      .select({ id: threadsTable.id })
+      .from(threadsTable)
+      .where(or(eq(threadsTable.designId, designId), eq(threadsTable.initiatingDesignId, designId)))
+      .limit(1)
+      .get();
+    return row !== undefined;
+  }
+
   listByProject(projectId: string, status?: AlignmentThread["status"]): AlignmentThread[] {
     const conditions = [eq(threadsTable.projectId, projectId)];
     if (status) conditions.push(eq(threadsTable.status, status));

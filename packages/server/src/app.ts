@@ -67,12 +67,6 @@ interface DesignCheckRequestBody {
   // link label. Optional: self-assigned server-side to this design's own
   // id when omitted. See DesignStatement.groupId (@twing/core).
   groupId?: string;
-  // "Force a choice" registration-sprawl fix (2026-08-25): explicit opt-out
-  // of the has-open-designs pre-registration check below, for a developer
-  // who's deliberately starting a genuinely new, unrelated design while
-  // another is still open. Like groupId, not identity-bearing -- just a
-  // caller-chosen override, never itself a source of authorization.
-  force?: boolean;
 }
 
 interface ResolveRequestBody {
@@ -97,6 +91,14 @@ interface AmendRequestBody {
    * after registration -- see DesignRegistry.amend's `groupId` param doc
    * comment for the full reasoning. */
   groupId?: string;
+  /** Change D (2026-08-31, design-gate registration-flow fixes): move an
+   * open, never-linked, nothing-built-on-it-yet design into a different
+   * project -- fixes a wrong-project registration in place instead of the
+   * only prior options (close-and-reregister, or force-a-duplicate-and-
+   * link). Mutually exclusive with every other field on this body -- see
+   * the route's own handling for why it's checked before the general
+   * scope-amend path, not folded into it. */
+  reassignProjectId?: string;
 }
 
 // §17 design lifecycle (2026-08): sessionId is required -- resume
@@ -1185,30 +1187,25 @@ export function createApp(options: CreateAppOptions = {}) {
         }
       }
     }
-    // "Force a choice" registration-sprawl fix (2026-08-25): before creating
-    // yet another open design, make sure the developer isn't just about to
-    // fragment work they already have open elsewhere. Deliberately scoped to
-    // exactly the structured `twing design register` path -- `ExitPlanMode`
-    // (rawPlanText) always registers unchanged; see this plan's own doc
-    // comment / commit message for why blocking it too would require
-    // guessing at a retry-safe auto-link the way an earlier version of this
-    // feature wrongly did. `groupId`/`force` are the two explicit escape
-    // hatches: a caller who already knows which existing design this
-    // continues, or one deliberately overriding, skips the check entirely.
-    // No row is created if this fires -- unlike file_overlap/
-    // constraint_violation, which register-then-flag, there's nothing yet
-    // worth flagging, so don't create the very clutter this exists to
-    // prevent.
-    if (!body.rawPlanText && !body.groupId && !body.force) {
-      const openForDeveloper = designs.openDesignsForDeveloper(identity.developerId, Date.now());
-      if (openForDeveloper.length > 0) {
-        return c.json({
-          verdict: "has_open_designs",
-          openDesigns: openForDeveloper.map((d) => ({ id: d.id, projectId: d.projectId, summary: d.summary, lastActivityAt: d.lastActivityAt })),
-        });
-      }
-    }
-
+    // "Force a choice" registration-sprawl fix (2026-08-25) retired
+    // 2026-08-31: this used to hard-block a structured `twing design
+    // register` call whenever the developer had any other open design
+    // anywhere, cross-project -- found live to break two completely normal
+    // workflows it never accounted for: switching to an unrelated bug fix
+    // mid-session without going through plan mode (the Edit/Write gate
+    // needs *a* design for the new files, so `register` is the only way to
+    // get one, and this then always fired), and running concurrent
+    // sessions on different repos under the same identity (the check was
+    // purely developerId-scoped, no session/project awareness, so the
+    // second session's first registration collided with the first
+    // session's every time, permanently). `ExitPlanMode` (rawPlanText)
+    // already solved the same underlying problem -- a developer
+    // accumulating forgotten open designs -- without blocking, via the
+    // "stale sibling" notice just below: register unconditionally, then
+    // nudge if a genuinely non-overlapping sibling is still open. That
+    // notice was never conditioned on how registration got here, so
+    // removing this block is enough on its own to give the structured
+    // `register` path the exact same non-blocking behavior for free.
     design ??= designs.register({
       projectId: body.projectId,
       developerId: identity.developerId,
@@ -1287,9 +1284,14 @@ export function createApp(options: CreateAppOptions = {}) {
     // `openDesignsForDeveloper` -- cross-project and no longer
     // session-restricted (session-scoping was only ever load-bearing for an
     // earlier, abandoned ExitPlanMode-blocking approach; see this feature's
-    // plan/commit message). This is `ExitPlanMode`'s entire half of that
-    // feature: it never blocks, it just gets a wider, more useful version of
-    // this same notice.
+    // plan/commit message). This was originally `ExitPlanMode`'s
+    // never-blocking half of that feature, with a separate hard-blocking
+    // `has_open_designs` verdict for the structured `register` path above.
+    // That block was retired 2026-08-31 -- found live to break normal
+    // task-switching and concurrent sessions (see the removed code's git
+    // history for the incident) -- so this notice is now the *entire*
+    // feature for both paths: registration never blocks on this, it just
+    // nudges.
     //
     // Deliberately `pathsOverlap`, not `outcome.conflicts` (2026-08-22): a
     // same-developer sibling is the same developer by construction, and
@@ -1323,8 +1325,19 @@ export function createApp(options: CreateAppOptions = {}) {
     // groupId (§17 design linking, 2026-08): echoed back on every branch --
     // post self-assignment, this is what lets a CLI caller that didn't pass
     // --group still see the value to hand a sibling-repo registration.
+    //
+    // Existence-check advisory (2026-08-31): `creates`/`touches` echoed back
+    // too, but only for a `rawPlanText` (ExitPlanMode) caller -- a
+    // structured `register` call already supplied these itself, so echoing
+    // them back would be pure noise. The Go hook has no other way to see
+    // what design-extract.ts resolved server-side (extraction never
+    // reaches the caller otherwise), and needs exactly this to stat
+    // `touches` against its own local `repoRoot` and warn on a likely
+    // wrong-project registration -- see hook/design_gate.go's
+    // `handleExitPlanModeSingle`.
+    const extractedFields = body.rawPlanText ? { creates: design.creates, touches: design.touches } : {};
     if (outcome.verdict === "clean") {
-      return c.json({ verdict: "clean", designId: design.id, groupId: design.groupId });
+      return c.json({ verdict: "clean", designId: design.id, groupId: design.groupId, ...extractedFields });
     }
     if (outcome.verdict === "constraint_violation") {
       return c.json({
@@ -1332,9 +1345,10 @@ export function createApp(options: CreateAppOptions = {}) {
         designId: design.id,
         groupId: design.groupId,
         constraints: outcome.constraints,
+        ...extractedFields,
       });
     }
-    return c.json({ verdict: "file_overlap", designId: design.id, groupId: design.groupId, conflicts: outcome.conflicts });
+    return c.json({ verdict: "file_overlap", designId: design.id, groupId: design.groupId, conflicts: outcome.conflicts, ...extractedFields });
   });
 
   // §17.5: adopt the conflicting design (superseded), or justify diverging
@@ -1532,6 +1546,61 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     const body = await c.req.json<AmendRequestBody>().catch(() => null);
+
+    // Change D (2026-08-31, design-gate registration-flow fixes): move an
+    // open, never-linked, nothing-built-on-it-yet design into a different
+    // project -- checked before every other branch below, since it's a
+    // distinct action with its own guard, not a scope amend. Auth is
+    // non-negotiable: membership in *both* the old project (already
+    // checked above) and the new one, or this would be exactly the hole a
+    // naive version of this feature opens -- moving a design into or out
+    // of a project you're not a member of.
+    if (body?.reassignProjectId !== undefined) {
+      const newProjectId = body.reassignProjectId;
+      if (!isProjectMember(identity, newProjectId)) {
+        return c.json({ error: "not a member of the target project" }, 403);
+      }
+      if (design.status !== "open") {
+        return c.json({ error: `design is ${design.status}, not open -- can't reassign` }, 409);
+      }
+      // Scoped narrowly to "nothing downstream depends on this design
+      // yet" rather than a general move-at-any-point feature -- any of
+      // these three existing means real process has already happened
+      // against the design's *current* project, and the deny message
+      // (hook/design_gate.go's warnIfTouchesMissing) already tells the
+      // caller to close-and-re-register instead when this is refused.
+      if (designs.hasReviewForDesign(id)) {
+        return c.json({ error: "design has a review attached -- close and re-register instead of reassigning" }, 409);
+      }
+      if (alignmentThreads.hasThreadForDesign(id)) {
+        return c.json({ error: "design has an alignment thread attached -- close and re-register instead of reassigning" }, 409);
+      }
+      if (design.groupId && designs.listByGroup(design.groupId).length > 1) {
+        return c.json({ error: "design is linked to another design -- close and re-register instead of reassigning" }, 409);
+      }
+
+      // Re-run the full syntactic check against the *new* project's own
+      // open designs/constraints before persisting anything -- the design
+      // needs to be evaluated against where it would actually live, not
+      // silently trusted. Unlike scope-amend's persist-then-flag (this
+      // route, below), a non-clean verdict here leaves the design exactly
+      // where it was: the guard above already established nothing depends
+      // on this design's current state, so there's nothing to lose by
+      // simply refusing the move outright rather than landing it under
+      // the new project already flagged.
+      const openInNewProject = designs.openDesigns(newProjectId, Date.now(), design.id);
+      const constraintsInNewProject = constraintStore.forProject(newProjectId);
+      const outcome = runDesignChecks(design, openInNewProject, constraintsInNewProject);
+      if (outcome.verdict !== "clean") {
+        console.log(`twing serve: design ${id.slice(0, 8)} reassign to project ${newProjectId.slice(0, 12)} refused -> ${outcome.verdict}`);
+        return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraints: outcome.constraints });
+      }
+
+      const reassigned = designs.reassignProject(id, newProjectId);
+      if (!reassigned) return c.json({ error: "no such design" }, 404);
+      console.log(`twing serve: design ${id.slice(0, 8)} reassigned ${design.projectId.slice(0, 12)} -> ${newProjectId.slice(0, 12)}`);
+      return c.json({ verdict: "clean", designId: reassigned.id, projectId: reassigned.projectId });
+    }
 
     // §17 design linking follow-up (2026-08-28): a groupId-only delta (no
     // scope or summary change) is pure metadata, not a scope expansion --

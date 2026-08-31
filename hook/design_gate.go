@@ -186,6 +186,15 @@ type designCheckResponse struct {
 	// groupId (self-assigned or caller-supplied). Not consumed by any
 	// gate decision today -- available for future logging/diagnostics.
 	GroupID string `json:"groupId,omitempty"`
+	// Creates/Touches (existence-check advisory, 2026-08-31): only ever set
+	// for a `rawPlanText` (ExitPlanMode) request -- app.ts echoes back
+	// what design-extract.ts resolved server-side, since this is otherwise
+	// the only way the hook ever learns what got extracted. Used by
+	// warnIfTouchesMissing below to catch a likely wrong-project
+	// registration; never set for a structured `register` call, which
+	// already had these client-side.
+	Creates []string `json:"creates,omitempty"`
+	Touches []string `json:"touches,omitempty"`
 }
 
 // blocksGate reports whether this response's verdict should deny the tool
@@ -194,9 +203,11 @@ type designCheckResponse struct {
 // core/types.ts). `/v1/designs/check`/`amend`/`resume` (design-checks.ts
 // tiers 1/3, the only source of a `designCheckResponse`) can only ever
 // return "clean", "file_overlap" (always advisory), or "constraint_violation"
-// (always blocks) -- anything else (e.g. "has_open_designs") falls through
-// to the caller's own "unknown verdict" fail-closed default, unchanged from
-// before this rename.
+// (always blocks) -- anything else falls through to the caller's own
+// "unknown verdict" fail-closed default, unchanged from before this rename.
+// ("has_open_designs" used to be a possible value here too, for a
+// structured `register` call only -- retired 2026-08-31, see app.ts's
+// removed pre-registration check for why.)
 func (r designCheckResponse) blocksGate() bool {
 	return r.Verdict != "clean" && r.Verdict != "file_overlap"
 }
@@ -272,6 +283,52 @@ func allowOutput(eventName string) map[string]any {
 		"hookSpecificOutput": map[string]any{
 			"hookEventName":      eventName,
 			"permissionDecision": "allow",
+		},
+	}
+}
+
+// allowOutputWithContext is allowOutput plus additionalContext -- same
+// field main.go's capture path already uses for a different hook event,
+// reused here so an ExitPlanMode registration is never silent. Found live,
+// 2026-08-31: a plan approved from the wrong repo's cwd registered a design
+// under the wrong project with zero feedback of any kind, and nothing
+// caught it until an unrelated later command happened to surface it. This
+// is the fix for that class of miss -- report what got registered and
+// where, every time, so a wrong project is visible the moment it happens
+// rather than discovered later by accident.
+// warnIfTouchesMissing returns a non-blocking advisory line, or "" when
+// nothing looks wrong. Fires only when repoRoot is known and *none* of
+// touches exist under it -- mirrors packages/cli/src/design.ts's
+// warnIfTouchesMissing exactly (same threshold, same two-branch guidance),
+// this is just the ExitPlanMode-path copy, since the check has to run
+// wherever repoRoot is actually known (client-side in both cases, for
+// different reasons -- see design.ts's own doc comment). `creates` is
+// deliberately not checked: it legitimately doesn't exist yet.
+func warnIfTouchesMissing(repoRoot, projectID string, touches []string) string {
+	if repoRoot == "" || len(touches) == 0 {
+		return ""
+	}
+	for _, t := range touches {
+		if _, err := os.Stat(filepath.Join(repoRoot, t)); err == nil {
+			return "" // one real match is enough to assume this repo is plausible
+		}
+	}
+	return fmt.Sprintf(
+		"twing: none of this design's declared files exist under %s for project %s. If this plan is actually "+
+			"about a different repo, move it: twing design amend --id <id> --reassign-project (run from the "+
+			"correct repo) -- or close and re-register if that's refused (already has reviews/threads attached). "+
+			"If this plan genuinely spans multiple repos, register a separate design in each one with that repo's "+
+			"own file list, then link them: twing design register --touches <paths> --group <groupId>.",
+		repoRoot, projectID,
+	)
+}
+
+func allowOutputWithContext(eventName, context string) map[string]any {
+	return map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":      eventName,
+			"permissionDecision": "allow",
+			"additionalContext":  context,
 		},
 	}
 }
@@ -670,9 +727,13 @@ func handleExitPlanModeSingle(payload hookPayload, config twingConfig) {
 		return
 	}
 
+	registeredContext := fmt.Sprintf("twing: registered design %s for project %s", result.DesignID, projectID)
+	if warning := warnIfTouchesMissing(config.RepoRoot, projectID, result.Touches); warning != "" {
+		registeredContext = registeredContext + "\n" + warning
+	}
 	switch {
 	case result.Verdict == "clean":
-		writeJSON(allowOutput("PreToolUse"))
+		writeJSON(allowOutputWithContext("PreToolUse", registeredContext))
 	case !result.blocksGate():
 		// 2026-08-26: "file_overlap" (renamed from "overlap") is always
 		// advisory now -- registers and allows same as clean. The conflict
@@ -680,7 +741,7 @@ func handleExitPlanModeSingle(payload hookPayload, config twingConfig) {
 		// -- see DesignVerdict's doc comment, core/types.ts, for why blocking
 		// is now a static function of verdict alone with no separate
 		// severity to check.
-		writeJSON(allowOutput("PreToolUse"))
+		writeJSON(allowOutputWithContext("PreToolUse", registeredContext))
 	case result.Verdict == "constraint_violation":
 		writeJSON(denyOutput("PreToolUse", constraintReason(result)))
 	default:
@@ -740,6 +801,7 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 	}
 
 	var denyReasons []string
+	var registeredContexts []string
 	matchedAny := false
 
 	for _, key := range order {
@@ -794,6 +856,18 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 				// The second case is 2026-08-26: "file_overlap" (renamed from
 				// "overlap") always registers and allows, same as clean, same
 				// reasoning as the single-repo path above.
+				msg := fmt.Sprintf("[%s] registered design %s for project %s", cand.DirName, result.DesignID, projectID)
+				// Lower value here than the single-repo path (the
+				// directory-name-prefix filter above already gives some
+				// matching signal), but cheap and worth the parity -- uses
+				// the locally-known `touches` directly rather than the
+				// echoed-back response field, since a structured request
+				// (like this one) never gets that field populated (see
+				// app.ts's rawPlanText-only gate on it).
+				if warning := warnIfTouchesMissing(cand.RepoRoot, projectID, touches); warning != "" {
+					msg = msg + "\n" + warning
+				}
+				registeredContexts = append(registeredContexts, msg)
 			case result.Verdict == "constraint_violation":
 				denyReasons = append(denyReasons, fmt.Sprintf("[%s] %s", cand.DirName, constraintReason(result)))
 			default:
@@ -816,7 +890,7 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 		writeJSON(denyOutput("PreToolUse", strings.Join(denyReasons, "\n\n")))
 		return
 	}
-	writeJSON(allowOutput("PreToolUse"))
+	writeJSON(allowOutputWithContext("PreToolUse", "twing: "+strings.Join(registeredContexts, "\n")))
 }
 
 // postDesignCheck posts to /v1/designs/check (structured or rawPlanText,
@@ -1083,7 +1157,7 @@ type designScopeMatchResponse struct {
 	// Set only for state "flagged" (2026-08-26, second pass): which of the
 	// four buckets actually flagged this design -- "constraint_violation" |
 	// "symbol_conflict" | "llm_divergence" (never "file_overlap", which
-	// doesn't flag, or "clean"/"has_open_designs", which don't apply here).
+	// doesn't flag, or "clean", which doesn't apply here).
 	// Lets flaggedDesignReason name the actual reason instead of one
 	// generic sentence for all three. Deliberately backward-compatible,
 	// same reasoning as OpenDesigns below: an older coordinator that
@@ -1218,11 +1292,11 @@ func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool
 			// (design-store.ts) already accepts a design out of any of
 			// open/flagged/dormant unconditionally, the gate just never told
 			// anyone that was an option. Mirrors the same three-way
-			// join/close/force shape `has_open_designs`'s own deny message
-			// (design.ts's printDesignVerdict) already uses, uniformly
-			// across all three flagging verdicts rather than special-cased
-			// per bucket -- closing is just as valid a response to "someone
-			// beat you to this" as it is to "you've since moved on".
+			// join/close/force shape the now-retired `has_open_designs`
+			// verdict's deny message used to use, uniformly across all
+			// three flagging verdicts rather than special-cased per bucket
+			// -- closing is just as valid a response to "someone beat you
+			// to this" as it is to "you've since moved on".
 			{
 				Label:   "Or, if that work is done and this doesn't apply anymore",
 				Command: fmt.Sprintf("twing design close --id %s", designID),
@@ -1239,10 +1313,9 @@ func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool
 // whether the actual cause was a real edit collision, a stated-intent
 // conflict, or a project rule. Falls back to that original generic wording
 // for "" (an older coordinator that predates the Verdict field) and for any
-// verdict this deny path shouldn't structurally see (`"clean"` /
-// `"has_open_designs"` never flag; `"file_overlap"` never blocks) --
-// unrecognized is treated the same as unset rather than risking a blank
-// lead sentence.
+// verdict this deny path shouldn't structurally see (`"clean"` never
+// flags; `"file_overlap"` never blocks) -- unrecognized is treated the
+// same as unset rather than risking a blank lead sentence.
 func flaggedLeadAndDetail(verdict string) (lead string, detail string) {
 	switch verdict {
 	case "constraint_violation":

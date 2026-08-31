@@ -134,48 +134,41 @@ test("runDesignRegister: prints no group line when the response has no groupId",
   });
 });
 
-// "Force a choice" registration-sprawl fix (2026-08-25)
+// Existence-check advisory (2026-08-31)
 
-test("runDesignRegister: --force sends force: true in the request body", async () => {
-  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1", groupId: "d1" }));
+test("runDesignRegister: warns when none of --touches exist under the repo root", async () => {
+  const { fetch } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
-    await withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "genuinely new", force: true }));
-    const body = calls[0].body as Record<string, unknown>;
-    assert.equal(body.force, true);
+    const { warnings } = await captureConsole(() =>
+      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo", touches: "src/does-not-exist.ts" })),
+    );
+    assert.ok(warnings.some((w) => w.includes("none of the declared --touches files exist")));
+    assert.ok(warnings.some((w) => w.includes("--reassign-project")));
+    assert.ok(warnings.some((w) => w.includes("--group")));
   });
 });
 
-test("runDesignRegister: omitting --force sends no force field at all", async () => {
-  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1", groupId: "d1" }));
+test("runDesignRegister: stays quiet when at least one --touches path exists under the repo root", async () => {
+  const { fetch } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
-    await withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo" }));
-    const body = calls[0].body as Record<string, unknown>;
-    assert.equal("force" in body, false, "must be omitted entirely, not sent as an explicit false");
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "src", "real.ts"), "");
+    const { warnings } = await captureConsole(() =>
+      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo", touches: "src/real.ts,src/also-missing.ts" })),
+    );
+    assert.equal(warnings.length, 0, "one real match is enough to stay quiet");
   });
 });
 
-test("runDesignRegister: a has_open_designs verdict lists the other open designs and the three next-step commands", async () => {
-  const { fetch } = captureFetch(
-    jsonResponse({
-      verdict: "has_open_designs",
-      openDesigns: [{ id: "d-old", projectId: "proj-x", summary: "an older, still-open task", lastActivityAt: 1 }],
-    }),
-  );
-  await withHome(async () => {
-    cacheToken(SERVER_URL, "test-token");
-    const repo = tmpRepo(SERVER_URL);
-    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "new task" })));
-    assert.ok(logs.some((l) => l.includes("verdict: has_open_designs")));
-    assert.ok(logs.some((l) => l.includes("d-old") && l.includes("an older, still-open task")));
-    assert.ok(logs.some((l) => l.includes("--group")));
-    assert.ok(logs.some((l) => l.includes("design close")));
-    assert.ok(logs.some((l) => l.includes("--force")));
-  });
-});
+// "Force a choice" registration-sprawl fix (2026-08-25) -- retired
+// 2026-08-31, along with its `--force` escape hatch and `has_open_designs`
+// verdict. See DesignVerdict's doc comment (core/types.ts) and
+// app.test.ts's replacement coverage (the same scenario now produces a
+// `design_stale_sibling_suggested` notice instead of a block).
 
 // --- runDesignResolve --------------------------------------------------------
 
@@ -299,6 +292,30 @@ test("runDesignAmend: --group alongside --summary sends both", async () => {
     const repo = tmpRepo(SERVER_URL);
     await withMockFetch(fetch, () => runDesignAmend({ cwd: repo, id: "d1", summary: "joining the group", group: "anchor-id" }));
     assert.deepEqual(calls[0].body, { addTouches: [], addCreates: [], addDependsOn: [], summary: "joining the group", groupId: "anchor-id" });
+  });
+});
+
+// Change D (2026-08-31): --reassign-project's cwd resolution -- resolves
+// the *new* projectId from wherever the command is actually run, the same
+// way `register` already does, so there's no raw project-id hash to paste.
+test("runDesignAmend: --reassign-project resolves the new projectId from cwd and sends only reassignProjectId", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1", projectId: "new-project-id" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignAmend({ cwd: repo, id: "d1", reassignProject: true })));
+    assert.match(calls[0].url, /\/v1\/designs\/d1\/amend$/);
+    assert.deepEqual(calls[0].body, { reassignProjectId: computeProjectId(repo) });
+    assert.ok(logs.some((l) => l.includes("now in project: new-project-id")));
+  });
+});
+
+test("runDesignAmend: --reassign-project rejects being combined with any scope-amend field", async () => {
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await assert.rejects(() => runDesignAmend({ cwd: repo, id: "d1", reassignProject: true, touches: "a.ts" }), /--reassign-project can't be combined/);
+    await assert.rejects(() => runDesignAmend({ cwd: repo, id: "d1", reassignProject: true, group: "anchor-id" }), /--reassign-project can't be combined/);
   });
 });
 

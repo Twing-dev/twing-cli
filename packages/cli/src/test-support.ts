@@ -93,19 +93,23 @@ export function withEnv<T>(vars: Record<string, string | undefined>, run: () => 
   });
 }
 
-export async function captureConsole<T>(run: () => Promise<T>): Promise<{ result: T; logs: string[]; errors: string[] }> {
+export async function captureConsole<T>(run: () => Promise<T>): Promise<{ result: T; logs: string[]; errors: string[]; warnings: string[] }> {
   const logs: string[] = [];
   const errors: string[] = [];
+  const warnings: string[] = [];
   const originalLog = console.log;
   const originalError = console.error;
+  const originalWarn = console.warn;
   console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
   console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
   try {
     const result = await run();
-    return { result, logs, errors };
+    return { result, logs, errors, warnings };
   } finally {
     console.log = originalLog;
     console.error = originalError;
+    console.warn = originalWarn;
   }
 }
 
