@@ -222,7 +222,14 @@ export const pendingReviews = sqliteTable(
      * See PendingReview.symbolConflictWaivers. */
     symbolConflictWaivers: text("symbol_conflict_waivers").notNull().default("[]"),
   },
-  (t) => [index("pending_reviews_project_id_idx").on(t.projectId)],
+  (t) => [
+    index("pending_reviews_project_id_idx").on(t.projectId),
+    // Change D (2026-08-31, design-gate registration-flow fixes): the
+    // `--reassign-project` guard reads "does any pending review reference
+    // this design" on every reassignment attempt -- unindexed, this was a
+    // full table scan.
+    index("pending_reviews_design_id_idx").on(t.designId),
+  ],
 );
 
 export const constraints = sqliteTable(
@@ -298,7 +305,15 @@ export const alignmentThreads = sqliteTable(
     initiatingDesignId: text("initiating_design_id"), // the initiating developer's own open design, when one resolves
     lastActivityAt: integer("last_activity_at"), // bumped on amend; falls back to openedAt when null
   },
-  (t) => [index("alignment_threads_project_id_idx").on(t.projectId)],
+  (t) => [
+    index("alignment_threads_project_id_idx").on(t.projectId),
+    // Change D (2026-08-31): the `--reassign-project` guard also checks
+    // both of a design's thread roles (party's own design, and the
+    // initiator's) -- same reasoning as pending_reviews_design_id_idx
+    // above.
+    index("alignment_threads_design_id_idx").on(t.designId),
+    index("alignment_threads_initiating_design_id_idx").on(t.initiatingDesignId),
+  ],
 );
 
 // ---------------------------------------------------------------------------

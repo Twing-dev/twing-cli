@@ -95,9 +95,10 @@ function printUsage(): void {
       "  twing project revoke-invite --code <invite-code> [--server <url>]",
       "  twing project remove-developer --developer-id <id> [--project <id>] [--server <url>]",
       "  twing project list-developers [--project <id>] [--server <url>]",
-      "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f [--group <groupId>] [--force]",
+      "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f [--group <groupId>]",
       "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
       "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f] [--summary \"...\"] [--group <groupId>]",
+      "  twing design amend --id <designId> --reassign-project   (run from the correct repo -- moves an open, unencumbered design there)",
       "  twing design resume --id <designId> [--session <id>] [--touches a,b] [--creates c,d] [--depends-on e,f]",
       "  twing design close --id <designId>",
       "  twing design list [--status open] [--mine]",
@@ -138,14 +139,22 @@ async function runDesignCommand(rest: string[]): Promise<void> {
         touches: flags.touches,
         dependsOn: flags["depends-on"],
         group: flags.group,
-        force: flags.force === "true",
       });
       return;
     case "resolve":
       await runDesignResolve({ cwd, id: flags.id, adopt: flags.adopt, justify: flags.justify });
       return;
     case "amend":
-      await runDesignAmend({ cwd, id: flags.id, touches: flags.touches, creates: flags.creates, dependsOn: flags["depends-on"], summary: flags.summary, group: flags.group });
+      await runDesignAmend({
+        cwd,
+        id: flags.id,
+        touches: flags.touches,
+        creates: flags.creates,
+        dependsOn: flags["depends-on"],
+        summary: flags.summary,
+        group: flags.group,
+        reassignProject: flags["reassign-project"] === "true",
+      });
       return;
     case "resume":
       await runDesignResume({ cwd, id: flags.id, session: flags.session, touches: flags.touches, creates: flags.creates, dependsOn: flags["depends-on"] });

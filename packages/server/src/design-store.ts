@@ -513,6 +513,49 @@ export class DesignRegistry {
     return this.get(id);
   }
 
+  /** Change D (2026-08-31, design-gate registration-flow fixes):
+   * `twing design amend --id <id> --reassign-project`'s persist step --
+   * fixes a design filed under the wrong project in place, instead of the
+   * only prior options (close-and-reregister, or force-a-duplicate-and-
+   * link) for what's usually a single misfiled row. Deliberately narrow:
+   * the route (`/v1/designs/:id/amend` in app.ts) only calls this once its
+   * own guard has confirmed the design is `"open"`, has no
+   * `pendingReviews`/`alignmentThreads` referencing it, and has never
+   * actually been linked to a sibling (`listByGroup(existing.groupId)`
+   * returns only itself) -- moving a design nothing downstream depends on
+   * yet carries none of the cross-row consistency risk a general
+   * move-at-any-point feature would. Metadata-only otherwise, same shape
+   * as `relink`: no scope/verdict re-check happens *here* -- the caller
+   * re-runs `runDesignChecks` against the new project's own open designs
+   * before ever calling this, same "reject and leave existing state
+   * untouched" contract every other amend-family method in this class
+   * follows. `groupId` is left untouched deliberately: a project
+   * reassignment doesn't change the design's own identity, and the "never
+   * linked" guard above already means it only ever equals `id` itself at
+   * this point anyway. Returns `undefined` only if the design doesn't
+   * exist. */
+  reassignProject(id: string, newProjectId: string): DesignStatement | undefined {
+    const existing = this.get(id);
+    if (!existing) return undefined;
+    const oldProjectId = existing.projectId;
+    this.db.update(designsTable).set({ projectId: newProjectId }).where(eq(designsTable.id, id)).run();
+    // Logged under the *new* project -- matches every other activity event
+    // for this design going forward, and this repo's insert-only
+    // convention means the design's earlier `design_registered`/
+    // `design_checked` rows correctly stay under the old project, an
+    // honest record of where it actually lived at the time.
+    this.activityLog.append({
+      projectId: newProjectId,
+      developerId: existing.developerId,
+      sessionId: existing.sessionId,
+      kind: "design_reassigned",
+      relatedId: id,
+      ts: Date.now(),
+      payload: { fromProjectId: oldProjectId, toProjectId: newProjectId },
+    });
+    return this.get(id);
+  }
+
   /** §17 design lifecycle (2026-08): reactivates a *dormant* design, always
    * as an explicit, deliberate act -- never called silently by a mere file
    * match (see `/v1/designs/scope-match`'s `"dormant"` state and the
@@ -905,6 +948,17 @@ export class DesignRegistry {
   getReview(id: string): PendingReview | undefined {
     const row = this.db.select().from(reviewsTable).where(eq(reviewsTable.id, id)).get() as ReviewRow | undefined;
     return row ? fromReviewRow(row) : undefined;
+  }
+
+  /** Change D's `--reassign-project` guard: any review at all (pending or
+   * already decided) referencing this design means real downstream
+   * process has already happened against its current project -- a
+   * reassignment is refused, not just for a still-pending one. Uses the
+   * new `pending_reviews_design_id_idx` (`db/schema.ts`) rather than the
+   * unindexed full-table scan this would otherwise be. */
+  hasReviewForDesign(designId: string): boolean {
+    const row = this.db.select({ id: reviewsTable.id }).from(reviewsTable).where(eq(reviewsTable.designId, designId)).limit(1).get();
+    return row !== undefined;
   }
 
   /** twing-monitor v1: `filter` used to be a `pendingOnly` boolean --

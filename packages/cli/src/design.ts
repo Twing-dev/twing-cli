@@ -8,6 +8,8 @@
  * this one.
  */
 
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { readConfig, getServerAuth, findRepoRoot, loadManifestFromFile, twingConfigPath, computeProjectId, computeDeveloperId, authFetch, isGateDisabled, setGateDisabled } from "@twing/core";
 
 interface RequiredConfig {
@@ -45,6 +47,35 @@ function splitList(value?: string): string[] {
 
 const UNAUTHORIZED_HINT = "unauthorized -- run `twing login` to re-authenticate";
 
+/**
+ * Existence-check advisory (2026-08-31): `touches` is only ever meant to
+ * name files that already exist under this repo -- unlike `creates`, which
+ * legitimately doesn't. Found live: a design's `touches` can be
+ * project-mismatched (registered against the wrong repo entirely) or, for
+ * a genuinely multi-repo plan, only partially relevant here, and neither
+ * looks any different from a correct registration until a human goes
+ * looking. Deliberately advisory only, printed to stdout rather than
+ * thrown -- a caller-supplied path that's merely relative to a
+ * subdirectory, or a real typo, shouldn't block a registration a human
+ * clearly meant to make; this just makes a wrong-repo case visible
+ * immediately instead of silently, same reasoning as the equivalent check
+ * in hook/design_gate.go's ExitPlanMode path. Fires only when *none* of
+ * the declared touches exist -- one match is enough to assume this repo is
+ * plausible and stay quiet.
+ */
+function warnIfTouchesMissing(repoRoot: string, touches: string[]): void {
+  if (touches.length === 0) return;
+  const anyExists = touches.some((t) => existsSync(join(repoRoot, t)));
+  if (anyExists) return;
+  console.warn(
+    `twing design: none of the declared --touches files exist under ${repoRoot}. If this design is actually about a ` +
+      `different repo, move it: twing design amend --id <id> --reassign-project (run from the correct repo) -- or ` +
+      `close and re-register if that's refused (already has reviews/threads attached). If this design genuinely ` +
+      `spans multiple repos, register a separate design in each one with that repo's own file list, then link them ` +
+      `with the same --group.`,
+  );
+}
+
 interface DesignConflictJSON {
   conflictingDesignId: string;
   overlapKind: string;
@@ -55,16 +86,16 @@ interface DesignConflictJSON {
 interface DesignCheckResponseJSON {
   error?: string;
   /** 2026-08-26 terminology simplification: renamed from
-   * `"clean" | "overlap" | "constraint_flag" | "has_open_designs"`. Only
-   * `"file_overlap"` and `"constraint_violation"` can come back from
+   * `"clean" | "overlap" | "constraint_flag"`. Only `"file_overlap"` and
+   * `"constraint_violation"` can come back from
    * `/v1/designs/check`/`amend`/`resume` (design-checks.ts tiers 1/3);
    * `"symbol_conflict"`/`"llm_divergence"` only ever arise from
    * `/v1/claims` or the async semantic-comparator pass, never this
    * synchronous response. See DesignVerdict's own doc comment,
-   * core/types.ts, for the full four-bucket model. */
-  verdict?: "clean" | "file_overlap" | "constraint_violation" | "has_open_designs";
-  /** Absent only for `"has_open_designs"` -- that verdict fires before any
-   * row is created. See DesignVerdict's own doc comment in core/types.ts. */
+   * core/types.ts, for the full four-bucket model. (A fifth value,
+   * `"has_open_designs"`, existed briefly for this response 2026-08-25 to
+   * 2026-08-31 -- retired, see DesignVerdict's doc comment for why.) */
+  verdict?: "clean" | "file_overlap" | "constraint_violation";
   designId?: string;
   /** §17 design linking (2026-08) -- the design's own groupId, self-assigned
    * or caller-supplied. Copy this into a sibling repo's
@@ -75,10 +106,10 @@ interface DesignCheckResponseJSON {
    * `constraint` object -- see design-checks.ts's matchConstraintsForPaths
    * doc comment for the full reasoning). */
   constraints?: { statement: string; type: string }[];
-  /** Set only for `"has_open_designs"` (2026-08-25, "force a choice"
-   * registration-sprawl fix) -- the developer's other currently-open
-   * designs, cross-project, found before this registration was created. */
-  openDesigns?: { id: string; projectId: string; summary: string; lastActivityAt: number }[];
+  /** Change D (2026-08-31): only ever populated by a successful
+   * `--reassign-project` amend -- the design's new home, echoed back so
+   * `printDesignVerdict` can confirm the move actually happened. */
+  projectId?: string;
 }
 
 async function parseJsonOrUnauthorized<T>(res: Response): Promise<T | { error: string }> {
@@ -91,9 +122,13 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
     console.error(`twing design: ${result.error}`);
     return;
   }
-  // "has_open_designs" (2026-08-25) has no designId -- no row exists yet
-  // for this verdict, see DesignCheckResult.designId's own doc comment.
   console.log(`verdict: ${result.verdict}` + (result.designId ? `  design: ${result.designId}` : ""));
+  if (result.projectId) {
+    // Change D (2026-08-31): only a successful --reassign-project amend
+    // sets this -- confirms the move, mirroring Change A's "report what
+    // actually happened" reasoning for ExitPlanMode's own registration.
+    console.log(`  now in project: ${result.projectId}`);
+  }
   if (result.groupId) {
     // §17 design linking (2026-08): the copy-paste hint for linking a
     // sibling-repo registration to this one.
@@ -114,15 +149,6 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
       console.log(`  [${c.type}] ${c.statement}`);
     }
     console.log(`  -> adjust your plan, or run: twing design resolve --id ${result.designId} --justify "<reason>" (a project admin will need to approve)`);
-  } else if (result.verdict === "has_open_designs") {
-    // "Force a choice" registration-sprawl fix (2026-08-25): no row was
-    // created for this call -- nothing to point `resolve`/`close` at yet.
-    for (const d of result.openDesigns ?? []) {
-      console.log(`  open: ${d.id}  (project ${d.projectId}) -- "${d.summary || "no summary"}"`);
-    }
-    console.log(`  -> if this is a continuation, link it: twing design register ... --group <id>`);
-    console.log(`  -> if that work is done, close it first: twing design close --id <id>`);
-    console.log(`  -> if this is genuinely new, override: twing design register ... --force`);
   }
 }
 
@@ -138,11 +164,6 @@ export interface RegisterOptions {
    * design (typically in another repo) sharing the same unit of work --
    * pass the `groupId` printed by that design's own registration. */
   group?: string;
-  /** "Force a choice" registration-sprawl fix (2026-08-25): explicit
-   * override of the has-open-designs pre-registration check -- for a
-   * genuinely new, unrelated design registered while another is still
-   * open. See DesignCheckRequestBody.force's doc comment (packages/server). */
-  force?: boolean;
 }
 
 /**
@@ -193,6 +214,8 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
   }
 
   const projectId = computeProjectId(repoRoot);
+  const touches = splitList(options.touches);
+  warnIfTouchesMissing(repoRoot, touches);
 
   const res = await authFetch(
     `${serverUrl}/v1/designs/check`,
@@ -206,10 +229,9 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
         agentLabel: options.label,
         summary: options.summary ?? "",
         creates: splitList(options.creates),
-        touches: splitList(options.touches),
+        touches,
         dependsOn: splitList(options.dependsOn),
         ...(options.group ? { groupId: options.group } : {}),
-        ...(options.force ? { force: true } : {}),
       }),
     },
     authToken,
@@ -315,6 +337,13 @@ export interface AmendOptions {
    * validated against a real design). Printed back via the shared
    * `group: <id>` hint in `printDesignVerdict`, same as `register`/`check`. */
   group?: string;
+  /** Change D (2026-08-31, design-gate registration-flow fixes): move this
+   * design to the project resolved from `cwd` -- run from the correct
+   * repo, no raw project-id hash to paste, same resolution `register`
+   * already uses. Mutually exclusive with every other field on this
+   * type -- it's a distinct action (`reassignProjectId` server-side), not
+   * a scope amend, and is checked first in `runDesignAmend` below. */
+  reassignProject?: boolean;
 }
 
 /**
@@ -336,9 +365,33 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
   if (!options.id) {
     throw new Error("twing design amend: --id <designId> is required");
   }
-  if (!options.touches && !options.creates && !options.dependsOn && !options.summary && !options.group) {
-    throw new Error("twing design amend: pass at least one of --touches, --creates, --depends-on, --summary, --group");
+
+  // Change D: a fix-in-place for a wrong-project registration -- see
+  // AmendOptions.reassignProject's own doc comment for why this is
+  // checked first and is mutually exclusive with every other amend shape.
+  if (options.reassignProject) {
+    if (options.touches || options.creates || options.dependsOn || options.summary || options.group) {
+      throw new Error(
+        "twing design amend: --reassign-project can't be combined with --touches/--creates/--depends-on/--summary/--group -- " +
+          "it's a distinct action (moving the design), run it on its own",
+      );
+    }
+    const newProjectId = computeProjectId(repoRoot);
+    const res = await authFetch(
+      `${serverUrl}/v1/designs/${options.id}/amend`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ reassignProjectId: newProjectId }) },
+      authToken,
+      developerId,
+    );
+    printDesignVerdict(await parseJsonOrUnauthorized<DesignCheckResponseJSON>(res));
+    return;
   }
+
+  if (!options.touches && !options.creates && !options.dependsOn && !options.summary && !options.group) {
+    throw new Error("twing design amend: pass at least one of --touches, --creates, --depends-on, --summary, --group, --reassign-project");
+  }
+  const addTouches = splitList(options.touches);
+  warnIfTouchesMissing(repoRoot, addTouches);
 
   const res = await authFetch(
     `${serverUrl}/v1/designs/${options.id}/amend`,
@@ -346,7 +399,7 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        addTouches: splitList(options.touches),
+        addTouches,
         addCreates: splitList(options.creates),
         addDependsOn: splitList(options.dependsOn),
         ...(options.summary ? { summary: options.summary } : {}),
@@ -392,6 +445,9 @@ export async function runDesignResume(options: ResumeOptions): Promise<void> {
     );
   }
 
+  const resumeTouches = splitList(options.touches);
+  warnIfTouchesMissing(repoRoot, resumeTouches);
+
   const res = await authFetch(
     `${serverUrl}/v1/designs/${options.id}/resume`,
     {
@@ -399,7 +455,7 @@ export async function runDesignResume(options: ResumeOptions): Promise<void> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         sessionId: session,
-        addTouches: splitList(options.touches),
+        addTouches: resumeTouches,
         addCreates: splitList(options.creates),
         addDependsOn: splitList(options.dependsOn),
       }),

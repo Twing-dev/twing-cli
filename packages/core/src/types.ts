@@ -323,13 +323,16 @@ export interface DesignConstraint {
  *   them); only ever set via `DesignRegistry.flag()` from the async
  *   comparator pass, after its response has already been sent. Self-
  *   approvable, same reasoning as `"symbol_conflict"`. (Was `"conflict"`.)
- * - `"has_open_designs"`: not actually a conflict between two designs at
- *   all -- a pre-registration hygiene check on one developer (too much of
- *   their own work open at once), running *before* any row exists for
- *   this request. Only reachable from `POST /v1/designs/check`'s
- *   structured (non-`rawPlanText`) path, i.e. `twing design register`,
- *   never `ExitPlanMode` -- see `DesignCheckResult.openDesigns`'s doc
- *   comment.
+ * (There used to be a fifth value, `"has_open_designs"`: not a conflict
+ * between two designs at all, but a pre-registration hygiene check on one
+ * developer having too much of their own work open at once, blocking
+ * *before* any row was created. Retired 2026-08-31 -- found live to break
+ * two normal workflows (mid-session task-switching without plan mode,
+ * concurrent sessions on different repos under the same identity) it never
+ * accounted for. The advisory-only "stale sibling" notice
+ * `DesignRegistry`/`app.ts` already ran for `ExitPlanMode` covers the same
+ * underlying concern -- a developer accumulating forgotten open designs --
+ * without blocking, and now runs for both registration paths.)
  *
  * `DesignSeverity`/`severity` is gone as of this change: with tier 4 and
  * the three-way constraint type both collapsed, whether a verdict blocks
@@ -338,7 +341,7 @@ export interface DesignConstraint {
  * vary independently of its own verdict was dead weight. Every former
  * `severity === "error"` check becomes a static per-verdict table instead.
  */
-export type DesignVerdict = "clean" | "file_overlap" | "constraint_violation" | "symbol_conflict" | "llm_divergence" | "has_open_designs";
+export type DesignVerdict = "clean" | "file_overlap" | "constraint_violation" | "symbol_conflict" | "llm_divergence";
 
 export type DesignOverlapKind = "creates" | "touches" | "constraint" | "symbol";
 
@@ -360,10 +363,7 @@ export interface DesignConflict {
 
 export interface DesignCheckResult {
   verdict: DesignVerdict;
-  /** Absent only for `"has_open_designs"` -- that verdict fires *before* a
-   * row is created (see DesignVerdict's own doc comment), so there is no id
-   * to report yet. Every other verdict always has one. */
-  designId?: string;
+  designId: string;
   conflicts?: DesignConflict[];
   /** Every constraint the checked scope matched (2026-08-22 -- was a single
    * `constraint` object; `matchConstraintsForPaths` used to collapse to one
@@ -372,12 +372,6 @@ export interface DesignCheckResult {
    * only discover the next one on retry. See design-checks.ts's own doc
    * comment on `matchConstraintsForPaths` for the full reasoning. */
   constraints?: { id: string; statement: string; type: DesignConstraintType }[];
-  /** Set only for `"has_open_designs"` (2026-08-25) -- the developer's other
-   * currently-open designs, cross-project, that a plain `twing design
-   * register` call found before creating a new row. Lets the CLI print
-   * "here's what you already have open" without a second round trip. Never
-   * set for any other verdict. */
-  openDesigns?: { id: string; projectId: string; summary: string; lastActivityAt: number }[];
 }
 
 export interface PendingReview {

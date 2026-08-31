@@ -692,6 +692,86 @@ func TestHandleExitPlanMode_CleanVerdict_Allows(t *testing.T) {
 	}
 }
 
+// additionalContextOf pulls hookSpecificOutput.additionalContext out of a
+// captured stdout payload, "" if absent -- allowOutputWithContext's own
+// field, distinct from decisionOf's permissionDecision/reason pair.
+func additionalContextOf(t *testing.T, stdout string) string {
+	t.Helper()
+	if stdout == "" {
+		return ""
+	}
+	var parsed struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
+		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout)
+	}
+	return parsed.HookSpecificOutput.AdditionalContext
+}
+
+// Change A (2026-08-31): a silent successful registration was exactly how
+// the incident that led to this whole file's changes went undetected --
+// see allowOutputWithContext's own doc comment.
+func TestHandleExitPlanMode_CleanVerdict_ReportsWhatItRegistered(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(repo, "sess1")) })
+	ctx := additionalContextOf(t, stdout)
+	if !strings.Contains(ctx, "registered design d1 for project") {
+		t.Fatalf("additionalContext = %q, want it to name the registered design and project", ctx)
+	}
+}
+
+// Change C (2026-08-31): the existence-check advisory. computeProjectID
+// requires a real git remote to produce a stable id, but that's incidental
+// here -- the check only cares whether declared `touches` exist under
+// repoRoot, so any value flowing through is fine.
+func TestHandleExitPlanMode_WarnsWhenNoDeclaredTouchesExist(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1","touches":["src/does-not-exist.go"]}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(repo, "sess1")) })
+	ctx := additionalContextOf(t, stdout)
+	if !strings.Contains(ctx, "none of this design's declared files exist") {
+		t.Fatalf("additionalContext = %q, want the existence-check warning", ctx)
+	}
+	if !strings.Contains(ctx, "--reassign-project") || !strings.Contains(ctx, "--group") {
+		t.Fatalf("additionalContext = %q, want both suggested commands (move / multi-repo link)", ctx)
+	}
+}
+
+func TestHandleExitPlanMode_NoWarningWhenADeclaredTouchExists(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1","touches":["real.go","also-missing.go"]}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	if err := os.WriteFile(filepath.Join(repo, "real.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(repo, "sess1")) })
+	ctx := additionalContextOf(t, stdout)
+	if strings.Contains(ctx, "none of this design's declared files exist") {
+		t.Fatalf("additionalContext = %q, want no warning -- one real match is enough", ctx)
+	}
+}
+
 // §17 design linking (2026-08): a genuinely single-repo plan (no sibling
 // candidates discovered, so handleExitPlanModeSingle handles it, not the
 // multi-candidate path) must never invent a groupId -- the server's own

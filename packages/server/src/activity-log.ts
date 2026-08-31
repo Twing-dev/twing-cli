@@ -91,7 +91,15 @@ export type ActivityEventKind =
    * specifically the dormant-thread path, triggered by `design resume`) --
    * this is the closed-thread path, triggered by `findOrCreate` reacting to
    * a fresh finding, not a party's own action. */
-  | "alignment_thread_reopened";
+  | "alignment_thread_reopened"
+  /** Change D (2026-08-31, design-gate registration-flow fixes):
+   * `DesignRegistry.reassignProject` moved an open design into a different
+   * project -- a fix-in-place for a wrong-project registration, guarded to
+   * only ever fire on a design nothing downstream depends on yet (see that
+   * method's own doc comment). Logged under the *new* project; the
+   * design's earlier `design_registered`/`design_checked` rows correctly
+   * stay under the old one, per this table's insert-only convention. */
+  | "design_reassigned";
 
 export interface ActivityEvent {
   id: string;
