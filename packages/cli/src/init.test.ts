@@ -20,6 +20,7 @@ import {
   tmpRepo,
   withHome,
   cacheToken,
+  cacheNoAuth,
   addGithubRemote,
   withMockFetch,
   captureConsole,
@@ -363,5 +364,50 @@ test("runInit: --no-github skips the membership check even for a GitHub-hosted r
     cacheToken(SERVER_URL, "already-cached-pat");
     await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, noGithub: true }, deps)));
     assert.ok(!calls.some((c) => c.includes("/v1/auth/whoami")), "--no-github must skip the membership check entirely");
+  });
+});
+
+/** A fetch mock that records each request's URL and its `X-Twing-Developer-Id`
+ * header -- `routedFetch`/`captureFetch` only expose URLs/bodies, and the
+ * no-auth registration path needs the header asserted. Responds "twing
+ * serve" to the reachability probe and `{ seeded: 0 }` to `/v1/constraints/
+ * seed`; throws on anything else. */
+function headerCapturingFetch(): { fetch: typeof fetch; calls: { url: string; developerId: string | null }[] } {
+  const calls: { url: string; developerId: string | null }[] = [];
+  const impl = (async (url: string | URL, init?: RequestInit) => {
+    const u = String(url);
+    calls.push({ url: u, developerId: new Headers(init?.headers).get("x-twing-developer-id") });
+    if (/\/$/.test(u)) return textResponse("twing serve");
+    if (/\/v1\/constraints\/seed$/.test(u)) return jsonResponse({ seeded: 0 });
+    throw new Error(`headerCapturingFetch: no route for ${u}`);
+  }) as typeof fetch;
+  return { fetch: impl, calls };
+}
+
+test("runInit: --no-auth with an empty manifest still calls /v1/constraints/seed to register the project", async () => {
+  const { fetch, calls } = headerCapturingFetch();
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo(); // no GitHub remote, empty .twing/twing.yml
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, noAuth: true }, deps)));
+
+    const seed = calls.find((c) => /\/v1\/constraints\/seed$/.test(c.url));
+    assert.ok(seed, "no-auth init must register the project even with nothing to seed");
+    assert.ok(seed!.developerId && seed!.developerId.length > 0, "the seed call must carry a self-declared X-Twing-Developer-Id header");
+    assert.ok(logs.some((l) => l.includes("registered this repo with the coordinator")));
+  });
+});
+
+test("runInit: a second plain `twing init` against an already-cached no-auth server still fires the registration call", async () => {
+  const { fetch, calls } = headerCapturingFetch();
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo();
+    cacheNoAuth(SERVER_URL); // as if a prior `twing init --no-auth` ran here
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.ok(
+      calls.some((c) => /\/v1\/constraints\/seed$/.test(c.url)),
+      "the sticky no-auth flag must be read back so registration still runs without --no-auth on the re-run",
+    );
   });
 });

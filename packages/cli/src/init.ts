@@ -139,6 +139,11 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // Self-declared, attribution-only (§17 Phase 4) -- only ever sent when
   // there's no real token, i.e. only reaches the wire on a no_auth server.
   const developerId = computeDeveloperId(repoRoot);
+  // Read the effective (possibly just-cached above, or set by an earlier
+  // run) no-auth flag -- so a later plain `twing init` against an
+  // already-cached no_auth server still forces the registration call in
+  // `seedConstraints` even when this repo's manifest is empty.
+  const noAuth = getServerAuth(readConfig(), serverUrl)?.noAuth === true;
 
   const hookPath = await deps.ensureHookInstalled();
   console.log(`twing init: hook installed at ${hookPath}`);
@@ -188,7 +193,7 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   const daemonStatus = await deps.ensureDaemonRunning();
   console.log(daemonStatus === "started" ? "twing init: daemon started" : "twing init: daemon already running");
 
-  await seedConstraints(repoRoot, manifest, serverUrl, authToken, developerId);
+  await seedConstraints(repoRoot, manifest, serverUrl, authToken, developerId, noAuth);
 
   console.log("twing init: done");
 }
@@ -287,8 +292,19 @@ async function resolveAuthToken(repoRoot: string, serverUrl: string, options: In
  * `authToken` is `undefined` on a `--no-auth` server (§17 Phase 4) --
  * `developerId` (self-declared, attribution only) travels instead. This is
  * also the one call that forwards `githubBinding` (§17 Phase 3) -- the
- * founding trigger, so it's the only place that needs to. */
-async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: string, authToken: string | undefined, developerId: string): Promise<void> {
+ * founding trigger, so it's the only place that needs to.
+ * `noAuth` (§17 Phase 4): on a no-auth coordinator this call is *also* the
+ * only thing that registers the repo as a project -- no invite/keygen/
+ * GitHub founding path runs there -- so it must fire even with an empty
+ * manifest and no GitHub binding. */
+async function seedConstraints(
+  repoRoot: string,
+  manifest: Manifest,
+  serverUrl: string,
+  authToken: string | undefined,
+  developerId: string,
+  noAuth: boolean,
+): Promise<void> {
   // §17.9 fix, 2026-08-11: require_human_review entries were silently never
   // forwarded here -- only `constraints:` was. That's the section meant to
   // hold rules like "packages/server/** needs sign-off," and it was never
@@ -300,7 +316,9 @@ async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: 
   // this phase, since nothing else needed it to run. Now it's also the one
   // call that establishes a project's GitHub binding at founding time, so
   // it can't stay silent just because there's nothing else to seed.
-  if (manifest.constraints.length === 0 && reviewRules.length === 0 && !github) return;
+  // §17 Phase 4: and on a no-auth coordinator it's the *only* thing that
+  // registers the project at all, so it fires there regardless.
+  if (manifest.constraints.length === 0 && reviewRules.length === 0 && !github && !noAuth) return;
 
   const projectId = computeProjectId(repoRoot);
   try {
@@ -329,7 +347,12 @@ async function seedConstraints(repoRoot: string, manifest: Manifest, serverUrl: 
     );
     if (res.ok) {
       const body = (await res.json()) as { seeded?: number };
-      console.log(`twing init: seeded ${body.seeded ?? manifest.constraints.length + reviewRules.length} constraint(s) into the coordinator (§17)`);
+      const seeded = body.seeded ?? manifest.constraints.length + reviewRules.length;
+      console.log(
+        seeded === 0
+          ? "twing init: registered this repo with the coordinator (no constraints to seed yet) (§17)"
+          : `twing init: seeded ${seeded} constraint(s) into the coordinator (§17)`,
+      );
     } else {
       // Found live, 2026-08-18: this used to always guess "older server, or
       // /v1/designs/* not deployed yet" -- actively misleading for the real
