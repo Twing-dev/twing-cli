@@ -183,7 +183,29 @@ on a fresh session's very first deny, to check `twing design list --mine
 --status open` first and join an existing open design of yours via `amend
 --group` if one already covers the same effort, rather than registering a
 new one for it. Follow whichever it tells you, then retry the original
-edit. Two things worth knowing before you do:
+edit.
+
+A peer-vs-peer deny (`symbol_conflict` / `llm_divergence`) presents its
+resolutions as a numbered pick-one menu, with the other design's summary
+and -- for `llm_divergence` -- the semantic comparator's own explanation of
+why the two plans clash, including a one-line `Suggested:` resolution when
+the model offered one. The counterpart design's id is filled straight into
+the `--adopt` command, so option `[1]` is copy-paste runnable. **Surface
+that menu (and the suggestion) to the operator rather than picking for
+them** -- the choice between adopting someone else's design, narrowing your
+own, or proceeding separately is theirs to make. The options:
+
+| # | Command | What it does |
+| - | ------- | ------------ |
+| `[1]` | `resolve --id <yours> --adopt <theirs>` | Drop your design, build on theirs (supersedes yours). |
+| `[2]` | `resolve --id <yours> --merge --touches <files>` | Narrow your own scope to just those paths; the server re-checks the narrowed shape and only clears the flag if it comes back clean. |
+| `[3]` | `resolve --id <yours> --justify "<why>"` | Proceed separately -- self-approves immediately for these two buckets (see below). |
+| `[4]` | `twing design close --id <yours>` | That work is done / no longer applies. |
+
+`twing design resolve --id <id>` with no resolution flag opens the same menu
+interactively when run in a terminal.
+
+Two things worth knowing before you resolve:
 
 - **`resolve --justify` unblocks you immediately for a `symbol_conflict` or
   `llm_divergence` deny, but not for `constraint_violation`.** The two

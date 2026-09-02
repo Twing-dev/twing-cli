@@ -193,12 +193,33 @@ test("runDesignResolve: --justify sends resolution: justified_divergence", async
   });
 });
 
-test("runDesignResolve: throws without --id, or without --adopt/--justify", async () => {
+test("runDesignResolve: --merge sends resolution: merged with the narrowed scope (replacing, not adding)", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ status: "resolved", verdict: "clean" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await withMockFetch(fetch, () => runDesignResolve({ cwd: repo, id: "d1", merge: true, touches: "src/auth.ts,src/quota.ts", creates: "" }));
+    assert.match(calls[0].url, /\/v1\/designs\/d1\/resolve$/);
+    assert.deepEqual(calls[0].body, { resolution: "merged", mergedTouches: ["src/auth.ts", "src/quota.ts"], mergedCreates: [] });
+  });
+});
+
+test("runDesignResolve: --merge that re-checks non-clean reports still-blocked without changing anything", async () => {
+  const { fetch } = captureFetch(jsonResponse({ status: "flagged", verdict: "constraint_violation" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignResolve({ cwd: repo, id: "d1", merge: true, touches: "protected.ts" })));
+    assert.ok(logs.some((l) => /still blocked/.test(l) && /constraint_violation/.test(l)), logs.join("\n"));
+  });
+});
+
+test("runDesignResolve: throws without --id, or without a resolution flag when there's no TTY", async () => {
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
     await assert.rejects(() => runDesignResolve({ cwd: repo, adopt: "d2" }), /--id/);
-    await assert.rejects(() => runDesignResolve({ cwd: repo, id: "d1" }), /--adopt.*--justify/);
+    await assert.rejects(() => runDesignResolve({ cwd: repo, id: "d1" }), /--adopt.*--justify.*--merge/);
   });
 });
 

@@ -70,9 +70,18 @@ interface DesignCheckRequestBody {
 }
 
 interface ResolveRequestBody {
-  resolution?: "adopted" | "justified_divergence";
+  resolution?: "adopted" | "justified_divergence" | "merged";
   adoptedDesignId?: string;
   justification?: string;
+  /** `resolution: "merged"` only -- the narrowed scope this design keeps
+   * for itself, dropping the overlap with the counterpart. Replaces
+   * `touches`/`creates` outright (not a union like `amend`): merging is
+   * how a session *shrinks* its declared scope to stop colliding. Empty /
+   * omitted arrays are allowed (narrowing a whole side away). The flag
+   * only clears if the narrowed shape re-checks clean; otherwise the new
+   * verdict comes back and nothing is persisted. */
+  mergedTouches?: string[];
+  mergedCreates?: string[];
 }
 
 // §17 scope enforcement (2026-08): "add" fields only -- amend expands an
@@ -660,13 +669,21 @@ export function createApp(options: CreateAppOptions = {}) {
         const liveCurrent = designs.get(current.id);
         const liveOther = designs.get(other.id);
         const reopenEligible = isDesignLive(liveCurrent) || isDesignLive(liveOther);
+        // The comparator's one-line resolution hint (`suggestion`, may be
+        // empty) rides along in the same free text as `reason` -- the
+        // alignment thread has no structured field for it and `scope-match`'s
+        // deny path reads `systemDescription` verbatim (see the flagged
+        // branch below). Kept as a "Suggested:" sentence rather than a
+        // separate column: it never decides anything, the deny menu still
+        // lists every option regardless.
+        const conflictText = result.suggestion ? `${result.reason}\n\nSuggested: ${result.suggestion}` : result.reason;
         const thread = alignmentThreads.findOrCreate({
           projectId: current.projectId,
           symbolIds: [], // no real symbol for a design-vs-design finding
           developerId: current.developerId,
           otherDeveloperId: other.developerId,
           designId: other.id,
-          systemDescription: result.reason,
+          systemDescription: conflictText,
           category: "llm_divergence",
           subKind,
           summary: buildAlignmentSummary(subKind, other.summary, 0),
@@ -680,10 +697,10 @@ export function createApp(options: CreateAppOptions = {}) {
           kind: "design_semantic_conflict",
           relatedId: thread.id,
           ts: Date.now(),
-          payload: { otherDesignId: other.id, kind: result.kind, reason: result.reason },
+          payload: { otherDesignId: other.id, kind: result.kind, reason: result.reason, suggestion: result.suggestion || undefined },
         });
-        store.addNotice(current.developerId, result.reason, Date.now(), thread.id);
-        store.addNotice(other.developerId, result.reason, Date.now(), thread.id);
+        store.addNotice(current.developerId, conflictText, Date.now(), thread.id);
+        store.addNotice(other.developerId, conflictText, Date.now(), thread.id);
         designs.flag(current.id, "llm_divergence", {
           conflicts: [
             {
@@ -1391,13 +1408,50 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     const body = await c.req.json<ResolveRequestBody>().catch(() => null);
-    if (!body || (body.resolution !== "adopted" && body.resolution !== "justified_divergence")) {
-      return c.json({ error: "expected resolution: adopted | justified_divergence" }, 400);
+    if (!body || (body.resolution !== "adopted" && body.resolution !== "justified_divergence" && body.resolution !== "merged")) {
+      return c.json({ error: "expected resolution: adopted | justified_divergence | merged" }, 400);
     }
 
     if (body.resolution === "adopted") {
       designs.supersede(id);
       return c.json({ status: "superseded", adoptedDesignId: body.adoptedDesignId });
+    }
+
+    // "merged" -- the session narrows its own declared scope to stop
+    // overlapping the counterpart. Re-runs the syntactic checks
+    // (design-checks.ts tiers 1-3) against the *narrowed* shape, exactly
+    // like `amend` does against its widened one: only if that comes back
+    // clean does the flag clear. The semantic re-check is deliberately left
+    // to the fire-and-forget `runSemanticComparatorPass` kicked below
+    // (never a second synchronous LLM call in this route -- same reasoning
+    // as the `conflictWaivers` read-back note further down) -- so a narrowed
+    // scope that still semantically diverges just re-flags moments later,
+    // same as it would after any amend.
+    if (body.resolution === "merged") {
+      if (design.status !== "flagged") {
+        return c.json({ error: "only a flagged design can be merge-resolved" }, 409);
+      }
+      const narrowed: DesignStatement = {
+        ...design,
+        touches: [...new Set(body.mergedTouches ?? [])],
+        creates: [...new Set(body.mergedCreates ?? [])],
+      };
+      const openOthers = designs.openDesigns(design.projectId, Date.now(), id);
+      const outcome = runDesignChecks(narrowed, openOthers, constraintStore.forProject(design.projectId));
+      if (outcome.verdict !== "clean") {
+        return c.json({ status: "flagged", verdict: outcome.verdict, conflicts: outcome.conflicts, constraints: outcome.constraints });
+      }
+      const merged = designs.mergeResolve(id, { touches: narrowed.touches, creates: narrowed.creates });
+      if (!merged) return c.json({ error: "only a flagged design can be merge-resolved" }, 409);
+      // The overlap is gone as far as the syntactic tiers can tell -- let
+      // any shared thread settle if the other side is done too, then run a
+      // fresh semantic pass that will re-flag if the narrowed scope still
+      // diverges.
+      for (const t of alignmentThreads.listByProject(design.projectId, "open")) {
+        if (t.initiatingDesignId === id || t.designId === id) maybeAutoCloseThread(t.id);
+      }
+      runSemanticComparatorPass(id, designs.openDesigns(design.projectId, Date.now(), id));
+      return c.json({ status: "resolved", verdict: "clean" });
     }
 
     if (!body.justification) {
@@ -1962,12 +2016,44 @@ export function createApp(options: CreateAppOptions = {}) {
       // DesignVerdict's doc comment (core/types.ts) for the full four-bucket
       // model.
       const requiresAdmin = flaggedDesign.blockedReason === "constraint_violation";
+      // For a peer-vs-peer flag (`llm_divergence`/`symbol_conflict`), pull
+      // the counterpart design + the comparator's reason/suggestion text
+      // off the open alignment thread this design is a party to, so the Go
+      // hook's deny message can name the other plan, fill its id into the
+      // `--adopt` command, and show the "Suggested:" line -- instead of the
+      // generic one-sentence wording it falls back to when these are
+      // absent. Same both-sides thread-membership match the `/resolve`
+      // route uses (`initiatingDesignId` *or* `designId`). `constraint_violation`
+      // has no counterpart design, so it's left untouched.
+      let conflictingDesignId: string | undefined;
+      let conflictSummary: string | undefined;
+      let conflictReason: string | undefined;
+      if (flaggedDesign.blockedReason === "llm_divergence" || flaggedDesign.blockedReason === "symbol_conflict") {
+        const thread = alignmentThreads
+          .listByProject(flaggedDesign.projectId, "open")
+          .find(
+            (t) =>
+              (t.category === "llm_divergence" || t.category === "symbol_conflict") &&
+              (t.initiatingDesignId === flaggedDesign.id || t.designId === flaggedDesign.id),
+          );
+        if (thread) {
+          conflictReason = thread.systemDescription;
+          const otherId = thread.initiatingDesignId === flaggedDesign.id ? thread.designId : thread.initiatingDesignId;
+          if (otherId) {
+            conflictingDesignId = otherId;
+            conflictSummary = designs.get(otherId)?.summary;
+          }
+        }
+      }
       return c.json({
         state: "flagged",
         designId: flaggedDesign.id,
         pendingReview: designs.hasPendingReview(flaggedDesign.id),
         requiresAdmin,
         verdict: flaggedDesign.blockedReason,
+        ...(conflictingDesignId ? { conflictingDesignId } : {}),
+        ...(conflictSummary ? { conflictSummary } : {}),
+        ...(conflictReason ? { conflictReason } : {}),
       });
     }
 

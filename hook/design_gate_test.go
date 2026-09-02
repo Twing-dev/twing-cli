@@ -1193,12 +1193,19 @@ func allDenyMessages(t *testing.T) map[string]string {
 	}
 	return map[string]string{
 		"noDesign":              noDesignReason(),
-		"flagged":               flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true, "constraint_violation"),
-		"flaggedPendingRev":     flaggedDesignReason("11111111-2222-3333-4444-555555555555", true, true, "constraint_violation"),
-		"flaggedSelfApprove":    flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "symbol_conflict"),
-		"flaggedSymbolConflict": flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "symbol_conflict"),
-		"flaggedLlmDivergence":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "llm_divergence"),
-		"flaggedLegacyVerdict":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, ""),
+		"flagged":               flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", RequiresAdmin: true, Verdict: "constraint_violation"}),
+		"flaggedPendingRev":     flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", PendingReview: true, RequiresAdmin: true, Verdict: "constraint_violation"}),
+		"flaggedSelfApprove":    flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", Verdict: "symbol_conflict"}),
+		"flaggedSymbolConflict": flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", Verdict: "symbol_conflict"}),
+		"flaggedLlmDivergence":  flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", Verdict: "llm_divergence"}),
+		"flaggedLlmWithReason": flaggedDesignReason(designScopeMatchResponse{
+			DesignID:            "11111111-2222-3333-4444-555555555555",
+			Verdict:             "llm_divergence",
+			ConflictingDesignID: "66666666-7777-8888-9999-000000000000",
+			ConflictSummary:     "add token-bucket rate limiting as gateway middleware",
+			ConflictReason:      "Both plans build request-throttling for the same service. Suggested: build on the gateway limiter and drop the per-user counter.",
+		}),
+		"flaggedLegacyVerdict": flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", Verdict: ""}),
 		"outOfScope":         outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", nil),
 		"outOfScopeMulti": outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", []designSummary{
 			{ID: "11111111-2222-3333-4444-555555555555", Summary: "add retry with backoff"},
@@ -1294,7 +1301,7 @@ func TestAuthRejectedReason_DistinguishesUnauthorizedFromForbidden(t *testing.T)
 // registration, so the old "conflict from its own registration" wording was
 // simply false in the common case.
 func TestFlaggedDesignReason_DoesNotClaimConflictCameFromRegistration(t *testing.T) {
-	msg := flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true, "constraint_violation")
+	msg := flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", RequiresAdmin: true, Verdict: "constraint_violation"})
 	if strings.Contains(msg, "registration") {
 		t.Errorf("should not attribute the conflict to registration time: %q", msg)
 	}
@@ -1309,7 +1316,8 @@ func TestFlaggedDesignReason_DoesNotClaimConflictCameFromRegistration(t *testing
 // relevant next step.
 func TestFlaggedDesignReason_OffersCloseAcrossAllThreeVerdicts(t *testing.T) {
 	for _, verdict := range []string{"constraint_violation", "symbol_conflict", "llm_divergence"} {
-		msg := flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, verdict)
+		requiresAdmin := verdict == "constraint_violation"
+		msg := flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", RequiresAdmin: requiresAdmin, Verdict: verdict})
 		wantCmd := "twing design close --id 11111111-2222-3333-4444-555555555555"
 		if !strings.Contains(msg, wantCmd) {
 			t.Errorf("%s: expected a close action (%q), got %q", verdict, wantCmd, msg)
@@ -1321,6 +1329,53 @@ func TestFlaggedDesignReason_OffersCloseAcrossAllThreeVerdicts(t *testing.T) {
 		}
 		if !strings.Contains(msg, "twing design resolve --id 11111111-2222-3333-4444-555555555555 --justify") {
 			t.Errorf("%s: justify action must still be present alongside close, got %q", verdict, msg)
+		}
+	}
+}
+
+// Peer-vs-peer flag: when the coordinator sends the counterpart design +
+// the comparator's reason, the deny message must (a) fill the real id into
+// the --adopt command instead of the <theirPlanId> placeholder, (b) show
+// the comparator's own explanation including any "Suggested:" clause, and
+// (c) still list all three resolutions as a numbered pick-one menu.
+func TestFlaggedDesignReason_SurfacesConflictReasonAndFillsAdoptID(t *testing.T) {
+	msg := flaggedDesignReason(designScopeMatchResponse{
+		DesignID:            "11111111-2222-3333-4444-555555555555",
+		Verdict:             "llm_divergence",
+		ConflictingDesignID: "66666666-7777-8888-9999-000000000000",
+		ConflictSummary:     "add token-bucket rate limiting as gateway middleware",
+		ConflictReason:      "Both plans build request-throttling for the same service. Suggested: build on the gateway limiter and drop the per-user counter.",
+	})
+	if !strings.Contains(msg, "--adopt 66666666-7777-8888-9999-000000000000") {
+		t.Errorf("adopt command should be pre-filled with the counterpart id, got %q", msg)
+	}
+	if strings.Contains(msg, "<theirPlanId>") {
+		t.Errorf("placeholder should be gone once the counterpart id is known, got %q", msg)
+	}
+	if !strings.Contains(msg, "request-throttling for the same service") {
+		t.Errorf("should surface the comparator's reason, got %q", msg)
+	}
+	if !strings.Contains(msg, "Suggested:") {
+		t.Errorf("should carry the model's resolution hint, got %q", msg)
+	}
+	for _, want := range []string{"[1]", "[2]", "[3]", "--adopt", "--justify", "twing design close --id"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("pick-one menu missing %q, got %q", want, msg)
+		}
+	}
+}
+
+// Without the optional counterpart fields (older coordinator, or a
+// constraint_violation), the peer menu still renders -- placeholder id,
+// generic per-bucket lead sentence, all three options.
+func TestFlaggedDesignReason_PeerMenuDegradesWithoutConflictFields(t *testing.T) {
+	msg := flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", Verdict: "llm_divergence"})
+	if !strings.Contains(msg, "--adopt <theirPlanId>") {
+		t.Errorf("should fall back to the placeholder when no counterpart id, got %q", msg)
+	}
+	for _, want := range []string{"[1]", "[2]", "[3]"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("menu missing %q, got %q", want, msg)
 		}
 	}
 }

@@ -96,7 +96,7 @@ function printUsage(): void {
       "  twing project remove-developer --developer-id <id> [--project <id>] [--server <url>]",
       "  twing project list-developers [--project <id>] [--server <url>]",
       "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f [--group <groupId>]",
-      "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
+      "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\" | --merge --touches <files>)",
       "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f] [--summary \"...\"] [--group <groupId>]",
       "  twing design amend --id <designId> --reassign-project   (run from the correct repo -- moves an open, unencumbered design there)",
       "  twing design resume --id <designId> [--session <id>] [--touches a,b] [--creates c,d] [--depends-on e,f]",
@@ -142,7 +142,15 @@ async function runDesignCommand(rest: string[]): Promise<void> {
       });
       return;
     case "resolve":
-      await runDesignResolve({ cwd, id: flags.id, adopt: flags.adopt, justify: flags.justify });
+      await runDesignResolve({
+        cwd,
+        id: flags.id,
+        adopt: flags.adopt,
+        justify: flags.justify,
+        merge: flags.merge === "true",
+        touches: flags.touches,
+        creates: flags.creates,
+      });
       return;
     case "amend":
       await runDesignAmend({

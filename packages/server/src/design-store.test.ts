@@ -209,6 +209,29 @@ test("DesignRegistry: blockedReason clears on an approved resolve (back to open)
   registry.stop();
 });
 
+test("DesignRegistry: mergeResolve replaces scope, clears the flag, bumps scopeVersion, and only works on a flagged design", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const d = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "quotas", creates: ["new.ts"], touches: ["a.ts", "shared.ts"], dependsOn: [] });
+
+  assert.equal(registry.mergeResolve(d.id, { touches: ["a.ts"], creates: [] }), undefined, "an open (not flagged) design has nothing to merge-resolve");
+
+  registry.flag(d.id, "llm_divergence");
+  const before = registry.get(d.id)!;
+  const merged = registry.mergeResolve(d.id, { touches: ["a.ts"], creates: [] });
+  assert.equal(merged?.status, "open");
+  assert.equal(merged?.blockedReason, undefined);
+  assert.deepEqual(merged?.touches, ["a.ts"], "replaced, not unioned -- shared.ts is dropped");
+  assert.deepEqual(merged?.creates, []);
+  assert.equal(merged?.scopeVersion, before.scopeVersion + 1);
+
+  const events = log.eventsForRelatedId(d.id).filter((e) => e.kind === "design_resolved");
+  assert.equal(events.length, 1);
+  assert.equal((events[0].payload as { resolution: string }).resolution, "merged");
+  registry.stop();
+});
+
 test("DesignRegistry: resume clears a stale blockedReason left over from before the design went dormant", () => {
   const db = createDb({ memory: true });
   const registry = new DesignRegistry(db);

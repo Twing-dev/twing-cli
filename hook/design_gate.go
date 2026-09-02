@@ -1175,6 +1175,20 @@ type designScopeMatchResponse struct {
 	// outOfScopeReason falls back to a one-candidate list built from
 	// `DesignID` alone.
 	OpenDesigns []designSummary `json:"openDesigns,omitempty"`
+	// Set only for state "flagged" with a peer-vs-peer verdict
+	// ("llm_divergence"/"symbol_conflict") -- the counterpart design this one
+	// collides with, pulled off the shared alignment thread server-side.
+	// ConflictingDesignID is filled into flaggedDesignReason's `--adopt`
+	// command so the menu is copy-paste runnable; ConflictSummary names the
+	// other plan; ConflictReason is the comparator's explanation, already
+	// carrying a "Suggested: ..." line when the model offered one (app.ts's
+	// runSemanticComparatorPass). All three absent (older coordinator, or a
+	// "constraint_violation" flag, which has no counterpart) -> the menu
+	// still renders, just with the generic lead sentence and a
+	// `<theirPlanId>` placeholder.
+	ConflictingDesignID string `json:"conflictingDesignId,omitempty"`
+	ConflictSummary     string `json:"conflictSummary,omitempty"`
+	ConflictReason      string `json:"conflictReason,omitempty"`
 }
 
 // designSummary is the minimal per-design context outOfScopeReason needs to
@@ -1239,10 +1253,11 @@ func checkDesignScope(serverURL, authToken, developerID, projectID, sessionID, f
 // whoever's authority you'd be overriding" principle this reflects. When
 // `pendingReview` is also true, `requiresAdmin` further distinguishes
 // "waiting on a person" from "already resolved, nothing more to do".
-func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool, verdict string) string {
-	lead, detail := flaggedLeadAndDetail(verdict)
-	if pendingReview {
-		if requiresAdmin {
+func flaggedDesignReason(m designScopeMatchResponse) string {
+	designID := m.DesignID
+	lead, detail := flaggedLeadAndDetail(m.Verdict)
+	if m.PendingReview {
+		if m.RequiresAdmin {
 			return denyMessage(
 				"You're waiting on a person, not on twing.",
 				"Your explanation has been sent to a project admin. There's nothing more to do "+
@@ -1268,37 +1283,75 @@ func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool
 			[]denyAction{{Label: "Retry your edit"}},
 		)
 	}
-	note := "This is self-approvable -- you'll be unblocked as soon as you submit it, no admin needed."
-	if requiresAdmin {
-		note = "This goes to a project admin. You stay blocked until they decide."
+
+	// constraint_violation is one design vs. a fixed project rule -- there's
+	// no counterpart design to adopt and the justification goes to a project
+	// admin, so this bucket keeps its original adjust/justify/close message
+	// rather than the peer-vs-peer pick-one menu below.
+	if m.RequiresAdmin {
+		return denyMessage(
+			lead,
+			detail,
+			[]denyDetail{{"Your plan", designID}, {"Status", "on hold until resolved"}},
+			[]denyAction{
+				{
+					Label:   "Build on their work instead",
+					Command: fmt.Sprintf("twing design resolve --id %s --adopt <theirPlanId>", designID),
+				},
+				{
+					Label:   "Or explain why yours needs to be separate",
+					Command: fmt.Sprintf("twing design resolve --id %s --justify \"<reason>\"", designID),
+					Note:    "This goes to a project admin. You stay blocked until they decide.",
+				},
+				{
+					Label:   "Or, if that work is done and this doesn't apply anymore",
+					Command: fmt.Sprintf("twing design close --id %s", designID),
+				},
+			},
+		)
 	}
+
+	// Peer-vs-peer (llm_divergence / symbol_conflict, or a legacy "" verdict
+	// from a pre-2026 coordinator): a numbered pick-one menu. The "why" is
+	// the comparator's own explanation when the coordinator sent one
+	// (ConflictReason, already carrying a "Suggested: ..." clause when the
+	// model offered a resolution hint -- newlines in it collapse to spaces
+	// through denyMessage's wrapper, which is fine); otherwise the generic
+	// per-bucket sentence. `--adopt` is pre-filled with the counterpart id
+	// when known, so option [1] is copy-paste runnable.
+	why := detail
+	if m.ConflictReason != "" {
+		why = m.ConflictReason
+	}
+	adoptTarget := m.ConflictingDesignID
+	if adoptTarget == "" {
+		adoptTarget = "<theirPlanId>"
+	}
+	details := []denyDetail{{"Your plan", designID}}
+	if m.ConflictSummary != "" {
+		details = append(details, denyDetail{"Their plan", m.ConflictSummary})
+		if m.ConflictingDesignID != "" {
+			details = append(details, denyDetail{"", "design " + m.ConflictingDesignID})
+		}
+	}
+	details = append(details, denyDetail{"Status", "on hold until resolved"})
+
 	return denyMessage(
-		lead,
-		detail,
-		[]denyDetail{{"Your plan", designID}, {"Status", "on hold until resolved"}},
+		"Someone else is already building this. Pick how to resolve it.",
+		why,
+		details,
 		[]denyAction{
 			{
-				Label:   "Build on their work instead",
-				Command: fmt.Sprintf("twing design resolve --id %s --adopt <theirPlanId>", designID),
+				Label:   "[1] Adopt their design -- drop yours and build on theirs",
+				Command: fmt.Sprintf("twing design resolve --id %s --adopt %s", designID, adoptTarget),
 			},
 			{
-				Label:   "Or explain why yours needs to be separate",
-				Command: fmt.Sprintf("twing design resolve --id %s --justify \"<reason>\"", designID),
-				Note:    note,
+				Label:   "[2] Keep yours separate -- if these genuinely don't overlap",
+				Command: fmt.Sprintf("twing design resolve --id %s --justify \"<why they're distinct>\"", designID),
+				Note:    "Self-approvable -- you're unblocked as soon as you submit it, no admin needed.",
 			},
-			// Tightening alignment threads, item 2 (2026-08-27): the deny
-			// message used to only ever offer adopt/justify, with no way to
-			// say "this doesn't apply to me anymore" -- `designs.close()`
-			// (design-store.ts) already accepts a design out of any of
-			// open/flagged/dormant unconditionally, the gate just never told
-			// anyone that was an option. Mirrors the same three-way
-			// join/close/force shape the now-retired `has_open_designs`
-			// verdict's deny message used to use, uniformly across all
-			// three flagging verdicts rather than special-cased per bucket
-			// -- closing is just as valid a response to "someone beat you
-			// to this" as it is to "you've since moved on".
 			{
-				Label:   "Or, if that work is done and this doesn't apply anymore",
+				Label:   "[3] Drop yours -- if that work is done and this no longer applies",
 				Command: fmt.Sprintf("twing design close --id %s", designID),
 			},
 		},
@@ -1656,7 +1709,7 @@ func handleEditWriteGate(payload hookPayload) {
 	case "in_scope":
 		writeJSON(allowOutput("PreToolUse"))
 	case "flagged":
-		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch.DesignID, scopeMatch.PendingReview, scopeMatch.RequiresAdmin, scopeMatch.Verdict)))
+		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch)))
 	case "dormant":
 		writeJSON(denyOutput("PreToolUse", dormantDesignReason(scopeMatch.DesignID, scopeMatch.Summary, scopeMatch.DormantSinceMs)))
 	case "out_of_scope":
