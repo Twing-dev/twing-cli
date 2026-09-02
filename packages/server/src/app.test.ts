@@ -1608,6 +1608,113 @@ test("POST /v1/designs/:id/resolve: self-approving an llm_divergence block posts
   assert.equal(resolutionNote!.authorId, undefined, "a system note, not posted as either party");
 });
 
+// LLM-assisted resolution, `resolution: "merged"`: the flagged session
+// narrows its own scope to stop overlapping the counterpart. A narrowed
+// shape that re-checks clean clears the flag (status back to "open",
+// blockedReason cleared, scopeVersion bumped); the shared thread settles if
+// the other side is done too.
+test("POST /v1/designs/:id/resolve: merged narrows the design's scope and clears the flag when the narrowed shape re-checks clean", async () => {
+  const { app, dataDir, designs, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+
+  const aliceRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's limiter", creates: [], touches: ["gateway.ts", "limits.ts"], dependsOn: [] }),
+  });
+  const { designId: aliceId } = (await aliceRes.json()) as { designId: string };
+
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
+  const bobRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's quotas", creates: [], touches: ["auth.ts", "limits.ts"], dependsOn: [] }),
+  });
+  const { designId: bobId } = (await bobRes.json()) as { designId: string };
+
+  const thread = alignmentThreads.findOrCreate({
+    projectId: "proj-1",
+    symbolIds: [],
+    developerId: "bob@example.com",
+    otherDeveloperId: admin.developerId,
+    designId: aliceId,
+    systemDescription: "both touch limits.ts. Suggested: let the gateway own limits config.",
+    category: "llm_divergence",
+    subKind: "duplication",
+    summary: "dup",
+    initiatingDesignId: bobId,
+    ts: Date.now(),
+    reopenEligible: false,
+  });
+  designs.flag(bobId, "llm_divergence", { conflicts: [{ conflictingDesignId: aliceId, overlapKind: "touches", overlapDetail: "limits.ts", conflictingSummary: "alice's limiter", overlapPaths: ["limits.ts"] }] });
+
+  const before = designs.get(bobId)!;
+  const res = await app.request(`/v1/designs/${bobId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
+    body: JSON.stringify({ resolution: "merged", mergedTouches: ["auth.ts"], mergedCreates: [] }),
+  });
+  const body = (await res.json()) as { status: string; verdict: string };
+  assert.equal(res.status, 200);
+  assert.equal(body.status, "resolved");
+  assert.equal(body.verdict, "clean");
+
+  const after = designs.get(bobId)!;
+  assert.equal(after.status, "open", "flag cleared");
+  assert.equal(after.blockedReason, undefined, "blockedReason cleared (DTO normalizes null -> undefined)");
+  assert.deepEqual(after.touches, ["auth.ts"], "scope replaced, not unioned -- limits.ts is gone");
+  assert.equal(after.scopeVersion, before.scopeVersion + 1);
+  void thread;
+});
+
+test("POST /v1/designs/:id/resolve: merged leaves the design flagged and returns the new verdict when the narrowed scope still violates a constraint", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "protected", scope: ["protected.ts"], type: "constraint" }] }),
+  });
+  const checkRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "x", creates: [], touches: ["protected.ts", "safe.ts"], dependsOn: [] }),
+  });
+  const { designId } = (await checkRes.json()) as { designId: string };
+  assert.equal(designs.get(designId)!.status, "flagged");
+
+  // Narrowing still keeps protected.ts -- must not clear.
+  const res = await app.request(`/v1/designs/${designId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "merged", mergedTouches: ["protected.ts"], mergedCreates: [] }),
+  });
+  const body = (await res.json()) as { status: string; verdict: string };
+  assert.equal(body.status, "flagged");
+  assert.equal(body.verdict, "constraint_violation");
+  assert.equal(designs.get(designId)!.status, "flagged", "nothing persisted on a non-clean re-check");
+});
+
+test("POST /v1/designs/:id/resolve: merged on a design that isn't flagged is a 409", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const checkRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "x", creates: [], touches: ["a.ts"], dependsOn: [] }),
+  });
+  const { designId } = (await checkRes.json()) as { designId: string };
+
+  const res = await app.request(`/v1/designs/${designId}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "merged", mergedTouches: ["a.ts"] }),
+  });
+  assert.equal(res.status, 409);
+});
+
 // The reverse-direction merge (just above) means both sides' resolutions
 // now land in the *same* thread -- this is what actually answers "who
 // unblocked themselves and who didn't" from one place, rather than two
@@ -3587,6 +3694,87 @@ test("GET /v1/designs/scope-match: with more than one flagged design, the one wh
   assert.equal(body.state, "flagged");
   assert.equal(body.designId, olderId, "must name the flagged design whose scope actually covers path, not just the newest");
   assert.notEqual(body.designId, newerId);
+});
+
+// LLM-assisted resolution: for a peer-vs-peer flag, scope-match's flagged
+// branch enriches its response from the shared alignment thread -- the
+// counterpart design id (so the Go hook can pre-fill `--adopt`), that
+// design's summary, and the comparator's reason text (which already carries
+// a "Suggested:" clause when the model offered one).
+test("GET /v1/designs/scope-match: a peer-vs-peer flagged design returns the counterpart id, summary, and comparator reason from its alignment thread", async () => {
+  const { app, dataDir, designs, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+
+  const aliceRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "per-user request quotas in auth middleware", creates: [], touches: ["auth.ts"], dependsOn: [] }),
+  });
+  const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
+
+  const otherPat = await addProjectMember(app, admin.token, "proj-1");
+  const bobRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(otherPat) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "token-bucket rate limiting as gateway middleware", creates: [], touches: ["gateway.ts"], dependsOn: [] }),
+  });
+  const { designId: bobDesignId } = (await bobRes.json()) as { designId: string };
+
+  alignmentThreads.findOrCreate({
+    projectId: "proj-1",
+    symbolIds: [],
+    developerId: "bob@example.com",
+    otherDeveloperId: admin.developerId,
+    designId: aliceDesignId,
+    systemDescription: "Both plans build request-throttling for the same service.\n\nSuggested: build on the gateway limiter and drop the per-user counter.",
+    category: "llm_divergence",
+    subKind: "duplication",
+    summary: "duplicate work",
+    initiatingDesignId: bobDesignId,
+    ts: Date.now(),
+    reopenEligible: false,
+  });
+  designs.flag(bobDesignId, "llm_divergence", { conflicts: [{ conflictingDesignId: aliceDesignId, overlapKind: "touches", overlapDetail: "dup", conflictingSummary: "alice's work", overlapPaths: [] }] });
+
+  const scopeMatch = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s-bob&path=gateway.ts`, { headers: bearer(otherPat) });
+  const body = (await scopeMatch.json()) as {
+    state: string;
+    verdict?: string;
+    conflictingDesignId?: string;
+    conflictSummary?: string;
+    conflictReason?: string;
+  };
+  assert.equal(body.state, "flagged");
+  assert.equal(body.verdict, "llm_divergence");
+  assert.equal(body.conflictingDesignId, aliceDesignId);
+  assert.equal(body.conflictSummary, "per-user request quotas in auth middleware");
+  assert.match(body.conflictReason ?? "", /request-throttling for the same service/);
+  assert.match(body.conflictReason ?? "", /Suggested:/);
+});
+
+// A constraint_violation flag has no counterpart design -- scope-match must
+// not attach conflict* fields to it.
+test("GET /v1/designs/scope-match: a constraint_violation flag carries no conflict* enrichment", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "protected", scope: ["protected.ts"], type: "constraint" }] }),
+  });
+  await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "x", creates: [], touches: ["protected.ts"], dependsOn: [] }),
+  });
+
+  const scopeMatch = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1&path=protected.ts`, { headers: bearer(admin.token) });
+  const body = (await scopeMatch.json()) as { state: string; verdict?: string; conflictingDesignId?: string; conflictReason?: string };
+  assert.equal(body.state, "flagged");
+  assert.equal(body.verdict, "constraint_violation");
+  assert.equal(body.conflictingDesignId, undefined);
+  assert.equal(body.conflictReason, undefined);
 });
 
 // Same bug class as the out_of_scope newest-first fix above, applied to the

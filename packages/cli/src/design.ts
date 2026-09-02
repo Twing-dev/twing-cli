@@ -245,6 +245,57 @@ export interface ResolveOptions {
   id?: string;
   adopt?: string;
   justify?: string;
+  /** `--merge`: narrow this flagged design's own scope to the given
+   * `--touches`/`--creates` (replacing, not adding), dropping the overlap
+   * with the counterpart. The server re-checks the narrowed shape and only
+   * clears the flag if it comes back clean. */
+  merge?: boolean;
+  touches?: string;
+  creates?: string;
+}
+
+/** The four ways out of a peer-vs-peer design flag, in the same order the
+ * Go hook's deny message lists them -- shared so the interactive prompt and
+ * that message can't drift. */
+const RESOLVE_CHOICES = [
+  "Adopt their design  (drop yours, build on theirs)",
+  "Split the work  (narrow your scope so it stops overlapping)",
+  "Keep yours separate  (justify why these don't actually overlap)",
+  "Drop yours  (that work is done / no longer applies)",
+] as const;
+
+async function promptResolution(id: string): Promise<{ resolution: string; [k: string]: unknown } | undefined> {
+  if (!process.stdin.isTTY) {
+    throw new Error('twing design resolve: pass --adopt <designId>, --justify "<reason>", or --merge --touches <files> (no TTY for the interactive picker)');
+  }
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log(`\nResolving design ${id} -- how do you want to resolve this conflict?\n`);
+    RESOLVE_CHOICES.forEach((c, i) => console.log(`  ${i + 1}. ${c}`));
+    const pick = (await rl.question("\nChoose 1-4 (or q to cancel): ")).trim();
+    switch (pick) {
+      case "1": {
+        const other = (await rl.question("Their design id (--adopt): ")).trim();
+        return other ? { resolution: "adopted", adoptedDesignId: other } : undefined;
+      }
+      case "2": {
+        const touches = (await rl.question("Paths that stay on YOUR side, comma-separated (--touches): ")).trim();
+        const creates = (await rl.question("...and any new files you'll still create (--creates, blank for none): ")).trim();
+        return { resolution: "merged", mergedTouches: splitList(touches), mergedCreates: splitList(creates) };
+      }
+      case "3": {
+        const why = (await rl.question("Why are these genuinely separate? ")).trim();
+        return why ? { resolution: "justified_divergence", justification: why } : undefined;
+      }
+      case "4":
+        return { resolution: "__close__" };
+      default:
+        return undefined;
+    }
+  } finally {
+    rl.close();
+  }
 }
 
 export async function runDesignResolve(options: ResolveOptions): Promise<void> {
@@ -253,13 +304,26 @@ export async function runDesignResolve(options: ResolveOptions): Promise<void> {
   if (!options.id) {
     throw new Error("twing design resolve: --id <designId> is required");
   }
-  if (!options.adopt && !options.justify) {
-    throw new Error('twing design resolve: pass --adopt <designId> or --justify "<reason>"');
-  }
 
-  const body = options.adopt
-    ? { resolution: "adopted", adoptedDesignId: options.adopt }
-    : { resolution: "justified_divergence", justification: options.justify };
+  let body: { resolution: string; [k: string]: unknown };
+  if (options.adopt) {
+    body = { resolution: "adopted", adoptedDesignId: options.adopt };
+  } else if (options.merge) {
+    body = { resolution: "merged", mergedTouches: splitList(options.touches), mergedCreates: splitList(options.creates) };
+  } else if (options.justify) {
+    body = { resolution: "justified_divergence", justification: options.justify };
+  } else {
+    const chosen = await promptResolution(options.id);
+    if (!chosen) {
+      console.log("twing design resolve: cancelled, nothing changed.");
+      return;
+    }
+    if (chosen.resolution === "__close__") {
+      await runDesignClose({ cwd: options.cwd, id: options.id });
+      return;
+    }
+    body = chosen;
+  }
 
   const res = await authFetch(
     `${serverUrl}/v1/designs/${options.id}/resolve`,
@@ -271,7 +335,7 @@ export async function runDesignResolve(options: ResolveOptions): Promise<void> {
     authToken,
     developerId,
   );
-  const result = (await parseJsonOrUnauthorized(res)) as { error?: string; status?: string; reviewId?: string };
+  const result = (await parseJsonOrUnauthorized(res)) as { error?: string; status?: string; reviewId?: string; verdict?: string };
   // 2026-08-26 self-approve: `/v1/designs/:id/resolve` now distinguishes
   // "resolved" (no constraint hit in the mix -- decided immediately, the
   // design is unblocked right now) from "pending_review" (a constraint
@@ -280,9 +344,13 @@ export async function runDesignResolve(options: ResolveOptions): Promise<void> {
   // core/types.ts, for the full four-bucket model this line reflects.
   if (!result.error) {
     if (result.status === "resolved") {
-      console.log(`twing design: unblocked -- self-approved, no admin needed (review ${result.reviewId}).`);
+      const via = body.resolution === "merged" ? "narrowed scope re-checked clean" : "self-approved, no admin needed";
+      console.log(`twing design: unblocked -- ${via}${result.reviewId ? ` (review ${result.reviewId})` : ""}.`);
     } else if (result.status === "pending_review") {
       console.log(`twing design: waiting on a project admin -- run \`twing design reviews --decide ${result.reviewId} --decision approve\` (as an admin) to unblock.`);
+    } else if (result.status === "flagged") {
+      // `--merge` only: the narrowed scope still didn't come back clean.
+      console.log(`twing design: still blocked -- the narrowed scope re-checked as "${result.verdict}". Nothing was changed; widen the narrowing or pick another resolution.`);
     }
   }
   console.log(JSON.stringify(result, null, 2));

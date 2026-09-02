@@ -479,6 +479,49 @@ export class DesignRegistry {
     return this.get(id);
   }
 
+  /** LLM-assisted resolution, `resolution: "merged"` (app.ts's
+   * `/v1/designs/:id/resolve`): a *flagged* design narrows its declared
+   * scope to stop overlapping the counterpart, and -- since the caller has
+   * already re-run `runDesignChecks` against this exact narrowed shape and
+   * got `clean` back -- the flag clears in the same step. Unlike `amend()`
+   * this *replaces* `touches`/`creates` outright rather than unioning
+   * (merging is a deliberate shrink; empty arrays are allowed), only
+   * accepts a `"flagged"` design (an `"open"` one has nothing to
+   * resolve; `amend` is its widen path), and bumps `scopeVersion` so any
+   * in-flight semantic-comparator pass sees it's been superseded.
+   * `blockedReason` clears alongside `status`, same pairing `flag()` sets
+   * them and `decideReview`'s approve path clears them. Returns `undefined`
+   * if the design isn't currently `"flagged"`. */
+  mergeResolve(id: string, scope: { touches: string[]; creates: string[] }): DesignStatement | undefined {
+    const existing = this.get(id);
+    if (!existing || existing.status !== "flagged") return undefined;
+    const touches = [...new Set(scope.touches)];
+    const creates = [...new Set(scope.creates)];
+    const scopeVersion = existing.scopeVersion + 1;
+    this.db
+      .update(designsTable)
+      .set({
+        touches: JSON.stringify(touches),
+        creates: JSON.stringify(creates),
+        status: "open",
+        blockedReason: null,
+        scopeVersion,
+        lastActivityAt: Date.now(),
+      })
+      .where(eq(designsTable.id, id))
+      .run();
+    this.activityLog.append({
+      projectId: existing.projectId,
+      developerId: existing.developerId,
+      sessionId: existing.sessionId,
+      kind: "design_resolved", // same kind supersede() uses; `resolution` distinguishes
+      relatedId: id,
+      ts: Date.now(),
+      payload: { resolution: "merged", touches, creates, priorVerdict: existing.blockedReason ?? undefined },
+    });
+    return this.get(id);
+  }
+
   /** §17 design linking follow-up (2026-08-28): `groupId` was otherwise
    * only ever settable at `register()` time or via `amend()` while a
    * design is `"open"` -- once a design reaches its far more common
