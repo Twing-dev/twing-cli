@@ -43,7 +43,11 @@ own instead? See "Self-hosting your own coordinator" below.
    server). Admin/maintain access founds an untouched project and makes
    you its admin; any other repo access just joins it. Non-GitHub repos
    use a separate auth path -- see "Self-hosting your own coordinator"
-   below.
+   below. If this makes you the project's admin -- founding it, or later
+   re-running `init` as one -- it also commits a bootstrap hook into this
+   repo's own `.claude/settings.json` so every future teammate is required
+   to run `twing init` themselves before their first edit; see "Install
+   enforcement" below.
 3. **Sets up the local pieces** -- installs `twing-hook`, wires it into
    Claude Code's hooks (once per machine), and starts a background daemon.
    The daemon exists because each hook invocation is a fresh, stateless
@@ -152,6 +156,63 @@ same as seeding a new/changed constraint already works today -- not a
 second-admin-approves-first staged flow. That's a real gap (an admin could
 narrow away a rule nobody else agreed to loosen) tracked as separate
 follow-up work, not yet built.
+
+## Install enforcement
+
+Separate from the design-conflict gate above, and a lot simpler: whoever
+founds a project (or already holds admin/maintain on it) has `init` also
+commit a small POSIX shell script into the repo's own `.claude/settings.json`
+-- git-tracked, not machine-local. From then on, every clone of the repo
+refuses `Edit`/`Write` in Claude Code until that machine has actually run
+`twing init` -- closing the gap where hook wiring was otherwise entirely
+per-machine and per-developer opt-in, so a teammate who never ran `init`
+would have no hooks at all and nothing enforcing anything.
+
+The script only checks two purely local things -- is `twing-hook` installed,
+and is it wired into `~/.claude/settings.json` -- no network call, so it
+costs nothing once you're set up. If either is missing, it denies with the
+fix:
+
+```sh
+npm install -g @twing/cli && twing init
+```
+
+There's deliberately no escape hatch (no env var, no flag) -- unlike
+`TWING_DESIGN_GATE=off` for the conflict gate above, this one is meant to be
+mandatory, not developer-optional. The only way to lift it is for an admin
+to edit or remove the committed hook (reviewed like any other repo change),
+or run:
+
+```sh
+twing project enable-enforcement    # writes it
+twing project disable-enforcement   # removes it
+```
+
+Both are pure local file edits -- no server call, no auth -- since the real
+authorization here is GitHub's own branch protection/PR review on the
+committed file, not twing's role system. Remember to commit and push
+whatever `enable-enforcement`/`init` writes yourself; twing has no way to do
+that for you.
+
+Non-GitHub-hosted projects, `--invite`/`--no-auth` onboarding, and a repo
+founded before this feature existed don't get this hook written
+automatically -- run `twing project enable-enforcement` yourself once
+you're that project's admin.
+
+The script assumes a POSIX `sh` (as on macOS/Linux); Windows hook-execution
+behavior for this specific mechanism hasn't been verified yet -- treat it as
+a known gap on that platform for now, same as `init`'s own OS-level
+service install already does.
+
+**For agents:** a deny that opens with "twing is not installed on this
+machine yet" is this gate, not the design-conflict gate above (and not a
+bug in your tool call) -- it means this machine has never run `twing init`
+at all, so there's no coordination happening yet, nothing to register or
+justify. Run the command it gives you (`npm install -g @twing/cli && twing
+init`, or the `npx` equivalent), then retry the original edit; `twing init`
+will need a GitHub device-flow approval from a human if this is a
+GitHub-hosted repo, so surface that step rather than assuming it can
+complete unattended.
 
 ### Quick command reference
 
@@ -428,6 +489,7 @@ via TypeScript project references. `npm link` in `packages/cli` gives you a
 | `twing admin bootstrap --token <bootstrap-token>`                                                  | Break-glass: claims the server's one-time bootstrap token, creating the first org and its admin.                                                                                                                                                                                                                                                                                                                       |
 | `twing admin invite` / `list-invites` / `revoke-invite` / `revoke-developer` / `list-developers`   | Org-scoped admin actions (§17.10).                                                                                                                                                                                                                                                                                                                                                                                     |
 | `twing project invite` / `list-invites` / `revoke-invite` / `remove-developer` / `list-developers` | Project-scoped admin actions -- a project's own admins, not just org admins, can run these.                                                                                                                                                                                                                                                                                                                            |
+| `twing project enable-enforcement` / `disable-enforcement`                                        | Writes/removes the install-enforcement bootstrap hook in this repo's `.claude/settings.json` -- see "Install enforcement" above. Local file edit only, no server call; commit and push it yourself.                                                                                                                                                                                                                   |
 | `twing align`                                                                                      | Local constraint checks plus a server round-trip for cross-session divergence findings.                                                                                                                                                                                                                                                                                                                                |
 | `twing daemon`                                                                                     | Runs the daemon in the foreground (rarely needed manually -- `init` already starts it detached, or as a persistent OS-level service).                                                                                                                                                                                                                                                                                  |
 | `twing design register/resolve/amend/resume/close/list/reviews`                                    | Design-conflict gate commands, see above.                                                                                                                                                                                                                                                                                                                                                                              |
