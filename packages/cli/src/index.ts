@@ -24,6 +24,8 @@ import {
   runProjectRevokeInvite,
   runProjectRemoveDeveloper,
   runProjectListDevelopers,
+  runProjectEnableEnforcement,
+  runProjectDisableEnforcement,
 } from "./project.js";
 import {
   runDesignRegister,
@@ -95,6 +97,8 @@ function printUsage(): void {
       "  twing project revoke-invite --code <invite-code> [--server <url>]",
       "  twing project remove-developer --developer-id <id> [--project <id>] [--server <url>]",
       "  twing project list-developers [--project <id>] [--server <url>]",
+      "  twing project enable-enforcement",
+      "  twing project disable-enforcement",
       "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f [--group <groupId>]",
       "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
       "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f] [--summary \"...\"] [--group <groupId>]",
@@ -302,6 +306,12 @@ async function runProjectCommand(rest: string[]): Promise<void> {
       return;
     case "list-developers":
       await runProjectListDevelopers({ cwd, server: flags.server, project: flags.project });
+      return;
+    case "enable-enforcement":
+      runProjectEnableEnforcement({ cwd });
+      return;
+    case "disable-enforcement":
+      runProjectDisableEnforcement({ cwd });
       return;
     default:
       printUsage();

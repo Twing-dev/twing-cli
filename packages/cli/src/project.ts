@@ -6,8 +6,10 @@
  * repo's `computeProjectId`, same pattern `design.ts` already uses).
  */
 
-import { findRepoRoot, computeProjectId, authFetch } from "@twing/core";
+import { findRepoRoot, computeProjectId, authFetch, twingConfigPath } from "@twing/core";
+import * as fs from "node:fs";
 import { resolveServerUrl, requireAuth } from "./auth.js";
+import { enableInstallEnforcement, disableInstallEnforcement } from "./enforce-hooks.js";
 
 type Role = "admin" | "member";
 
@@ -135,4 +137,50 @@ export async function runProjectListDevelopers(options: ProjectListDevelopersOpt
   for (const d of body.items ?? []) {
     console.log(`${d.developerId}  role=${d.role}`);
   }
+}
+
+/**
+ * Admin-driven install enforcement (`enforce-hooks.ts`): unlike every other
+ * command in this file, deliberately no server call, no `--server`/auth
+ * flag. The real authorization boundary here is GitHub's own branch
+ * protection / PR review on the committed `.claude/settings.json` file
+ * itself, not twing's server-side role system -- gating a local file write
+ * behind a network auth check would be theater (it wouldn't stop anyone
+ * from hand-editing the JSON and opening a rejectable PR regardless), and
+ * would add a needless network dependency to a purely-local operation. For
+ * the same reason there's no machine-local override file
+ * (`gate-overrides.ts`'s pattern) for this feature either: that file exists
+ * because the *design gate*'s wiring is machine-global and a per-repo
+ * override has to live somewhere local; this feature's whole artifact
+ * already lives in the repo, so there's nothing to override locally.
+ */
+export interface ProjectEnforcementOptions {
+  cwd: string;
+}
+
+export function runProjectEnableEnforcement(options: ProjectEnforcementOptions): void {
+  const repoRoot = findRepoRoot(options.cwd);
+  if (!fs.existsSync(twingConfigPath(repoRoot))) {
+    console.warn("twing project enable-enforcement: this repo has no .twing/twing.yml yet -- the hook will no-op until `twing init` sets one up");
+  }
+  if (!enableInstallEnforcement(repoRoot)) {
+    console.log("twing project enable-enforcement: already present in .claude/settings.json");
+    return;
+  }
+  console.log(
+    "twing project enable-enforcement: wrote a bootstrap install-check into .claude/settings.json -- " +
+      "commit and push this file (or open a PR) so your team inherits it.",
+  );
+}
+
+export function runProjectDisableEnforcement(options: ProjectEnforcementOptions): void {
+  const repoRoot = findRepoRoot(options.cwd);
+  if (!disableInstallEnforcement(repoRoot)) {
+    console.log("twing project disable-enforcement: nothing to remove -- not present in .claude/settings.json");
+    return;
+  }
+  console.log(
+    "twing project disable-enforcement: removed from .claude/settings.json -- commit and push this file (or " +
+      "open a PR) so your team stops being gated by it.",
+  );
 }

@@ -158,14 +158,24 @@ export async function postJoinViaGithub(
   );
 }
 
-/**
- * Returns the resulting PAT (freshly minted, an already-cached one that was
- * just reused, or one attached to via an existing session) -- `init.ts`'s
- * default auth-resolution path (§17 Phase 3 GitHub-founding) uses this
- * return value directly rather than re-reading config, mirroring
- * `runKeygen`'s existing return-token convention.
- */
-export async function runJoinGithub(options: JoinOptions): Promise<string> {
+export interface JoinGithubResult {
+  /** The resulting PAT (freshly minted, an already-cached one that was just
+   * reused, or one attached to via an existing session) -- `init.ts`'s
+   * default auth-resolution path (§17 Phase 3 GitHub-founding) uses this
+   * directly rather than re-reading config, mirroring `runKeygen`'s
+   * existing return-token convention. */
+  token: string;
+  /** Whether this call founded the project (vs. joining an
+   * already-founded one). */
+  founded: boolean;
+  /** This caller's resulting twing role for the project, from the
+   * coordinator's GitHub-permission-verified response -- `init.ts` uses
+   * this (`role === "admin"`) to decide whether to auto-write the
+   * install-enforcement hook. */
+  role: string | undefined;
+}
+
+export async function runJoinGithub(options: JoinOptions): Promise<JoinGithubResult> {
   const repoRoot = findRepoRoot(options.cwd);
   const serverUrl = resolveServerUrl(options.cwd, options.server);
   if (!serverUrl) {
@@ -219,5 +229,5 @@ export async function runJoinGithub(options: JoinOptions): Promise<string> {
       ? `twing join: founded this project on ${normalizedServer} and joined as ${result.role} (verified via your GitHub repo permissions)`
       : `twing join: joined as ${result.role} (from your GitHub repo permissions)`,
   );
-  return twingToken ?? existingToken!;
+  return { token: twingToken ?? existingToken!, founded: result.founded ?? false, role: result.role };
 }

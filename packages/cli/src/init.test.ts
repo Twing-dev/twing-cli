@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { computeProjectId } from "@twing/core";
-import { runInit, isProjectMember, type InitDeps } from "./init.js";
+import { runInit, resolveGithubMembership, type InitDeps } from "./init.js";
 import {
   tmpRepo,
   withHome,
@@ -55,9 +55,13 @@ const REACHABILITY_ROUTE = { match: new RegExp(`^${SERVER_URL.replace(/[.*+?^${}
 
 function fakeDeps(overrides: Partial<InitDeps> = {}): {
   deps: InitDeps;
-  calls: { wireHooks: { hookPath: string }[]; stripLegacyRepoLocalHooks: { repoRoot: string; hookPath: string }[] };
+  calls: { wireHooks: { hookPath: string }[]; stripLegacyRepoLocalHooks: { repoRoot: string; hookPath: string }[]; enableInstallEnforcement: { repoRoot: string }[] };
 } {
-  const calls = { wireHooks: [] as { hookPath: string }[], stripLegacyRepoLocalHooks: [] as { repoRoot: string; hookPath: string }[] };
+  const calls = {
+    wireHooks: [] as { hookPath: string }[],
+    stripLegacyRepoLocalHooks: [] as { repoRoot: string; hookPath: string }[],
+    enableInstallEnforcement: [] as { repoRoot: string }[],
+  };
   const deps: InitDeps = {
     ensureHookInstalled: async () => "/fake/bin/twing-hook",
     wireHooks: (hookPath) => {
@@ -67,6 +71,10 @@ function fakeDeps(overrides: Partial<InitDeps> = {}): {
     stripLegacyRepoLocalHooks: (repoRoot, hookPath) => {
       calls.stripLegacyRepoLocalHooks.push({ repoRoot, hookPath });
       return false;
+    },
+    enableInstallEnforcement: (repoRoot) => {
+      calls.enableInstallEnforcement.push({ repoRoot });
+      return true;
     },
     ensureDaemonRunning: async () => "started",
     installDaemonService: async () => "installed",
@@ -279,30 +287,30 @@ test("runInit: constraint seeding surfaces the server's real error reason instea
 // fallback, which fails for anyone with no org (the default for anyone
 // onboarded via GitHub-founding in the first place).
 
-test("isProjectMember: true when the project is in whoami's list", async () => {
+test("resolveGithubMembership: member + role surfaced when the project is in whoami's list", async () => {
   const { fetch } = captureFetch(jsonResponse({ developerId: "me", projects: [{ projectId: "proj-1", orgId: "", role: "admin" }] }));
-  const isMember = await withMockFetch(fetch, () => isProjectMember(SERVER_URL, "proj-1", "tok"));
-  assert.equal(isMember, true);
+  const membership = await withMockFetch(fetch, () => resolveGithubMembership(SERVER_URL, "proj-1", "tok"));
+  assert.deepEqual(membership, { member: true, role: "admin" });
 });
 
-test("isProjectMember: false when the project is absent from whoami's list", async () => {
+test("resolveGithubMembership: not a member when the project is absent from whoami's list", async () => {
   const { fetch } = captureFetch(jsonResponse({ developerId: "me", projects: [{ projectId: "some-other-proj", orgId: "", role: "admin" }] }));
-  const isMember = await withMockFetch(fetch, () => isProjectMember(SERVER_URL, "proj-1", "tok"));
-  assert.equal(isMember, false);
+  const membership = await withMockFetch(fetch, () => resolveGithubMembership(SERVER_URL, "proj-1", "tok"));
+  assert.deepEqual(membership, { member: false });
 });
 
-test("isProjectMember: fails soft to true on a non-ok response", async () => {
+test("resolveGithubMembership: fails soft to member=true (role unknown) on a non-ok response", async () => {
   const { fetch } = captureFetch(jsonResponse({ error: "unauthorized" }, 401));
-  const isMember = await withMockFetch(fetch, () => isProjectMember(SERVER_URL, "proj-1", "tok"));
-  assert.equal(isMember, true, "a failed check must not force a surprise join attempt on every retry");
+  const membership = await withMockFetch(fetch, () => resolveGithubMembership(SERVER_URL, "proj-1", "tok"));
+  assert.deepEqual(membership, { member: true }, "a failed check must not force a surprise join attempt on every retry");
 });
 
-test("isProjectMember: fails soft to true on a network error", async () => {
+test("resolveGithubMembership: fails soft to member=true (role unknown) on a network error", async () => {
   const throwingFetch = (async () => {
     throw new Error("network down");
   }) as typeof fetch;
-  const isMember = await withMockFetch(throwingFetch, () => isProjectMember(SERVER_URL, "proj-1", "tok"));
-  assert.equal(isMember, true);
+  const membership = await withMockFetch(throwingFetch, () => resolveGithubMembership(SERVER_URL, "proj-1", "tok"));
+  assert.deepEqual(membership, { member: true });
 });
 
 test("runInit: a cached token skips the membership check entirely for a non-GitHub-hosted repo (no whoami call)", async () => {
@@ -325,13 +333,32 @@ test("runInit: cached token + already a project member on a GitHub-hosted repo -
     { match: /\/v1\/auth\/whoami$/, response: jsonResponse({ developerId: "me", projects: [{ projectId, orgId: "", role: "admin" }] }) },
     { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) },
   ]);
-  const { deps } = fakeDeps();
+  const { deps, calls: depCalls } = fakeDeps();
   await withHome(async () => {
     cacheToken(SERVER_URL, "already-cached-pat");
     const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
     assert.ok(calls.some((c) => /\/v1\/auth\/whoami$/.test(c)), "membership check must run for a github-hosted repo");
     assert.ok(!calls.some((c) => c.includes("github.com/login/device/code")), "already a member -- must not attempt a GitHub join");
     assert.ok(logs.some((l) => l.includes("twing init: done")));
+    assert.equal(depCalls.enableInstallEnforcement.length, 1, "an admin re-running init on an already-founded repo must still (re-)write the enforcement hook -- the backfill path");
+    assert.equal(depCalls.enableInstallEnforcement[0].repoRoot, repo);
+  });
+});
+
+test("runInit: cached token + already a project MEMBER (not admin) on a GitHub-hosted repo -- enforcement hook is not written", async () => {
+  const repo = tmpRepo();
+  addGithubRemote(repo, "acme", "widgets");
+  const projectId = computeProjectId(repo);
+  const { fetch } = routedFetch([
+    REACHABILITY_ROUTE,
+    { match: /\/v1\/auth\/whoami$/, response: jsonResponse({ developerId: "me", projects: [{ projectId, orgId: "", role: "member" }] }) },
+    { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) },
+  ]);
+  const { deps, calls: depCalls } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.equal(depCalls.enableInstallEnforcement.length, 0, "a plain member must never auto-write the enforcement hook");
   });
 });
 
@@ -344,7 +371,7 @@ test("runInit: cached token + NOT yet a project member on a GitHub-hosted repo -
     { match: /github\.com\/login\/device\/code$/, response: jsonResponse({ error: "device flow unavailable in test" }, 500) },
     { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) },
   ]);
-  const { deps } = fakeDeps();
+  const { deps, calls: depCalls } = fakeDeps();
   await withHome(async () => {
     cacheToken(SERVER_URL, "already-cached-pat");
     const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
@@ -352,6 +379,45 @@ test("runInit: cached token + NOT yet a project member on a GitHub-hosted repo -
     assert.ok(calls.some((c) => c.includes("github.com/login/device/code")), "not a member -- must attempt a GitHub join for this project");
     assert.ok(logs.some((l) => l.includes("automatic GitHub-verified join didn't work")));
     assert.ok(logs.some((l) => l.includes("twing init: done")), "a failed join attempt must not abort init -- falls back to the cached token");
+    assert.equal(depCalls.enableInstallEnforcement.length, 0, "a failed join attempt must not leave adminRole true");
+  });
+});
+
+test("runInit: no cached token, GitHub-hosted repo -- a successful founding join (role: admin) writes the enforcement hook", async () => {
+  const repo = tmpRepo();
+  addGithubRemote(repo, "acme", "widgets");
+  const { fetch } = routedFetch([
+    REACHABILITY_ROUTE,
+    { match: /github\.com\/login\/device\/code$/, response: jsonResponse({ device_code: "d", user_code: "u", verification_uri: "https://github.com/login/device", expires_in: 900, interval: 0 }) },
+    { match: /github\.com\/login\/oauth\/access_token$/, response: jsonResponse({ access_token: "gh-token" }) },
+    { match: /\/v1\/projects\/.+\/join-via-github$/, response: jsonResponse({ developerId: "me", role: "admin", founded: true }) },
+    { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) },
+  ]);
+  const { deps, calls: depCalls } = fakeDeps();
+  await withHome(async () => {
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.equal(depCalls.enableInstallEnforcement.length, 1, "founding this project must write the enforcement hook");
+    assert.equal(depCalls.enableInstallEnforcement[0].repoRoot, repo);
+    assert.ok(logs.some((l) => l.includes("wrote a bootstrap install-check into .claude/settings.json")));
+    assert.ok(logs.some((l) => l.includes("There is no bypass flag for this")));
+  });
+});
+
+test("runInit: no cached token, GitHub-hosted repo -- joining an already-founded project as a member does not write the enforcement hook", async () => {
+  const repo = tmpRepo();
+  addGithubRemote(repo, "acme", "widgets");
+  const { fetch } = routedFetch([
+    REACHABILITY_ROUTE,
+    { match: /github\.com\/login\/device\/code$/, response: jsonResponse({ device_code: "d", user_code: "u", verification_uri: "https://github.com/login/device", expires_in: 900, interval: 0 }) },
+    { match: /github\.com\/login\/oauth\/access_token$/, response: jsonResponse({ access_token: "gh-token" }) },
+    { match: /\/v1\/projects\/.+\/join-via-github$/, response: jsonResponse({ developerId: "me", role: "member", founded: false }) },
+    { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) },
+  ]);
+  const { deps, calls: depCalls } = fakeDeps();
+  await withHome(async () => {
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.equal(depCalls.enableInstallEnforcement.length, 0, "joining as a plain member must never auto-write the enforcement hook");
+    assert.ok(logs.some((l) => l.includes("twing init: done")));
   });
 });
 

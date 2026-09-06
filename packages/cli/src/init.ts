@@ -25,6 +25,7 @@ import {
 } from "@twing/core";
 import { ensureHookInstalled } from "./install-hook.js";
 import { wireHooks, stripLegacyRepoLocalHooks } from "./wire-hooks.js";
+import { enableInstallEnforcement } from "./enforce-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
 import { installDaemonService, type ServiceInstallResult } from "./daemon-service.js";
 import { requireAuth, isReachableCoordinator } from "./auth.js";
@@ -68,11 +69,12 @@ export interface InitDeps {
   ensureHookInstalled: () => Promise<string>;
   wireHooks: (hookPath: string) => boolean;
   stripLegacyRepoLocalHooks: (repoRoot: string, hookPath: string) => boolean;
+  enableInstallEnforcement: (repoRoot: string) => boolean;
   ensureDaemonRunning: () => Promise<"already-running" | "started">;
   installDaemonService: () => Promise<ServiceInstallResult>;
 }
 
-const defaultInitDeps: InitDeps = { ensureHookInstalled, wireHooks, stripLegacyRepoLocalHooks, ensureDaemonRunning, installDaemonService };
+const defaultInitDeps: InitDeps = { ensureHookInstalled, wireHooks, stripLegacyRepoLocalHooks, enableInstallEnforcement, ensureDaemonRunning, installDaemonService };
 
 export async function runInit(options: InitOptions, deps: InitDeps = defaultInitDeps): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
@@ -135,7 +137,7 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     }
   }
 
-  const authToken = await resolveAuthToken(repoRoot, serverUrl, options);
+  const { token: authToken, adminRole } = await resolveAuthToken(repoRoot, serverUrl, options);
   // Self-declared, attribution-only (§17 Phase 4) -- only ever sent when
   // there's no real token, i.e. only reaches the wire on a no_auth server.
   const developerId = computeDeveloperId(repoRoot);
@@ -161,6 +163,28 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // once). Silent no-op for the common case (nothing to strip).
   if (deps.stripLegacyRepoLocalHooks(repoRoot, hookPath)) {
     console.log(`twing init: removed legacy repo-local hook entries from ${repoRoot}/.claude/settings.json (superseded by the global wiring above)`);
+  }
+
+  // Admin-driven install enforcement: fires only when this caller's
+  // resolved role for THIS project is admin -- covers both "I just founded
+  // this project" and "I'm an admin re-running init on an already-founded
+  // repo" (the backfill path for a repo founded before this feature
+  // existed, or an admin who joined after founding). Never fires for a
+  // member-role caller. Writes (never commits/pushes) a repo-local,
+  // git-tracked .claude/settings.json -- twing has no way to push a repo
+  // file on the caller's behalf.
+  if (adminRole) {
+    if (deps.enableInstallEnforcement(repoRoot)) {
+      console.log(
+        "twing init: wrote a bootstrap install-check into .claude/settings.json (committed, repo-local) -- " +
+          "commit and push this file so the rest of the team inherits it: git add .claude/settings.json && " +
+          "git commit && git push (or open a PR). From then on, every clone of this repo will refuse Edit/Write " +
+          "until that teammate has run `twing init` themselves. There is no bypass flag for this -- only editing " +
+          "or removing the committed hook, or `twing project disable-enforcement`, lifts it.",
+      );
+    } else {
+      console.log("twing init: install-enforcement hook already present in .claude/settings.json");
+    }
   }
 
   // §5 restart-survival: best-effort OS-level service install (launchd on
@@ -198,27 +222,37 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   console.log("twing init: done");
 }
 
+export interface GithubMembership {
+  member: boolean;
+  role?: "admin" | "member";
+}
+
 /**
  * Checks whether this identity already has a membership row for projectId
  * on serverUrl, via GET /v1/auth/whoami's full project list (no
- * per-project endpoint exists, and the list is small/cheap). Exists purely
- * to let `resolveAuthToken` tell "authenticated to this *server*" apart
- * from "a member of *this* project" -- see that function's comment for why
- * those are different questions. Fails soft to `true` (assume already a
- * member) on any network/parse error, so a transient whoami hiccup can't
- * force a surprise GitHub device-flow prompt on every subsequent `init`
- * run -- worst case this just falls through to the pre-existing
- * best-effort `seedConstraints` founding attempt below, same as before
- * this function existed.
+ * per-project endpoint exists, and the list is small/cheap), and if so what
+ * role it holds. Exists purely to let `resolveAuthToken` tell
+ * "authenticated to this *server*" apart from "a member of *this*
+ * project" -- see that function's comment for why those are different
+ * questions -- and (since the admin-driven install-enforcement feature)
+ * to give it the `role` needed to decide whether to auto-write the
+ * enforcement hook on a re-run, without a second network call. Fails soft
+ * to `{ member: true }` (role unknown) on any network/parse error, so a
+ * transient whoami hiccup can't force a surprise GitHub device-flow prompt
+ * on every subsequent `init` run -- worst case this just falls through to
+ * the pre-existing best-effort `seedConstraints` founding attempt below,
+ * same as before this function existed.
  */
-export async function isProjectMember(serverUrl: string, projectId: string, authToken: string): Promise<boolean> {
+export async function resolveGithubMembership(serverUrl: string, projectId: string, authToken: string): Promise<GithubMembership> {
   try {
     const res = await authFetch(`${serverUrl}/v1/auth/whoami`, {}, authToken);
-    if (!res.ok) return true;
-    const body = (await res.json()) as { projects?: { projectId: string }[] };
-    return (body.projects ?? []).some((p) => p.projectId === projectId);
+    if (!res.ok) return { member: true };
+    const body = (await res.json()) as { projects?: { projectId: string; role?: string }[] };
+    const mine = (body.projects ?? []).find((p) => p.projectId === projectId);
+    if (!mine) return { member: false };
+    return { member: true, role: mine.role === "admin" ? "admin" : "member" };
   } catch {
-    return true;
+    return { member: true };
   }
 }
 
@@ -257,30 +291,53 @@ export async function isProjectMember(serverUrl: string, projectId: string, auth
  *     on. A clean structural failure (no repo access, or a project that
  *     isn't founded and this caller lacks admin/maintain to found it)
  *     falls back to the old error rather than crashing `init` outright.
+ *
+ * Also resolves `adminRole`: whether this caller's role for *this* project
+ * is admin, from whichever branch above resolves. Used by `runInit` to
+ * decide whether to auto-write the install-enforcement hook -- covers both
+ * "I just founded this project" (a fresh `runJoinGithub` call returning
+ * `role: "admin"`) and "I'm an admin re-running init on an already-founded
+ * repo" (the already-a-member branch, whose `resolveGithubMembership` call
+ * now also surfaces `role`, at no extra network cost). Only the
+ * GitHub-hosted-repo paths ever populate `adminRole: true` -- `--invite`,
+ * `--no-github`, `--no-auth`, and non-GitHub-hosted repos have no
+ * equivalent "am I admin" signal here, so those admins use the explicit
+ * `twing project enable-enforcement` command instead.
  */
-async function resolveAuthToken(repoRoot: string, serverUrl: string, options: InitOptions): Promise<string | undefined> {
+interface AuthResolution {
+  token: string | undefined;
+  adminRole: boolean;
+}
+
+async function resolveAuthToken(repoRoot: string, serverUrl: string, options: InitOptions): Promise<AuthResolution> {
   const auth = getServerAuth(readConfig(), serverUrl);
-  if (auth?.noAuth) return undefined;
+  if (auth?.noAuth) return { token: undefined, adminRole: false };
   if (auth?.authToken) {
-    if (!options.noGithub && githubBinding(repoRoot) && !(await isProjectMember(serverUrl, computeProjectId(repoRoot), auth.authToken))) {
-      try {
-        return await runJoinGithub({ cwd: repoRoot, server: serverUrl });
-      } catch (err) {
-        console.log(`twing init: automatic GitHub-verified join didn't work (${err instanceof Error ? err.message : err}) -- falling back`);
+    if (!options.noGithub && githubBinding(repoRoot)) {
+      const membership = await resolveGithubMembership(serverUrl, computeProjectId(repoRoot), auth.authToken);
+      if (!membership.member) {
+        try {
+          const joined = await runJoinGithub({ cwd: repoRoot, server: serverUrl });
+          return { token: joined.token, adminRole: joined.role === "admin" };
+        } catch (err) {
+          console.log(`twing init: automatic GitHub-verified join didn't work (${err instanceof Error ? err.message : err}) -- falling back`);
+        }
       }
+      return { token: auth.authToken, adminRole: membership.role === "admin" };
     }
-    return auth.authToken;
+    return { token: auth.authToken, adminRole: false };
   }
-  if (options.invite) return runKeygen({ cwd: repoRoot, serverUrl, invite: options.invite });
-  if (options.noGithub) return requireAuth(serverUrl, "twing init");
+  if (options.invite) return { token: await runKeygen({ cwd: repoRoot, serverUrl, invite: options.invite }), adminRole: false };
+  if (options.noGithub) return { token: await requireAuth(serverUrl, "twing init"), adminRole: false };
   if (githubBinding(repoRoot)) {
     try {
-      return await runJoinGithub({ cwd: repoRoot, server: serverUrl });
+      const joined = await runJoinGithub({ cwd: repoRoot, server: serverUrl });
+      return { token: joined.token, adminRole: joined.role === "admin" };
     } catch (err) {
       console.log(`twing init: automatic GitHub-verified join didn't work (${err instanceof Error ? err.message : err}) -- falling back`);
     }
   }
-  return requireAuth(serverUrl, "twing init");
+  return { token: await requireAuth(serverUrl, "twing init"), adminRole: false };
 }
 
 /** §17.2's cold-start seed: forward this repo's local `.twing/twing.yml`

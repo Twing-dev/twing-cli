@@ -9,27 +9,12 @@
  * entries there — so this only ever reads, appends if missing, writes.
  */
 
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { readClaudeSettings, writeClaudeSettings, type ClaudeSettings, type HookMatcherEntry } from "@twing/core";
 
 function globalSettingsPath(): string {
   return path.join(os.homedir(), ".claude", "settings.json");
-}
-
-interface HookCommand {
-  type: "command";
-  command: string;
-}
-
-interface HookMatcherEntry {
-  matcher?: string;
-  hooks: HookCommand[];
-}
-
-interface ClaudeSettings {
-  hooks?: Record<string, HookMatcherEntry[]>;
-  [key: string]: unknown;
 }
 
 const POST_TOOL_USE_MATCHER = "Edit|Write|Read|Grep|Glob";
@@ -56,20 +41,10 @@ function addEntry(settings: ClaudeSettings, eventName: string, hookPath: string,
   return true;
 }
 
-function readSettings(settingsPath: string): ClaudeSettings {
-  if (!fs.existsSync(settingsPath)) return {};
-  return JSON.parse(fs.readFileSync(settingsPath, "utf8")) as ClaudeSettings;
-}
-
-function writeSettings(settingsPath: string, settings: ClaudeSettings): void {
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-}
-
 /** Returns true if the file was changed. */
 export function wireHooks(hookPath: string): boolean {
   const settingsPath = globalSettingsPath();
-  const settings = readSettings(settingsPath);
+  const settings = readClaudeSettings(settingsPath);
 
   const changedPostToolUse = addEntry(settings, "PostToolUse", hookPath, POST_TOOL_USE_MATCHER);
   const changedSessionStart = addEntry(settings, "SessionStart", hookPath);
@@ -77,7 +52,7 @@ export function wireHooks(hookPath: string): boolean {
   const changed = changedPostToolUse || changedSessionStart || changedUserPromptSubmit;
 
   if (changed) {
-    writeSettings(settingsPath, settings);
+    writeClaudeSettings(settingsPath, settings);
   }
 
   // §17: wired by default now, alongside the capture-path entries above --
@@ -102,7 +77,7 @@ function wireDesignGate(settingsPath: string, settings: ClaudeSettings, hookPath
   changed = addEntry(settings, "SessionEnd", hookPath) || changed;
 
   if (changed) {
-    writeSettings(settingsPath, settings);
+    writeClaudeSettings(settingsPath, settings);
   }
   return changed;
 }
@@ -119,8 +94,7 @@ function wireDesignGate(settingsPath: string, settings: ClaudeSettings, hookPath
  * true if anything was actually removed. */
 export function stripLegacyRepoLocalHooks(repoRoot: string, hookPath: string): boolean {
   const settingsPath = path.join(repoRoot, ".claude", "settings.json");
-  if (!fs.existsSync(settingsPath)) return false;
-  const settings = readSettings(settingsPath);
+  const settings = readClaudeSettings(settingsPath);
   if (!settings.hooks) return false;
 
   let changed = false;
@@ -133,7 +107,7 @@ export function stripLegacyRepoLocalHooks(repoRoot: string, hookPath: string): b
   }
 
   if (changed) {
-    writeSettings(settingsPath, settings);
+    writeClaudeSettings(settingsPath, settings);
   }
   return changed;
 }

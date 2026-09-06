@@ -18,7 +18,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { wireHooks } from "./wire-hooks.js";
+import { wireHooks, stripLegacyRepoLocalHooks } from "./wire-hooks.js";
+import { bootstrapHookScript } from "./enforce-hooks.js";
 
 interface HookCommand {
   type: "command";
@@ -99,4 +100,35 @@ test("wireHooks: merges into an existing settings.json without touching unrelate
     assert.ok(settings.hooks?.PostToolUse?.some((e) => e.hooks.some((h) => h.command === "some-other-tool")));
     assert.ok(settings.hooks?.PostToolUse?.some((e) => e.hooks.some((h) => h.command === HOOK_PATH)));
   });
+});
+
+// --- stripLegacyRepoLocalHooks vs. the install-enforcement hook (regression) ---
+//
+// Both mechanisms write to the same file (<repoRoot>/.claude/settings.json),
+// which is the one place they share a target. stripLegacyRepoLocalHooks
+// matches by exact `command === hookPath` (a resolved absolute binary path);
+// the enforcement hook's command is a multi-line script that can never equal
+// that string -- confirmed by construction, pinned here so a future change
+// to either matching strategy can't silently regress it.
+
+test("stripLegacyRepoLocalHooks: never removes an install-enforcement hook entry sharing the same repo-local settings file", () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "twing-wire-hooks-strip-test-"));
+  const repoSettingsPath = path.join(repoRoot, ".claude", "settings.json");
+  fs.mkdirSync(path.dirname(repoSettingsPath), { recursive: true });
+  fs.writeFileSync(
+    repoSettingsPath,
+    JSON.stringify({
+      hooks: {
+        PostToolUse: [{ matcher: "Edit|Write|Read|Grep|Glob", hooks: [{ type: "command", command: HOOK_PATH }] }],
+        PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }],
+      },
+    }),
+  );
+
+  const changed = stripLegacyRepoLocalHooks(repoRoot, HOOK_PATH);
+  assert.equal(changed, true, "the legacy PostToolUse entry (by resolved path) must still be stripped");
+
+  const settings: ClaudeSettings = JSON.parse(fs.readFileSync(repoSettingsPath, "utf8"));
+  assert.deepEqual(settings.hooks?.PostToolUse, [], "the legacy entry's matcher block is now empty");
+  assert.deepEqual(settings.hooks?.PreToolUse, [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }], "the enforcement hook must be untouched, byte-for-byte");
 });

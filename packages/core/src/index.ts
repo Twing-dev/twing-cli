@@ -11,3 +11,4 @@ export * from "./socket-path.js";
 export * from "./http.js";
 export * from "./call-graph.js";
 export * from "./gate-overrides.js";
+export * from "./claude-settings.js";
