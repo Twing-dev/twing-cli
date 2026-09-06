@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Task-time coordination and change-time evidence for multi-agent codebases,
-across two distinct code paths that share a data model but never share logic:
+across three distinct code paths that share a data model but never share
+logic:
 
 1. **Capture/advisory (`align`)** — background, never blocks. Hooks capture
    claims (who touched what symbol) into a local daemon, which syncs them to
@@ -14,6 +15,16 @@ across two distinct code paths that share a data model but never share logic:
    blocks. Before an agent's first `Edit`/`Write`, it needs a registered
    design; overlapping or constraint-violating designs get denied until
    adopted or justified (which queues for human review).
+3. **Session capture** (2026-09) — background, never blocks, and rides the
+   same hook→daemon socket as (1) but carries something different in kind:
+   the *conversation*, not the edits. The daemon reads Claude Code's own
+   transcript, keeps human turns and assistant prose, redacts secrets, and
+   uploads to `twing serve`. Opt-in per repo (`capture.enabled` in
+   `.twing/twing.yml`) — absent is not consent. Raw only: the server side is
+   a write-only sink with no read route, no deletion and no expiry, because
+   distillation (the reason it exists) isn't designed yet. "We can't distill
+   what we never captured" is the whole argument for building the sink
+   first.
 
 The full design lives in `docs/orchestrator-and-verification-design-doc_v1.md`
 (cite section numbers like `§4`, `§17` when working in this codebase — the
@@ -114,6 +125,20 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     runtime caller) because `align`'s no-daemon git-diff fallback
     (`diff-claims.ts`) needs the same pure algorithm without pulling in the
     daemon's socket-server/sync machinery.
+  - `transcript-filter.ts` — the session-capture contract, as a pure
+    function over one line of Claude Code's transcript JSONL. Keeps human
+    turns, assistant prose, and the file paths tool calls named; drops every
+    tool input and result, `<system-reminder>` blocks, the `<command-*>`
+    family, and compaction summaries (recursive lossy filtering — capturing
+    them would capture the very decay this routes around). An allowlist of
+    two entry types, deliberately, so new Claude Code entry kinds stay out
+    by construction. `reposForEntry`/`RepoResolver` map an entry's paths to
+    the repos it touched — the resolver is *injected* rather than imported,
+    since resolving a repo root is filesystem work and this module does no
+    I/O. The entry's own `cwd` is excluded from that: every entry in a
+    session carries the same one (all 42,117 in the transcript this was
+    built against named twing-cli while the tool calls spanned three repos),
+    so attributing on cwd would collapse every session to a single repo.
   - `manifest.ts` — `.twing/twing.yml` parser (renamed from `verify.yml`:
     its scope grew beyond verification policy). `requireHumanReview`/
     `constraints`/`triggers` are evaluated locally, only the match *results*
@@ -125,7 +150,12 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     `design *` and by the Go hook to know where to send everything else.
     `upsertCoordinatorServerUrl` (comment-preserving, `yaml.parseDocument`)
     is what `init` uses to bootstrap/update that field without disturbing
-    the rest of the file.
+    the rest of the file. `capture.enabled` (2026-09) is the session-capture
+    opt-in, and `captureEnabled()` reads it strictly — only a literal `true`
+    counts, so a missing file, a missing block, or an unreadable manifest
+    all mean off. Consent has to come from a committed file somebody
+    deliberately edited, since `npm install -g @twing/cli` must never start
+    capturing anyone's conversations.
   - `config.ts` — `~/.twing/config.json`, the machine-local (never
     committed) counterpart to `manifest.ts`'s repo-local (committed) file: a
     map of coordinator server URL → cached auth token, not a single slot —
@@ -158,6 +188,42 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `developerId` — not just `sessionId` — see the long comment in
   `server.ts` about why (two worktrees, same origin, same machine,
   different local `user.email`).
+  - **Session capture** (`transcript.ts`, `redact.ts`, `capture-upload.ts`,
+    2026-09): triggered by the same `get_notices`/`session_end` messages the
+    hook already sends, which now carry Claude Code's `transcript_path`.
+    Anchored on a **byte watermark** (`~/.twing/sessions/<id>.state.json`),
+    never on `SessionEnd` — the session this was built against ran 11 days
+    across three repos and produced zero commits, so an end-anchored capture
+    would have kept none of it.
+    - *Consent is session-level and sticky.* If any repo the session has
+      touched (or its cwd repo) opted in, the session is captured for the
+      rest of its life, including stretches touching repos that never opted
+      in. A repo-based *forward* filter was evaluated and rejected: 89% of
+      turns name no file and 100% of prose turns name none, so it would
+      decide the fate of prose by whichever tool call happened to run
+      before it — partial risk reduction that reads like a guarantee.
+    - *Capture starts where the session first **touched** an opted-in repo*
+      (`findCaptureStart`), walking backward from there and stopping hard at
+      the last entry touching a repo that did not opt in. That line is the
+      consent boundary and nothing before it leaves the machine. The first
+      touch is a read, not an edit, which is what makes the reach-back worth
+      having — twing-cli's first touch in the sample transcript was line 117
+      and its first edit line 781, three hours of exploration later. Until
+      something opts in the watermark is deliberately *not* advanced; that
+      is the mechanism leaving earlier bytes reachable.
+    - *`redact.ts`* runs four layers (provider token prefixes, credentialed
+      URIs, keyed secrets, entropy scoring) over conversation text before
+      anything is written. Its negative cases matter as much as its positive
+      ones: masking every git SHA, UUID and file path would make a capture
+      useless to distill from. Found only by running it over a real 92MB
+      transcript, never by unit tests — see `maskRun`'s comment.
+    - *`capture-upload.ts`* reads the capture **file**, not the records the
+      capture pass returned, keeping its own send watermark per (session,
+      server). A crash, an unreachable coordinator and a 500 then all end
+      identically: the bytes are on disk and the next pass sends them. Per
+      *server* because a session can touch opted-in repos on different
+      coordinators — every one of them consented, so each gets the capture
+      and one being down must not stall another.
   - **Restart survival** (`daemon-service.ts`): `installDaemonService`,
     called from `init`, best-effort installs the daemon as a persistent
     OS-level service — a macOS `launchd` LaunchAgent or a Linux `systemd
@@ -216,7 +282,7 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `ProjectRecord`/`ProjectMembership` are the tenant-isolation anchor for a
   possible future managed/billed offering — bare `{id, name}` shape only, no
   `plan`/`quota`/payment fields built yet (see
-  `docs/statefulness-and-identity-memo.md`). Four route groups in `app.ts`:
+  `docs/statefulness-and-identity-memo.md`). Five route groups in `app.ts`:
   - `/v1/claims`, `/v1/notices` — advisory path: upsert claims, run
     `checks.ts`'s divergence checks *and* `design-divergence.ts`'s
     cross-session check (a real Claim landing inside another session's open
@@ -338,13 +404,33 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     admin-bootstrap path still uses them, and they're `identity-store.ts`'s
     documented future billing/tenant-isolation anchor) but are no longer
     the default onboarding path's concern.
+  - `/v1/captures` — session capture ingest (2026-09), `capture-store.ts`.
+    Write-only: there is no `GET`, no `DELETE` and no sweep anywhere in the
+    package, and a test asserts that absence so adding a reader is a
+    deliberate act rather than drift. Blob-backed — a capture is ~1.6MB of
+    append-only text no query ever filters or joins on, so `captures` holds
+    only a pointer row and the bytes go to a file under `<dataDir>/captures`.
+    Appends rather than replaces (a session uploads over its whole
+    multi-day life), and the blob is written *before* the row is updated:
+    a crash between them undercounts bytes, which the next append heals by
+    re-reading the file's real size — the other order would advertise bytes
+    that were never written. Blob paths are a sha256 of
+    developerId+sessionId, never interpolated, since session ids come from
+    a process this server doesn't control. `developerId` is resolved from
+    the token as everywhere else; `projectIds` are deliberately *unverified*
+    client-supplied labels — only the capturing machine can compute one, and
+    a legitimate id may name a repo this coordinator has never heard of.
   - This package's own `.twing/twing.yml` in this repo flags
-    `design-*.ts`, `identity-store.ts`, and the entrypoint/wiring files
-    (`index.ts`/`main.ts`/`app.ts`) as `require_human_review` — narrowed
-    2026-08-16 from a blanket `packages/server/**` (which made every routine
-    edit anywhere in the package, e.g. `activity-log.ts`, block on review)
-    down to the files where a bug is actually a verdict-logic bypass,
-    an access-control hole (§17.10), or a sign of wholesale restructuring.
+    `identity-store.ts` alone as `require_human_review`. Narrowed twice:
+    2026-08-16 from a blanket `packages/server/**` down to six named rules,
+    then 2026-09-06 down to this one, when the other five were found to name
+    real invariants that a path glob cannot actually check (the gate matches
+    a path and denies; it never reads the diff) on files edited 20-39 times
+    since August, where a per-edit admin round trip degrades into a rubber
+    stamp. See the manifest's own header for the test a new rule has to
+    pass. Note that deleting a live constraint row without also removing it
+    from the committed file is only a pause: the next `twing init` from any
+    checkout re-seeds whatever its file lists.
 
 - **`packages/cli`** — the `twing` command. `index.ts` dispatches
   `init`/`login`/`keygen`/`whoami`/`join`/`daemon`/`align`/`design <sub>`/
@@ -394,7 +480,12 @@ as a failure or looking like a block. Two independent handlers dispatched by
   per-repo for constraint/trigger matching, reused there rather than making
   the hook shell out to `git`/read YAML on this path too — see the
   capture-path note in `daemon/server.ts`). Must never deny a tool call
-  (constraint in this repo's own `.twing/twing.yml`).
+  (constraint in this repo's own `.twing/twing.yml`). Also forwards Claude
+  Code's `transcript_path` (2026-09) on `get_notices` and on a new
+  fire-and-forget `session_end` message — the hook still reads nothing and
+  decides nothing about it, it just hands over the path; `SessionEnd` sends
+  it independently of `designGateEnabled()`, since capture and the gate are
+  unrelated switches.
 - **Design gate** (`design_gate.go`, `PreToolUse` on `ExitPlanMode`/
   `Edit`|`Write`, and `SessionEnd`) — talks to `twing serve` directly over
   HTTP, bypassing the daemon entirely, because this path needs a synchronous
@@ -451,6 +542,18 @@ Claude Code tool call
   -> twing-hook (PreToolUse: ExitPlanMode / Edit|Write)  --[HTTPS, synchronous]-->  twing serve (/v1/designs/check, /v1/constraints/match)
                                                                                        -> allow / deny verdict, written back to stdout as
                                                                                           hookSpecificOutput.permissionDecision
+
+Claude Code session transcript (Claude Code writes it; twing only reads)
+  -> twing-hook (UserPromptSubmit / SessionStart / SessionEnd, carrying transcript_path)
+                               --[Unix socket, fire-and-forget]-->  daemon
+                                                                       |  opted-in? (any repo touched, sticky)
+                                                                       |  reach back to the consent boundary
+                                                                       |  filter -> redact -> ~/.twing/sessions/<id>.jsonl
+                                                                       |  background upload (CaptureUploader)
+                                                                       v
+                                                                  twing serve (/v1/captures)
+                                                                       -> blob under <dataDir>/captures + pointer row
+                                                                          (write-only: nothing reads it back yet)
 ```
 
 ### Identifiers
@@ -502,11 +605,20 @@ from `cwd`, but `resolveRepoRelative` (`hook/design_gate.go`) should already
 be catching that case and allowing silently; see its own doc comment for
 the live incident this was found from.
 
+Session capture is **on** in this repo (`capture: {enabled: true}` in
+`.twing/twing.yml`) — this is the repo the feature is built and dogfooded
+in, so working here means your own conversations are captured to
+`~/.twing/sessions/` and uploaded to the coordinator. Turn it off by setting
+`enabled: false`; there is no machine-level override, deliberately, since
+consent belongs to the repo's admins rather than to whoever happens to be
+running the agent.
+
 `.gitignore` also excludes `dist/`, `*.tsbuildinfo`, the built
 `hook/twing-hook` binary, `openrouter_key.txt`, `simulator/.workspaces/`,
 and the `deploy/`-generated `twing-serve.log`/`.pid`. Everything
 machine-local (`daemon.sock`, `daemon-launch.json`, `gate-overrides.json`,
-the multi-server auth-token config, the OS-service definitions themselves —
+the multi-server auth-token config, captured sessions under `sessions/`,
+the OS-service definitions themselves —
 `~/Library/LaunchAgents/dev.twing.daemon.plist` on macOS,
 `~/.config/systemd/user/twing-daemon.service` on Linux) lives under
 `~/.twing/` or the platform's own service-manager directories — never
