@@ -9,7 +9,7 @@
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
     "start": "node dist/main.js",
-    "test": "node --test dist/*.test.js"
+    "test": "node --test dist/*.test.js dist/*/*.test.js"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.0",

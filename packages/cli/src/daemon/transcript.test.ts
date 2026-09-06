@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { captureSession } from "./transcript.js";
+import { captureSession, createRepoResolver } from "./transcript.js";
 
 /** A scratch dir that is also an opted-in repo: capture is opt-in, so
  * every test that expects anything to be captured has to pass a `cwd`
@@ -241,4 +241,52 @@ test("captureSession: overlapping passes for one session serialize instead of do
     .filter((r) => r.type === "turn")
     .map((r) => r.text);
   assert.deepEqual(texts, ["one", "two"]);
+});
+
+// createRepoResolver runs against the real filesystem (the one place in
+// capture that does), so these use real directories rather than fixtures.
+
+test("createRepoResolver: a file inside a repo resolves to the repo root", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-resolver-"));
+  fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "src", "net"), { recursive: true });
+  const resolve = createRepoResolver();
+
+  // The file need not exist -- a Write names a path before creating it.
+  assert.equal(resolve(path.join(dir, "src", "net", "retry.ts")), dir);
+  assert.equal(resolve(dir), dir, "the repo root itself resolves to itself");
+});
+
+test("createRepoResolver: a path outside every repo resolves to undefined, not to itself", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-not-a-repo-"));
+  const resolve = createRepoResolver();
+
+  assert.equal(resolve(path.join(dir, "scratch.txt")), undefined, "inventing a repo here would let a scratch file act like a project");
+});
+
+test("createRepoResolver: the nearest repo root wins for a nested checkout", () => {
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), "twing-outer-"));
+  fs.mkdirSync(path.join(outer, ".git"), { recursive: true });
+  const inner = path.join(outer, "vendor", "inner");
+  fs.mkdirSync(path.join(inner, ".git"), { recursive: true });
+  const resolve = createRepoResolver();
+
+  assert.equal(resolve(path.join(inner, "src", "a.ts")), inner);
+  assert.equal(resolve(path.join(outer, "src", "a.ts")), outer);
+});
+
+// Memoization is a precondition rather than an optimization: a session
+// names paths tens of thousands of times across a handful of directories.
+// Observed through behavior -- the answer survives the repo marker being
+// deleted underneath it, which is only possible if it was cached.
+test("createRepoResolver: repeated lookups are served from the cache", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-resolver-cache-"));
+  fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+  const resolve = createRepoResolver();
+
+  assert.equal(resolve(path.join(dir, "src", "a.ts")), dir);
+  fs.rmSync(path.join(dir, ".git"), { recursive: true, force: true });
+
+  assert.equal(resolve(path.join(dir, "src", "b.ts")), dir, "a sibling path reuses the ancestors already walked");
 });

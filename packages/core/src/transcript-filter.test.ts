@@ -8,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { filterTranscriptEntry } from "./transcript-filter.js";
+import { filterTranscriptEntry, reposForEntry, type FilteredEntry, type RepoResolver } from "./transcript-filter.js";
 
 function userEntry(content: unknown, extra: Record<string, unknown> = {}): unknown {
   return { type: "user", timestamp: "2026-09-05T12:00:00.000Z", message: { role: "user", content }, ...extra };
@@ -134,4 +134,65 @@ test("filterTranscriptEntry: junk input degrades to captured-nothing rather than
     assert.equal(result.turn, undefined);
     assert.ok(Array.isArray(result.paths));
   }
+});
+
+// Repo attribution. Capture consent keys on which repositories a session
+// touched, so these decide what gets captured at all -- a fake resolver
+// keeps them pure and lets the awkward shapes (no repo, no cwd, relative
+// paths) be stated directly rather than staged on disk.
+
+/** Treats any path under `/repos/<name>` as belonging to that repo, and
+ * everything else as outside every repo. */
+const fakeResolver: RepoResolver = (absPath) => {
+  const match = /^(\/repos\/[^/]+)(?:\/|$)/.exec(absPath);
+  return match ? match[1] : undefined;
+};
+
+function entry(paths: string[], cwd?: string): FilteredEntry {
+  return { paths, cwd };
+}
+
+test("reposForEntry: maps touched paths to their repo roots, deduped and in first-seen order", () => {
+  const result = reposForEntry(entry(["/repos/api/src/a.ts", "/repos/ui/src/b.tsx", "/repos/api/src/c.ts"]), fakeResolver);
+  assert.deepEqual(result, ["/repos/api", "/repos/ui"]);
+});
+
+// The reason this function exists rather than reading `paths` directly.
+// `filterTranscriptEntry` puts the entry's cwd in `paths`, and every entry
+// in a session carries the same one -- all 42,117 in the transcript this
+// was built against named twing-cli, while the tool calls spanned three
+// repos. Attributing on cwd would collapse every session to one repo.
+test("reposForEntry: the entry's own cwd is not a touch", () => {
+  const result = reposForEntry(entry(["/repos/ui/src/b.tsx", "/repos/api"], "/repos/api"), fakeResolver);
+  assert.deepEqual(result, ["/repos/ui"], "cwd is the caller's separate input, never a per-entry signal");
+});
+
+// A path outside every repo must read as "no repo", never as a repo of its
+// own -- otherwise a scratch file would act like a project that never
+// opted in, and hard-stop the consent walk on nothing.
+test("reposForEntry: paths outside every repo contribute nothing", () => {
+  const result = reposForEntry(entry(["/Users/dev/.claude/plans/some-plan.md", "/tmp/scratch.txt"]), fakeResolver);
+  assert.deepEqual(result, []);
+});
+
+test("reposForEntry: relative paths resolve against the entry's cwd", () => {
+  const result = reposForEntry(entry(["src/a.ts"], "/repos/api"), fakeResolver);
+  assert.deepEqual(result, ["/repos/api"]);
+});
+
+test("reposForEntry: a relative path with no cwd is skipped rather than guessed at", () => {
+  const result = reposForEntry(entry(["src/a.ts"]), fakeResolver);
+  assert.deepEqual(result, [], "misattributing a touch is the one error this must not make");
+});
+
+test("reposForEntry: a real filtered entry's tool-call paths flow straight through", () => {
+  const filtered = filterTranscriptEntry({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "tool_use", name: "Edit", input: { file_path: "/repos/ui/src/App.tsx" } }],
+    },
+    cwd: "/repos/api",
+  });
+  assert.deepEqual(reposForEntry(filtered, fakeResolver), ["/repos/ui"]);
 });

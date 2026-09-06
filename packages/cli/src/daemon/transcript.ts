@@ -27,7 +27,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { captureEnabled, filterTranscriptEntry, findRepoRoot, loadManifestFromFile, twingConfigPath, type CapturedRecord } from "@twing/core";
+import { captureEnabled, filterTranscriptEntry, findRepoRoot, loadManifestFromFile, reposForEntry, twingConfigPath, type CapturedRecord, type RepoResolver } from "@twing/core";
 import { redact } from "./redact.js";
 
 /** Read the transcript delta in bounded chunks rather than one big buffer:
@@ -270,4 +270,52 @@ async function writeState(statePath: string, state: CaptureState): Promise<void>
   const tmp = `${statePath}.tmp`;
   await fsp.writeFile(tmp, JSON.stringify(state) + "\n", "utf8");
   await fsp.rename(tmp, statePath);
+}
+
+/**
+ * A `RepoResolver` over the real filesystem, memoized per instance.
+ *
+ * Memoization is not an optimization here so much as a precondition: the
+ * transcript this was built against names paths 42,117 times across a
+ * handful of directories, and an unmemoized walk would stat the same
+ * ancestors on every one of them, on the daemon's own event loop.
+ *
+ * The walk starts at the path itself rather than its parent, which handles
+ * files and directories with one code path and no `stat`: for a file,
+ * `<file>/.git` simply doesn't exist and the walk moves up as it would
+ * anyway. Every directory visited on the way is backfilled with the answer,
+ * so the second path under a repo resolves in one map lookup.
+ *
+ * Returns `undefined` rather than a fallback when nothing above the path is
+ * a repo -- see `RepoResolver`'s doc comment in `@twing/core` for why that
+ * distinction carries weight for capture consent.
+ */
+export function createRepoResolver(): RepoResolver {
+  const cache = new Map<string, string | undefined>();
+
+  return (absPath: string): string | undefined => {
+    const visited: string[] = [];
+    let dir = absPath;
+
+    for (;;) {
+      if (cache.has(dir)) {
+        const hit = cache.get(dir);
+        for (const seen of visited) cache.set(seen, hit);
+        return hit;
+      }
+      visited.push(dir);
+
+      if (fs.existsSync(path.join(dir, ".git"))) {
+        for (const seen of visited) cache.set(seen, dir);
+        return dir;
+      }
+
+      const parent = path.dirname(dir);
+      if (parent === dir) {
+        for (const seen of visited) cache.set(seen, undefined);
+        return undefined;
+      }
+      dir = parent;
+    }
+  };
 }
