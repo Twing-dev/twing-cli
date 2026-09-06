@@ -37,7 +37,8 @@ own instead? See "Self-hosting your own coordinator" below.
 
 1. **Resolves the coordinator** -- from the repo's committed
    `.twing/twing.yml`, `--server`/`TWING_SERVER`, or an interactive prompt
-   if neither exists yet.
+   if neither exists yet (just press Enter to accept twing's own hosted
+   coordinator, shown as the default).
 2. **Authenticates** -- verifies your GitHub permissions on this repo via
    an OAuth device flow and mints a local PAT (only its hash reaches the
    server). Admin/maintain access founds an untouched project and makes

@@ -33,6 +33,12 @@ import { runKeygen } from "./keygen.js";
 import { runJoinGithub } from "./join.js";
 import { promptLine } from "./prompt-line.js";
 
+/** twing's own hosted coordinator -- offered as the interactive prompt's
+ * default (a bare Enter accepts it) below, and what the README's own
+ * getting-started walkthrough points new users at. Free to use, no invite
+ * needed for a GitHub-hosted repo. */
+export const DEFAULT_COORDINATOR_URL = "https://coordination-server.twing.dev";
+
 export interface InitOptions {
   server?: string;
   invite?: string;
@@ -91,7 +97,10 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   let rawServerUrl = explicitServer ?? manifest.coordinator.serverUrl;
   let promptedServer = false;
   if (!rawServerUrl) {
-    rawServerUrl = await promptLine("twing init: no coordinator configured for this repo -- enter the twing server URL: ");
+    rawServerUrl = await promptLine(
+      `twing init: no coordinator configured for this repo -- enter the twing server URL [${DEFAULT_COORDINATOR_URL}]: `,
+      DEFAULT_COORDINATOR_URL,
+    );
     promptedServer = true;
   }
   const serverUrl = normalizeServerUrl(rawServerUrl);

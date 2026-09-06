@@ -9,13 +9,24 @@
 
 import * as readline from "node:readline/promises";
 
-export async function promptLine(question: string): Promise<string> {
+/** A bare Enter (an empty trimmed line) falls back to `defaultValue` when
+ * given. Pure and exported separately so it's unit-testable without faking
+ * a TTY -- `promptLine` itself reads directly from `process.stdin`/
+ * `process.stdout` with no injectable seam, same as `prompt-password.ts`. */
+export function applyDefault(answer: string, defaultValue?: string): string {
+  return answer === "" && defaultValue !== undefined ? defaultValue : answer;
+}
+
+/** `defaultValue`, when given, is returned as-is for a bare Enter -- the
+ * caller's `question` text is responsible for showing it, this function
+ * doesn't append anything to it itself. */
+export async function promptLine(question: string, defaultValue?: string): Promise<string> {
   if (!process.stdin.isTTY) {
     throw new Error("stdin isn't a TTY to prompt on -- pass the value as a flag instead, or run this interactively once");
   }
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
-    return (await rl.question(question)).trim();
+    return applyDefault((await rl.question(question)).trim(), defaultValue);
   } finally {
     rl.close();
   }
