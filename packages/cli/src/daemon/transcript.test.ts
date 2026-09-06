@@ -399,3 +399,35 @@ test("captureSession: once on, capture stays on for turns that touch nothing or 
   assert.equal(second.turnsWritten, 2);
   assert.equal(second.startedFrom, undefined, "the boundary is settled once, not re-decided every pass");
 });
+
+// Project attribution. A projectId is derived from a repo's git remote, so
+// the capturing machine is the only one that can compute one -- a server
+// receiving absolute paths has no way to attribute them afterwards.
+
+test("captureSession: paths records carry the projectId of opted-in repos, and only those", async (t) => {
+  const optedIn = repo(true);
+  const foreign = repo(false);
+  // A real projectId needs a git remote; without one `computeProjectId`
+  // falls back to a persisted random id, which is just as valid here.
+  const { transcript, sessionsDir } = scratch();
+  fs.writeFileSync(transcript, toolCall(optedIn.file("a.ts")) + toolCall(foreign.file("b.ts")) + assistantTurn("done"));
+
+  await captureSession({ sessionId: "attr1", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  const record = readCapture(sessionsDir, "attr1").find((r) => r.type === "paths");
+  const projects = (record?.projects ?? []) as string[];
+  assert.equal(projects.length, 1, "one project: the opted-in repo, never the foreign one");
+  // Either shape is valid: a sha256 of the canonicalized remote, or -- as
+  // here, with no remote to hash -- the per-repo persisted random id.
+  assert.match(projects[0], /^[0-9a-f]{64}$|^[0-9a-f-]{36}$/);
+  assert.ok(fs.existsSync(path.join(optedIn.root, ".git", "twing-project-id")), "the opted-in repo is where that id is persisted");
+
+  // The foreign repo's paths are still captured (forward stickiness), they
+  // are simply never attributed to a project.
+  const paths = (record?.paths ?? []) as string[];
+  assert.ok(
+    paths.some((p) => p.startsWith(foreign.root)),
+    "the path is kept",
+  );
+  assert.equal(fs.existsSync(path.join(foreign.root, ".git", "twing-project-id")), false, "and no identity is minted inside a repo that never opted in");
+});

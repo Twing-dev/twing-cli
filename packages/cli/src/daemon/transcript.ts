@@ -27,7 +27,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { captureEnabled, filterTranscriptEntry, findRepoRoot, loadManifestFromFile, reposForEntry, twingConfigPath, type CapturedRecord, type RepoResolver } from "@twing/core";
+import { captureEnabled, computeProjectId, filterTranscriptEntry, findRepoRoot, loadManifestFromFile, reposForEntry, twingConfigPath, type CapturedRecord, type RepoResolver } from "@twing/core";
 import { redact } from "./redact.js";
 
 /** Read the transcript delta in bounded chunks rather than one big buffer:
@@ -180,7 +180,25 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     // per tool call: they cost well under 1% of a transcript in total, and
     // they're the only signal answering "which repos did this session
     // touch" -- but only if they aren't repeated thousands of times.
-    records.push({ type: "paths", ts: new Date().toISOString(), paths: newPaths.map(redact) });
+    //
+    // Resolved to projectIds here, on the only machine that can: see
+    // `CapturedRecord`'s note. Absolute paths stay too -- they are what a
+    // later fold routes on -- but they mean nothing to a server on their
+    // own.
+    const projectId = createProjectIdCache();
+    const projects: string[] = [];
+    for (const candidate of newPaths) {
+      const root = resolve(candidate);
+      if (root === undefined || !isOptedIn(root)) continue;
+      const id = projectId(root);
+      if (id !== undefined && !projects.includes(id)) projects.push(id);
+    }
+    records.push({
+      type: "paths",
+      ts: new Date().toISOString(),
+      paths: newPaths.map(redact),
+      ...(projects.length > 0 ? { projects } : {}),
+    });
   }
 
   if (records.length > 0) {
@@ -229,6 +247,33 @@ function createOptedInCache(): (repoRoot: string) => boolean {
     }
     cache.set(repoRoot, enabled);
     return enabled;
+  };
+}
+
+/**
+ * The twing `projectId` for a repo, memoized per capture pass.
+ *
+ * Memoized because `computeProjectId` shells out to `git remote get-url`:
+ * once per distinct repo per pass is fine, once per path mention is not.
+ *
+ * Only ever called for repos that opted in. Beyond matching the consent
+ * model, that keeps this away from its own side effect -- for a repo with
+ * no remote, `computeProjectId` *writes* `.git/twing-project-id` -- so
+ * merely observing a path in some unrelated checkout never leaves a mark
+ * inside it.
+ */
+function createProjectIdCache(): (repoRoot: string) => string | undefined {
+  const cache = new Map<string, string | undefined>();
+  return (repoRoot: string): string | undefined => {
+    if (cache.has(repoRoot)) return cache.get(repoRoot);
+    let id: string | undefined;
+    try {
+      id = computeProjectId(repoRoot);
+    } catch {
+      id = undefined; // no git, no remote, unwritable .git -- attribution is best-effort
+    }
+    cache.set(repoRoot, id);
+    return id;
   };
 }
 

@@ -40,7 +40,16 @@ import * as path from "node:path";
  * than one record per tool call. */
 export type CapturedRecord =
   | { type: "turn"; role: "user" | "assistant"; ts?: string; text: string }
-  | { type: "paths"; ts?: string; paths: string[] };
+  /** `projects` carries the twing `projectId` of every *opted-in* repo
+   * these paths landed in. It is recorded here because it cannot be
+   * recovered later: a projectId is derived from a repo's git remote, so
+   * only the machine holding the checkout can compute one. A server
+   * receiving this capture sees absolute paths it has no way to attribute.
+   *
+   * Scoped to opted-in repos on purpose. A repo that never consented gets
+   * no identity minted for it here, which also keeps `computeProjectId`
+   * from touching a checkout the developer never onboarded. */
+  | { type: "paths"; ts?: string; paths: string[]; projects?: string[] };
 
 export interface FilteredEntry {
   /** The conversation turn this entry contributed, if any. */
