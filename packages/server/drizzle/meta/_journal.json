@@ -99,6 +99,13 @@
       "when": 1788161747241,
       "tag": "0013_reassign-project-indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1788698755556,
+      "tag": "0014_session-captures",
+      "breakpoints": true
     }
   ]
 }

@@ -37,6 +37,7 @@ import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
 import { enrichReviews } from "./review-enrich.js";
 import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind, type AlignmentThread } from "./alignment-store.js";
+import { CaptureStore } from "./capture-store.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role } from "./identity-store.js";
 import { fetchRepoPermissions } from "./github-client.js";
@@ -154,6 +155,9 @@ interface RedeemRequestBody {
   label?: string;
 }
 
+/** Per-request record cap for `/v1/captures` -- see the route's comment. */
+const MAX_CAPTURE_RECORDS_PER_REQUEST = 5000;
+
 export interface CreateAppOptions {
   /** Shared Drizzle handle every store below is built from -- pass one
    * explicitly to share a single database across a test; otherwise built
@@ -168,6 +172,9 @@ export interface CreateAppOptions {
   constraints?: ConstraintStore;
   identities?: IdentityStore;
   alignmentThreads?: AlignmentThreadStore;
+  /** Session capture sink. Injected in tests so the blob directory is a
+   * temp dir rather than the real `~/.twing/serve-data/captures`. */
+  captures?: CaptureStore;
   /** Bedrock model id for design-extract.ts's plan->fields extraction (see
    * llm-client.ts's header comment) -- defaults to the same model
    * semanticCheckModel does below, the one this repo's own eval validated
@@ -215,6 +222,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const constraintStore = options.constraints ?? new ConstraintStore(db);
   const identities = options.identities ?? new IdentityStore(db, { dataDir: options.dataDir });
   const alignmentThreads = options.alignmentThreads ?? new AlignmentThreadStore(db);
+  const captures = options.captures ?? new CaptureStore(db, options.dataDir ? { capturesDir: `${options.dataDir}/captures` } : {});
   const activityLog = new DrizzleActivityLog(db);
   // Tightening alignment threads item 4 (2026-08-27): wired here, after
   // both `designs` and `alignmentThreads` locals exist, rather than only
@@ -1026,6 +1034,52 @@ export function createApp(options: CreateAppOptions = {}) {
       console.log(`twing serve: delivering ${items.length} notice(s) to ${identity.developerId}`);
     }
     return c.json({ items });
+  });
+
+  /**
+   * Session capture ingest. Write-only by design: there is no GET, no
+   * DELETE and no sweep anywhere in this package, because distillation --
+   * the reason capture exists -- is not designed yet. This is the sink that
+   * lets data accumulate until it is, and nothing reads what it writes.
+   *
+   * Appends to the session's blob rather than replacing it: a session here
+   * can run for days, and the daemon uploads on its ordinary sync debounce
+   * rather than waiting for an end that may never come.
+   *
+   * `developerId` is the identity resolved from the bearer token, never a
+   * client field -- the ordinary rule for every write in this package
+   * (§17.10). `projectIds` are different in kind and deliberately *not*
+   * verified against membership: they are inert labels today, only the
+   * capturing machine can compute one (a projectId comes from a git remote
+   * on its filesystem), and a legitimate one may name a repo this
+   * coordinator has never heard of. Dropping those to enforce a membership
+   * check would discard exactly the attribution data this records for
+   * later. Whoever builds attribution has to treat them as claims, not
+   * facts -- which is why they are stored as the client's set rather than
+   * resolved into a single owning project here.
+   */
+  app.post("/v1/captures", async (c) => {
+    const identity = c.get("identity");
+    const body = await c.req.json<{ sessionId?: unknown; records?: unknown; projectIds?: unknown }>().catch(() => null);
+    if (!body || typeof body.sessionId !== "string" || body.sessionId.length === 0 || !Array.isArray(body.records)) {
+      return c.json({ error: "expected { sessionId: string, records: object[], projectIds?: string[] }" }, 400);
+    }
+    // Bounded per request so one upload can't pin the event loop or the
+    // disk; the daemon chunks anything larger. Generous enough that a
+    // normal session's whole backlog arrives in a handful of requests.
+    if (body.records.length > MAX_CAPTURE_RECORDS_PER_REQUEST) {
+      return c.json({ error: `too many records in one request (max ${MAX_CAPTURE_RECORDS_PER_REQUEST})` }, 413);
+    }
+    const records = body.records.filter((record): record is Record<string, unknown> => !!record && typeof record === "object" && !Array.isArray(record));
+    const projectIds = Array.isArray(body.projectIds) ? body.projectIds.filter((id): id is string => typeof id === "string") : undefined;
+
+    const summary = captures.append({
+      sessionId: body.sessionId,
+      developerId: identity.developerId,
+      records,
+      projectIds,
+    });
+    return c.json(summary);
   });
 
   /** Authorization for the two *mutating* alignment-thread routes (reply,

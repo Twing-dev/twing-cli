@@ -11,6 +11,7 @@ import { IdentityStore } from "./identity-store.js";
 import { Store } from "./store.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
 import { AlignmentThreadStore } from "./alignment-store.js";
+import { CaptureStore } from "./capture-store.js";
 
 function sha256Hex(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -63,6 +64,12 @@ function freshApp(options: { corsOrigins?: string[]; version?: string; publicPro
   const designs = new DesignRegistry(db);
   const constraints = new ConstraintStore(db);
   const alignmentThreads = new AlignmentThreadStore(db);
+  // Injected with a temp blob directory: `CaptureStore`'s default is the
+  // real `~/.twing/serve-data/captures`, and `createApp` only overrides it
+  // when handed a dataDir (which this harness deliberately doesn't pass, to
+  // keep the DB in memory). Without this every route test would append to
+  // the developer's actual server data.
+  const captures = new CaptureStore(db, { capturesDir: path.join(dataDir, "captures") });
   const app = createApp({
     db,
     identities,
@@ -70,11 +77,12 @@ function freshApp(options: { corsOrigins?: string[]; version?: string; publicPro
     designs,
     constraints,
     alignmentThreads,
+    captures,
     corsOrigins: options.corsOrigins,
     version: options.version,
     publicProjectIds: options.publicProjectIds,
   });
-  return { app, dataDir, identities, store, designs, constraints, alignmentThreads };
+  return { app, dataDir, identities, store, designs, constraints, alignmentThreads, captures };
 }
 
 function bootstrapToken(dataDir: string): string {
@@ -4999,4 +5007,107 @@ test("GET /v1/designs: an unauthenticated request 401s exactly as before when pu
 
   const res = await app.request("/v1/designs?projectId=proj-1");
   assert.equal(res.status, 401);
+});
+
+// ---------------------------------------------------------------------------
+// POST /v1/captures -- session capture ingest (write-only)
+// ---------------------------------------------------------------------------
+
+test("POST /v1/captures stores a batch under the authenticated developer", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/captures", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      sessionId: "sess-1",
+      records: [{ type: "turn", role: "user", text: "why does the gate fail closed?" }],
+      projectIds: ["proj-a"],
+    }),
+  });
+
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { developerId: string; recordCount: number; projectIds: string[] };
+  assert.equal(body.developerId, admin.developerId, "attribution comes from the token, never the request body");
+  assert.equal(body.recordCount, 1);
+  assert.deepEqual(body.projectIds, ["proj-a"]);
+});
+
+// §17.10: developerId is resolved from the bearer token on every write. A
+// client claiming to be someone else must not be able to write into their
+// captures.
+test("POST /v1/captures ignores a client-supplied developerId", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/captures", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ sessionId: "sess-2", developerId: "somebody-else", records: [{ n: 1 }] }),
+  });
+
+  const body = (await res.json()) as { developerId: string };
+  assert.equal(body.developerId, admin.developerId);
+});
+
+test("POST /v1/captures requires authentication", async () => {
+  const { app } = freshApp();
+
+  const res = await app.request("/v1/captures", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: "sess-3", records: [{ n: 1 }] }),
+  });
+
+  assert.equal(res.status, 401);
+});
+
+test("POST /v1/captures rejects a malformed body", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  for (const body of [{}, { sessionId: "" , records: [] }, { sessionId: "s", records: "not an array" }]) {
+    const res = await app.request("/v1/captures", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify(body),
+    });
+    assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(body)}`);
+  }
+});
+
+test("POST /v1/captures caps how much arrives in one request", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/captures", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ sessionId: "sess-4", records: Array.from({ length: 5001 }, (_, n) => ({ n })) }),
+  });
+
+  assert.equal(res.status, 413);
+});
+
+// The store is a sink until distillation is designed: no route reads it back
+// and none deletes from it. This asserts that absence, so adding one becomes
+// a deliberate act rather than a drift.
+test("there is no route to read or delete a capture", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await app.request("/v1/captures", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ sessionId: "sess-5", records: [{ n: 1 }] }),
+  });
+
+  for (const [method, path] of [
+    ["GET", "/v1/captures"],
+    ["GET", "/v1/captures/sess-5"],
+    ["DELETE", "/v1/captures/sess-5"],
+  ] as const) {
+    const res = await app.request(path, { method, headers: bearer(admin.token) });
+    assert.equal(res.status, 404, `${method} ${path} should not exist`);
+  }
 });

@@ -22,6 +22,13 @@
  * current-state read of them, unlike designs), durably represented only as
  * `claim_recorded`/`call_edge_recorded` activity-log rows.
  *
+ * Session captures follow the same "not everything belongs in the DB"
+ * discipline from the other direction: `captures` holds only a pointer row,
+ * while the conversation itself is appended to a file on disk. A single
+ * session's capture is ~1.6MB of append-only text that no query ever filters
+ * or joins on, so putting it in a row would grow the database by the size of
+ * every conversation ever held while buying nothing SQL is good at.
+ *
  * Portability discipline for an eventual Postgres driver (see db/client.ts):
  * every column here is `text`/`integer` only (JSON fields are
  * `text`-serialized, epoch-ms timestamps are `integer`, booleans are
@@ -330,4 +337,54 @@ export const roadmapItems = sqliteTable(
     createdAt: integer("created_at").notNull(),
   },
   (t) => [index("roadmap_items_project_id_idx").on(t.projectId)],
+);
+
+// ---------------------------------------------------------------------------
+// Session captures
+// ---------------------------------------------------------------------------
+
+/**
+ * One row per captured session, pointing at the blob that holds it.
+ *
+ * Deliberately a pointer, not the content -- see this file's header. The
+ * columns here are exactly what a future reader needs to *find* a capture
+ * without opening any of them: whose it is, which session, which projects it
+ * touched, how big it got, and when it last grew.
+ *
+ * `projectIds` is a JSON array because a session legitimately spans several
+ * opted-in repos, and which one "owns" the capture is an open question this
+ * schema deliberately does not answer yet (raw capture first, attribution
+ * later). Storing the set keeps every answer available; storing a single
+ * winner now would throw away the others irreversibly.
+ *
+ * No read route, no deletion and no expiry exist yet, so nothing here is
+ * indexed for a query that hasn't been designed. The one index is the
+ * uniqueness constraint the ingest path itself needs, to find the row to
+ * append to.
+ */
+export const captures = sqliteTable(
+  "captures",
+  {
+    id: text("id").primaryKey(),
+    /** Claude Code's own session id, as reported by the capturing daemon. */
+    sessionId: text("session_id").notNull(),
+    /** Resolved from the authenticated token on every append, never
+     * client-supplied -- same rule as every other write in this schema. */
+    developerId: text("developer_id").notNull(),
+    /** JSON array of twing projectIds, accumulated across appends. */
+    projectIds: text("project_ids").notNull(),
+    /** Path of the blob, relative to the server's captures directory. */
+    blobPath: text("blob_path").notNull(),
+    bytes: integer("bytes").notNull(),
+    recordCount: integer("record_count").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => ({
+    // A session's capture arrives incrementally over its whole life, so
+    // every append has to land on the same row. Scoped by developer as well
+    // as session: session ids come from another process entirely and are
+    // never this server's to assume unique across developers.
+    developerSession: uniqueIndex("captures_developer_session").on(table.developerId, table.sessionId),
+  }),
 );
