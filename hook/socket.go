@@ -49,6 +49,34 @@ func enqueue(sessionID, cwd, toolName string, toolInput []byte) {
 	_, _ = conn.Write(frame)
 }
 
+// sendSessionEnd tells the daemon a session ended, so it can drain whatever
+// the transcript gained since the last prompt. Fire-and-forget on exactly
+// enqueue's terms -- same dial/write budget, no reply awaited, every failure
+// swallowed. Deliberately not routed through design_gate.go's HTTP client:
+// that path is §17's blocking exception and is gated on designGateEnabled(),
+// which is the wrong lifecycle for capture.
+func sendSessionEnd(sessionID, cwd, transcriptPath string) {
+	if transcriptPath == "" {
+		return
+	}
+	path := socketPath()
+	if path == "" {
+		return
+	}
+	conn, err := net.DialTimeout("unix", path, dialAndWriteTimeout)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	frame, err := encodeFrame(newSessionEndMessage(sessionID, cwd, transcriptPath))
+	if err != nil {
+		return
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(dialAndWriteTimeout))
+	_, _ = conn.Write(frame)
+}
+
 // cacheCheckResult is cacheCheck's reply -- notices plus an optional
 // version-mismatch signal, independent of each other (see
 // packages/cli/src/daemon/sync.ts's Syncer.versionMismatch() doc comment
@@ -62,7 +90,7 @@ type cacheCheckResult struct {
 // failure (no socket, daemon down, timeout) returns a zero-value result,
 // which the caller treats as "nothing cached" — an empty stdout, exit 0
 // no-op.
-func cacheCheck(sessionID string) cacheCheckResult {
+func cacheCheck(sessionID, cwd, transcriptPath string) cacheCheckResult {
 	path := socketPath()
 	if path == "" {
 		return cacheCheckResult{}
@@ -76,7 +104,7 @@ func cacheCheck(sessionID string) cacheCheckResult {
 	deadline := time.Now().Add(cacheCheckTimeout)
 	_ = conn.SetDeadline(deadline)
 
-	frame, err := encodeFrame(newGetNoticesMessage(sessionID))
+	frame, err := encodeFrame(newGetNoticesMessage(sessionID, cwd, transcriptPath))
 	if err != nil {
 		return cacheCheckResult{}
 	}

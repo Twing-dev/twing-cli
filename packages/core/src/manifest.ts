@@ -52,17 +52,37 @@ export interface CoordinatorConfig {
   serverUrl?: string;
 }
 
+/** Whether this repo's sessions get their conversation captured to local
+ * disk (`~/.twing/sessions/<sessionId>.jsonl`, phase 1). Same kind as
+ * `coordinator` and not `constraints`: read purely locally, never uploaded
+ * anywhere -- nothing about capture transits today, since phase 1 stops at
+ * the local file.
+ *
+ * **Opt-in: absent means disabled.** A repo turns it on with
+ * `capture: {enabled: true}` and nothing else does. Capture is a new
+ * data-collection behavior, and one that installing an npm package should
+ * never start silently on someone's machine -- so the committed manifest,
+ * which somebody had to deliberately edit, is the only thing that can
+ * consent to it. That the material is local-only and derived from a file
+ * Claude Code already wrote to the same disk is a reason the risk is
+ * bounded, not a reason to assume agreement. */
+export interface CaptureConfig {
+  enabled?: boolean;
+}
+
 export interface Manifest {
   requireHumanReview: RequireHumanReviewRule[];
   constraints: ConstraintRule[];
   coordinator: CoordinatorConfig;
+  capture: CaptureConfig;
 }
 
-const EMPTY_MANIFEST: Manifest = { requireHumanReview: [], constraints: [], coordinator: {} };
+const EMPTY_MANIFEST: Manifest = { requireHumanReview: [], constraints: [], coordinator: {}, capture: {} };
 
 export function parseManifest(yamlText: string): Manifest {
   const doc = (parseYaml(yamlText) ?? {}) as Record<string, unknown>;
   const coordinator = (doc.coordinator ?? {}) as Record<string, unknown>;
+  const capture = (doc.capture ?? {}) as Record<string, unknown>;
   return {
     requireHumanReview: asArray(doc.require_human_review).map((r) => ({
       path: r.path as string | undefined,
@@ -75,6 +95,9 @@ export function parseManifest(yamlText: string): Manifest {
     })),
     coordinator: {
       serverUrl: typeof coordinator.serverUrl === "string" ? coordinator.serverUrl : undefined,
+    },
+    capture: {
+      enabled: typeof capture.enabled === "boolean" ? capture.enabled : undefined,
     },
   };
 }
@@ -152,4 +175,11 @@ export function matchRequireHumanReview(manifest: Manifest, relPath: string, sym
     else if (rule.symbol && rule.symbol === symbolId) reasons.push(rule.reason);
   }
   return reasons;
+}
+
+/** The `capture:` switch's one consumer-facing question, so no caller has
+ * to re-decide what an absent block means (see `CaptureConfig`: opt-in, so
+ * only an explicit `true` enables it). */
+export function captureEnabled(manifest: Manifest): boolean {
+  return manifest.capture.enabled === true;
 }

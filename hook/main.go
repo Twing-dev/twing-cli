@@ -19,6 +19,12 @@ type hookPayload struct {
 	HookEventName string          `json:"hook_event_name"`
 	ToolName      string          `json:"tool_name"`
 	ToolInput     json.RawMessage `json:"tool_input"`
+	// TranscriptPath is Claude Code's own session transcript JSONL, sent on
+	// every event and (until now) silently dropped here. Forwarded verbatim
+	// to the daemon, which owns every decision about what in it is worth
+	// keeping -- the path only, never the content: transcripts run far past
+	// the 10MB frame cap in packages/core/src/framing.ts.
+	TranscriptPath string `json:"transcript_path"`
 }
 
 func main() {
@@ -56,6 +62,12 @@ func main() {
 		// above -- see design_gate.go. Never used by capture (§4).
 		handlePreToolUse(payload)
 	case "SessionEnd":
+		// Capture first, and independently: sendSessionEnd is a
+		// fire-and-forget socket write on the same dumb-pipe path as
+		// enqueue, while handleSessionEnd below is the design gate's
+		// synchronous HTTP path and short-circuits on designGateEnabled().
+		// Capture must not inherit that lifecycle.
+		sendSessionEnd(payload.SessionID, payload.Cwd, payload.TranscriptPath)
 		// §17.6 close trigger. No-op unless the design gate is registered
 		// (handleSessionEnd checks TWING_DESIGN_GATE itself).
 		handleSessionEnd(payload)
@@ -74,7 +86,7 @@ func handlePostToolUse(payload hookPayload) {
 }
 
 func handleCacheCheck(payload hookPayload) {
-	result := cacheCheck(payload.SessionID)
+	result := cacheCheck(payload.SessionID, payload.Cwd, payload.TranscriptPath)
 
 	messages := make([]string, 0, len(result.Items)+1)
 	for _, item := range result.Items {

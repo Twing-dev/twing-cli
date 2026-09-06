@@ -10,6 +10,7 @@
 import {
   findRepoRoot,
   loadManifestFromFile,
+  captureEnabled,
   twingConfigPath,
   upsertCoordinatorServerUrl,
   normalizeServerUrl,
@@ -76,7 +77,7 @@ export interface InitDeps {
   wireHooks: (hookPath: string) => boolean;
   stripLegacyRepoLocalHooks: (repoRoot: string, hookPath: string) => boolean;
   enableInstallEnforcement: (repoRoot: string) => boolean;
-  ensureDaemonRunning: () => Promise<"already-running" | "started">;
+  ensureDaemonRunning: () => Promise<"already-running" | "started" | "failed">;
   installDaemonService: () => Promise<ServiceInstallResult>;
 }
 
@@ -224,7 +225,25 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // (or an earlier session) already has the daemon up, the actual startup
   // path if not.
   const daemonStatus = await deps.ensureDaemonRunning();
-  console.log(daemonStatus === "started" ? "twing init: daemon started" : "twing init: daemon already running");
+  if (daemonStatus === "failed") {
+    // Non-fatal, same as every other optional step here -- but said out
+    // loud rather than reported as "started", which is what a spawn with no
+    // exit listener used to do. `~/.twing/daemon.log` has the reason (a
+    // squatter on the socket being the usual one).
+    console.log("twing init: daemon failed to start -- see ~/.twing/daemon.log, and `lsof ~/.twing/daemon.sock` for whatever may be holding the socket");
+  } else {
+    console.log(daemonStatus === "started" ? "twing init: daemon started" : "twing init: daemon already running");
+  }
+
+  // Say which way the capture switch is set. It's opt-in and silent when
+  // off, so without this a typo'd key (`enable:`, `capture: true`) is
+  // indistinguishable from a repo that simply hasn't opted in -- and `init`
+  // is where someone who just edited the manifest would look.
+  console.log(
+    captureEnabled(manifest)
+      ? "twing init: session capture ON for this repo -- filtered conversation is written to ~/.twing/sessions/ on this machine, and nowhere else"
+      : "twing init: session capture off (set `capture: {enabled: true}` in .twing/twing.yml to turn it on)",
+  );
 
   await seedConstraints(repoRoot, manifest, serverUrl, authToken, developerId, noAuth);
 

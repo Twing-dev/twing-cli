@@ -76,6 +76,30 @@ export function queryDaemonNotices(sessionId: string): Promise<Notice[] | null> 
   return queryDaemon({ type: "get_notices", sessionId }, "notices", (msg) => (msg.items ?? []) as Notice[]);
 }
 
+export interface DaemonIdentity {
+  pid: number;
+  version: string;
+  startedAt: number;
+}
+
+/**
+ * "Which process is holding the socket, and what version is it?" -- the
+ * primitive that lets `daemon restart` confirm a restart actually happened
+ * instead of trusting a socket-connect probe that any daemon, including the
+ * one that was supposed to be replaced, would satisfy.
+ *
+ * Null covers both "nothing listening" and "something is listening but
+ * doesn't answer `get_identity`" -- the latter being any daemon older than
+ * this release, which callers must treat as "unknown", never as "gone".
+ */
+export function queryDaemonIdentity(): Promise<DaemonIdentity | null> {
+  return queryDaemon({ type: "get_identity" }, "identity", (msg) => ({
+    pid: msg.pid as number,
+    version: String(msg.version ?? "unknown"),
+    startedAt: (msg.startedAt as number) ?? 0,
+  }));
+}
+
 /** `twing daemon restart`'s no-service-installed path (daemon-restart.ts):
  * ask a running daemon to exit cleanly over the socket rather than relying
  * on OS signals alone. Resolves false the same way every other query here

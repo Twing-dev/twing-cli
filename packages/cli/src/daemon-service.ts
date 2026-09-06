@@ -29,6 +29,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultSocketPath } from "@twing/core";
+import { queryDaemonIdentity } from "./daemon-client.js";
 
 // packages/cli/dist/daemon/main.js -- a sibling of this file
 // (daemon-service.js) once built, mirroring the src/daemon/ layout. Was
@@ -98,10 +99,24 @@ function sleep(ms: number): Promise<void> {
  * ~2s after a bootout+bootstrap. `RunAtLoad` means a healthy bootstrap
  * should be listening within a few hundred ms; this budget is generous
  * without making a routine `twing init` feel slow on the failure path
- * (which is rare by construction -- see the rollback this guards below). */
-export async function waitForDaemonUp(socketPath: string): Promise<boolean> {
+ * (which is rare by construction -- see the rollback this guards below).
+ *
+ * `notPid` closes this check's own false positive: "something is listening"
+ * is satisfied just as well by a pre-existing orphan as by the job that was
+ * just installed, so an install could report success while its own job
+ * crash-looped against `clearStaleSocket` forever. Passing the pid observed
+ * *before* the restart makes the check ask the question that was actually
+ * meant -- "is a *different* process listening now?" An unidentified
+ * responder (any daemon older than identity support) counts as satisfying
+ * the wait: it's the same conservative "don't guess about a process that
+ * predates this release" stance eviction takes. */
+export async function waitForDaemonUp(socketPath: string, notPid?: number): Promise<boolean> {
   for (let i = 0; i < 8; i++) {
-    if (await probeSocketOnce(socketPath)) return true;
+    if (await probeSocketOnce(socketPath)) {
+      if (notPid === undefined) return true;
+      const identity = await queryDaemonIdentity();
+      if (!identity || identity.pid !== notPid) return true;
+    }
     await sleep(250);
   }
   return false;
@@ -123,6 +138,8 @@ async function installLaunchAgent(marker: DaemonLaunchMarker): Promise<ServiceIn
   <array><string>${xmlEscape(marker.node)}</string><string>${xmlEscape(marker.script)}</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict><key>TWING_DAEMON_SUPERVISED</key><string>1</string></dict>
   <key>StandardOutPath</key><string>${xmlEscape(log)}</string>
   <key>StandardErrorPath</key><string>${xmlEscape(log)}</string>
 </dict>
@@ -143,6 +160,11 @@ async function installLaunchAgent(marker: DaemonLaunchMarker): Promise<ServiceIn
       // Doesn't exist yet -- first install, fall through.
     }
     if (existing === plist) return "installed";
+
+    // Whoever holds the socket right now -- so the liveness check below can
+    // tell "the job I just bootstrapped came up" from "an orphan was
+    // already answering and still is."
+    const previousPid = (await queryDaemonIdentity())?.pid;
 
     fs.mkdirSync(path.dirname(plistPath), { recursive: true });
     fs.writeFileSync(plistPath, plist);
@@ -193,7 +215,7 @@ async function installLaunchAgent(marker: DaemonLaunchMarker): Promise<ServiceIn
     // previous plist + re-bootstrapping it if the new one never answers.
     // Deliberately outside the try/catch above (see the two comments just
     // above): a thrown `bootstrap` must not skip this.
-    const cameUp = await waitForDaemonUp(defaultSocketPath());
+    const cameUp = await waitForDaemonUp(defaultSocketPath(), previousPid);
     if (!cameUp && existing !== undefined) {
       try {
         fs.writeFileSync(plistPath, existing);
@@ -234,12 +256,14 @@ Description=twing daemon
 
 [Service]
 ExecStart=${marker.node} ${marker.script}
+Environment=TWING_DAEMON_SUPERVISED=1
 Restart=on-failure
 
 [Install]
 WantedBy=default.target
 `;
   try {
+    const previousPid = (await queryDaemonIdentity())?.pid;
     fs.mkdirSync(path.dirname(unitPath), { recursive: true });
     fs.writeFileSync(unitPath, unit);
     execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
@@ -260,23 +284,46 @@ WantedBy=default.target
     // calls this before the spawn fallback specifically so this check is
     // what decides whether a fallback spawn is still needed, not a race
     // between two independently-started daemons.
-    const cameUp = await waitForDaemonUp(defaultSocketPath());
+    const cameUp = await waitForDaemonUp(defaultSocketPath(), previousPid);
     return cameUp ? "installed" : "failed";
   } catch {
     return "failed";
   }
 }
 
-/** Which OS-level service (if any) is currently installed for this daemon --
- * `daemon-restart.ts` uses this to decide whether to restart via the
- * service manager directly (launchd/systemd) or fall back to the plain
- * socket-shutdown + spawn path. Checks for the plist/unit file on disk,
- * same ground-truth-over-bookkeeping preference `waitForDaemonUp` already
- * uses for the socket itself. */
+/** Which OS-level service (if any) can actually restart this daemon --
+ * `daemon-restart.ts` uses this to decide whether to go through the service
+ * manager (launchd/systemd) or fall back to the plain socket-shutdown +
+ * spawn path.
+ *
+ * Asks the service manager, not the filesystem. A plist/unit file on disk
+ * says only that an install once ran; it says nothing about whether the job
+ * is loaded now. That gap is a real, reported failure (GitHub issue #20): a
+ * machine with a leftover plist took the launchd branch, `launchctl
+ * kickstart` did nothing reachable, and the restart reported success while
+ * the stale daemon kept running. If the job isn't loaded, "none" is the
+ * honest answer -- the socket path below can still restart it. */
 export function isServiceInstalled(): "launchd" | "systemd" | "none" {
-  if (process.platform === "darwin" && fs.existsSync(launchAgentPlistPath())) return "launchd";
-  if (process.platform === "linux" && fs.existsSync(systemdUnitPath())) return "systemd";
+  if (process.platform === "darwin" && fs.existsSync(launchAgentPlistPath())) {
+    const uid = typeof process.getuid === "function" ? process.getuid() : "";
+    return commandSucceeds("launchctl", ["print", `gui/${uid}/${LAUNCH_AGENT_LABEL}`]) ? "launchd" : "none";
+  }
+  if (process.platform === "linux" && fs.existsSync(systemdUnitPath())) {
+    // `is-enabled`, not `is-active`: an enabled-but-stopped unit is still
+    // something `systemctl --user restart` can start, which is exactly what
+    // this answer is used for.
+    return commandSucceeds("systemctl", ["--user", "is-enabled", "twing-daemon.service"]) ? "systemd" : "none";
+  }
   return "none";
+}
+
+function commandSucceeds(command: string, args: string[]): boolean {
+  try {
+    execFileSync(command, args, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Best-effort OS-level service install so the daemon survives a machine

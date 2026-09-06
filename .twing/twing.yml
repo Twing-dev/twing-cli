@@ -1,33 +1,45 @@
+# Deliberately small. Every entry here seeds the coordinator's Constraint
+# Store (`twing init` -> POST /v1/constraints/seed), and a match is a
+# `constraint_violation`: it *always* blocks the Edit/Write, and only a
+# project admin can approve the override. There is no lighter tier --
+# `require_human_review` and `constraints` both seed as type "constraint"
+# since the 4-bucket simplification (2026-08-26), so the two sections are
+# the same mechanism wearing different names.
+#
+# A rule here also cannot check what it claims to check: the gate matches a
+# path and denies, it never reads the diff. So a rule buys exactly one
+# thing -- "stop, and make an admin look" -- which is worth paying for only
+# where the path is edited rarely AND a bad change would be silent. Six
+# rules were pruned on 2026-09-06 for failing that test: they named real
+# invariants, but ones already covered by tests (49 in hook/design_gate_test.go,
+# 47 in design-checks.test.ts), on files edited 20-39 times since August,
+# where a per-edit admin round trip degrades into a rubber stamp.
+#
+# Before adding one back, ask: is this path edited rarely, is the failure
+# silent, and is it uncovered by tests? If not, write the test instead.
+
 require_human_review:
-  - path: "hook/{main,socket,protocol}.go"
-    reason: "capture edge — must stay a trivial socket client with no decision logic
-      (design doc §4)"
-  - path: "hook/design_gate.go"
-    reason: "the gate's own verdict/deny logic (§17) — a bug here is a silent
-      bypass, or wrongly blocks every gated session. Narrowed 2026-08-16 out
-      of the old blanket hook/** rule to name this chokepoint explicitly."
-  - path: "hook/daemon_launch.go"
-    reason: "the one deliberate, reviewed exception to the capture-edge
-      no-decision-logic rule above (§4) — checking daemon liveness and
-      deciding whether to spawn one is real decision logic, kept narrowly
-      contained here rather than left to spread. See this repo's CLAUDE.md
-      for the fuller framing."
-  - path: "packages/server/src/design-*.ts"
-    reason: "coordinator's core verdict logic — a bug here blocks real Edit/Write
-      calls across every gated session (design doc §17)"
+  # Kept when the other six were pruned (2026-09-06): rarely edited (3
+  # commits since 2026-08-16), the failure mode is silent, and "a human
+  # looks at auth changes" is the one place stop-and-look is standard
+  # practice rather than ceremony. This note lives in a comment, not in
+  # `reason:` -- the reason text is the statement seeded to the coordinator
+  # and shown verbatim in gate denials, and `ConstraintStore.add` upserts
+  # on that exact string: editing it doesn't update the live row, it
+  # creates a second one alongside the old.
   - path: "packages/server/src/identity-store.ts"
     reason: "auth/identity resolution (§17.10) — a bug here is a real
       access-control hole, not just gate friction."
-  - path: "packages/server/src/{index,main,app}.ts"
-    reason: "the hosted coordinator itself — do not remove or fundamentally
-      restructure (e.g. moving it into the daemon/local-only) without human
-      sign-off (design doc §17). Added 2026-08-11 after a live test showed
-      exactly this change going unblocked."
 
-constraints:
-  - text: "use the shared length-prefixed frame codec in packages/core; don't invent
-      a second wire format"
-    scope: "packages/core/src/framing.ts"
+# Session conversation capture (phase 1, local only): human turns,
+# assistant prose and touched file paths are filtered out of Claude Code's
+# own transcript, redacted, and appended to ~/.twing/sessions/<id>.jsonl on
+# this machine. Nothing is uploaded -- server storage is deferred to phase 2.
+# Opt-in by design: absent means off, so installing @twing/cli never starts
+# capturing on anyone's machine without a deliberate edit to a committed file.
+# On here because this is the repo the feature is built and dogfooded in.
+capture:
+  enabled: true
 
 coordinator:
   serverUrl: https://coordination-server.twing.dev
