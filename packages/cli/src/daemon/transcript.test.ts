@@ -290,3 +290,112 @@ test("createRepoResolver: repeated lookups are served from the cache", () => {
 
   assert.equal(resolve(path.join(dir, "src", "b.ts")), dir, "a sibling path reuses the ancestors already walked");
 });
+
+// Session-level consent and the retroactive reach-back. These are the two
+// decisions repo attribution exists to serve, so they are exercised against
+// real repos on disk rather than fakes.
+
+/** A repo that either has or hasn't opted in, plus a transcript-shaped
+ * absolute path inside it. */
+function repo(optedIn: boolean): { root: string; file: (name: string) => string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), optedIn ? "twing-optedin-" : "twing-foreign-"));
+  fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(root, ".twing"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".twing", "twing.yml"), optedIn ? "capture:\n  enabled: true\n" : "coordinator:\n  serverUrl: http://localhost:8787\n");
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  return { root, file: (name: string) => path.join(root, "src", name) };
+}
+
+// The measured shape this is built for: the first touch of an opted-in repo
+// is a *read*, hours before the first edit there, and the reasoning that
+// led to it sits in turns that name no file at all.
+test("captureSession: capture reaches back over discussion to the point the opted-in repo was first touched", async () => {
+  const optedIn = repo(true);
+  const foreign = repo(false);
+  const { transcript, sessionsDir } = scratch();
+
+  fs.writeFileSync(
+    transcript,
+    humanTurn("the previous task's question") +
+      toolCall(foreign.file("old.ts")) +
+      humanTurn("now let's look at the other project") +
+      assistantTurn("Reading it.") +
+      toolCall(optedIn.file("new.ts")) +
+      assistantTurn("Found the bug."),
+  );
+
+  const result = await captureSession({ sessionId: "reach1", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  const texts = readCapture(sessionsDir, "reach1")
+    .filter((r) => r.type === "turn")
+    .map((r) => r.text);
+  assert.deepEqual(texts, ["now let's look at the other project", "Reading it.", "Found the bug."]);
+  assert.ok(result.startedFrom !== undefined && result.startedFrom > 0, "it reached back, but not to the start of the session");
+});
+
+// The consent boundary. Everything before the last foreign touch belongs to
+// a unit of work that never concerned the repo which granted permission,
+// and must never be captured -- not even to be trimmed later.
+test("captureSession: nothing before a non-opted-in repo's touch is captured", async () => {
+  const optedIn = repo(true);
+  const foreign = repo(false);
+  const { transcript, sessionsDir } = scratch();
+
+  fs.writeFileSync(
+    transcript,
+    humanTurn("SECRET client discussion") + toolCall(foreign.file("client.ts")) + toolCall(optedIn.file("ours.ts")) + assistantTurn("ok"),
+  );
+
+  await captureSession({ sessionId: "reach2", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  const raw = fs.readFileSync(path.join(sessionsDir, "reach2.jsonl"), "utf8");
+  assert.ok(!raw.includes("SECRET client discussion"), "the previous task never leaves the machine");
+  assert.match(raw, /"ok"/);
+});
+
+test("captureSession: with no foreign touch before it, the reach-back runs to the start of the session", async () => {
+  const optedIn = repo(true);
+  const foreign = repo(false);
+  const { transcript, sessionsDir } = scratch();
+
+  fs.writeFileSync(transcript, humanTurn("what does this project do?") + toolCall(optedIn.file("a.ts")) + assistantTurn("Here."));
+
+  const result = await captureSession({ sessionId: "reach3", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  assert.equal(result.startedFrom, 0);
+  const texts = readCapture(sessionsDir, "reach3")
+    .filter((r) => r.type === "turn")
+    .map((r) => r.text);
+  assert.deepEqual(texts, ["what does this project do?", "Here."]);
+});
+
+// Until something opts in, the watermark must not advance -- that is the
+// whole mechanism that leaves earlier bytes reachable.
+test("captureSession: a session touching no opted-in repo captures nothing and does not advance", async () => {
+  const foreign = repo(false);
+  const { transcript, sessionsDir } = scratch();
+  fs.writeFileSync(transcript, humanTurn("just this project") + toolCall(foreign.file("a.ts")));
+
+  const result = await captureSession({ sessionId: "reach4", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  assert.equal(result.skipped, "disabled");
+  assert.deepEqual(readCapture(sessionsDir, "reach4"), []);
+  assert.equal(fs.existsSync(path.join(sessionsDir, "reach4.state.json")), false, "no watermark yet, so nothing is skipped past");
+});
+
+test("captureSession: once on, capture stays on for turns that touch nothing or touch only a non-opted-in repo", async () => {
+  const optedIn = repo(true);
+  const foreign = repo(false);
+  const { transcript, sessionsDir } = scratch();
+
+  fs.writeFileSync(transcript, toolCall(optedIn.file("a.ts")) + assistantTurn("captured"));
+  const first = await captureSession({ sessionId: "sticky1", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+  assert.equal(first.turnsWritten, 1);
+
+  // A stretch that would never have turned capture on by itself.
+  fs.appendFileSync(transcript, toolCall(foreign.file("b.ts")) + assistantTurn("still captured") + humanTurn("and this"));
+  const second = await captureSession({ sessionId: "sticky1", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  assert.equal(second.turnsWritten, 2);
+  assert.equal(second.startedFrom, undefined, "the boundary is settled once, not re-decided every pass");
+});
