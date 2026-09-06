@@ -205,15 +205,29 @@ behavior for this specific mechanism hasn't been verified yet -- treat it as
 a known gap on that platform for now, same as `init`'s own OS-level
 service install already does.
 
-**For agents:** a deny that opens with "twing is not installed on this
-machine yet" is this gate, not the design-conflict gate above (and not a
-bug in your tool call) -- it means this machine has never run `twing init`
-at all, so there's no coordination happening yet, nothing to register or
-justify. Run the command it gives you (`npm install -g @twing/cli && twing
-init`, or the `npx` equivalent), then retry the original edit; `twing init`
-will need a GitHub device-flow approval from a human if this is a
-GitHub-hosted repo, so surface that step rather than assuming it can
-complete unattended.
+**What the message actually says, and why.** A deny that opens with "twing
+is not installed on this machine yet" is this gate, not the design-conflict
+gate above -- it means this machine has never run `twing init` at all. Note
+for anyone reading this section expecting it to be advice reaching the
+agent that hits this: it is not -- that agent is almost never in *this*
+repo (`.claude/settings.json`'s hook script ships into whichever repo an
+admin runs `twing init` in, which is virtually always someone else's), so
+it has no access to this README, no git history explaining any of this, no
+context at all beyond the message text itself. Which is exactly why the
+message doesn't just say "run this command" -- an install instruction
+arriving as denied tool output is indistinguishable from a supply-chain
+prompt-injection attempt on its face, and a reasonably cautious agent
+should (and, tested live, will) refuse it even after being told to proceed,
+having no way to independently check whether `@twing/cli` is real. So the
+deny message instead gives concrete, externally-checkable evidence a fresh
+agent actually can verify on its own: the product site (`twing.dev`), the
+open-source repo it can go read before running anything
+(`github.com/Twing-dev/twing-cli`), and the correct way to check npm's real
+version history (`npm view @twing/cli time.created`/`versions` -- the
+default `npm view` output only shows the *latest* release's publish date,
+easy to misread as the whole package's age). It also notes that editing
+`.claude/settings.json` directly to strip the hook hits this same check --
+there's no self-service way around it that way either.
 
 ### Quick command reference
 

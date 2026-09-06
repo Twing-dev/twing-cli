@@ -181,7 +181,10 @@ test("bootstrapHookScript: denies with instructions when nothing is installed", 
   const parsed = JSON.parse(stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
   assert.equal(parsed.hookSpecificOutput.permissionDecision, "deny");
   assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /npm install -g @twing\/cli && twing init/);
-  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /there is no personal bypass/i);
+  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /https:\/\/twing\.dev/);
+  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /github\.com\/Twing-dev\/twing-cli/);
+  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /npm view @twing\/cli time\.created/);
+  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /hits this same check -- there is no bypass/i);
 });
 
 test("bootstrapHookScript: denies when the binary exists but isn't wired", () => {
