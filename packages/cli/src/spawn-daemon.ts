@@ -28,8 +28,15 @@ function isDaemonRunning(socketPath: string): Promise<boolean> {
  * `twing init` in a second repo reuses it rather than spawning a duplicate.
  * Always (re)writes the launch marker first, even on the already-running
  * path -- keeps it current with this build's paths regardless of whether a
- * fresh spawn happens here. */
-export async function ensureDaemonRunning(): Promise<"already-running" | "started"> {
+ * fresh spawn happens here.
+ *
+ * Returns `"failed"` when the child dies during startup instead of coming
+ * up. This used to be pure fire-and-forget with no `exit`/`error` listener
+ * at all, so a daemon that crashed on launch -- `clearStaleSocket` throwing
+ * against a squatter is the realistic case -- was reported as `"started"`
+ * to `init` and to `daemon restart` alike, and nobody found out until the
+ * next symptom, days later. */
+export async function ensureDaemonRunning(): Promise<"already-running" | "started" | "failed"> {
   writeDaemonLaunchMarker();
   const socketPath = defaultSocketPath();
   if (await isDaemonRunning(socketPath)) return "already-running";
@@ -38,6 +45,36 @@ export async function ensureDaemonRunning(): Promise<"already-running" | "starte
     detached: true,
     stdio: "ignore",
   });
+
+  // Watch just long enough to catch a startup failure. A healthy daemon
+  // binds its socket in well under this; an unhealthy one exits almost
+  // immediately, so neither outcome actually waits the full budget. The
+  // child is unref'd either way, so a caller that exits first never hangs
+  // on it.
+  const outcome = await new Promise<"started" | "failed">((resolve) => {
+    const settle = (result: "started" | "failed") => {
+      clearInterval(poll);
+      clearTimeout(deadline);
+      child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
+      resolve(result);
+    };
+    const onError = () => settle("failed");
+    const onExit = () => settle("failed");
+    child.once("error", onError);
+    child.once("exit", onExit);
+    const poll = setInterval(() => {
+      void isDaemonRunning(socketPath).then((up) => {
+        if (up) settle("started");
+      });
+    }, 100);
+    // Neither up nor dead within the budget: report "started" rather than
+    // "failed" -- a slow-starting daemon that is still alive is not a
+    // failure, and the callers that need certainty (daemon-restart.ts)
+    // confirm by identity afterwards regardless.
+    const deadline = setTimeout(() => settle("started"), 2_000);
+  });
+
   child.unref();
-  return "started";
+  return outcome;
 }

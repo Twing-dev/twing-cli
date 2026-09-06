@@ -62,13 +62,31 @@ func newEnqueueMessage(sessionID, cwd, toolName string, toolInput json.RawMessag
 }
 
 // getNoticesMessage mirrors GetNoticesMessage in packages/core/src/protocol.ts.
+// Cwd and TranscriptPath ride along for session conversation capture: this
+// message already fires on every SessionStart/UserPromptSubmit, so capture
+// needs no new event and no new decision here -- the daemon reads the
+// transcript and decides what to keep.
 type getNoticesMessage struct {
-	Type      string `json:"type"`
-	SessionID string `json:"sessionId"`
+	Type           string `json:"type"`
+	SessionID      string `json:"sessionId"`
+	Cwd            string `json:"cwd,omitempty"`
+	TranscriptPath string `json:"transcriptPath,omitempty"`
 }
 
-func newGetNoticesMessage(sessionID string) getNoticesMessage {
-	return getNoticesMessage{Type: "get_notices", SessionID: sessionID}
+func newGetNoticesMessage(sessionID, cwd, transcriptPath string) getNoticesMessage {
+	return getNoticesMessage{Type: "get_notices", SessionID: sessionID, Cwd: cwd, TranscriptPath: transcriptPath}
+}
+
+// sessionEndMessage mirrors SessionEndMessage in packages/core/src/protocol.ts.
+type sessionEndMessage struct {
+	Type           string `json:"type"`
+	SessionID      string `json:"sessionId"`
+	Cwd            string `json:"cwd"`
+	TranscriptPath string `json:"transcriptPath,omitempty"`
+}
+
+func newSessionEndMessage(sessionID, cwd, transcriptPath string) sessionEndMessage {
+	return sessionEndMessage{Type: "session_end", SessionID: sessionID, Cwd: cwd, TranscriptPath: transcriptPath}
 }
 
 // noticesMessage mirrors NoticesMessage in packages/core/src/protocol.ts.

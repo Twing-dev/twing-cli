@@ -27,6 +27,30 @@ export interface AckMessage {
 export interface GetNoticesMessage {
   type: "get_notices";
   sessionId: string;
+  /** Absolute path to Claude Code's own session transcript JSONL, forwarded
+   * verbatim from the hook payload's `transcript_path` (present on every
+   * event). The *path*, never the content -- `framing.ts` caps a frame at
+   * 10MB and real transcripts run far past that. Optional: an older hook
+   * binary doesn't send it, and the daemon treats its absence as "nothing to
+   * capture", never an error. */
+  transcriptPath?: string;
+  /** The session's cwd, needed to resolve which repo (and therefore which
+   * `.twing/twing.yml` `capture:` switch) governs conversation capture.
+   * `get_notices` never needed it before -- notices are keyed by session id
+   * alone -- so it's optional for the same older-hook reason. */
+  cwd?: string;
+}
+
+/** Hook -> daemon on `SessionEnd`: one last chance to drain whatever the
+ * transcript gained since the last `UserPromptSubmit`. Fire-and-forget, no
+ * reply, exactly like `enqueue` -- capture is watermark-based, so a session
+ * that never reaches an end (or whose end message is lost) is still captured
+ * incrementally along the way. */
+export interface SessionEndMessage {
+  type: "session_end";
+  sessionId: string;
+  cwd: string;
+  transcriptPath?: string;
 }
 
 export interface NoticeItem {
@@ -67,6 +91,30 @@ export interface ShutdownAckMessage {
   type: "shutdown_ack";
 }
 
+/** CLI -> daemon: "which process are you, and what version?" The primitive
+ * every daemon-lifecycle fix is built on -- every liveness check in this
+ * subsystem used to be a bare socket-connect probe answering "is anything
+ * listening?", never "is it the process I just started?", which is how a
+ * daemon from a local checkout could hold the socket for 8+ days while
+ * `twing daemon restart` reported success without touching it. */
+export interface GetIdentityMessage {
+  type: "get_identity";
+}
+
+export interface IdentityMessage {
+  type: "identity";
+  pid: number;
+  /** Snapshotted into a module-level constant at daemon start, deliberately
+   * NOT re-read from disk per call: `npm install -g @twing/cli@latest`
+   * overwrites the very `package.json` `getCliVersion()` reads, so a stale
+   * daemon would otherwise re-read the *new* number and report itself
+   * current. See `daemon/sync.ts`'s `daemonVersion`. */
+  version: string;
+  /** Epoch ms, so a caller can tell a long-lived orphan from a daemon that
+   * just came up under the same pid-comparison check. */
+  startedAt: number;
+}
+
 /** CLI -> daemon (§6): "ask it for the live claim set" for the repo at
  * `cwd`, scoped by the projectId that repo derives to (§8). */
 export interface GetClaimsMessage {
@@ -80,10 +128,10 @@ export interface ClaimsMessage {
   callEdges: CallEdge[];
 }
 
-export type HookToDaemonMessage = EnqueueMessage | GetNoticesMessage;
-export type CliToDaemonMessage = GetClaimsMessage | ShutdownMessage;
+export type HookToDaemonMessage = EnqueueMessage | GetNoticesMessage | SessionEndMessage;
+export type CliToDaemonMessage = GetClaimsMessage | ShutdownMessage | GetIdentityMessage;
 export type DaemonToHookMessage = AckMessage | NoticesMessage;
-export type DaemonToCliMessage = ClaimsMessage | ShutdownAckMessage;
+export type DaemonToCliMessage = ClaimsMessage | ShutdownAckMessage | IdentityMessage;
 export type ProtocolMessage = HookToDaemonMessage | CliToDaemonMessage | DaemonToHookMessage | DaemonToCliMessage;
 
 /**

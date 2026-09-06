@@ -26,6 +26,12 @@ simulator/.workspaces/
 # `mkdir -p data`, bind-mounted into the container, never committed.
 /deploy/docker/data/
 
+# Off-box copies of the production coordinator's SQLite database, pulled
+# down before a risky upgrade. Real identity/design data for every project
+# on the hosted coordinator -- never committed, and named here so a
+# `git add -A` can't sweep one in.
+/deploy/docker/backups-offbox/
+
 # Hook commands in here are absolute, $HOME-specific paths baked in by
 # `twing init` (hookBinaryPath()) -- committing it breaks on every machine
 # whose $HOME differs from whoever committed it last (hit live, 2026-08-11:
