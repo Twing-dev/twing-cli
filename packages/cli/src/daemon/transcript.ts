@@ -55,6 +55,19 @@ export interface CaptureInput {
   sessionsDir?: string;
 }
 
+/**
+ * One opted-in repo this session touched that has a coordinator configured
+ * -- everything the uploader needs to send the capture somewhere, resolved
+ * here because only this side can resolve any of it: the repo root comes
+ * from walking the filesystem, the projectId from that repo's git remote,
+ * and the coordinator from its committed manifest.
+ */
+export interface CaptureTarget {
+  repoRoot: string;
+  projectId: string;
+  serverUrl: string;
+}
+
 export interface CaptureResult {
   /** Why nothing was captured, when nothing was. */
   skipped?: "no-transcript-path" | "transcript-missing" | "disabled" | "nothing-new";
@@ -65,6 +78,12 @@ export interface CaptureResult {
   /** On the pass that turned capture on, the byte offset it reached back
    * to. Absent on every later pass. */
   startedFrom?: number;
+  /** Where this session's capture may be uploaded, across every opted-in
+   * repo it has touched so far -- not only the ones touched this pass, so a
+   * pass that adds no new paths still reports the full set. Empty when the
+   * opted-in repos have no coordinator configured, which is a perfectly
+   * ordinary local-only capture. */
+  targets: CaptureTarget[];
 }
 
 interface CaptureState {
@@ -104,7 +123,7 @@ export function captureSession(input: CaptureInput): Promise<CaptureResult> {
 }
 
 async function runCapture(input: CaptureInput): Promise<CaptureResult> {
-  const empty = (skipped: CaptureResult["skipped"], offset = 0): CaptureResult => ({ skipped, turnsWritten: 0, pathsWritten: 0, offset });
+  const empty = (skipped: CaptureResult["skipped"], offset = 0): CaptureResult => ({ skipped, turnsWritten: 0, pathsWritten: 0, offset, targets: [] });
 
   if (!input.transcriptPath) return empty("no-transcript-path");
 
@@ -136,6 +155,8 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   // reach back over on the pass that finally turns capture on.
   const resolve = createRepoResolver();
   const isOptedIn = createOptedInCache();
+  const projectId = createProjectIdCache();
+  const coordinator = createCoordinatorCache();
   let startedFrom: number | undefined;
 
   if (!state.enabled) {
@@ -185,7 +206,6 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     // `CapturedRecord`'s note. Absolute paths stay too -- they are what a
     // later fold routes on -- but they mean nothing to a server on their
     // own.
-    const projectId = createProjectIdCache();
     const projects: string[] = [];
     for (const candidate of newPaths) {
       const root = resolve(candidate);
@@ -208,6 +228,21 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     await fsp.appendFile(capturePath, header + records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
   }
 
+  // Session-level, over every path seen so far rather than only this pass's
+  // new ones: a pass that captures turns but names no new file must still
+  // report where the capture goes, or an upload would stall waiting for a
+  // path that may never come.
+  const targets: CaptureTarget[] = [];
+  for (const candidate of seenPaths) {
+    const root = resolve(candidate);
+    if (root === undefined || !isOptedIn(root)) continue;
+    if (targets.some((t) => t.repoRoot === root)) continue;
+    const serverUrl = coordinator(root);
+    const id = projectId(root);
+    if (serverUrl === undefined || id === undefined) continue;
+    targets.push({ repoRoot: root, projectId: id, serverUrl });
+  }
+
   await writeState(statePath, {
     transcriptPath: input.transcriptPath,
     offset: readTo,
@@ -220,6 +255,7 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     turnsWritten: records.filter((r) => r.type === "turn").length,
     pathsWritten: newPaths.length,
     offset: readTo,
+    targets,
     ...(startedFrom !== undefined ? { startedFrom } : {}),
   };
 }
@@ -274,6 +310,24 @@ function createProjectIdCache(): (repoRoot: string) => string | undefined {
     }
     cache.set(repoRoot, id);
     return id;
+  };
+}
+
+/** A repo's configured coordinator, memoized per pass. Absent is ordinary:
+ * a repo can opt into capture without ever having run `twing init`, and its
+ * capture simply stays on this machine. */
+function createCoordinatorCache(): (repoRoot: string) => string | undefined {
+  const cache = new Map<string, string | undefined>();
+  return (repoRoot: string): string | undefined => {
+    if (cache.has(repoRoot)) return cache.get(repoRoot);
+    let url: string | undefined;
+    try {
+      url = loadManifestFromFile(twingConfigPath(repoRoot)).coordinator.serverUrl;
+    } catch {
+      url = undefined;
+    }
+    cache.set(repoRoot, url);
+    return url;
   };
 }
 
