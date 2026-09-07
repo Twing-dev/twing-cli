@@ -158,12 +158,24 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `developerId` — not just `sessionId` — see the long comment in
   `server.ts` about why (two worktrees, same origin, same machine,
   different local `user.email`).
-  - **Restart survival** (`daemon-service.ts`): `installDaemonService`,
-    called from `init`, best-effort installs the daemon as a persistent
-    OS-level service — a macOS `launchd` LaunchAgent or a Linux `systemd
-    --user` unit, both installable without elevation — so it comes back on
-    its own after a reboot. Windows has no privilege-free equivalent, so it
-    relies entirely on the fallback below. Either way,
+  - **Lifecycle** (`daemon-service.ts`): the daemon **exits on its own
+    after `IDLE_EXIT_MS` with no client connection** (`daemon/server.ts`,
+    `TWING_DAEMON_IDLE_MS` to override) — it has no work between Claude Code
+    sessions, and bounding its lifetime is what stops a long-lived process
+    going stale across an upgrade and squatting the socket at the old
+    version (GitHub issue #20). `stopAndFlush` pushes the pending claim
+    batch before exiting, so the ≤7s debounce window isn't dropped.
+    There is **no OS-level service** any more — the launchd/systemd install
+    was removed: it never detected a wedged daemon (`Restart=on-failure`
+    and `KeepAlive` fire on *exit*, and a wedged daemon hasn't exited), it
+    was the only privileged/environment-sensitive step in `init` (absent in
+    containers, polkit-gated `loginctl enable-linger`), and it caused the
+    2026-08-26 socket race and the 2026-08-22 launchd bootout staleness bug.
+    `uninstallDaemonService` remains, to clean up machines that still carry
+    a plist/unit from an older `init`. Socket eviction moved with it: only
+    `twing daemon restart` may evict a live holder now (`TWING_DAEMON_EVICT`,
+    set by `spawn-daemon.ts`'s `mayEvict`), which keeps exactly one
+    candidate evictor so auto-start paths can't evict each other in a loop.
     `writeDaemonLaunchMarker` always writes `~/.twing/daemon-launch.json`
     (the `{node, script}` pair needed to start the daemon) first — the one
     thing the Go hook's self-heal (`hook/daemon_launch.go`, called from
@@ -505,13 +517,13 @@ the live incident this was found from.
 `.gitignore` also excludes `dist/`, `*.tsbuildinfo`, the built
 `hook/twing-hook` binary, `openrouter_key.txt`, `simulator/.workspaces/`,
 and the `deploy/`-generated `twing-serve.log`/`.pid`. Everything
-machine-local (`daemon.sock`, `daemon-launch.json`, `gate-overrides.json`,
-the multi-server auth-token config, the OS-service definitions themselves —
-`~/Library/LaunchAgents/dev.twing.daemon.plist` on macOS,
-`~/.config/systemd/user/twing-daemon.service` on Linux) lives under
-`~/.twing/` or the platform's own service-manager directories — never
-inside this repo's working tree, so none of it was ever something
-`.gitignore` needed to name.
+machine-local (`daemon.sock`, `daemon.pid`, `daemon-launch.json`,
+`gate-overrides.json`, the multi-server auth-token config) lives under
+`~/.twing/` — never inside this repo's working tree, so none of it was ever
+something `.gitignore` needed to name. (Older installs may still have a
+`~/Library/LaunchAgents/dev.twing.daemon.plist` or
+`~/.config/systemd/user/twing-daemon.service` from when `init` registered an
+OS-level service; `uninstallDaemonService` removes those.)
 
 License is dual MIT/Apache-2.0 for most packages, but `packages/server` is
 AGPL-3.0-only — check a package's own `package.json` `license` field before

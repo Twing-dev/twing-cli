@@ -28,7 +28,6 @@ import { ensureHookInstalled } from "./install-hook.js";
 import { wireHooks, stripLegacyRepoLocalHooks } from "./wire-hooks.js";
 import { enableInstallEnforcement } from "./enforce-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
-import { installDaemonService, type ServiceInstallResult } from "./daemon-service.js";
 import { requireAuth, isReachableCoordinator } from "./auth.js";
 import { runKeygen } from "./keygen.js";
 import { runJoinGithub } from "./join.js";
@@ -67,9 +66,6 @@ export interface InitOptions {
    *    only fires for repos that already have one)
    *  - no GitHub device flow; auth resolves from `gh auth token` or fails
    *    cleanly (`join.ts`)
-   *  - no `installDaemonService` -- the launchd/systemd install is the one
-   *    privileged, failure-prone step, and it only buys reboot survival,
-   *    which the Go hook's `SessionStart` self-heal already covers
    *  - no global `~/.claude/settings.json` wiring: the committed hook is
    *    already firing for this repo, and adding a global entry would make
    *    both fire for every tool call (see `enforce-hooks.ts`'s guard)
@@ -98,10 +94,9 @@ export interface InitDeps {
   stripLegacyRepoLocalHooks: (repoRoot: string, hookPath: string) => boolean;
   enableInstallEnforcement: (repoRoot: string) => boolean;
   ensureDaemonRunning: () => Promise<"already-running" | "started" | "failed">;
-  installDaemonService: () => Promise<ServiceInstallResult>;
 }
 
-const defaultInitDeps: InitDeps = { ensureHookInstalled, wireHooks, stripLegacyRepoLocalHooks, enableInstallEnforcement, ensureDaemonRunning, installDaemonService };
+const defaultInitDeps: InitDeps = { ensureHookInstalled, wireHooks, stripLegacyRepoLocalHooks, enableInstallEnforcement, ensureDaemonRunning };
 
 export async function runInit(options: InitOptions, deps: InitDeps = defaultInitDeps): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
@@ -240,43 +235,11 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     }
   }
 
-  // §5 restart-survival: best-effort OS-level service install (launchd on
-  // macOS, systemd --user on Linux) so the daemon comes back on its own
-  // after a reboot -- tried FIRST, before the plain spawn fallback below,
-  // so a supported platform's daemon is actually started/held by the
-  // service manager rather than by this process's own detached child.
-  // Found live, 2026-08-26: the reverse order (spawn fallback, then
-  // install-service) raced the two against the same socket -- the fallback
-  // always grabbed it first, so the systemd-managed instance crash-looped
-  // on every single init, permanently unable to hold the socket even
-  // though installDaemonService reported "installed". Never fails init
-  // over this, same philosophy as seedConstraints below. Windows has no
-  // clean privilege-free service equivalent (installDaemonService returns
-  // "unsupported" there); the Go hook's SessionStart self-heal
-  // (hook/daemon_launch.go) is that platform's restart-survival story
-  // instead, same as the spawn fallback below covers it meanwhile.
-  //
-  // Skipped entirely when unattended: this is the one step that needs a
-  // service manager (and on some systems a polkit-gated `loginctl
-  // enable-linger`), it is the step that fails on containers and other
-  // boxes with no systemd user session, and all it buys is reboot
-  // survival -- which the Go hook's SessionStart self-heal already
-  // provides from the launch marker `ensureDaemonRunning` writes below. A
-  // teammate's first Edit should not be trying to register OS services.
-  if (!options.unattended) {
-    const serviceStatus = await deps.installDaemonService();
-    if (serviceStatus === "installed") {
-      console.log("twing init: daemon installed as a persistent OS-level service (survives reboot)");
-    } else if (serviceStatus === "failed") {
-      console.log("twing init: OS-level service install failed (non-fatal) -- falling back to a plain spawn, won't auto-restart after a reboot without a new twing init/session self-heal");
-    } else {
-      console.log("twing init: no persistent OS-level service on this platform -- restart-survival relies on the hook's SessionStart self-heal instead");
-    }
-  }
-
-  // Idempotent regardless of what happened above: a no-op if the service
-  // (or an earlier session) already has the daemon up, the actual startup
-  // path if not.
+  // Idempotent: a no-op if an earlier session already has the daemon up,
+  // the actual startup path if not. Also (re)writes the launch marker, which
+  // is what the Go hook's SessionStart self-heal reads to bring the daemon
+  // back after a reboot or an idle exit -- there is no OS-level service
+  // involved any more, see daemon-service.ts for why that was removed.
   const daemonStatus = await deps.ensureDaemonRunning();
   if (daemonStatus === "failed") {
     // Non-fatal, same as every other optional step here -- but said out

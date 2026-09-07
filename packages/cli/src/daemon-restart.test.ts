@@ -6,13 +6,13 @@
  * process holds the socket now".
  *
  * `DaemonRestartDeps` (init.ts's `InitDeps` convention) stands in for the
- * process signals, `launchctl`/`systemctl` subprocesses and socket round
+ * process signals, detached spawns and socket round
  * trips this can't do for real in a test.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runDaemonRestart, type DaemonRestartDeps, type ServiceKind } from "./daemon-restart.js";
+import { runDaemonRestart, type DaemonRestartDeps } from "./daemon-restart.js";
 import { type DaemonIdentity } from "./daemon-client.js";
 import { captureConsole } from "./test-support.js";
 
@@ -28,7 +28,6 @@ interface FakeWorld {
   diesOnSignal: boolean;
   signals: { pid: number; sig: string }[];
   spawns: number;
-  serviceRestarts: ServiceKind[];
 }
 
 function fakeWorld(overrides: Partial<FakeWorld> = {}): FakeWorld {
@@ -39,22 +38,16 @@ function fakeWorld(overrides: Partial<FakeWorld> = {}): FakeWorld {
     diesOnSignal: true,
     signals: [],
     spawns: 0,
-    serviceRestarts: [],
     ...overrides,
   };
 }
 
-function depsFor(world: FakeWorld, kind: ServiceKind = "none", nextPid = 200): DaemonRestartDeps {
+function depsFor(world: FakeWorld, nextPid = 200): DaemonRestartDeps {
   const start = () => {
     world.holder = { pid: nextPid, version: "0.2.12" };
   };
   return {
     socketPath: "/tmp/fake-twing.sock",
-    serviceKind: () => kind,
-    restartService: (k) => {
-      world.serviceRestarts.push(k);
-      start();
-    },
     identity: async (): Promise<DaemonIdentity | null> => (world.holder && world.answersIdentity ? { ...world.holder, startedAt: 0 } : null),
     requestShutdown: async () => {
       if (!world.holder || !world.answersShutdown) return false;
@@ -90,14 +83,26 @@ test("runDaemonRestart: the happy path reports the pid it actually replaced", as
 
 test("runDaemonRestart: throws instead of reporting success when the same pid still holds the socket", async () => {
   const world = fakeWorld();
-  // A restart that does nothing at all: the service manager claims success,
-  // the socket stays live, and pid 100 never moves. This is the live
-  // incident (GitHub issue #20) in one test.
+  // A restart that does nothing at all: every step reports success, the
+  // socket stays live, and pid 100 never moves. This is the live incident
+  // (GitHub issue #20) in one test -- success is defined as "a *different*
+  // process holds the socket now", never "something does".
+  // Every step *looks* like it worked -- shutdown is acked, the socket goes
+  // quiet, a spawn is reported -- but pid 100 is holding the socket again by
+  // the time we check. Only the final "is it a *different* pid" test can
+  // catch that; asking whether something is listening cannot.
+  let spawned = false;
   const deps: DaemonRestartDeps = {
-    ...depsFor(world, "launchd"),
-    restartService: () => {
-      world.serviceRestarts.push("launchd");
+    ...depsFor(world),
+    requestShutdown: async () => true,
+    // Gone while we wait for it to leave; back once a "replacement" starts.
+    socketAlive: async () => spawned,
+    spawnDaemon: async () => {
+      spawned = true;
+      world.spawns += 1;
+      return "already-running";
     },
+    // ...but it is the same pid 100 that world.holder still names.
   };
 
   await assert.rejects(() => runDaemonRestart(deps), /pid 100 is still the daemon holding .* the restart did not take effect/);
@@ -139,16 +144,6 @@ test("runDaemonRestart: nothing running at all just starts one", async () => {
   assert.equal(world.spawns, 1);
   assert.equal(world.holder?.pid, 200);
   assert.match(logs.join("\n"), /restarted \(pid 200/);
-});
-
-test("runDaemonRestart: with a loaded service, the service manager restarts it and the socket path is left alone", async () => {
-  const world = fakeWorld();
-
-  await captureConsole(() => runDaemonRestart(depsFor(world, "systemd")));
-
-  assert.deepEqual(world.serviceRestarts, ["systemd"]);
-  assert.equal(world.spawns, 0, "a supervised daemon must not also get a detached spawn racing it");
-  assert.deepEqual(world.signals, []);
 });
 
 test("runDaemonRestart: throws when nothing comes back up", async () => {

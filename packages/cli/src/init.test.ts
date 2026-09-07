@@ -61,7 +61,6 @@ function fakeDeps(overrides: Partial<InitDeps> = {}): {
     stripLegacyRepoLocalHooks: { repoRoot: string; hookPath: string }[];
     enableInstallEnforcement: { repoRoot: string }[];
     ensureDaemonRunning: true[];
-    installDaemonService: true[];
   };
 } {
   const calls = {
@@ -70,7 +69,6 @@ function fakeDeps(overrides: Partial<InitDeps> = {}): {
     stripLegacyRepoLocalHooks: [] as { repoRoot: string; hookPath: string }[],
     enableInstallEnforcement: [] as { repoRoot: string }[],
     ensureDaemonRunning: [] as true[],
-    installDaemonService: [] as true[],
   };
   const deps: InitDeps = {
     ensureHookInstalled: async () => {
@@ -92,10 +90,6 @@ function fakeDeps(overrides: Partial<InitDeps> = {}): {
     ensureDaemonRunning: async () => {
       calls.ensureDaemonRunning.push(true);
       return "started";
-    },
-    installDaemonService: async () => {
-      calls.installDaemonService.push(true);
-      return "installed";
     },
     ...overrides,
   };
@@ -121,7 +115,6 @@ test("runInit: full flow with an already-cached PAT -- resolves the server, inst
     assert.ok(logs.some((l) => l.includes("hook installed at /fake/bin/twing-hook")));
     assert.ok(logs.some((l) => l.includes("wired hooks into")));
     assert.ok(logs.some((l) => l.includes("daemon started")));
-    assert.ok(logs.some((l) => l.includes("daemon installed as a persistent OS-level service")));
     assert.ok(logs.some((l) => l.includes("twing init: done")));
 
     const manifest = fs.readFileSync(path.join(repo, ".twing", "twing.yml"), "utf8");
@@ -140,33 +133,6 @@ test("runInit: reports when legacy repo-local hook entries were found and remove
     const repo = tmpRepo();
     const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
     assert.ok(logs.some((l) => l.includes("removed legacy repo-local hook entries")));
-  });
-});
-
-test("runInit: a non-fatal OS-service install failure is logged but doesn't abort init", async () => {
-  const { fetch } = captureFetch(textResponse("twing serve"));
-  const { deps } = fakeDeps({ installDaemonService: async () => "failed" });
-  await withHome(async () => {
-    cacheToken(SERVER_URL, "already-cached-pat");
-    const repo = tmpRepo();
-    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
-    assert.ok(logs.some((l) => l.includes("OS-level service install failed (non-fatal)")));
-    assert.ok(logs.some((l) => l.includes("twing init: done")), "a failed service install must not abort init");
-  });
-});
-
-test("runInit: an unsupported platform (e.g. Windows) logs that self-heal is the fallback, not a failure", async () => {
-  const { fetch } = captureFetch(textResponse("twing serve"));
-  const { deps } = fakeDeps({ installDaemonService: async () => "unsupported" });
-  await withHome(async () => {
-    cacheToken(SERVER_URL, "already-cached-pat");
-    const repo = tmpRepo();
-    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
-    assert.ok(logs.some((l) => l.includes("restart-survival relies on the hook's SessionStart self-heal")));
-    assert.ok(
-      logs.every((l) => !l.includes("failed")),
-      "unsupported is not a failure -- must not be logged as one",
-    );
   });
 });
 
@@ -502,18 +468,13 @@ test("runInit: a second plain `twing init` against an already-cached no-auth ser
 // Driven by the repo-committed bootstrap hook, so nothing may prompt, wait on
 // a browser, or ask for privileges. Each test below pins one of those.
 
-test("runInit --unattended: skips the OS-service install and the global hook wiring", async () => {
+test("runInit --unattended: skips the global hook wiring", async () => {
   const { fetch } = captureFetch(textResponse("twing serve"));
   const { deps, calls } = fakeDeps();
   await withHome(async () => {
     cacheToken(SERVER_URL, "already-cached-pat");
     const repo = tmpRepo(SERVER_URL);
     await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, unattended: true }, deps)));
-
-    // The privileged, container-hostile step -- and the only thing it buys
-    // (reboot survival) is already covered by the hook's SessionStart
-    // self-heal off the launch marker.
-    assert.equal(calls.installDaemonService.length, 0, "must not try to register an OS-level service");
 
     // Global wiring would make BOTH it and the committed hook fire for every
     // tool call: duplicate claims, two gate checks per Edit.

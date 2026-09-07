@@ -36,7 +36,7 @@ function isDaemonRunning(socketPath: string): Promise<boolean> {
  * against a squatter is the realistic case -- was reported as `"started"`
  * to `init` and to `daemon restart` alike, and nobody found out until the
  * next symptom, days later. */
-export async function ensureDaemonRunning(): Promise<"already-running" | "started" | "failed"> {
+export async function ensureDaemonRunning(options: { mayEvict?: boolean } = {}): Promise<"already-running" | "started" | "failed"> {
   writeDaemonLaunchMarker();
   const socketPath = defaultSocketPath();
   if (await isDaemonRunning(socketPath)) return "already-running";
@@ -44,6 +44,10 @@ export async function ensureDaemonRunning(): Promise<"already-running" | "starte
   const child = spawn(process.execPath, [daemonMainPath()], {
     detached: true,
     stdio: "ignore",
+    // `mayEvict` is only ever set by `twing daemon restart` -- see
+    // `EVICTION_ENV` in daemon/server.ts for why the capability belongs to
+    // that one explicitly-invoked path and not to any auto-start path.
+    env: options.mayEvict ? { ...process.env, TWING_DAEMON_EVICT: "1" } : process.env,
   });
 
   // Watch just long enough to catch a startup failure. A healthy daemon

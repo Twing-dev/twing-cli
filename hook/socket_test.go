@@ -72,4 +72,24 @@ func TestCacheCheck_NoDaemon_ReturnsZeroValue(t *testing.T) {
 	if result.Items != nil || result.VersionMismatch != nil {
 		t.Errorf("result = %+v, want the zero value when nothing is listening", result)
 	}
+	// The signal handleCacheCheck self-heals on: nothing listening is the one
+	// failure a respawn actually fixes, and it must be distinguishable from a
+	// live daemon that simply had nothing cached.
+	if !result.DaemonUnreachable {
+		t.Error("DaemonUnreachable = false, want true when nothing is listening")
+	}
+}
+
+func TestCacheCheck_LiveDaemonWithNothingCached_IsNotReportedUnreachable(t *testing.T) {
+	// The distinction that matters: an empty answer from a healthy daemon
+	// must not trigger a respawn, or every quiet prompt would start one.
+	fakeDaemon(t, noticesMessage{Type: "notices"})
+
+	result := cacheCheck("sess1", "", "")
+	if len(result.Items) != 0 {
+		t.Fatalf("Items = %+v, want none", result.Items)
+	}
+	if result.DaemonUnreachable {
+		t.Error("DaemonUnreachable = true for a daemon that answered")
+	}
 }

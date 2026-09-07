@@ -84,6 +84,13 @@ func sendSessionEnd(sessionID, cwd, transcriptPath string) {
 type cacheCheckResult struct {
 	Items           []noticeItem
 	VersionMismatch *versionMismatchInfo
+	// DaemonUnreachable distinguishes "the daemon isn't there" from "the
+	// daemon had nothing for us" — both of which are otherwise a zero-value
+	// result. The dial below is the only liveness signal on the
+	// UserPromptSubmit path, and it is already being paid for, so reporting
+	// it lets the caller self-heal a daemon that died mid-session instead of
+	// waiting for the next SessionStart. See handleCacheCheck in main.go.
+	DaemonUnreachable bool
 }
 
 // cacheCheck asks the daemon for anything cached for this session. Any
@@ -97,7 +104,10 @@ func cacheCheck(sessionID, cwd, transcriptPath string) cacheCheckResult {
 	}
 	conn, err := net.DialTimeout("unix", path, dialAndWriteTimeout)
 	if err != nil {
-		return cacheCheckResult{}
+		// Nothing listening: the one failure that a respawn actually fixes.
+		// Every other error below is a live daemon behaving oddly, which
+		// starting a second one would not improve.
+		return cacheCheckResult{DaemonUnreachable: true}
 	}
 	defer conn.Close()
 

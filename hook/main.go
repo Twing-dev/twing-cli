@@ -48,11 +48,8 @@ func main() {
 	case "PostToolUse":
 		handlePostToolUse(payload)
 	case "SessionStart":
-		// Restart-survival fallback for machines with no persistent OS-level
-		// daemon service installed (see daemon-service.ts) or where the
-		// service died independently of a reboot -- see daemon_launch.go.
-		// Only here, not on every UserPromptSubmit, to keep this off the
-		// higher-frequency path.
+		// The daemon exits on its own once idle, so a new session routinely
+		// needs to start one -- see daemon_launch.go.
 		selfHealDaemon()
 		handleCacheCheck(payload)
 	case "UserPromptSubmit":
@@ -87,6 +84,16 @@ func handlePostToolUse(payload hookPayload) {
 
 func handleCacheCheck(payload hookPayload) {
 	result := cacheCheck(payload.SessionID, payload.Cwd, payload.TranscriptPath)
+
+	// A daemon that died mid-session (crash, idle-exit racing a long pause,
+	// an upgrade) used to stay dead until the next SessionStart, silently
+	// dropping capture the whole time. The dial inside cacheCheck above is
+	// already the liveness probe -- acting on its result costs nothing extra
+	// on the common path, where the daemon answers and this is skipped.
+	// selfHealDaemon is itself a no-op when something is listening.
+	if result.DaemonUnreachable {
+		selfHealDaemon()
+	}
 
 	messages := make([]string, 0, len(result.Items)+1)
 	for _, item := range result.Items {
