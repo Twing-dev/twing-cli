@@ -93,7 +93,23 @@ function wireDesignGate(settingsPath: string, settings: ClaudeSettings, hookPath
  * of ours in it -- most repos hit this path exactly zero times. Returns
  * true if anything was actually removed. */
 export function stripLegacyRepoLocalHooks(repoRoot: string, hookPath: string): boolean {
-  const settingsPath = path.join(repoRoot, ".claude", "settings.json");
+  return stripHooksByCommand(path.join(repoRoot, ".claude", "settings.json"), hookPath);
+}
+
+/** The inverse of `wireHooks`: removes twing's own entries from the
+ * machine-global `~/.claude/settings.json`. Used by `twing uninstall` --
+ * leaving them behind would point Claude Code at a binary that is about to
+ * be deleted, so every tool call would try to run something that isn't
+ * there. Matches by exact command, so another tool's hooks (and any
+ * unrelated settings) are untouched. Returns true if anything was removed. */
+export function unwireHooks(hookPath: string): boolean {
+  return stripHooksByCommand(globalSettingsPath(), hookPath);
+}
+
+/** Drops every hook entry whose command is exactly `hookPath`, across every
+ * event name, and prunes entries left with no hooks. Silent no-op when the
+ * file doesn't exist or has nothing of ours in it. */
+function stripHooksByCommand(settingsPath: string, hookPath: string): boolean {
   const settings = readClaudeSettings(settingsPath);
   if (!settings.hooks) return false;
 

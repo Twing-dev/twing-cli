@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { wireHooks, stripLegacyRepoLocalHooks } from "./wire-hooks.js";
+import { wireHooks, stripLegacyRepoLocalHooks, unwireHooks } from "./wire-hooks.js";
 import { bootstrapHookScript } from "./enforce-hooks.js";
 
 interface HookCommand {
@@ -131,4 +131,41 @@ test("stripLegacyRepoLocalHooks: never removes an install-enforcement hook entry
   const settings: ClaudeSettings = JSON.parse(fs.readFileSync(repoSettingsPath, "utf8"));
   assert.deepEqual(settings.hooks?.PostToolUse, [], "the legacy entry's matcher block is now empty");
   assert.deepEqual(settings.hooks?.PreToolUse, [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }], "the enforcement hook must be untouched, byte-for-byte");
+});
+
+// --- unwireHooks (twing uninstall) -------------------------------------------
+
+test("unwireHooks: removes every twing entry from ~/.claude/settings.json and returns true", () => {
+  withIsolatedHome(() => {
+    wireHooks(HOOK_PATH);
+    const changed = unwireHooks(HOOK_PATH);
+    assert.equal(changed, true);
+
+    const settings = readSettings();
+    const remaining = Object.values(settings.hooks ?? {}).flat();
+    assert.deepEqual(remaining, [], "leaving entries behind would point Claude Code at a deleted binary");
+  });
+});
+
+test("unwireHooks: leaves another tool's hooks and unrelated settings untouched", () => {
+  withIsolatedHome(() => {
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(
+      settingsPath(),
+      JSON.stringify({ someOtherTopLevelSetting: true, hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "some-other-tool" }] }] } }),
+    );
+    wireHooks(HOOK_PATH);
+    unwireHooks(HOOK_PATH);
+
+    const settings = readSettings();
+    assert.equal(settings.someOtherTopLevelSetting, true);
+    const remaining = Object.values(settings.hooks ?? {}).flat().flatMap((e) => e.hooks.map((h) => h.command));
+    assert.deepEqual(remaining, ["some-other-tool"]);
+  });
+});
+
+test("unwireHooks: no-op (returns false) when nothing is wired", () => {
+  withIsolatedHome(() => {
+    assert.equal(unwireHooks(HOOK_PATH), false);
+  });
 });

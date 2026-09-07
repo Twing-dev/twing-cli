@@ -2,6 +2,7 @@
 import { startDaemon } from "./daemon/server.js";
 import { defaultSocketPath, authFetch, computeDeveloperId, readConfig } from "@twing/core";
 import { runInit } from "./init.js";
+import { runUninstall } from "./uninstall.js";
 import { getCliVersion } from "./version.js";
 import { runDaemonRestart } from "./daemon-restart.js";
 import { runLogin } from "./login.js";
@@ -75,6 +76,7 @@ function printUsage(): void {
       "Usage:",
       "  twing --version | -v",
       "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]",
+      "  twing uninstall [--dry-run]",
       "  twing login [--server <url>] [--token <pat>]",
       "  twing keygen --invite <code> [--server <url>] [--label <email>]",
       "  twing whoami [--server <url>] [--show-token]",
@@ -405,6 +407,9 @@ async function main(): Promise<void> {
         unattended: flags.unattended === "true",
         cwd: process.cwd(),
       });
+      return;
+    case "uninstall":
+      await runUninstall({ dryRun: flags["dry-run"] === "true" });
       return;
     case "login":
       await runLogin({ server: flags.server, token: flags.token, cwd: process.cwd() });
