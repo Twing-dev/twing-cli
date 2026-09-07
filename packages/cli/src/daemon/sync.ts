@@ -94,6 +94,25 @@ export class Syncer {
     clearInterval(this.pollTimer);
   }
 
+  /** Stop the timers, then push whatever the last debounce window
+   * accumulated. `stop()` alone drops it: claims land in a pending batch and
+   * only reach the coordinator on the next FLUSH_INTERVAL_MS tick, so
+   * anything enqueued since the previous tick dies with the process.
+   *
+   * Rare enough to go unnoticed while the daemon only exited on an explicit
+   * shutdown; routine once it also exits on idle, which is why this exists.
+   * Awaited by both exit paths -- never fire-and-forget, or the process can
+   * exit mid-request and lose exactly the batch this is meant to save. */
+  async stopAndFlush(): Promise<void> {
+    this.stop();
+    try {
+      await this.flush();
+    } catch {
+      // Best-effort, same as every other flush: an unreachable coordinator
+      // on the way out must not stop the daemon from exiting cleanly.
+    }
+  }
+
   /** Learns/updates which coordinator `projectId` syncs to. A no-op
    * re-registration (same server) is cheap and expected on every enqueue;
    * re-registering with a *different* server for a projectId that already

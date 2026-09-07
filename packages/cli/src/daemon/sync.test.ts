@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Syncer } from "./sync.js";
 import { getCliVersion } from "../version.js";
-import { withMockFetch, jsonResponse } from "../test-support.js";
+import { withMockFetch, jsonResponse, withHome, cacheToken } from "../test-support.js";
 
 /** pollVersions is private -- this is whitebox testing of the class's own
  * internals rather than exercising the 5s real timer, same reasoning as
@@ -65,4 +65,57 @@ test("Syncer.versionMismatch: a failed /v1/version check is logged and skipped, 
   } finally {
     syncer.stop();
   }
+});
+
+// --- stopAndFlush --------------------------------------------------------
+//
+// Claims sit in a pending batch until the next FLUSH_INTERVAL_MS tick, so
+// exiting without a final flush silently drops everything enqueued since
+// the previous one. That was survivable while the daemon only exited on an
+// explicit shutdown; idle-exit makes it a routine path.
+
+test("Syncer.stopAndFlush: pushes the pending batch instead of dropping it", async () => {
+  const serverUrl = "http://localhost:9999";
+  await withHome(async () => {
+    cacheToken(serverUrl, "pat");
+    const syncer = new Syncer();
+    syncer.registerProjectServer("proj-1", serverUrl);
+    syncer.enqueue(
+      { projectId: "proj-1", developerId: "dev@example.com", sessionId: "s1", symbolId: "src/a.ts::f", stage: "firm", ts: Date.now(), ttlMs: 60_000 } as never,
+      [],
+    );
+
+    const urls: string[] = [];
+    const mockFetch = (async (url: string | URL) => {
+      urls.push(String(url));
+      return jsonResponse({ findings: [] });
+    }) as typeof fetch;
+
+    await withMockFetch(mockFetch, () => syncer.stopAndFlush());
+    assert.ok(
+      urls.some((u) => /\/v1\/claims$/.test(u)),
+      "the batch enqueued since the last tick must reach the coordinator before the process exits",
+    );
+  });
+});
+
+test("Syncer.stopAndFlush: a failing coordinator still lets the daemon exit", async () => {
+  const serverUrl = "http://localhost:9999";
+  await withHome(async () => {
+    cacheToken(serverUrl, "pat");
+    const syncer = new Syncer();
+    syncer.registerProjectServer("proj-1", serverUrl);
+    syncer.enqueue(
+      { projectId: "proj-1", developerId: "dev@example.com", sessionId: "s1", symbolId: "src/a.ts::f", stage: "firm", ts: Date.now(), ttlMs: 60_000 } as never,
+      [],
+    );
+
+    const throwingFetch = (async () => {
+      throw new Error("coordinator unreachable");
+    }) as typeof fetch;
+
+    // Must resolve, not reject: shutdown can't be held hostage by a server
+    // that happens to be down.
+    await withMockFetch(throwingFetch, () => syncer.stopAndFlush());
+  });
 });

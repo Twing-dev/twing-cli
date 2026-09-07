@@ -36,6 +36,14 @@ export interface DaemonHandle {
  * launchd's `KeepAlive: true` would happily feed that loop. */
 const SUPERVISED_ENV = "TWING_DAEMON_SUPERVISED";
 
+/** How long the daemon sits with no client connection before exiting --
+ * see `armIdleExit` in `startDaemon` for why it exits at all. Generous
+ * relative to a session's own rhythm (the hook connects on every
+ * UserPromptSubmit and every Edit/Write), so this only fires between
+ * sessions, never inside one. `TWING_DAEMON_IDLE_MS` overrides it, mainly
+ * so tests don't have to wait half an hour. */
+const IDLE_EXIT_MS = Number(process.env.TWING_DAEMON_IDLE_MS ?? 30 * 60 * 1000);
+
 /** Written beside the socket (so a `TWING_SOCK` override keeps its own
  * pidfile) at startup, removed on clean shutdown. Its job is to make a
  * future squatter identifiable even if it stops answering the socket at
@@ -202,7 +210,8 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
   // daemon to exit cleanly regardless of how it was started (foreground,
   // spawn-daemon.ts's detached child, or an installed OS service).
   const onShutdownRequested = async (): Promise<void> => {
-    syncer.stop();
+    clearTimeout(idleTimer);
+    await syncer.stopAndFlush();
     server.close(() => {
       removePidFile(socketPath);
       if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
@@ -210,7 +219,34 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
     });
   };
 
+  // Idle-exit. The daemon has no work between Claude Code sessions: claims
+  // only arrive from hooks, notices are only consumed at SessionStart/
+  // UserPromptSubmit, and session_end drains. So a daemon nobody has talked
+  // to in IDLE_EXIT_MS is pure liability -- it is the long-lived process
+  // that goes stale across a `twing-cli` upgrade and then squats the socket
+  // at the old version (GitHub issue #20's 8-day orphan). Bounding its
+  // lifetime makes that failure mode structurally impossible rather than
+  // something eviction has to clean up after.
+  //
+  // Nothing is lost by exiting: the Go hook's self-heal
+  // (hook/daemon_launch.go) starts a fresh daemon from the launch marker
+  // the moment one is needed again, and every piece of state that matters
+  // across a restart is already durable -- transcript watermarks are on
+  // disk, notice cursors re-fetch, claims are TTL'd, and the pending batch
+  // is flushed by `stopAndFlush` above.
+  let idleTimer: ReturnType<typeof setTimeout>;
+  const armIdleExit = (): void => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => void onShutdownRequested(), IDLE_EXIT_MS);
+    // Never hold the event loop open on the idle timer's own account: it
+    // exists to end the process, not to keep it alive.
+    idleTimer.unref?.();
+  };
+
   const server = net.createServer((conn) => {
+    // Any client at all counts as activity -- a connection is what a live
+    // session looks like from here, regardless of which message it carries.
+    armIdleExit();
     const decoder = new FrameDecoder();
 
     conn.on("data", (chunk) => {
@@ -247,19 +283,26 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
   // stale bookkeeping the identity work exists to stop trusting.
   writePidFile(socketPath);
 
+  // Start the clock now, not on the first connection: a daemon spawned by a
+  // session that then dies before ever connecting must still exit on its
+  // own rather than linger forever.
+  armIdleExit();
+
   return {
     socketPath,
     claims,
     callEdges,
-    close: () =>
-      new Promise<void>((resolve) => {
-        syncer.stop();
+    close: async () => {
+      clearTimeout(idleTimer);
+      await syncer.stopAndFlush();
+      await new Promise<void>((resolve) => {
         server.close(() => {
           removePidFile(socketPath);
           if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
           resolve();
         });
-      }),
+      });
+    },
   };
 }
 
