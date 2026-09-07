@@ -55,15 +55,28 @@ const REACHABILITY_ROUTE = { match: new RegExp(`^${SERVER_URL.replace(/[.*+?^${}
 
 function fakeDeps(overrides: Partial<InitDeps> = {}): {
   deps: InitDeps;
-  calls: { wireHooks: { hookPath: string }[]; stripLegacyRepoLocalHooks: { repoRoot: string; hookPath: string }[]; enableInstallEnforcement: { repoRoot: string }[] };
+  calls: {
+    ensureHookInstalled: true[];
+    wireHooks: { hookPath: string }[];
+    stripLegacyRepoLocalHooks: { repoRoot: string; hookPath: string }[];
+    enableInstallEnforcement: { repoRoot: string }[];
+    ensureDaemonRunning: true[];
+    installDaemonService: true[];
+  };
 } {
   const calls = {
+    ensureHookInstalled: [] as true[],
     wireHooks: [] as { hookPath: string }[],
     stripLegacyRepoLocalHooks: [] as { repoRoot: string; hookPath: string }[],
     enableInstallEnforcement: [] as { repoRoot: string }[],
+    ensureDaemonRunning: [] as true[],
+    installDaemonService: [] as true[],
   };
   const deps: InitDeps = {
-    ensureHookInstalled: async () => "/fake/bin/twing-hook",
+    ensureHookInstalled: async () => {
+      calls.ensureHookInstalled.push(true);
+      return "/fake/bin/twing-hook";
+    },
     wireHooks: (hookPath) => {
       calls.wireHooks.push({ hookPath });
       return true;
@@ -76,8 +89,14 @@ function fakeDeps(overrides: Partial<InitDeps> = {}): {
       calls.enableInstallEnforcement.push({ repoRoot });
       return true;
     },
-    ensureDaemonRunning: async () => "started",
-    installDaemonService: async () => "installed",
+    ensureDaemonRunning: async () => {
+      calls.ensureDaemonRunning.push(true);
+      return "started";
+    },
+    installDaemonService: async () => {
+      calls.installDaemonService.push(true);
+      return "installed";
+    },
     ...overrides,
   };
   return { deps, calls };
@@ -474,6 +493,78 @@ test("runInit: a second plain `twing init` against an already-cached no-auth ser
     assert.ok(
       calls.some((c) => /\/v1\/constraints\/seed$/.test(c.url)),
       "the sticky no-auth flag must be read back so registration still runs without --no-auth on the re-run",
+    );
+  });
+});
+
+// --- --unattended (zero-touch onboarding) -------------------------------------
+//
+// Driven by the repo-committed bootstrap hook, so nothing may prompt, wait on
+// a browser, or ask for privileges. Each test below pins one of those.
+
+test("runInit --unattended: skips the OS-service install and the global hook wiring", async () => {
+  const { fetch } = captureFetch(textResponse("twing serve"));
+  const { deps, calls } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const repo = tmpRepo(SERVER_URL);
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, unattended: true }, deps)));
+
+    // The privileged, container-hostile step -- and the only thing it buys
+    // (reboot survival) is already covered by the hook's SessionStart
+    // self-heal off the launch marker.
+    assert.equal(calls.installDaemonService.length, 0, "must not try to register an OS-level service");
+
+    // Global wiring would make BOTH it and the committed hook fire for every
+    // tool call: duplicate claims, two gate checks per Edit.
+    assert.equal(calls.wireHooks.length, 0, "must not add global wiring alongside the committed hook");
+  });
+});
+
+test("runInit --unattended: still installs the hook binary and starts the daemon", async () => {
+  const { fetch } = captureFetch(textResponse("twing serve"));
+  const { deps, calls } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const repo = tmpRepo(SERVER_URL);
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, unattended: true }, deps)));
+
+    // Both are unprivileged, and without the daemon capture/symbol-conflict
+    // detection/notice delivery all silently no-op -- a half-working install.
+    assert.equal(calls.ensureHookInstalled.length, 1, "the binary is the whole point of the bootstrap");
+    assert.equal(calls.ensureDaemonRunning.length, 1, "the daemon is unprivileged and carries half the product");
+  });
+});
+
+test("runInit --unattended: never writes a git-tracked file, even as an admin", async () => {
+  const repo = tmpRepo();
+  addGithubRemote(repo, "acme", "widgets");
+  const projectId = computeProjectId(repo);
+  const { fetch } = routedFetch([
+    REACHABILITY_ROUTE,
+    { match: /\/v1\/auth\/whoami$/, response: jsonResponse({ developerId: "me", projects: [{ projectId, orgId: "", role: "admin" }] }) },
+    { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) },
+  ]);
+  const { deps, calls } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, unattended: true }, deps)));
+    assert.equal(
+      calls.enableInstallEnforcement.length,
+      0,
+      "committing an enforcement hook is an admin's deliberate act, not something a teammate's first Edit does to their working tree",
+    );
+  });
+});
+
+test("runInit --unattended: throws rather than prompting when no coordinator is configured", async () => {
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo(); // no committed .twing/twing.yml, no --server
+    await assert.rejects(
+      () => runInit({ cwd: repo, unattended: true }, deps),
+      /no coordinator configured/,
+      "must fail loudly rather than hang on a prompt nobody can answer",
     );
   });
 });

@@ -9,7 +9,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { postJoinViaGithub, JOIN_VIA_GITHUB_MAX_ATTEMPTS } from "./join.js";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { postJoinViaGithub, githubTokenFromGhCli, JOIN_VIA_GITHUB_MAX_ATTEMPTS } from "./join.js";
 import { withMockFetch, captureFetchSequence, jsonResponse, captureConsole } from "./test-support.js";
 
 const SERVER_URL = "http://localhost:9999";
@@ -47,4 +50,50 @@ test("postJoinViaGithub: a 4xx (e.g. identity collision) is not retried -- surfa
   assert.equal(calls.length, 1, "a real rejection shouldn't be retried three times before surfacing");
   assert.equal(result.res.status, 400);
   assert.match(result.result.error ?? "", /already exists/);
+});
+
+// --- githubTokenFromGhCli (non-interactive auth) ------------------------------
+//
+// The whole of twing's zero-touch auth story: reuse a credential the machine
+// already has instead of making a human approve in a browser. Exercised
+// against a real `gh` on PATH (a stub), since the point is the subprocess
+// call itself.
+
+/** A PATH whose `gh` is a stub behaving as `behavior` describes. */
+function pathWithGh(behavior: "token" | "unauthenticated" | "missing"): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-join-gh-"));
+  if (behavior === "token") {
+    fs.writeFileSync(path.join(dir, "gh"), "#!/bin/sh\nprintf '%s\\n' 'gho_stubtoken123'\n", { mode: 0o755 });
+  } else if (behavior === "unauthenticated") {
+    // What a real `gh auth token` does when logged out: fails, message on stderr.
+    fs.writeFileSync(path.join(dir, "gh"), "#!/bin/sh\necho 'not logged in' >&2\nexit 1\n", { mode: 0o755 });
+  }
+  // "missing" -> the directory has no `gh` at all.
+  return dir; // deliberately NOT prepended to the real PATH: an isolated PATH
+}
+
+function withPath<T>(value: string, run: () => T): T {
+  const original = process.env.PATH;
+  process.env.PATH = value;
+  try {
+    return run();
+  } finally {
+    if (original === undefined) delete process.env.PATH;
+    else process.env.PATH = original;
+  }
+}
+
+test("githubTokenFromGhCli: returns the token when gh is installed and authenticated", () => {
+  const token = withPath(pathWithGh("token"), () => githubTokenFromGhCli());
+  assert.equal(token, "gho_stubtoken123", "must trim the trailing newline gh prints");
+});
+
+test("githubTokenFromGhCli: undefined when gh is present but not authenticated", () => {
+  const token = withPath(pathWithGh("unauthenticated"), () => githubTokenFromGhCli());
+  assert.equal(token, undefined, "a logged-out gh is the common case, not an error to throw on");
+});
+
+test("githubTokenFromGhCli: undefined when gh isn't installed at all", () => {
+  const token = withPath(pathWithGh("missing"), () => githubTokenFromGhCli());
+  assert.equal(token, undefined, "must never throw -- the device flow is the fallback");
 });

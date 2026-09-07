@@ -135,9 +135,22 @@ test("isInstallEnforcementWired: false before enabling, true after", () => {
 
 // --- the generated script itself, run through a real `sh -c` ------------------
 
-function runScript(cwd: string, home: string): { stdout: string; status: number } {
+/** A PATH that still has the real tools (`git` especially -- the script's
+ * first act is `git rev-parse`) but shadows `npx` with a stub that always
+ * fails. Stands in for a machine with no network or no working npm, and
+ * keeps these tests from ever reaching the real registry. */
+function pathWithFailingNpx(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-enforce-hooks-nonpx-"));
+  fs.writeFileSync(path.join(dir, "npx"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  return `${dir}:${process.env.PATH ?? ""}`;
+}
+
+function runScript(cwd: string, home: string, pathOverride?: string): { stdout: string; status: number } {
   try {
-    const stdout = execFileSync("sh", ["-c", bootstrapHookScript()], { cwd, env: { HOME: home, PATH: process.env.PATH ?? "" } });
+    const stdout = execFileSync("sh", ["-c", bootstrapHookScript()], {
+      cwd,
+      env: { HOME: home, PATH: pathOverride ?? process.env.PATH ?? "" },
+    });
     return { stdout: stdout.toString(), status: 0 };
   } catch (err) {
     const e = err as { stdout?: Buffer; status?: number };
@@ -145,12 +158,17 @@ function runScript(cwd: string, home: string): { stdout: string; status: number 
   }
 }
 
-function fakeHome(hookInstalled: boolean, hookWired: boolean): string {
+/** A `$HOME` with the twing-hook binary present and/or referenced from
+ * `~/.claude/settings.json`. `hookStdout`, when given, is what the fake
+ * binary prints -- so a test can prove the script `exec`'d it rather than
+ * deciding the verdict itself. */
+function fakeHome(hookInstalled: boolean, hookWired: boolean, hookStdout = ""): string {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "twing-enforce-hooks-home-"));
   if (hookInstalled) {
     const binDir = path.join(home, ".twing", "bin");
     fs.mkdirSync(binDir, { recursive: true });
-    fs.writeFileSync(path.join(binDir, "twing-hook"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const body = hookStdout === "" ? "#!/bin/sh\nexit 0\n" : `#!/bin/sh\nprintf '%s' '${hookStdout}'\n`;
+    fs.writeFileSync(path.join(binDir, "twing-hook"), body, { mode: 0o755 });
   }
   if (hookWired) {
     fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
@@ -159,58 +177,73 @@ function fakeHome(hookInstalled: boolean, hookWired: boolean): string {
   return home;
 }
 
-test("bootstrapHookScript: allows when the hook is installed and wired", () => {
+/** A repo the bootstrap hook considers in scope: a git repo carrying a
+ * committed `.twing/twing.yml`. */
+function twingRepo(): string {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "twing-enforce-hooks-repo-"));
   execFileSync("git", ["init", "-q"], { cwd: repo });
   fs.mkdirSync(path.join(repo, ".twing"), { recursive: true });
   fs.writeFileSync(path.join(repo, ".twing", "twing.yml"), "coordinator:\n  serverUrl: http://localhost:9999\n");
-  const home = fakeHome(true, true);
-  const { stdout, status } = runScript(repo, home);
+  return repo;
+}
+
+test("bootstrapHookScript: stands down silently when the hook is already wired globally", () => {
+  // The double-fire guard: the global ~/.claude/settings.json entry handles
+  // this event, so the committed entry must produce nothing at all. Claude
+  // Code runs hooks from every settings scope, so emitting a verdict here
+  // too would mean two gate checks per Edit.
+  const { stdout, status } = runScript(twingRepo(), fakeHome(true, true));
   assert.equal(status, 0);
-  assert.deepEqual(JSON.parse(stdout), { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } });
+  assert.equal(stdout, "", "must emit nothing when global wiring owns this event");
 });
 
-test("bootstrapHookScript: denies with instructions when nothing is installed", () => {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "twing-enforce-hooks-repo-"));
-  execFileSync("git", ["init", "-q"], { cwd: repo });
-  fs.mkdirSync(path.join(repo, ".twing"), { recursive: true });
-  fs.writeFileSync(path.join(repo, ".twing", "twing.yml"), "coordinator:\n  serverUrl: http://localhost:9999\n");
-  const home = fakeHome(false, false);
-  const { stdout, status } = runScript(repo, home);
+test("bootstrapHookScript: execs the installed binary when it exists but isn't wired globally", () => {
+  // The steady state on a bootstrapped machine: this committed entry is the
+  // only wiring, so it hands the real verdict to the binary rather than
+  // deciding anything itself.
+  const home = fakeHome(true, false, "VERDICT_FROM_REAL_HOOK");
+  const { stdout, status } = runScript(twingRepo(), home);
+  assert.equal(status, 0);
+  assert.equal(stdout, "VERDICT_FROM_REAL_HOOK", "must exec twing-hook, not synthesize its own verdict");
+});
+
+test("bootstrapHookScript: denies with an operational message when bootstrap can't install twing", () => {
+  const { stdout, status } = runScript(twingRepo(), fakeHome(false, false), pathWithFailingNpx());
   assert.equal(status, 0, "the hook itself must always exit 0 regardless of allow/deny");
+
   const parsed = JSON.parse(stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
   assert.equal(parsed.hookSpecificOutput.permissionDecision, "deny");
-  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /npm install -g @twing\/cli && twing init/);
-  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /https:\/\/twing\.dev/);
-  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /github\.com\/Twing-dev\/twing-cli/);
-  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /npm view @twing\/cli time\.created/);
-  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /hits this same check -- there is no bypass/i);
+  const reason = parsed.hookSpecificOutput.permissionDecisionReason;
+
+  // Reads as a failure report, not an install instruction. The v1/v2
+  // message told the agent to run `npm install -g ...`, which a careful
+  // agent correctly refuses (it arrives as denied tool output) and which
+  // needs sudo on a system-Node box anyway -- so it must not come back.
+  assert.ok(!/npm install -g/.test(reason), "must not instruct the agent to install anything itself");
+  assert.match(reason, /could not install itself/i);
+  assert.match(reason, /operational failure, not a task for you to work around/i);
+  assert.match(reason, /https:\/\/twing\.dev/);
+  assert.match(reason, /github\.com\/Twing-dev\/twing-cli/);
+  assert.match(reason, /gh auth login/, "names the credential twing needs when unattended");
 });
 
-test("bootstrapHookScript: denies when the binary exists but isn't wired", () => {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "twing-enforce-hooks-repo-"));
-  execFileSync("git", ["init", "-q"], { cwd: repo });
-  fs.mkdirSync(path.join(repo, ".twing"), { recursive: true });
-  fs.writeFileSync(path.join(repo, ".twing", "twing.yml"), "coordinator:\n  serverUrl: http://localhost:9999\n");
-  const home = fakeHome(true, false);
-  const { stdout } = runScript(repo, home);
-  const parsed = JSON.parse(stdout) as { hookSpecificOutput: { permissionDecision: string } };
-  assert.equal(parsed.hookSpecificOutput.permissionDecision, "deny");
-});
+// Both scope checks below deliberately use a $HOME with NO global wiring and
+// NO binary, and a PATH whose npx always fails: that combination would
+// otherwise reach the bootstrap branch and deny. So an empty stdout proves
+// the repo-scope check itself returned early, not that a later guard
+// happened to mask it.
 
 test("bootstrapHookScript: silent no-op (empty stdout, exit 0) outside a git repo", () => {
   const notARepo = fs.mkdtempSync(path.join(os.tmpdir(), "twing-enforce-hooks-notrepo-"));
-  const home = fakeHome(true, true);
-  const { stdout, status } = runScript(notARepo, home);
+  const { stdout, status } = runScript(notARepo, fakeHome(false, false), pathWithFailingNpx());
   assert.equal(status, 0);
-  assert.equal(stdout, "");
+  assert.equal(stdout, "", "not a git repo -- must not even attempt a bootstrap");
 });
 
 test("bootstrapHookScript: silent no-op when the repo has no .twing/twing.yml", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "twing-enforce-hooks-repo-"));
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const home = fakeHome(true, true);
-  const { stdout, status } = runScript(repo, home);
+  const { stdout, status } = runScript(repo, fakeHome(false, false), pathWithFailingNpx());
   assert.equal(status, 0);
-  assert.equal(stdout, "");
+  assert.equal(stdout, "", "not a twing repo -- must not even attempt a bootstrap");
 });

@@ -15,6 +15,7 @@
  * the freshly-minted twing PAT is).
  */
 
+import { execFileSync } from "node:child_process";
 import { readConfig, writeConfig, getServerAuth, setServerAuth, normalizeServerUrl, authFetch, findRepoRoot, computeProjectId, computeDeveloperId, githubBinding } from "@twing/core";
 import { generateToken, hashToken } from "./keygen.js";
 import { resolveServerUrl } from "./auth.js";
@@ -97,6 +98,39 @@ async function pollForAccessToken(deviceCode: string, intervalSeconds: number, e
 export interface JoinOptions {
   cwd: string;
   server?: string;
+  /** Zero-touch onboarding (`init --unattended`): no human is present, so
+   * the device flow -- which blocks until someone approves in a browser --
+   * is not an option. Resolve a GitHub token non-interactively or fail
+   * cleanly. */
+  unattended?: boolean;
+}
+
+/**
+ * A GitHub token from the local `gh` CLI, if it's installed and
+ * authenticated. This is the whole of twing's non-interactive auth story,
+ * and it works because the coordinator treats `githubToken` as an opaque
+ * bearer: it hands it straight to `fetchRepoPermissions` (`app.ts`) to read
+ * this repo's permissions, and nothing binds it to twing's own
+ * `GITHUB_CLIENT_ID`. So any token with repo read access does the job --
+ * the same check, the same server-derived role, one less browser round
+ * trip.
+ *
+ * Deliberately not `GITHUB_TOKEN`/`GH_TOKEN`: those are ambient in CI and
+ * are frequently short-lived job tokens scoped to a *different* repo than
+ * the one being edited, which would silently resolve the wrong permissions.
+ * `gh auth token` is an explicit, user-established credential for the
+ * machine's actual GitHub identity.
+ *
+ * Never throws -- a missing or unauthenticated `gh` is the common case, not
+ * an error.
+ */
+export function githubTokenFromGhCli(): string | undefined {
+  try {
+    const token = execFileSync("gh", ["auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return token === "" ? undefined : token;
+  } catch {
+    return undefined;
+  }
 }
 
 interface JoinViaGithubResponseJSON {
@@ -189,11 +223,28 @@ export async function runJoinGithub(options: JoinOptions): Promise<JoinGithubRes
   // clearly on that rather than this command guessing an error message.
   const github = githubBinding(repoRoot);
 
-  const device = await requestDeviceCode();
-  console.log(`twing join: go to ${device.verification_uri} and enter code: ${device.user_code}`);
-  console.log("twing join: waiting for you to approve...");
-  const githubToken = await pollForAccessToken(device.device_code, device.interval, device.expires_in);
-  console.log("twing join: GitHub authorization confirmed");
+  // Prefer a token the machine already has (`gh auth token`) over making
+  // someone approve in a browser -- same permissions check, same
+  // server-derived role, no interaction. The device flow stays the fallback
+  // for machines without `gh`, and is the only option a human ever sees
+  // prompted.
+  let githubToken = githubTokenFromGhCli();
+  if (githubToken) {
+    console.log("twing join: using the GitHub token from `gh auth token` (no browser approval needed)");
+  } else {
+    if (options.unattended) {
+      throw new Error(
+        "twing join: no non-interactive GitHub credential available. The GitHub device flow needs a human to " +
+          "approve in a browser, which an unattended run can't do. Install and authenticate the GitHub CLI " +
+          "(`gh auth login`), then retry -- or run `twing init` yourself once, interactively.",
+      );
+    }
+    const device = await requestDeviceCode();
+    console.log(`twing join: go to ${device.verification_uri} and enter code: ${device.user_code}`);
+    console.log("twing join: waiting for you to approve...");
+    githubToken = await pollForAccessToken(device.device_code, device.interval, device.expires_in);
+    console.log("twing join: GitHub authorization confirmed");
+  }
 
   const normalizedServer = normalizeServerUrl(serverUrl);
   const config = readConfig();

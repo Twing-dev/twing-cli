@@ -74,7 +74,7 @@ function printUsage(): void {
     [
       "Usage:",
       "  twing --version | -v",
-      "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github]",
+      "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]",
       "  twing login [--server <url>] [--token <pat>]",
       "  twing keygen --invite <code> [--server <url>] [--label <email>]",
       "  twing whoami [--server <url>] [--show-token]",
@@ -397,7 +397,14 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "init":
-      await runInit({ server: flags.server, invite: flags.invite, noAuth: flags["no-auth"] === "true", noGithub: flags["no-github"] === "true", cwd: process.cwd() });
+      await runInit({
+        server: flags.server,
+        invite: flags.invite,
+        noAuth: flags["no-auth"] === "true",
+        noGithub: flags["no-github"] === "true",
+        unattended: flags.unattended === "true",
+        cwd: process.cwd(),
+      });
       return;
     case "login":
       await runLogin({ server: flags.server, token: flags.token, cwd: process.cwd() });
