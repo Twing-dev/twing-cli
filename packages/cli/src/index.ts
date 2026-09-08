@@ -2,6 +2,7 @@
 import { startDaemon } from "./daemon/server.js";
 import { defaultSocketPath, authFetch, computeDeveloperId, readConfig } from "@twing/core";
 import { runInit } from "./init.js";
+import { installTwingHintResolution } from "./twing-command.js";
 import { runUninstall } from "./uninstall.js";
 import { getCliVersion } from "./version.js";
 import { runDaemonRestart } from "./daemon-restart.js";
@@ -458,6 +459,13 @@ async function main(): Promise<void> {
       process.exit(1);
   }
 }
+
+// Before anything prints: hints like "run `twing login`" assume a `twing`
+// on PATH, which a bootstrap-onboarded machine does not have. Installed
+// here so both console output and the thrown-error handler below inherit
+// it -- see twing-command.ts for why it is a choke point and why only
+// backticked spans are touched.
+installTwingHintResolution();
 
 main().catch((err) => {
   console.error(err instanceof Error ? err.message : err);
