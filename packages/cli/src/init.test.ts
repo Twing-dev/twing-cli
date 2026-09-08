@@ -529,3 +529,38 @@ test("runInit --unattended: throws rather than prompting when no coordinator is 
     );
   });
 });
+
+// --- pruning the redundant bootstrap copy ------------------------------------
+//
+// The bootstrap installs a whole @twing/cli into ~/.twing/lib when it can't
+// find an existing `twing`. Once a real install is driving `init`, that copy
+// is dead weight that only drifts in version -- and a stale second `twing`
+// is exactly what caused a version-mismatch deny in testing.
+
+test("runInit: removes the redundant ~/.twing/lib bootstrap copy", async () => {
+  const { fetch } = captureFetch(textResponse("twing serve"));
+  const { deps } = fakeDeps();
+  await withHome(async (home) => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const lib = path.join(home, ".twing", "lib", "node_modules", "@twing", "cli", "dist");
+    fs.mkdirSync(lib, { recursive: true });
+    fs.writeFileSync(path.join(lib, "index.js"), "// a bootstrap-installed copy\n");
+
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo }, deps)));
+
+    assert.equal(fs.existsSync(path.join(home, ".twing", "lib")), false, "this install supersedes the bootstrap copy");
+    assert.ok(logs.some((l) => l.includes("removed the redundant bootstrap copy")));
+  });
+});
+
+test("runInit: pruning is a no-op when there is no bootstrap copy", async () => {
+  const { fetch } = captureFetch(textResponse("twing serve"));
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo }, deps)));
+    assert.ok(!logs.some((l) => l.includes("removed the redundant bootstrap copy")), "nothing to say when nothing was there");
+  });
+});

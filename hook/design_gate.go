@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -384,6 +385,53 @@ const (
 // several conflicts or rules.
 type denyDetail struct{ Label, Value string }
 
+// twingCLIPath returns how to invoke the twing CLI on this machine.
+//
+// Every "What now" command below is written as a bare `twing ...`, which
+// assumed the only way to install twing was `npm install -g` -- that puts
+// `twing` on PATH. The zero-touch bootstrap deliberately does not use -g
+// (it needs sudo on a system-Node box, and a hook has no TTY to answer a
+// password prompt), so on a bootstrap-onboarded machine the CLI exists at
+// ~/.twing/bin/twing but nothing on PATH points at it. Printing a bare
+// `twing ...` there names a command the reader cannot run: the gate blocks
+// correctly and then gives instructions that fail, which is worse than not
+// gating at all. Found live -- an agent looked for `twing`, found only
+// `twing-hook`, and correctly refused to guess.
+//
+// Prefers the bare name when it actually resolves (the common case, and
+// what a human expects to see); falls back to the absolute shim path,
+// which works without touching PATH or any shell rc -- neither of which
+// could help the already-running session anyway.
+func twingCLIPath() string {
+	if _, err := exec.LookPath("twing"); err == nil {
+		return "twing"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "twing"
+	}
+	shim := filepath.Join(home, ".twing", "bin", "twing")
+	if info, err := os.Stat(shim); err == nil && !info.IsDir() {
+		return shim
+	}
+	return "twing"
+}
+
+// resolveTwingCommand rewrites a leading `twing ` in a suggested command to
+// whatever actually runs here. Applied at the single point where commands
+// are rendered, so every call site can keep writing the readable bare form.
+func resolveTwingCommand(command string) string {
+	const prefix = "twing "
+	if !strings.HasPrefix(command, prefix) {
+		return command
+	}
+	cli := twingCLIPath()
+	if cli == "twing" {
+		return command
+	}
+	return cli + " " + strings.TrimPrefix(command, prefix)
+}
+
 // denyAction is one entry under "What now": what it achieves, the command
 // that does it (optional -- some actions are advice, not a command), and an
 // optional caveat. The command lives on its own line rather than beside the
@@ -452,7 +500,7 @@ func denyMessage(headline, why string, details []denyDetail, actions []denyActio
 		for _, a := range actions {
 			b.WriteString("\n" + denyActionIndent + a.Label)
 			if a.Command != "" {
-				b.WriteString("\n" + denyCommandIndent + a.Command)
+				b.WriteString("\n" + denyCommandIndent + resolveTwingCommand(a.Command))
 			}
 			if a.Note != "" {
 				writeWrapped(&b, a.Note, denyCommandIndent)

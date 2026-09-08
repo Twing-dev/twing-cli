@@ -24,6 +24,7 @@
  * it.
  */
 
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -49,6 +50,38 @@ interface Teardown {
 
 function twingDir(): string {
   return path.join(os.homedir(), ".twing");
+}
+
+/**
+ * Names any `twing` still runnable after the teardown above.
+ *
+ * This command can only remove what twing owns (`~/.twing`). A CLI
+ * installed by npm lives in npm's prefix, and there can be more than one --
+ * a user-level prefix and a root-owned `/usr` one from a `sudo npm install
+ * -g` are different installations, and a plain `npm uninstall -g` only
+ * touches the former. Someone who has just run both commands and still sees
+ * `which twing` answer has no way to tell that from a failed uninstall.
+ *
+ * Worse, the survivor is often an *older* copy that was shadowed until now,
+ * which then fails the coordinator's version check on every gated edit. So
+ * say exactly what is left and where.
+ */
+function reportRemainingCli(): void {
+  let remaining: string;
+  try {
+    remaining = execFileSync("sh", ["-c", "command -v twing"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return; // nothing left on PATH -- the clean case, no need to say anything
+  }
+  if (!remaining) return;
+
+  console.log(`twing uninstall: note -- \`twing\` still resolves to ${remaining}`);
+  console.log(
+    "twing uninstall: that is a separate npm-installed copy, not twing's own state. " +
+      "`npm uninstall -g @twing/cli` removes it if it is in your own npm prefix; " +
+      "one installed with sudo needs `sudo npm uninstall -g @twing/cli`. " +
+      "Check every copy with `which -a twing`.",
+  );
 }
 
 /** Best-effort stop: ask over the socket, then confirm it actually let go.
@@ -112,6 +145,8 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
     // reporting but not worth failing the whole teardown over.
     console.log(`twing uninstall: couldn't remove ${dir} (${err instanceof Error ? err.message : err}) -- delete it by hand`);
   }
+
+  reportRemainingCli();
 
   console.log("twing uninstall: done -- `npm uninstall -g @twing/cli` removes the CLI itself");
   console.log(

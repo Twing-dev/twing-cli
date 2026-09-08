@@ -22,6 +22,60 @@ export function hookBinaryPath(): string {
   return path.join(os.homedir(), ".twing", "bin", `twing-hook${ext}`);
 }
 
+/** Where `ensureCliShim` puts a runnable `twing`, beside the hook binary. */
+export function cliShimPath(): string {
+  return path.join(os.homedir(), ".twing", "bin", "twing");
+}
+
+/**
+ * Makes the CLI runnable on a machine onboarded by the committed bootstrap
+ * hook.
+ *
+ * That path deliberately avoids `npm install -g` (it would need sudo on a
+ * system-Node box, which a hook has no TTY to supply), so the CLI lands in
+ * `~/.twing/lib/node_modules/` with nothing on `PATH` pointing at it --
+ * while every remediation message the design gate prints says to run
+ * `twing design register ...`. The result was a gate that blocks correctly
+ * and then names a command that does not exist: strictly worse than no
+ * gate, because there is no way forward. Found live.
+ *
+ * A small wrapper here fixes that without touching `PATH` or anyone's
+ * shell rc (neither of which could help the already-running session
+ * anyway) -- the gate points at this absolute path when a bare `twing`
+ * isn't resolvable (`resolveTwingCommand`, hook/design_gate.go). It lives
+ * beside `twing-hook`, in a directory twing already owns, so `twing
+ * uninstall` reclaims it for free.
+ *
+ * Harmless for a global install, which already has a real `twing` on
+ * `PATH` and will simply keep using it. Never throws -- a machine where
+ * this can't be written still has a working gate, just a less convenient
+ * one.
+ */
+export function ensureCliShim(): string | null {
+  // Windows has no equivalent of this shim, and the committed bootstrap
+  // hook that makes it necessary is POSIX-only anyway (documented gap).
+  if (process.platform === "win32") return null;
+
+  // dist/install-hook.js -> dist/index.js: this build's own entrypoint,
+  // whichever copy is running.
+  const cliEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.js");
+  const shim = cliShimPath();
+  try {
+    if (!fs.existsSync(cliEntry)) return null;
+    fs.mkdirSync(path.dirname(shim), { recursive: true });
+    // A wrapper rather than a symlink, deliberately: a symlink inherits the
+    // target's permissions, and `dist/index.js` is only executable when npm
+    // installed the package (it sets the bit for a `bin` entry) -- not in a
+    // contributor's checkout, where tsc just writes a plain file. Naming
+    // the interpreter explicitly also sidesteps shebang resolution
+    // entirely. Same {node, script} shape the daemon launch marker uses.
+    fs.writeFileSync(shim, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(cliEntry)} "$@"\n`, { mode: 0o755 });
+    return shim;
+  } catch {
+    return null;
+  }
+}
+
 /** Walks up from this module's own install location looking for a `hook/`
  * Go module directory — the monorepo dev-mode layout, i.e. "this is a
  * twing-cli contributor's own checkout." */

@@ -83,3 +83,55 @@ test("runUninstall --dry-run: reports without removing anything", async () => {
     assert.ok(logs.some((l) => l.includes("would NOT touch any repo")));
   });
 });
+
+// --- reporting a twing left on PATH ------------------------------------------
+//
+// `twing uninstall` can only remove twing's own state. A CLI installed by
+// npm lives in npm's prefix, and there can be more than one (a user prefix
+// and a root-owned /usr one from `sudo npm install -g` are different
+// installations). Someone who runs both teardown commands and still sees
+// `which twing` answer has no way to tell that from a failed uninstall --
+// and the survivor is often an older copy that then fails the coordinator's
+// version check on every edit.
+
+/** A PATH whose only `twing` is a stub at a known location. */
+function pathWithTwing(): { dir: string; path: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-onpath-"));
+  fs.writeFileSync(path.join(dir, "twing"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  return { dir, path: `${dir}:${process.env.PATH ?? ""}` };
+}
+
+/** Async-aware: a synchronous wrapper would restore PATH the moment
+ * `run()` returned its promise, i.e. before the code under test had
+ * actually looked at PATH. */
+async function withPath<T>(value: string, run: () => Promise<T>): Promise<T> {
+  const original = process.env.PATH;
+  process.env.PATH = value;
+  try {
+    return await run();
+  } finally {
+    if (original === undefined) delete process.env.PATH;
+    else process.env.PATH = original;
+  }
+}
+
+test("runUninstall: names a twing still on PATH after teardown", async () => {
+  const onPath = pathWithTwing();
+  await withHome(async () => {
+    seedInstalledMachine();
+    const { logs } = await withPath(onPath.path, () => captureConsole(() => runUninstall()));
+    const joined = logs.join("\n");
+    assert.match(joined, /still resolves to/, "silence here reads as a failed uninstall");
+    assert.ok(joined.includes(path.join(onPath.dir, "twing")), "must name the actual surviving path");
+    assert.match(joined, /sudo npm uninstall -g/, "a root-owned copy needs sudo, which this command cannot do itself");
+  });
+});
+
+test("runUninstall: says nothing about PATH when no twing survives", async () => {
+  const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-nopath-"));
+  await withHome(async () => {
+    seedInstalledMachine();
+    const { logs } = await withPath(emptyDir, () => captureConsole(() => runUninstall()));
+    assert.ok(!logs.join("\n").includes("still resolves to"), "the clean case needs no caveat");
+  });
+});

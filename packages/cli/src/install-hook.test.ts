@@ -10,11 +10,13 @@
  */
 
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { withHome } from "./test-support.js";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { releaseAssetName, fetchPrebuiltHook } from "./install-hook.js";
+import { releaseAssetName, fetchPrebuiltHook, ensureCliShim } from "./install-hook.js";
 import { withMockFetch } from "./test-support.js";
 
 function withPlatform<T>(platform: NodeJS.Platform, arch: NodeJS.Architecture, fn: () => T): T {
@@ -117,4 +119,35 @@ test("fetchPrebuiltHook: an unsupported platform returns false without ever call
 
   assert.equal(ok, false);
   assert.equal(fetchCalled, false);
+});
+
+// --- ensureCliShim -----------------------------------------------------------
+//
+// The bootstrap avoids `npm install -g` (sudo), so it leaves no `twing` on
+// PATH -- while the design gate's messages all say "run `twing ...`". That
+// combination blocked an agent with instructions it could not follow. The
+// shim is what makes those instructions runnable.
+
+test("ensureCliShim: writes a runnable twing beside the hook binary", async () => {
+  await withHome(async (home) => {
+    const shim = ensureCliShim();
+    assert.equal(shim, path.join(home, ".twing", "bin", "twing"));
+    assert.equal(fs.existsSync(shim!), true);
+
+    // Must actually run. A symlink would inherit dist/index.js's mode, which
+    // is only executable when npm installed the package -- not in a checkout.
+    const version = execFileSync(shim!, ["--version"], { encoding: "utf8" }).trim();
+    assert.match(version, /^\d+\.\d+\.\d+$/, `expected a version, got ${version}`);
+  });
+});
+
+test("ensureCliShim: is idempotent and repoints at the running build", async () => {
+  await withHome(async () => {
+    const first = ensureCliShim();
+    const second = ensureCliShim();
+    assert.equal(first, second);
+    // Re-running after an upgrade must not leave the shim aimed at a stale
+    // copy, so the body is rewritten rather than skipped.
+    assert.match(fs.readFileSync(second!, "utf8"), /dist\/index\.js/);
+  });
 });

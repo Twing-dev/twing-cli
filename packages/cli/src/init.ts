@@ -7,6 +7,9 @@
  * start the daemon. Safe to re-run.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   findRepoRoot,
   loadManifestFromFile,
@@ -24,10 +27,11 @@ import {
   writeConfig,
   type Manifest,
 } from "@twing/core";
-import { ensureHookInstalled } from "./install-hook.js";
+import { ensureHookInstalled, ensureCliShim } from "./install-hook.js";
 import { wireHooks, stripLegacyRepoLocalHooks } from "./wire-hooks.js";
 import { enableInstallEnforcement } from "./enforce-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
+import { twingLibDir } from "./daemon-service.js";
 import { requireAuth, isReachableCoordinator } from "./auth.js";
 import { runKeygen } from "./keygen.js";
 import { runJoinGithub } from "./join.js";
@@ -183,6 +187,23 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // the good message.
   const hookPath = await deps.ensureHookInstalled();
   console.log(`twing init: hook installed at ${hookPath}`);
+
+  // A runnable `twing` beside the hook binary. On a machine onboarded by
+  // the committed bootstrap hook there is otherwise no `twing` anywhere on
+  // PATH -- that path avoids `npm install -g` on purpose -- so the design
+  // gate would block with instructions naming a command that doesn't
+  // exist. No-op for a global install, which already has a real one.
+  ensureCliShim();
+
+  // Converge on one copy. The bootstrap installs the CLI into
+  // ~/.twing/lib when it can't find an existing `twing`; once a real
+  // install is driving `init`, that copy is redundant and would sit there
+  // diverging in version. Pruning it must happen BEFORE the daemon launch
+  // marker is rewritten below (ensureDaemonRunning), because the marker
+  // can point straight into this directory -- see resolveDaemonScript.
+  // Self-healing either way: if the global install is later removed, the
+  // next edit re-bootstraps a fresh copy.
+  pruneRedundantBootstrapCopy();
 
   const { token: authToken, adminRole } = await resolveAuthToken(repoRoot, serverUrl, options);
   // Self-declared, attribution-only (§17 Phase 4) -- only ever sent when
@@ -391,6 +412,27 @@ async function resolveAuthToken(repoRoot: string, serverUrl: string, options: In
     }
   }
   return { token: await requireAuth(serverUrl, "twing init"), adminRole: false };
+}
+
+/** Removes the bootstrap's own `~/.twing/lib` copy of the CLI when this
+ * process is not itself running from it -- i.e. a global (or checkout)
+ * install is now in charge, so the second copy is dead weight that would
+ * only drift out of version. A no-op when this very process *is* the
+ * bootstrap copy (deleting the code you are executing is not clever), and
+ * best-effort throughout: failing to tidy up must never fail `init`. */
+function pruneRedundantBootstrapCopy(): void {
+  const lib = twingLibDir();
+  try {
+    if (!fs.existsSync(lib)) return;
+    // Resolve both sides: a symlinked/realpath-differing checkout must not
+    // fool this into deleting the tree it is running from.
+    const selfDir = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));
+    if (selfDir.startsWith(fs.realpathSync(lib))) return;
+    fs.rmSync(lib, { recursive: true, force: true });
+    console.log(`twing init: removed the redundant bootstrap copy at ${lib} (this install supersedes it)`);
+  } catch {
+    // Left behind at worst -- harmless, just duplicated.
+  }
 }
 
 /** §17.2's cold-start seed: forward this repo's local `.twing/twing.yml`
