@@ -21,7 +21,7 @@ import {
   runProjectDisableEnforcement,
 } from "./project.js";
 import { tmpRepo, withHome, cacheToken, withMockFetch, captureConsole, jsonResponse, captureFetch } from "./test-support.js";
-import { BOOTSTRAP_HOOK_MARKER } from "./enforce-hooks.js";
+import { isBootstrapHook } from "./enforce-hooks.js";
 
 const SERVER_URL = "http://localhost:9999";
 const PROJECT_ID = "proj-1";
@@ -145,7 +145,7 @@ test("runProjectEnableEnforcement: writes the bootstrap hook into the repo's .cl
   const settings = JSON.parse(fs.readFileSync(path.join(repo, ".claude", "settings.json"), "utf8")) as {
     hooks?: { PreToolUse?: { matcher?: string; hooks: { command: string }[] }[] };
   };
-  assert.ok(settings.hooks?.PreToolUse?.some((e) => e.matcher === "Edit|Write" && e.hooks.some((h) => h.command.startsWith(BOOTSTRAP_HOOK_MARKER))));
+  assert.ok(settings.hooks?.PreToolUse?.some((e) => e.matcher === "Edit|Write" && e.hooks.some((h) => isBootstrapHook(h))));
   assert.ok(logs.some((l) => l.includes("wrote a bootstrap install-check")));
 });
 
@@ -171,7 +171,7 @@ test("runProjectDisableEnforcement: removes a previously-written hook", async ()
   const settings = JSON.parse(fs.readFileSync(path.join(repo, ".claude", "settings.json"), "utf8")) as {
     hooks?: { PreToolUse?: { matcher?: string; hooks: { command: string }[] }[] };
   };
-  assert.ok(!settings.hooks?.PreToolUse?.some((e) => e.hooks.some((h) => h.command.startsWith(BOOTSTRAP_HOOK_MARKER))));
+  assert.ok(!settings.hooks?.PreToolUse?.some((e) => e.hooks.some((h) => isBootstrapHook(h))));
 });
 
 test("runProjectDisableEnforcement: no-op when nothing is wired", async () => {

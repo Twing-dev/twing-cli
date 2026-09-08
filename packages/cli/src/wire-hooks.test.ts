@@ -19,7 +19,18 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { wireHooks, stripLegacyRepoLocalHooks, unwireHooks } from "./wire-hooks.js";
-import { bootstrapHookScript } from "./enforce-hooks.js";
+/** A v3-shaped committed entry: the whole script inlined as the `command`.
+ * v4 moved the script to a committed file and points at it through `args`,
+ * but repos hold committed copies of older shapes indefinitely -- and a
+ * bootstrap hook that reached the *global* file (found live, before the
+ * $HOME guard existed) is by definition one of those older ones, since the
+ * guard now refuses to write a new one there at all. So the legacy shape is
+ * the realistic fixture for this sweep; the v4 shape is covered separately
+ * below. */
+const LEGACY_INLINE_BOOTSTRAP_HOOK = "# twing-bootstrap-hook-v3\nrepo_root=$(git rev-parse --show-toplevel)\n...";
+
+/** The v4 shape, for the one case that still has to recognise it. */
+const BOOTSTRAP_HOOK_V4 = { type: "command" as const, command: "sh", args: ["${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh", "PreToolUse"] };
 
 interface HookCommand {
   type: "command";
@@ -120,7 +131,7 @@ test("stripLegacyRepoLocalHooks: never removes an install-enforcement hook entry
     JSON.stringify({
       hooks: {
         PostToolUse: [{ matcher: "Edit|Write|Read|Grep|Glob", hooks: [{ type: "command", command: HOOK_PATH }] }],
-        PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }],
+        PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: LEGACY_INLINE_BOOTSTRAP_HOOK }] }],
       },
     }),
   );
@@ -130,7 +141,7 @@ test("stripLegacyRepoLocalHooks: never removes an install-enforcement hook entry
 
   const settings: ClaudeSettings = JSON.parse(fs.readFileSync(repoSettingsPath, "utf8"));
   assert.deepEqual(settings.hooks?.PostToolUse, [], "the legacy entry's matcher block is now empty");
-  assert.deepEqual(settings.hooks?.PreToolUse, [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }], "the enforcement hook must be untouched, byte-for-byte");
+  assert.deepEqual(settings.hooks?.PreToolUse, [{ matcher: "Edit|Write", hooks: [{ type: "command", command: LEGACY_INLINE_BOOTSTRAP_HOOK }] }], "the enforcement hook must be untouched, byte-for-byte");
 });
 
 // --- unwireHooks (twing uninstall) -------------------------------------------
@@ -184,7 +195,7 @@ test("unwireHooks: removes a bootstrap hook sitting in the global settings", () 
     fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
     fs.writeFileSync(
       settingsPath(),
-      JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }] } }),
+      JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: LEGACY_INLINE_BOOTSTRAP_HOOK }] }] } }),
     );
 
     assert.equal(unwireHooks(HOOK_PATH), true, "must report the removal, not 'nothing was there'");
@@ -207,6 +218,18 @@ test("unwireHooks: removes an older bootstrap version too", () => {
   });
 });
 
+test("unwireHooks: removes a v4 bootstrap hook, which names its script through args", () => {
+  // v4 entries run `sh <script> <event>`, so the marker is in the committed
+  // file rather than the command string. Matching only on `command` would
+  // sweep every older shape and silently miss the current one.
+  withIsolatedHome(() => {
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(settingsPath(), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [BOOTSTRAP_HOOK_V4] }] } }));
+    assert.equal(unwireHooks(HOOK_PATH), true);
+    assert.deepEqual(Object.values(readSettings().hooks ?? {}).flat(), []);
+  });
+});
+
 test("unwireHooks: removes binary and bootstrap entries together, sparing other tools", () => {
   withIsolatedHome(() => {
     fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
@@ -216,7 +239,7 @@ test("unwireHooks: removes binary and bootstrap entries together, sparing other 
         hooks: {
           PreToolUse: [{ matcher: "Edit|Write", hooks: [
             { type: "command", command: "some-other-tool" },
-            { type: "command", command: bootstrapHookScript() },
+            { type: "command", command: LEGACY_INLINE_BOOTSTRAP_HOOK },
             { type: "command", command: HOOK_PATH },
           ]}],
         },
@@ -238,10 +261,10 @@ test("stripLegacyRepoLocalHooks: still spares a repo's committed bootstrap hook"
   fs.mkdirSync(path.dirname(repoSettings), { recursive: true });
   fs.writeFileSync(
     repoSettings,
-    JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }] } }),
+    JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: LEGACY_INLINE_BOOTSTRAP_HOOK }] }] } }),
   );
 
   assert.equal(stripLegacyRepoLocalHooks(repoRoot, HOOK_PATH), false);
   const settings: ClaudeSettings = JSON.parse(fs.readFileSync(repoSettings, "utf8"));
-  assert.equal(settings.hooks?.PreToolUse?.[0].hooks[0].command, bootstrapHookScript());
+  assert.equal(settings.hooks?.PreToolUse?.[0].hooks[0].command, LEGACY_INLINE_BOOTSTRAP_HOOK);
 });

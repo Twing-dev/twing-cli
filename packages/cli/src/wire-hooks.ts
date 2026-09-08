@@ -11,8 +11,8 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
-import { readClaudeSettings, writeClaudeSettings, type ClaudeSettings, type HookMatcherEntry } from "@twing/core";
-import { KNOWN_BOOTSTRAP_HOOK_MARKERS } from "./enforce-hooks.js";
+import { readClaudeSettings, writeClaudeSettings, type ClaudeSettings, type HookCommand, type HookMatcherEntry } from "@twing/core";
+import { isBootstrapHook } from "./enforce-hooks.js";
 
 function globalSettingsPath(): string {
   return path.join(os.homedir(), ".claude", "settings.json");
@@ -133,15 +133,14 @@ function stripHooksByCommand(settingsPath: string, hookPath: string, options: { 
   const settings = readClaudeSettings(settingsPath);
   if (!settings.hooks) return false;
 
-  const isOurs = (command: string): boolean =>
-    command === hookPath ||
-    (options.includeBootstrapHooks === true && KNOWN_BOOTSTRAP_HOOK_MARKERS.some((marker) => command.startsWith(marker)));
+  const isOurs = (hook: HookCommand): boolean =>
+    hook.command === hookPath || (options.includeBootstrapHooks === true && isBootstrapHook(hook));
 
   let changed = false;
   for (const eventName of Object.keys(settings.hooks)) {
     const before = settings.hooks[eventName].flatMap((e) => e.hooks).length;
     settings.hooks[eventName] = settings.hooks[eventName]
-      .map((entry) => ({ ...entry, hooks: entry.hooks.filter((h) => !isOurs(h.command)) }))
+      .map((entry) => ({ ...entry, hooks: entry.hooks.filter((h) => !isOurs(h)) }))
       .filter((entry) => entry.hooks.length > 0);
     if (settings.hooks[eventName].flatMap((e) => e.hooks).length !== before) changed = true;
   }
