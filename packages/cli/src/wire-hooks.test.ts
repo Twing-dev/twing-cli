@@ -169,3 +169,79 @@ test("unwireHooks: no-op (returns false) when nothing is wired", () => {
     assert.equal(unwireHooks(HOOK_PATH), false);
   });
 });
+
+// --- unwireHooks vs a bootstrap hook in the GLOBAL file (regression) ---------
+//
+// Found live: `twing uninstall` reported "no twing hook entries" while a
+// bootstrap hook sat in ~/.claude/settings.json. unwireHooks matched only
+// `command === hookPath` (the binary), so the script entry was invisible.
+// Not cosmetic -- a bootstrap hook in the *global* file fires for every repo
+// with a .twing/twing.yml, so the next edit anywhere silently reinstalled
+// twing while uninstall claimed success.
+
+test("unwireHooks: removes a bootstrap hook sitting in the global settings", () => {
+  withIsolatedHome(() => {
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(
+      settingsPath(),
+      JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }] } }),
+    );
+
+    assert.equal(unwireHooks(HOOK_PATH), true, "must report the removal, not 'nothing was there'");
+    const settings = readSettings();
+    assert.deepEqual(Object.values(settings.hooks ?? {}).flat(), [], "leaving it re-installs twing on the next edit in any repo");
+  });
+});
+
+test("unwireHooks: removes an older bootstrap version too", () => {
+  withIsolatedHome(() => {
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(
+      settingsPath(),
+      JSON.stringify({
+        hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: "# twing-install-enforcement-hook-v2\nold" }] }] },
+      }),
+    );
+    assert.equal(unwireHooks(HOOK_PATH), true);
+    assert.deepEqual(Object.values(readSettings().hooks ?? {}).flat(), []);
+  });
+});
+
+test("unwireHooks: removes binary and bootstrap entries together, sparing other tools", () => {
+  withIsolatedHome(() => {
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(
+      settingsPath(),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [{ matcher: "Edit|Write", hooks: [
+            { type: "command", command: "some-other-tool" },
+            { type: "command", command: bootstrapHookScript() },
+            { type: "command", command: HOOK_PATH },
+          ]}],
+        },
+      }),
+    );
+
+    assert.equal(unwireHooks(HOOK_PATH), true);
+    const survivors = Object.values(readSettings().hooks ?? {}).flat().flatMap((e) => e.hooks.map((h) => h.command));
+    assert.deepEqual(survivors, ["some-other-tool"]);
+  });
+});
+
+test("stripLegacyRepoLocalHooks: still spares a repo's committed bootstrap hook", () => {
+  // The opt-in is deliberate: this runs against a repo's own committed file
+  // during `init`, where removing the bootstrap hook would silently undo an
+  // admin's enforcement decision. Only uninstall's global sweep is widened.
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "twing-strip-scope-"));
+  const repoSettings = path.join(repoRoot, ".claude", "settings.json");
+  fs.mkdirSync(path.dirname(repoSettings), { recursive: true });
+  fs.writeFileSync(
+    repoSettings,
+    JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }] } }),
+  );
+
+  assert.equal(stripLegacyRepoLocalHooks(repoRoot, HOOK_PATH), false);
+  const settings: ClaudeSettings = JSON.parse(fs.readFileSync(repoSettings, "utf8"));
+  assert.equal(settings.hooks?.PreToolUse?.[0].hooks[0].command, bootstrapHookScript());
+});

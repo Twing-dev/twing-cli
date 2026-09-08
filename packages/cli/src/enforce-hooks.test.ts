@@ -6,6 +6,7 @@
  */
 
 import { test } from "node:test";
+import { withHome } from "./test-support.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -345,4 +346,26 @@ test("disableInstallEnforcement: removes older versions and duplicates too, leav
   const settings = readSettings(repoRoot);
   const survivors = (settings.hooks?.PreToolUse ?? []).flatMap((e) => e.hooks.map((h) => h.command));
   assert.deepEqual(survivors, ["some-other-tool"], "another tool's hook must survive untouched");
+});
+
+// --- home-directory guard ----------------------------------------------------
+
+test("enableInstallEnforcement: refuses to write into a repo rooted at $HOME", async () => {
+  // A dotfiles repo makes $HOME a git root, and .claude/settings.json there
+  // IS the machine-global file. Writing the bootstrap hook to it would fire
+  // for every repo on the machine rather than the one being enabled -- the
+  // likely way a bootstrap hook was found in a global settings file live.
+  await withHome(async (home) => {
+    assert.throws(() => enableInstallEnforcement(home), /refusing to write the bootstrap hook into your home directory/);
+    assert.equal(fs.existsSync(path.join(home, ".claude", "settings.json")), false, "must not have written anything");
+  });
+});
+
+test("enableInstallEnforcement: still works for a normal repo under $HOME", async () => {
+  await withHome(async (home) => {
+    const repo = path.join(home, "projects", "widgets");
+    fs.mkdirSync(repo, { recursive: true });
+    assert.equal(enableInstallEnforcement(repo), true);
+    assert.equal(isInstallEnforcementWired(repo), true);
+  });
 });

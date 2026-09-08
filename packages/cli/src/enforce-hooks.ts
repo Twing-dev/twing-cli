@@ -55,6 +55,7 @@
  * block (so another tool's hook under the same matcher survives untouched).
  */
 
+import * as os from "node:os";
 import * as path from "node:path";
 import { readClaudeSettings, writeClaudeSettings, type HookMatcherEntry } from "@twing/core";
 
@@ -210,6 +211,20 @@ export function isInstallEnforcementWired(repoRoot: string): boolean {
  * (in-place upgrade, same array position, sibling hooks untouched).
  * Returns true iff the file was changed. */
 export function enableInstallEnforcement(repoRoot: string): boolean {
+  // A repo rooted at $HOME (a dotfiles repo, and they are common) would put
+  // this hook in ~/.claude/settings.json -- the machine-global file, not a
+  // project's committed one. It would then fire for *every* repo on the
+  // machine rather than the one being enabled, and survive `twing
+  // uninstall`'s teardown of the project it was meant for. Almost certainly
+  // not what was meant, so refuse rather than do it quietly.
+  if (path.resolve(repoRoot) === path.resolve(os.homedir())) {
+    throw new Error(
+      "twing: refusing to write the bootstrap hook into your home directory. " +
+        `The repo root resolved to ${repoRoot}, so this would land in ~/.claude/settings.json -- the ` +
+        "machine-global file -- and fire for every repo on this machine. Run this from inside the " +
+        "project you mean to enable.",
+    );
+  }
   const target = settingsPath(repoRoot);
   const settings = readClaudeSettings(target);
   const script = bootstrapHookScript();

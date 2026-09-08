@@ -12,6 +12,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { readClaudeSettings, writeClaudeSettings, type ClaudeSettings, type HookMatcherEntry } from "@twing/core";
+import { KNOWN_BOOTSTRAP_HOOK_MARKERS } from "./enforce-hooks.js";
 
 function globalSettingsPath(): string {
   return path.join(os.homedir(), ".claude", "settings.json");
@@ -100,26 +101,49 @@ export function stripLegacyRepoLocalHooks(repoRoot: string, hookPath: string): b
  * machine-global `~/.claude/settings.json`. Used by `twing uninstall` --
  * leaving them behind would point Claude Code at a binary that is about to
  * be deleted, so every tool call would try to run something that isn't
- * there. Matches by exact command, so another tool's hooks (and any
- * unrelated settings) are untouched. Returns true if anything was removed. */
+ * there.
+ *
+ * Removes bootstrap-hook entries as well as binary ones. Matching only the
+ * resolved `twing-hook` path missed those entirely, and the consequence was
+ * not cosmetic: a bootstrap hook sitting in the *global* file fires for
+ * every repo carrying a `.twing/twing.yml`, so the next edit anywhere
+ * silently reinstalled twing -- while uninstall reported "no twing hook
+ * entries" and appeared to succeed. Found live.
+ *
+ * The global file is machine state, which is exactly what `twing uninstall`
+ * owns; a repo's *committed* `.claude/settings.json` is shared team state
+ * and stays out of scope (`twing project disable-enforcement`).
+ *
+ * Another tool's hooks and unrelated settings are untouched either way.
+ * Returns true if anything was removed. */
 export function unwireHooks(hookPath: string): boolean {
-  return stripHooksByCommand(globalSettingsPath(), hookPath);
+  return stripHooksByCommand(globalSettingsPath(), hookPath, { includeBootstrapHooks: true });
 }
 
-/** Drops every hook entry whose command is exactly `hookPath`, across every
- * event name, and prunes entries left with no hooks. Silent no-op when the
- * file doesn't exist or has nothing of ours in it. */
-function stripHooksByCommand(settingsPath: string, hookPath: string): boolean {
+/** Drops twing's hook entries across every event name, and prunes entries
+ * left with no hooks. Silent no-op when the file doesn't exist or has
+ * nothing of ours in it.
+ *
+ * `includeBootstrapHooks` widens the match from "exactly this binary path"
+ * to "also any bootstrap script, any version". Deliberately opt-in:
+ * `stripLegacyRepoLocalHooks` runs against a repo's own committed file
+ * during `init`, where removing a bootstrap hook would silently undo an
+ * admin's enforcement decision. */
+function stripHooksByCommand(settingsPath: string, hookPath: string, options: { includeBootstrapHooks?: boolean } = {}): boolean {
   const settings = readClaudeSettings(settingsPath);
   if (!settings.hooks) return false;
 
+  const isOurs = (command: string): boolean =>
+    command === hookPath ||
+    (options.includeBootstrapHooks === true && KNOWN_BOOTSTRAP_HOOK_MARKERS.some((marker) => command.startsWith(marker)));
+
   let changed = false;
   for (const eventName of Object.keys(settings.hooks)) {
-    const before = settings.hooks[eventName].length;
+    const before = settings.hooks[eventName].flatMap((e) => e.hooks).length;
     settings.hooks[eventName] = settings.hooks[eventName]
-      .map((entry) => ({ ...entry, hooks: entry.hooks.filter((h) => h.command !== hookPath) }))
+      .map((entry) => ({ ...entry, hooks: entry.hooks.filter((h) => !isOurs(h.command)) }))
       .filter((entry) => entry.hooks.length > 0);
-    if (settings.hooks[eventName].length !== before) changed = true;
+    if (settings.hooks[eventName].flatMap((e) => e.hooks).length !== before) changed = true;
   }
 
   if (changed) {
