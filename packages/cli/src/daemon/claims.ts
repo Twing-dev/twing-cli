@@ -122,6 +122,31 @@ export interface ExtractionResult {
  * caller that's merely been read no longer counts as "active" for that
  * check, only one that's actually been written to — see the design doc's
  * §12 note. */
+/**
+ * The `(projectId, coordinatorServerUrl)` pair for the repo containing
+ * `cwd`, or null if there is no repo or no coordinator configured there.
+ *
+ * Exists so the daemon can learn which coordinators it serves *without
+ * waiting for a successful edit*. `extractClaim` returns the same pair, but
+ * only ever as a by-product of a claim -- which meant a machine whose edits
+ * were all being denied (the version-mismatch case, most of all) never
+ * registered a server, so `pollVersions` had nothing to poll, so
+ * `versionMismatch()` stayed null and the self-update never fired. The deny
+ * blocked the only thing that could clear the deny. Found live.
+ *
+ * Reuses `getRepoState`, so this is one git shell-out and one manifest read
+ * per repo per daemon lifetime, and free on every call after that.
+ */
+export function resolveProjectCoordinator(cwd: string): { projectId: string; serverUrl: string } | null {
+  try {
+    const state = getRepoState(findRepoRoot(cwd));
+    const serverUrl = state.manifest.coordinator.serverUrl;
+    return serverUrl ? { projectId: state.projectId, serverUrl } : null;
+  } catch {
+    return null; // not a repo, unreadable manifest -- nothing to register
+  }
+}
+
 export async function extractClaim(input: ExtractionInput): Promise<ExtractionResult | null> {
   const rawPath = input.toolInput.file_path;
   if (typeof rawPath !== "string" || rawPath.length === 0) return null;

@@ -15,7 +15,7 @@ import {
   type Claim,
   type CallEdge,
 } from "@twing/core";
-import { extractClaim } from "./claims.js";
+import { extractClaim, resolveProjectCoordinator } from "./claims.js";
 import { captureSession } from "./transcript.js";
 import { Syncer, daemonVersion } from "./sync.js";
 
@@ -418,6 +418,18 @@ function handleMessage(
     // with no prior claims (see its doc comment for the one remaining gap).
     const versionMismatch = syncer.versionMismatch() ?? undefined;
     conn.write(encodeFrame({ type: "notices", items, versionMismatch }));
+    // After the reply, never before it: this can shell out to git the first
+    // time it sees a repo, and the hook is waiting on the frame above.
+    // `enqueue` used to be the only thing that registered a coordinator, so
+    // a machine whose every edit was denied never registered one at all --
+    // see resolveProjectCoordinator's doc comment for the deadlock that
+    // created. This message fires on every SessionStart/UserPromptSubmit
+    // regardless of whether edits are landing, which is exactly what that
+    // needs.
+    setImmediate(() => {
+      const coordinator = req.cwd ? resolveProjectCoordinator(req.cwd) : null;
+      if (coordinator) syncer.registerProjectServer(coordinator.projectId, coordinator.serverUrl);
+    });
     return;
   }
 

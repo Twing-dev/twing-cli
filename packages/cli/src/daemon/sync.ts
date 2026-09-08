@@ -16,7 +16,7 @@
 
 import { readConfig, getServerAuth, authFetch, type Claim, type CallEdge, type Notice } from "@twing/core";
 import { getCliVersion } from "../version.js";
-import { isSelfUpdatable, performSelfUpdate } from "./self-update.js";
+import { isSelfUpdatable, performSelfUpdate, updateTarget } from "./self-update.js";
 
 /**
  * This daemon process's own `@twing/cli` version, snapshotted once at
@@ -226,7 +226,7 @@ export class Syncer {
   private selfUpdateAttempted = false;
 
   /**
-   * Brings a twing-managed install up to the coordinator's version, rather
+   * Brings this machine's install up to the coordinator's version, rather
    * than asking the agent to run three commands mid-edit.
    *
    * Requests shutdown on success: this process is the old code, and a
@@ -238,13 +238,13 @@ export class Syncer {
     if (this.selfUpdateAttempted || !this.onSelfUpdated) return;
     const mismatch = this.versionMismatch();
     if (!mismatch) return;
-    // A global npm install may need root to replace, which a background
-    // daemon cannot obtain and should not try to work around. Those
+    // Only a root-owned install is out of reach -- a background daemon
+    // cannot obtain root and should not try to work around it. Those
     // machines keep the explicit instructions.
     if (!isSelfUpdatable(import.meta.url)) return;
 
     this.selfUpdateAttempted = true;
-    if (await performSelfUpdate(mismatch.serverVersion)) {
+    if (await performSelfUpdate(mismatch.serverVersion, updateTarget(import.meta.url))) {
       await this.onSelfUpdated();
     }
   }

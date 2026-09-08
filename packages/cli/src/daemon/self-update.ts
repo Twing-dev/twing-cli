@@ -22,14 +22,16 @@
  * hitting. Update the CLI, refresh the hook binary and launch marker, and
  * cycle the daemon.
  *
- * **Only a twing-managed install.** `~/.twing/lib` is ours: written by the
- * bootstrap hook, under the developer's own home, no elevation needed. A
- * CLI installed with `npm install -g` lives in npm's prefix and may need
- * root, which a background daemon has no way to obtain and no business
- * assuming -- those machines keep the existing message.
+ * **Any install this user can write.** A twing-managed `~/.twing/lib` copy
+ * is replaced in place; a global install in a user-owned prefix
+ * (`~/.npm-global`, nvm, any `npm config set prefix`) is updated with `npm
+ * install -g`, which needs no elevation there and keeps the developer's own
+ * `twing` on PATH current instead of shadowing it. Only a genuinely
+ * root-owned prefix is refused -- a background daemon cannot obtain root,
+ * and there the explicit instructions really are the only option.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -49,25 +51,59 @@ function managedCliEntry(): string {
   return path.join(twingLibDir(), "node_modules", "@twing", "cli", "dist", "index.js");
 }
 
+/** The globally-installed CLI's entry point, resolved from npm's own
+ * prefix rather than guessed -- a user prefix can be anywhere. */
+function globalCliEntry(): string {
+  const prefix = execFileSync("npm", ["prefix", "-g"], { encoding: "utf8" }).trim();
+  return path.join(prefix, "lib", "node_modules", "@twing", "cli", "dist", "index.js");
+}
+
 function updateLogPath(): string {
   return path.join(os.homedir(), ".twing", "bootstrap.log");
 }
 
 /**
- * Whether this daemon is running out of the twing-managed install, and can
- * therefore replace itself.
+ * Whether this daemon can replace the install it is running from.
  *
- * Asks where *this process's own code* lives rather than merely whether
- * `~/.twing/lib` exists: a global install can leave that directory behind,
- * and updating a copy nothing is running from would report success while
- * changing nothing.
+ * Asks whether the install is **writable by this user**, not where it sits.
+ * The first version tested location -- "is this code under `~/.twing/lib`"
+ * -- using it as a proxy for "can we write it", on the reasoning that a
+ * global `npm install -g` may need root. That reasoning is wrong for the
+ * common case: `~/.npm-global`, nvm, and any `npm config set prefix` setup
+ * put the global install under the user's own home, writable with no sudo
+ * at all. Those machines were excluded from self-update for no reason, and
+ * kept being told to run three commands by hand. Found live.
+ *
+ * Testing the actual permission keeps the genuine sudo case (a root-owned
+ * `/usr/lib/node_modules`) excluded, where the explicit instructions really
+ * are the only option -- and covers everything else.
+ *
+ * Resolves through symlinks first: an install reached via a symlinked path
+ * must be judged on the directory that would actually be written.
  */
 export function isSelfUpdatable(moduleUrl: string): boolean {
   try {
-    const self = fs.realpathSync(path.dirname(new URL(moduleUrl).pathname));
-    return self.startsWith(fs.realpathSync(twingLibDir()));
+    // .../dist/daemon/self-update.js -> the package root that npm replaces.
+    const selfDir = fs.realpathSync(path.dirname(new URL(moduleUrl).pathname));
+    const packageRoot = path.resolve(selfDir, "..", "..");
+    fs.accessSync(packageRoot, fs.constants.W_OK);
+    return true;
   } catch {
-    return false; // ~/.twing/lib absent -- a global install or a checkout
+    return false; // root-owned, missing, or otherwise not ours to replace
+  }
+}
+
+/** Where an update should install, given where this code is running from.
+ * A twing-managed install replaces itself in place; anything else
+ * user-writable (a `~/.npm-global`-style prefix) is updated with `npm
+ * install -g`, which needs no elevation there and keeps the developer's own
+ * `twing` on PATH current rather than shadowing it with a second copy. */
+export function updateTarget(moduleUrl: string): "managed" | "global" {
+  try {
+    const selfDir = fs.realpathSync(path.dirname(new URL(moduleUrl).pathname));
+    return selfDir.startsWith(fs.realpathSync(twingLibDir())) ? "managed" : "global";
+  } catch {
+    return "global";
   }
 }
 
@@ -82,7 +118,10 @@ function appendLog(line: string): void {
 
 export interface SelfUpdateDeps {
   run(command: string, args: string[]): Promise<void>;
-  cliEntry(): string;
+  /** Entry point of the CLI that was just updated -- the one whose `init`
+   * must run, so the refreshed hook binary and launch marker come from the
+   * new code rather than the old process doing the updating. */
+  cliEntry(target: "managed" | "global"): string;
   log(line: string): void;
 }
 
@@ -90,7 +129,7 @@ const defaultDeps: SelfUpdateDeps = {
   run: async (command, args) => {
     await execFileAsync(command, args, { timeout: UPDATE_TIMEOUT_MS });
   },
-  cliEntry: managedCliEntry,
+  cliEntry: (target) => (target === "managed" ? managedCliEntry() : globalCliEntry()),
   log: appendLog,
 };
 
@@ -103,18 +142,22 @@ const defaultDeps: SelfUpdateDeps = {
  * differ (a release published but not yet deployed), and chasing `latest`
  * would swap one mismatch for another and re-trigger immediately.
  */
-export async function performSelfUpdate(targetVersion: string, deps: SelfUpdateDeps = defaultDeps): Promise<boolean> {
-  deps.log(`self-update: coordinator wants ${targetVersion}; updating the managed install`);
+export async function performSelfUpdate(
+  targetVersion: string,
+  target: "managed" | "global" = "managed",
+  deps: SelfUpdateDeps = defaultDeps,
+): Promise<boolean> {
+  deps.log(`self-update: coordinator wants ${targetVersion}; updating the ${target} install`);
+  // `--prefix ~/.twing/lib` for the copy twing itself installed; `-g` for a
+  // global one, so the update lands where `twing` on PATH actually resolves
+  // rather than beside it. Both are unprivileged here -- isSelfUpdatable
+  // has already confirmed this user can write the target.
+  const installArgs =
+    target === "managed"
+      ? ["install", "--prefix", twingLibDir(), `@twing/cli@${targetVersion}`]
+      : ["install", "-g", `@twing/cli@${targetVersion}`];
   try {
-    await deps.run("npm", [
-      "install",
-      "--prefix",
-      twingLibDir(),
-      `@twing/cli@${targetVersion}`,
-      "--no-fund",
-      "--no-audit",
-      "--loglevel=error",
-    ]);
+    await deps.run("npm", [...installArgs, "--no-fund", "--no-audit", "--loglevel=error"]);
   } catch (err) {
     deps.log(`self-update: npm install failed -- ${err instanceof Error ? err.message : err}`);
     return false;
@@ -125,7 +168,7 @@ export async function performSelfUpdate(targetVersion: string, deps: SelfUpdateD
   // sends) and rewrites the launch marker, so the daemon that comes back
   // starts from the new code.
   try {
-    await deps.run(process.execPath, [deps.cliEntry(), "init", "--unattended"]);
+    await deps.run(process.execPath, [deps.cliEntry(target), "init", "--unattended"]);
   } catch (err) {
     deps.log(`self-update: the updated CLI's init failed -- ${err instanceof Error ? err.message : err}`);
     return false;
