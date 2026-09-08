@@ -69,10 +69,48 @@ export function ensureCliShim(): string | null {
     // contributor's checkout, where tsc just writes a plain file. Naming
     // the interpreter explicitly also sidesteps shebang resolution
     // entirely. Same {node, script} shape the daemon launch marker uses.
-    fs.writeFileSync(shim, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(cliEntry)} "$@"\n`, { mode: 0o755 });
+    replaceFileAtomically(shim, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(cliEntry)} "$@"\n`, 0o755);
     return shim;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Writes `target` by way of a temp file in the same directory, so the
+ * replacement is a single atomic rename rather than a truncate-and-refill.
+ *
+ * Both files this is used for are *executed*, and both are now replaced by
+ * an update that a running hook can start (hook/version_recovery.go). A
+ * plain `writeFileSync` truncates in place, so a concurrent invocation --
+ * two tool calls in the same second is entirely ordinary -- can be executing
+ * the file mid-write: `ETXTBSY` on Linux, or a half-written binary that
+ * fails in some less obvious way. A rename never exposes a partial file, and
+ * a process already running the old inode keeps running it unharmed.
+ *
+ * Same directory deliberately: a rename across filesystems isn't atomic (and
+ * on many setups isn't even permitted), which is exactly what a temp file
+ * under the system tmpdir would risk.
+ */
+function replaceFileAtomically(target: string, contents: Uint8Array | string, mode: number): void {
+  const tmp = `${target}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, contents);
+    if (process.platform !== "win32") {
+      fs.chmodSync(tmp, mode);
+    }
+    try {
+      fs.renameSync(tmp, target);
+    } catch {
+      // Windows refuses to rename onto an existing file. Unlinking first
+      // reopens the race this exists to close, so it stays the fallback
+      // rather than the method.
+      fs.rmSync(target, { force: true });
+      fs.renameSync(tmp, target);
+    }
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
   }
 }
 
@@ -131,10 +169,7 @@ export async function fetchPrebuiltHook(target: string): Promise<boolean> {
     if (!res.ok) return false;
     const bytes = new Uint8Array(await res.arrayBuffer());
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, bytes);
-    if (process.platform !== "win32") {
-      fs.chmodSync(target, 0o755);
-    }
+    replaceFileAtomically(target, bytes, 0o755);
     return true;
   } catch {
     return false;

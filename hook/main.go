@@ -27,6 +27,18 @@ type hookPayload struct {
 	TranscriptPath string `json:"transcript_path"`
 }
 
+// rawPayload is the exact bytes this process read from stdin, kept so a
+// handler can replay the same event through another process. Only
+// version_recovery.go's rerunUpdatedHook uses it: after replacing this
+// stale binary, the event has to be handed to the new one, and stdin is
+// long since consumed by then. currentHookEvent scopes that recovery to
+// PreToolUse, the only event where a deny actually costs the developer
+// something.
+var (
+	rawPayload       []byte
+	currentHookEvent string
+)
+
 func main() {
 	// Hard rule: always exit 0, no matter what. A panic here would otherwise
 	// surface as a non-zero exit and, worse, could look like a block.
@@ -43,6 +55,8 @@ func main() {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return
 	}
+	rawPayload = data
+	currentHookEvent = payload.HookEventName
 
 	switch payload.HookEventName {
 	case "PostToolUse":
@@ -110,6 +124,19 @@ func handleCacheCheck(payload hookPayload) {
 			messages = append(messages, fmt.Sprintf(
 				"twing: this machine's twing-cli (%s) is newer than the coordinator (%s). "+
 					"Coordination server needs an update. Please wait.",
+				vm.ClientVersion, vm.ServerVersion))
+		} else if isManagedInstall() {
+			// twing installed itself on this machine, so it updates itself
+			// too -- the gate does it on the next Edit (version_recovery.go).
+			// Naming commands here would be worse than useless: `npm install
+			// -g` needs sudo on a system-Node box and there is no `twing` on
+			// PATH at all, so a reader who tried would get nowhere and a
+			// careful agent would refuse outright. Say what is happening
+			// instead.
+			messages = append(messages, fmt.Sprintf(
+				"twing: this machine's twing (%s) does not match the coordinator (%s). "+
+					"twing updates itself here -- nothing to run. If edits keep being blocked for this, "+
+					"~/.twing/design-coordinator.log has the reason; report it rather than installing twing another way.",
 				vm.ClientVersion, vm.ServerVersion))
 		} else {
 			messages = append(messages, fmt.Sprintf(

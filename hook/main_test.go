@@ -11,6 +11,7 @@ import (
 // itself.
 
 func TestHandleCacheCheck_VersionMismatchOnly_StillEmitsOutput(t *testing.T) {
+	pinInstallKind(t, false) // someone installed twing here, so the commands are real
 	fakeDaemon(t, noticesMessage{
 		Type:            "notices",
 		Items:           nil, // no ordinary notices -- version-only signal
@@ -48,6 +49,7 @@ func TestHandleCacheCheck_NothingCached_EmptyOutput(t *testing.T) {
 }
 
 func TestHandleCacheCheck_ItemsAndVersionMismatch_BothJoinedIntoOutput(t *testing.T) {
+	pinInstallKind(t, false)
 	fakeDaemon(t, noticesMessage{
 		Type:            "notices",
 		Items:           []noticeItem{{Message: "some other notice"}},
@@ -63,5 +65,36 @@ func TestHandleCacheCheck_ItemsAndVersionMismatch_BothJoinedIntoOutput(t *testin
 	}
 	if !strings.Contains(stdout, "does not match the coordinator's expected version") {
 		t.Errorf("stdout = %q, want it to include the version-mismatch line too", stdout)
+	}
+}
+
+// The notices path carries the same message as the gate's deny, and needs
+// the same split: on a machine nobody installed twing on, the three
+// commands are unrunnable, and printing them into every SessionStart is a
+// standing invitation for an agent to go try them.
+func TestHandleCacheCheck_VersionMismatch_ManagedInstallNamesNoCommand(t *testing.T) {
+	pinInstallKind(t, true)
+	fakeDaemon(t, noticesMessage{
+		Type:            "notices",
+		VersionMismatch: &versionMismatchInfo{ClientVersion: "0.0.1", ServerVersion: "9.9.9"},
+	})
+
+	stdout := captureStdout(t, func() {
+		handleCacheCheck(hookPayload{SessionID: "sess1", HookEventName: "SessionStart"})
+	})
+
+	if stdout == "" {
+		t.Fatal("stdout is empty -- the mismatch is still worth saying, just not as an instruction")
+	}
+	for _, forbidden := range []string{"npm install", "twing init", "twing daemon restart"} {
+		if strings.Contains(stdout, forbidden) {
+			t.Errorf("must not name %q on a machine with no twing on PATH: %s", forbidden, stdout)
+		}
+	}
+	if !strings.Contains(stdout, "updates itself here") {
+		t.Errorf("should say twing handles this itself: %s", stdout)
+	}
+	if !strings.Contains(stdout, "0.0.1") || !strings.Contains(stdout, "9.9.9") {
+		t.Errorf("should still name both versions: %s", stdout)
 	}
 }

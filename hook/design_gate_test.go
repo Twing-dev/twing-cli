@@ -237,6 +237,10 @@ func TestHandleEditWriteGate_CoordinatorUnreachable_Denies(t *testing.T) {
 }
 
 func TestHandleEditWriteGate_HookVersionMismatch_Denies(t *testing.T) {
+	// A machine someone installed twing on: there, naming the three commands
+	// is right, because they exist and work. The managed counterpart is
+	// TestHookVersionMismatchReason_ManagedInstallNamesNoCommand below.
+	pinInstallKind(t, false)
 	var gotVersionHeader string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotVersionHeader = r.Header.Get("x-twing-hook-version")
@@ -1199,7 +1203,7 @@ func allDenyMessages(t *testing.T) map[string]string {
 		"flaggedSymbolConflict": flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "symbol_conflict"),
 		"flaggedLlmDivergence":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "llm_divergence"),
 		"flaggedLegacyVerdict":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, ""),
-		"outOfScope":         outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", nil),
+		"outOfScope":            outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", nil),
 		"outOfScopeMulti": outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", []designSummary{
 			{ID: "11111111-2222-3333-4444-555555555555", Summary: "add retry with backoff"},
 			{ID: "66666666-7777-8888-9999-000000000000", Summary: "unrelated debounce helper"},
@@ -1263,11 +1267,31 @@ func TestDenyMessages_TellYouWhatToDo(t *testing.T) {
 	}
 }
 
+// pinInstallKind fixes whether the deny messages treat this machine as one
+// twing set itself up on (managed) or one someone installed twing on
+// (self-installed). Without it these assertions read the ambient machine and
+// pass or fail depending on whose box they run on -- a contributor with a
+// bootstrapped ~/.twing/bin/twing gets different text than CI.
+// flattenMessage collapses the deny renderer's line wrapping, so an
+// assertion can name a phrase without having to know where the wrap
+// happens to fall -- which changes whenever the surrounding wording does.
+func flattenMessage(msg string) string {
+	return strings.Join(strings.Fields(msg), " ")
+}
+
+func pinInstallKind(t *testing.T, managed bool) {
+	t.Helper()
+	original := isManagedInstall
+	isManagedInstall = func() bool { return managed }
+	t.Cleanup(func() { isManagedInstall = original })
+}
+
 // 401 and 403 are different problems with different fixes. Collapsing them
 // cost a real user five days: the message said the token was stale and to
 // run `twing login`, when the actual cause was a 403 -- not being a member
 // of the project -- which `twing login` cannot fix.
 func TestAuthRejectedReason_DistinguishesUnauthorizedFromForbidden(t *testing.T) {
+	pinInstallKind(t, false) // a machine where `twing whoami` is real
 	unauthorized := authRejectedReason(http.StatusUnauthorized, "https://example.com")
 	forbidden := authRejectedReason(http.StatusForbidden, "https://example.com")
 
@@ -1405,5 +1429,81 @@ func TestBothConstraintPaths_LeadWithPlainSentence(t *testing.T) {
 	// The Edit/Write path names the specific file; the plan path does not.
 	if !strings.Contains(editPath, "src/billing/charge.ts") {
 		t.Error("Edit/Write path should name the file being written")
+	}
+}
+
+// --- what a machine that never installed twing is told ----------------------
+//
+// The whole point of the committed bootstrap hook is that nobody runs a
+// twing command. A deny that then hands the agent three commands is not
+// just unhelpful there, it is unrunnable: `npm install -g` needs sudo on a
+// system-Node box and there is no `twing` on PATH at all. Found live -- the
+// agent refused, correctly, and the developer stayed blocked.
+
+func TestHookVersionMismatchReason_ManagedInstallNamesNoCommand(t *testing.T) {
+	pinInstallKind(t, true)
+	msg := flattenMessage(hookVersionMismatchReason("0.2.19", "0.2.20"))
+
+	for _, forbidden := range []string{"npm install", "twing init", "twing daemon restart"} {
+		if strings.Contains(msg, forbidden) {
+			t.Errorf("managed install must not be told to run %q: %s", forbidden, msg)
+		}
+	}
+	if !strings.Contains(msg, "couldn't update itself") {
+		t.Errorf("should say the automatic update failed, got: %s", msg)
+	}
+	if !strings.Contains(msg, "operational failure") {
+		t.Errorf("should frame this as operational, not as a task for the agent: %s", msg)
+	}
+	if !strings.Contains(msg, "design-coordinator.log") {
+		t.Errorf("should point at the log that has the real cause: %s", msg)
+	}
+	// Both versions still have to be visible -- that is what makes the
+	// report actionable for whoever runs the repo.
+	if !strings.Contains(msg, "0.2.19") || !strings.Contains(msg, "0.2.20") {
+		t.Errorf("should still name both versions: %s", msg)
+	}
+}
+
+func TestHookVersionMismatchReason_SelfInstalledKeepsTheRunnableCommands(t *testing.T) {
+	pinInstallKind(t, false)
+	msg := flattenMessage(hookVersionMismatchReason("0.2.19", "0.2.20"))
+
+	// On a machine where someone chose to install twing, asking them to
+	// update is fine and the commands genuinely work. `twing init` in
+	// particular must stay: neither npm install -g nor daemon restart
+	// refreshes the separately-fetched hook binary, which is what actually
+	// sends the version this gate checks (found live, 2026-08-27).
+	for _, want := range []string{"npm install -g @twing/cli@latest", "twing init", "twing daemon restart"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("self-installed machine should still be told to run %q: %s", want, msg)
+		}
+	}
+}
+
+func TestAuthReasons_ManagedInstallPointAtGhNotTwing(t *testing.T) {
+	pinInstallKind(t, true)
+
+	// attemptAuthRecovery has already run `twing init --unattended` and
+	// failed by the time any of these render, and it fails for one reason:
+	// no GitHub credential. Every twing command would hit the same wall.
+	for name, msg := range map[string]string{
+		"authRequired":    flattenMessage(authRequiredReason("https://example.com")),
+		"authRejected401": flattenMessage(authRejectedReason(http.StatusUnauthorized, "https://example.com")),
+		"authRejected403": flattenMessage(authRejectedReason(http.StatusForbidden, "https://example.com")),
+	} {
+		if !strings.Contains(msg, "gh auth login") {
+			t.Errorf("%s: should name the credential twing actually needs: %s", name, msg)
+		}
+		for _, forbidden := range []string{"twing login", "twing init", "twing join", "twing whoami"} {
+			if strings.Contains(msg, forbidden) {
+				t.Errorf("%s: must not name %q on a machine with no twing on PATH: %s", name, forbidden, msg)
+			}
+		}
+		// The escape hatch survives -- it is the one thing that works
+		// regardless of how twing got here.
+		if !strings.Contains(msg, "TWING_DESIGN_GATE=off") {
+			t.Errorf("%s: should keep the gate-off escape hatch: %s", name, msg)
+		}
 	}
 }

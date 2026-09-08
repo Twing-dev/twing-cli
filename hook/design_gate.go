@@ -569,16 +569,45 @@ var gateOffAction = denyAction{
 const failClosedWhy = "twing blocks rather than risk letting two people edit the same thing " +
 	"without either of them noticing."
 
+// ghAuthLoginAction is the only thing worth naming to a machine that was set
+// up by the committed bootstrap hook. On those machines attemptAuthRecovery
+// has already run `twing init --unattended` and failed, and it fails for one
+// reason: `gh` is absent or logged out, so there was no credential to sign in
+// with. Every twing command below would hit the same wall.
+//
+// It needs a human at a terminal, which is the point -- the agent's job here
+// is to report, not to go hunting for another way in.
+var ghAuthLoginAction = denyAction{
+	Label:   "Someone needs to give twing a GitHub credential",
+	Command: "gh auth login",
+	Note:    "twing signs itself in from this and already tried; it found none. Needs a human at a terminal -- report it rather than working around it.",
+}
+
+// authActions picks between the self-serve twing commands and the single
+// thing a bootstrapped machine can act on.
+//
+// Naming `twing login` / `twing init` / `twing join` to a machine where
+// nobody installed twing is the same mistake the version-mismatch deny made:
+// there is no `twing` on PATH there, so the instruction is unrunnable, and an
+// unrunnable instruction arriving as denied tool output is exactly what a
+// careful agent is right to refuse. On a machine where the developer did
+// install twing, those commands are real and stay.
+func authActions(selfInstalled ...denyAction) []denyAction {
+	if isManagedInstall() {
+		return []denyAction{ghAuthLoginAction, gateOffAction}
+	}
+	return append(selfInstalled, gateOffAction)
+}
+
 func authRequiredReason(serverURL string) string {
 	return denyMessage(
 		"twing can't check for conflicts -- this machine isn't signed in.",
 		failClosedWhy,
 		[]denyDetail{{"Coordinator", serverURL}},
-		[]denyAction{
-			{Label: "Sign in", Command: fmt.Sprintf("twing login --server %s", serverURL)},
-			{Label: "Or set this repo up from scratch", Command: "twing init"},
-			gateOffAction,
-		},
+		authActions(
+			denyAction{Label: "Sign in", Command: fmt.Sprintf("twing login --server %s", serverURL)},
+			denyAction{Label: "Or set this repo up from scratch", Command: "twing init"},
+		),
 	)
 }
 
@@ -596,15 +625,14 @@ func authRejectedReason(status int, serverURL string) string {
 			"Your sign-in worked, but this project didn't accept it. Usually that means "+
 				"you haven't been added to it yet. "+failClosedWhy,
 			[]denyDetail{{"Coordinator", serverURL}, {"Response", "403 access denied"}},
-			[]denyAction{
-				{
+			authActions(
+				denyAction{
 					Label:   "Join this project",
 					Command: "twing join --github",
 					Note:    "Run this from inside this repo. It uses your GitHub access to decide your role.",
 				},
-				{Label: "See what you currently have access to", Command: "twing whoami"},
-				gateOffAction,
-			},
+				denyAction{Label: "See what you currently have access to", Command: "twing whoami"},
+			),
 		)
 	}
 	return denyMessage(
@@ -612,10 +640,9 @@ func authRejectedReason(status int, serverURL string) string {
 		"The coordinator didn't recognise this machine's saved credentials. They may have "+
 			"expired or been revoked. "+failClosedWhy,
 		[]denyDetail{{"Coordinator", serverURL}, {"Response", "401 not recognised"}},
-		[]denyAction{
-			{Label: "Sign in again", Command: "twing join --github", Note: "Run this from inside this repo."},
-			gateOffAction,
-		},
+		authActions(
+			denyAction{Label: "Sign in again", Command: "twing join --github", Note: "Run this from inside this repo."},
+		),
 	)
 }
 
@@ -667,6 +694,27 @@ func hookVersionMismatchReasonFromResponse(res *http.Response) string {
 	if serverVersion == "" {
 		serverVersion = "unknown"
 	}
+
+	// Fix it rather than instruct someone to. On a machine set up by the
+	// committed bootstrap hook this is fully automatic: update, then replay
+	// this same event through the binary that replaced this one and answer
+	// with its verdict, so the edit proceeds and the developer never sees a
+	// deny at all. Scoped to PreToolUse because that is the only event where
+	// the deny blocks anything; a SessionEnd drain is not worth a
+	// minutes-long update. See version_recovery.go.
+	//
+	// os.Exit rather than a return value: this is one of four call sites
+	// funnelling into here, all of which return a deny *string*, and there
+	// is no answer in that vocabulary for "the verdict is already written."
+	// Exiting 0 with the new binary's output on stdout is exactly the
+	// contract main() would have satisfied anyway.
+	if currentHookEvent == "PreToolUse" {
+		if out, ok := recoverVersionAndRerun(serverVersion); ok {
+			_, _ = os.Stdout.Write(out)
+			os.Exit(0)
+		}
+	}
+
 	return hookVersionMismatchReason(version, serverVersion)
 }
 
@@ -717,6 +765,31 @@ func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 			},
 		)
 	}
+	// A machine set up by the committed bootstrap hook gets here only after
+	// recoverVersionAndRerun has already tried to update it and failed, so
+	// there is nothing left to ask of the reader -- and the three commands
+	// below would be unrunnable there anyway (`npm install -g` needs sudo on
+	// a system-Node box; `twing` is not on PATH at all). Report it as the
+	// operational failure it is, the same shape the bootstrap hook's own
+	// failure message uses, and point at the log that has the real cause.
+	if isManagedInstall() {
+		return denyMessage(
+			"twing can't check for conflicts -- this machine's twing is out of date and couldn't update itself.",
+			"A mismatched version might not understand the coordinator's current API, so twing "+
+				"blocks rather than risk enforcing conflict checks incorrectly. twing installs and "+
+				"updates itself on this machine, with nothing for you or anyone else to run -- so "+
+				"this is an operational failure, not a task for you to work around. Do not try to "+
+				"install or update it another way.",
+			[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
+			[]denyAction{
+				{
+					Label: "Report this, with the real cause",
+					Note:  "~/.twing/design-coordinator.log records what the update actually did. Read it and report what it says rather than guessing from this message.",
+				},
+			},
+		)
+	}
+
 	return denyMessage(
 		"twing can't check for conflicts -- this machine's twing-cli is out of date.",
 		"A mismatched version might not understand the coordinator's current API, "+
