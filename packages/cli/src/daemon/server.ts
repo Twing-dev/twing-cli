@@ -258,6 +258,15 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
     idleTimer.unref?.();
   };
 
+  // A completed self-update leaves this process running the code it just
+  // replaced. Cycling it is the point: the hook's self-heal starts a fresh
+  // daemon from the launch marker the update rewrote, so the new binary,
+  // CLI and daemon all match the coordinator.
+  syncer.onSelfUpdated = async () => {
+    console.log("twing daemon: self-updated; shutting down so a fresh daemon starts on the new code");
+    await onShutdownRequested();
+  };
+
   const server = net.createServer((conn) => {
     // Any client at all counts as activity -- a connection is what a live
     // session looks like from here, regardless of which message it carries.

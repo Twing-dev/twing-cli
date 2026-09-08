@@ -16,6 +16,7 @@
 
 import { readConfig, getServerAuth, authFetch, type Claim, type CallEdge, type Notice } from "@twing/core";
 import { getCliVersion } from "../version.js";
+import { isSelfUpdatable, performSelfUpdate } from "./self-update.js";
 
 /**
  * This daemon process's own `@twing/cli` version, snapshotted once at
@@ -213,7 +214,45 @@ export class Syncer {
         console.error(`twing daemon: version check failed for ${serverUrl}`, err);
       }
     }
+    await this.maybeSelfUpdate();
   }
+
+  /** Set once a self-update has been attempted, successfully or not.
+   * Without it a failing update would retry every POLL_INTERVAL_MS -- an
+   * npm install every five seconds, forever, against a coordinator that is
+   * simply ahead of any published release. One attempt per daemon lifetime
+   * is enough: the daemon is short-lived now (it exits on idle), so a
+   * genuinely fixable mismatch gets another attempt soon anyway. */
+  private selfUpdateAttempted = false;
+
+  /**
+   * Brings a twing-managed install up to the coordinator's version, rather
+   * than asking the agent to run three commands mid-edit.
+   *
+   * Requests shutdown on success: this process is the old code, and a
+   * daemon that keeps running after its own package was replaced is exactly
+   * the version-skew this exists to remove. The hook's self-heal starts a
+   * fresh one from the (just-rewritten) launch marker on the next event.
+   */
+  private async maybeSelfUpdate(): Promise<void> {
+    if (this.selfUpdateAttempted || !this.onSelfUpdated) return;
+    const mismatch = this.versionMismatch();
+    if (!mismatch) return;
+    // A global npm install may need root to replace, which a background
+    // daemon cannot obtain and should not try to work around. Those
+    // machines keep the explicit instructions.
+    if (!isSelfUpdatable(import.meta.url)) return;
+
+    this.selfUpdateAttempted = true;
+    if (await performSelfUpdate(mismatch.serverVersion)) {
+      await this.onSelfUpdated();
+    }
+  }
+
+  /** Set by the daemon so a completed self-update can cycle the process.
+   * Injected rather than imported to keep this class free of the server's
+   * lifecycle machinery (and trivially testable). */
+  onSelfUpdated?: () => Promise<void>;
 
   /** Whether this machine's own @twing/cli version mismatches any server
    * this daemon has ever synced claims to. Deliberately daemon-wide, not

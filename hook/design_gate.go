@@ -786,6 +786,15 @@ func handleExitPlanModeSingle(payload hookPayload, config twingConfig) {
 	}
 
 	if config.AuthToken == "" && !config.NoAuth {
+		// Try to fix it rather than instruct someone to. `init --unattended`
+		// resolves a GitHub token from `gh auth token` and joins this
+		// project non-interactively; if it works, re-resolve and carry on as
+		// though the credential had been there all along.
+		if attemptAuthRecovery(config.RepoRoot) {
+			config = resolveServerConfig(payload.Cwd)
+		}
+	}
+	if config.AuthToken == "" && !config.NoAuth {
 		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
 		return
 	}
@@ -887,6 +896,11 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 		g := groups[key]
 		cfg := g.config
 
+		if cfg.AuthToken == "" && !cfg.NoAuth {
+			if attemptAuthRecovery(g.candidates[0].RepoRoot) {
+				cfg = resolveServerConfig(g.candidates[0].RepoRoot)
+			}
+		}
 		if cfg.AuthToken == "" && !cfg.NoAuth {
 			writeJSON(authRequiredOutput("PreToolUse", cfg.ServerURL))
 			return
@@ -1708,6 +1722,16 @@ func handleEditWriteGate(payload hookPayload) {
 		return
 	}
 
+	if config.AuthToken == "" && !config.NoAuth {
+		// Fix it rather than instruct someone to: `init --unattended`
+		// resolves a GitHub token from `gh auth token` and joins this
+		// project without a human. If it works, re-resolve and carry on as
+		// though the credential had been there all along -- the edit
+		// proceeds instead of costing the agent a denial and a chore.
+		if attemptAuthRecovery(config.RepoRoot) {
+			config = resolveServerConfigForFile(payload.Cwd, input.FilePath)
+		}
+	}
 	if config.AuthToken == "" && !config.NoAuth {
 		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
 		return
