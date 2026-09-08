@@ -151,3 +151,74 @@ test("ensureCliShim: is idempotent and repoints at the running build", async () 
     assert.match(fs.readFileSync(second!, "utf8"), /dist\/index\.js/);
   });
 });
+
+// --- the hook binary must match the CLI package it came with ---------------
+//
+// The gate compares the *hook binary's* stamped version against the
+// coordinator's, so an update that installs `@twing/cli@0.2.21` and then
+// fetches the latest hook binary has not updated anything the gate can see.
+// It only looked correct because the coordinator happened to sit at the
+// newest release; a staged rollout, a rollback, or a pinned deployment made
+// automatic recovery unable to converge at all.
+
+test("fetchPrebuiltHook: asks for the release matching the given version first", async () => {
+  const requested: string[] = [];
+  const fakeFetch = (async (url: string) => {
+    requested.push(url);
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const target = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "twing-hook-ver-")), "twing-hook");
+  const ok = await withMockFetch(fakeFetch, () => withPlatformAsync("linux", "x64", () => fetchPrebuiltHook(target, "0.2.21")));
+
+  assert.equal(ok, true);
+  assert.equal(requested.length, 1, "a matching release exists -- latest must not be fetched at all");
+  assert.match(requested[0], /\/releases\/download\/v0\.2\.21\/twing-hook-linux-amd64$/);
+});
+
+test("fetchPrebuiltHook: falls back to latest when that version has no release asset", async () => {
+  // A version published to npm before its hook release finished uploading.
+  const requested: string[] = [];
+  const fakeFetch = (async (url: string) => {
+    requested.push(url);
+    if (url.includes("/download/v")) return new Response("not found", { status: 404 });
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const target = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "twing-hook-ver-")), "twing-hook");
+  const ok = await withMockFetch(fakeFetch, () => withPlatformAsync("linux", "x64", () => fetchPrebuiltHook(target, "9.9.9")));
+
+  assert.equal(ok, true, "a missing per-version asset must not leave the machine with no binary at all");
+  assert.equal(requested.length, 2);
+  assert.match(requested[1], /\/releases\/latest\/download\//);
+});
+
+test("fetchPrebuiltHook: no version given falls straight through to latest", async () => {
+  const requested: string[] = [];
+  const fakeFetch = (async (url: string) => {
+    requested.push(url);
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const target = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "twing-hook-ver-")), "twing-hook");
+  await withMockFetch(fakeFetch, () => withPlatformAsync("linux", "x64", () => fetchPrebuiltHook(target)));
+
+  assert.deepEqual(requested.length, 1);
+  assert.match(requested[0], /\/releases\/latest\/download\//);
+});
+
+test("fetchPrebuiltHook: the version sentinel \"unknown\" is not treated as a version", async () => {
+  // getCliVersion() returns it when package.json has no version field;
+  // there is no `releases/download/vunknown/` to ask for.
+  const requested: string[] = [];
+  const fakeFetch = (async (url: string) => {
+    requested.push(url);
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const target = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "twing-hook-ver-")), "twing-hook");
+  await withMockFetch(fakeFetch, () => withPlatformAsync("linux", "x64", () => fetchPrebuiltHook(target, "unknown")));
+
+  assert.equal(requested.length, 1);
+  assert.match(requested[0], /\/releases\/latest\/download\//);
+});

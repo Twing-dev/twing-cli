@@ -153,27 +153,55 @@ export function releaseAssetName(): string | null {
   return `twing-hook-${osName}-${archName}${ext}`;
 }
 
-/** Fetches the latest published release's binary for this platform,
- * writing it to `target`. GitHub's `/releases/latest/download/<asset>` URL
- * always redirects to the current latest release's matching asset -- no
- * API token, no rate limit, works from a plain `fetch`. Returns false (never
- * throws) on any failure: no release published yet, wrong platform, a
- * network hiccup -- all fall through to the next tier the same way. */
-export async function fetchPrebuiltHook(target: string): Promise<boolean> {
+/**
+ * Fetches a published release's binary for this platform, writing it to
+ * `target`. No API token, no rate limit, works from a plain `fetch`.
+ *
+ * **Prefers the release matching `version`, not whatever is newest.** The
+ * gate compares the *hook binary's* stamped version against the
+ * coordinator's, and every automatic update pins the npm install to a
+ * specific version on purpose -- the daemon's `performSelfUpdate` and the
+ * gate's `attemptVersionRecovery` both install `@twing/cli@<the
+ * coordinator's version>` precisely so that chasing `latest` cannot swap one
+ * mismatch for another. Refreshing the hook from `/releases/latest/`
+ * regardless threw that away at the final step: install the right package,
+ * then overwrite its hook binary with a different version's. Whenever the
+ * coordinator is not at the newest release -- a staged rollout, a rollback,
+ * a deliberately pinned deployment -- the update could never converge, and a
+ * machine that repairs itself automatically would repair itself into the
+ * same 426 every time.
+ *
+ * Falls back to `/releases/latest/`, which covers a version published to npm
+ * before its hook release finished uploading, and any caller with no version
+ * to offer.
+ *
+ * Returns false (never throws) on any failure: no release published yet,
+ * wrong platform, a network hiccup -- all fall through to the next tier the
+ * same way.
+ */
+export async function fetchPrebuiltHook(target: string, version?: string): Promise<boolean> {
   const asset = releaseAssetName();
   if (!asset) return false;
 
-  const url = `https://github.com/${RELEASE_REPO}/releases/latest/download/${asset}`;
-  try {
-    const res = await fetch(url, { redirect: "follow" });
-    if (!res.ok) return false;
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    replaceFileAtomically(target, bytes, 0o755);
-    return true;
-  } catch {
-    return false;
+  const base = `https://github.com/${RELEASE_REPO}/releases`;
+  const urls = [`${base}/latest/download/${asset}`];
+  if (version && version !== "unknown") {
+    urls.unshift(`${base}/download/v${version}/${asset}`);
   }
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { redirect: "follow" });
+      if (!res.ok) continue;
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      replaceFileAtomically(target, bytes, 0o755);
+      return true;
+    } catch {
+      // This URL didn't work; try the fallback before giving up.
+    }
+  }
+  return false;
 }
 
 /** Returns the installed binary path -- building from source, fetching a
@@ -215,7 +243,10 @@ export async function ensureHookInstalled(): Promise<string> {
     return target;
   }
 
-  if (await fetchPrebuiltHook(target)) {
+  // Matched to this npm package's own version, so an install's two halves
+  // -- the CLI, and the hook binary whose version the gate actually sends --
+  // can never disagree. See fetchPrebuiltHook's doc comment.
+  if (await fetchPrebuiltHook(target, getCliVersion())) {
     return target;
   }
 
