@@ -166,10 +166,13 @@ problem: getting twing *onto* a teammate's machine without them having to do
 anything.
 
 Whoever founds a project (or already holds admin/maintain on it) has `init`
-also commit a small POSIX shell script into the repo's own
-`.claude/settings.json` -- git-tracked, not machine-local. Every clone of the
-repo then carries it, and Claude Code runs it before any `Edit`/`Write`.
-On a machine that has never run twing, that hook **installs twing itself**:
+commit two git-tracked files: `.twing/bootstrap-hook.sh`, a small POSIX
+shell script, and the `.claude/settings.json` entries that point Claude Code
+at it. Every clone of the repo carries both, and the script runs on every
+hook event -- the same set the machine-global wiring covers, so a machine
+driven only by the committed files still gets the whole product rather than
+just the gate. On a machine that has never run twing, it **installs twing
+itself**:
 
 ```sh
 npm install --prefix ~/.twing/lib @twing/cli@latest
@@ -184,7 +187,7 @@ path, and npm may evict its own cache at any time, which would leave a
 marker that works today and silently stops working weeks later. Once the
 binary is in place the hook `exec`s it, so the real design gate decides the
 verdict as usual. Later runs are a `test -x` plus an `exec` -- no network,
-no measurable cost.
+no subprocess, no measurable cost.
 
 **Why it installs rather than instructs.** Earlier versions denied the edit
 and told the agent to run `npm install -g @twing/cli && twing init`. That
@@ -205,16 +208,26 @@ check, same server-derived role -- one less thing a human has to be present
 for. If `gh` isn't installed or isn't logged in, the bootstrap reports that
 plainly; `gh auth login` (or one interactive `twing init`) fixes it.
 
-**Exactly one hook wiring is ever active.** Claude Code merges hooks from
-every settings scope and runs all of them, so a repo carrying both the
-committed entry and machine-global wiring would fire twice per tool call.
-The committed script therefore stands down the moment it sees
-`~/.claude/settings.json` already referencing the binary. A fresh clone has
-no global wiring, so the committed entry runs; after a deliberate `twing
-init` the global entry takes over and the committed one goes quiet. Global
-wiring stays the better steady state -- it is the only one that works when a
-session is started in a directory *containing* twing repos rather than
-inside one.
+**It keeps itself current, too.** If the coordinator moves ahead of a
+machine's twing, the gate updates that machine in place and replays the same
+edit through the new binary -- so the edit simply proceeds. Nothing is asked
+of anyone: on a machine where nobody installed twing, no twing command is
+ever named, because none of them would run there (`npm install -g` needs
+sudo on a system-Node box, and there is no `twing` on `PATH` at all). If the
+update genuinely can't happen, you get an operational report pointing at
+`~/.twing/design-coordinator.log`, not a command list.
+
+**Installing twing yourself keeps working.** `npm install -g @twing/cli`
+followed by `twing init` writes machine-global wiring, and the committed
+script stands down the moment it sees `~/.claude/settings.json` already
+referencing the binary -- Claude Code merges hooks from every settings scope
+and runs all of them, so without that guard both would fire on every tool
+call. Your copy is yours: twing won't replace a package you installed
+deliberately, and version-mismatch and sign-in messages keep naming the
+commands that genuinely work on your machine. Global wiring also covers the
+one case the committed files can't -- a session started in a directory
+*containing* twing repos rather than inside one, where there is no
+repo-local settings file to load.
 
 **Turning it on and off** -- both are plain local file edits, no server call
 and no auth, since the real authorization is your own branch protection / PR
@@ -225,7 +238,8 @@ twing project enable-enforcement    # writes it
 twing project disable-enforcement   # removes it
 ```
 
-Remember to commit and push whatever `enable-enforcement`/`init` writes;
+Remember to commit and push both files that `enable-enforcement`/`init`
+writes (`.twing/bootstrap-hook.sh` and `.claude/settings.json`);
 twing has no way to do that for you. Non-GitHub-hosted projects,
 `--invite`/`--no-auth` onboarding, and repos founded before this existed
 don't get the hook written automatically -- run `twing project
@@ -238,7 +252,9 @@ behavior for this mechanism hasn't been verified -- a known gap, same as
 **If the bootstrap fails** (no network, npm unreachable, no `gh`
 credential), the hook denies with an *operational* report -- what failed and
 who to tell -- explicitly not an instruction for the agent to install
-anything another way. That is a rare path, not the default one.
+anything another way. Only the `PreToolUse` entries can carry a verdict at
+all; the rest stay silent rather than emit output for an event that has no
+meaning for it. That is a rare path, not the default one.
 
 ### Quick command reference
 
