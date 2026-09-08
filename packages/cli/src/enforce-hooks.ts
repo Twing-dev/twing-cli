@@ -276,13 +276,41 @@ export function bootstrapScriptPath(repoRoot: string): string {
   return path.join(repoRoot, BOOTSTRAP_SCRIPT_RELPATH);
 }
 
-/** The hook entry pointing at this repo's committed script. `sh <script>`
- * rather than executing it directly: git tracks the executable bit, but a
- * checkout that lost it (a zip export, a Windows clone, an over-broad
- * umask) would otherwise fail with no way for the reader to tell why. */
+/**
+ * The hook entry pointing at this repo's committed script.
+ *
+ * Run through `sh` rather than executed directly: git tracks the executable
+ * bit, but a checkout that lost it (a zip export, a Windows clone, an
+ * over-broad umask) would otherwise fail with no way for the reader to tell
+ * why.
+ *
+ * **The existence guard is the important part.** Splitting the artifact into
+ * a script plus these entries created a failure mode the inlined version
+ * could not have: an admin who commits `.claude/settings.json` and forgets
+ * `.twing/bootstrap-hook.sh`. Verified live -- `sh` exits 2 when it cannot
+ * open the script, Claude Code treats exit 2 on `PreToolUse` as a block, and
+ * the result is every developer in the repo blocked on every edit by
+ * `sh: 0: cannot open ...`, an error that names no fix and that only another
+ * admin push can clear.
+ *
+ * So a missing script is a silent no-op instead: the repo is simply
+ * un-enforced until the file arrives, which is where it was before anyone
+ * ran `enable-enforcement` and is a state the admin can fix at their own
+ * pace. Failing closed sounds safer for a gate, but not here -- the
+ * condition is an admin packaging slip, never a developer bypass (nothing a
+ * developer does can remove a committed file from their own checkout without
+ * them knowing), and the cost of getting it wrong is the whole team's day.
+ */
 function bootstrapHookCommand(event: string): HookCommand {
   const scriptRef = `\${CLAUDE_PROJECT_DIR}/${BOOTSTRAP_SCRIPT_RELPATH.split(path.sep).join("/")}`;
-  return { type: "command", command: "sh", args: [scriptRef, event] };
+  return {
+    type: "command",
+    command: "sh",
+    // `sh -c <guard> <argv0> <script> <event>`: $1 is the script, $2 the
+    // event. Kept to one line -- the whole point of v4 is that the real
+    // script lives in a file a human can read, not in this JSON.
+    args: ["-c", 'test -f "$1" || exit 0; exec sh "$1" "$2"', "twing-bootstrap-hook", scriptRef, event],
+  };
 }
 
 /** Recognises both shapes this hook has shipped in: v1-v3's inlined script

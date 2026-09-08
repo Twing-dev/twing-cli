@@ -167,9 +167,11 @@ export function runProjectEnableEnforcement(options: ProjectEnforcementOptions):
     console.log("twing project enable-enforcement: already present in .claude/settings.json");
     return;
   }
+  // Both paths, explicitly. They are the same artifact, and committing only
+  // one leaves the repo un-enforced with nothing to say so.
   console.log(
-    "twing project enable-enforcement: wrote a bootstrap install-check into .claude/settings.json -- " +
-      "commit and push this file (or open a PR) so your team inherits it.",
+    "twing project enable-enforcement: wrote .twing/bootstrap-hook.sh and the entries in " +
+      ".claude/settings.json -- commit and push BOTH files (or open a PR) so your team inherits it.",
   );
 }
 

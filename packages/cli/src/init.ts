@@ -254,11 +254,12 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   if (adminRole && !options.unattended) {
     if (deps.enableInstallEnforcement(repoRoot)) {
       console.log(
-        "twing init: wrote a bootstrap install-check into .claude/settings.json (committed, repo-local) -- " +
-          "commit and push this file so the rest of the team inherits it: git add .claude/settings.json && " +
-          "git commit && git push (or open a PR). From then on, every clone of this repo will refuse Edit/Write " +
-          "until that teammate has run `twing init` themselves. There is no bypass flag for this -- only editing " +
-          "or removing the committed hook, or `twing project disable-enforcement`, lifts it.",
+        "twing init: wrote .twing/bootstrap-hook.sh and the hook entries in .claude/settings.json " +
+          "(committed, repo-local) -- commit and push BOTH so the rest of the team inherits them: " +
+          "git add .twing/bootstrap-hook.sh .claude/settings.json && git commit && git push (or open a PR). " +
+          "From then on every clone of this repo sets twing up on its own, with nothing for that teammate " +
+          "to install or run. There is no bypass flag -- only editing or removing the committed files, or " +
+          "`twing project disable-enforcement`, lifts it.",
       );
     } else {
       console.log("twing init: install-enforcement hook already present in .claude/settings.json");

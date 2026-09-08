@@ -8,6 +8,9 @@
             "type": "command",
             "command": "sh",
             "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
               "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
               "PreToolUse"
             ]
@@ -21,6 +24,9 @@
             "type": "command",
             "command": "sh",
             "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
               "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
               "PreToolUse"
             ]
@@ -36,6 +42,9 @@
             "type": "command",
             "command": "sh",
             "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
               "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
               "PostToolUse"
             ]
@@ -50,6 +59,9 @@
             "type": "command",
             "command": "sh",
             "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
               "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
               "SessionStart"
             ]
@@ -64,6 +76,9 @@
             "type": "command",
             "command": "sh",
             "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
               "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
               "UserPromptSubmit"
             ]
@@ -78,6 +93,9 @@
             "type": "command",
             "command": "sh",
             "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
               "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
               "SessionEnd"
             ]

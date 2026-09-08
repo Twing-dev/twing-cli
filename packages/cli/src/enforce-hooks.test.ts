@@ -102,8 +102,9 @@ test("enableInstallEnforcement: writes the script and wires every event the glob
   // is the only thing the script needs to distinguish them.
   for (const { event, hook } of bootstrapHooks(repoRoot)) {
     assert.equal(hook.command, "sh", "run via sh, so a lost executable bit can't break a clone");
-    assert.equal(hook.args?.[0], "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh");
-    assert.equal(hook.args?.[1], event);
+    const args = hook.args ?? [];
+    assert.equal(args[args.length - 2], "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh");
+    assert.equal(args[args.length - 1], event);
   }
 });
 
@@ -462,4 +463,52 @@ test("enableInstallEnforcement: still works for a normal repo under $HOME", asyn
     assert.equal(enableInstallEnforcement(repo), true);
     assert.equal(isInstallEnforcementWired(repo), true);
   });
+});
+
+// --- a missing script must not block the repo -------------------------------
+//
+// Splitting the artifact into a script plus settings entries created a
+// failure mode the inlined version could not have: an admin commits
+// .claude/settings.json and forgets .twing/bootstrap-hook.sh. Verified live
+// before this guard existed -- `sh` exits 2 when it cannot open the script,
+// Claude Code treats exit 2 on PreToolUse as a block, and every developer in
+// the repo was stopped on every edit by `sh: 0: cannot open ...`, an error
+// naming no fix that only another admin push could clear.
+
+/** Runs a wired entry's argv the way Claude Code would, with
+ * ${CLAUDE_PROJECT_DIR} already expanded. */
+function runWiredEntry(hook: { command: string; args?: string[] }, projectDir: string, home: string): { stdout: string; status: number } {
+  const argv = (hook.args ?? []).map((a) => a.replace("${CLAUDE_PROJECT_DIR}", projectDir));
+  try {
+    const stdout = execFileSync(hook.command, argv, { env: { HOME: home, PATH: process.env.PATH ?? "" } });
+    return { stdout: stdout.toString(), status: 0 };
+  } catch (err) {
+    const e = err as { stdout?: Buffer; status?: number };
+    return { stdout: e.stdout?.toString() ?? "", status: e.status ?? 1 };
+  }
+}
+
+test("wired entry: a missing bootstrap script is a silent no-op, not a repo-wide block", () => {
+  const repoRoot = tmpRepoRoot();
+  enableInstallEnforcement(repoRoot);
+  fs.rmSync(bootstrapScriptPath(repoRoot)); // the admin committed only settings.json
+
+  for (const { event, hook } of bootstrapHooks(repoRoot)) {
+    const { stdout, status } = runWiredEntry(hook, repoRoot, fakeHome(false, false));
+    assert.equal(status, 0, `${event}: exit 2 here blocks every Edit in the repo with a raw shell error`);
+    assert.equal(stdout, "", `${event}: must say nothing at all`);
+  }
+});
+
+test("wired entry: with the script present it still runs, and gets its event", () => {
+  // The guard must not have broken the thing it wraps.
+  const repoRoot = tmpRepoRoot();
+  enableInstallEnforcement(repoRoot);
+  fs.writeFileSync(bootstrapScriptPath(repoRoot), "#!/bin/sh\nprintf 'RAN:%s' \"$1\"\n", { mode: 0o755 });
+
+  for (const { event, hook } of bootstrapHooks(repoRoot)) {
+    const { stdout, status } = runWiredEntry(hook, repoRoot, fakeHome(false, false));
+    assert.equal(status, 0);
+    assert.equal(stdout, `RAN:${event}`, "the script must receive the event this entry was wired for");
+  }
 });

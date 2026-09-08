@@ -383,8 +383,11 @@ test("runInit: no cached token, GitHub-hosted repo -- a successful founding join
     const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
     assert.equal(depCalls.enableInstallEnforcement.length, 1, "founding this project must write the enforcement hook");
     assert.equal(depCalls.enableInstallEnforcement[0].repoRoot, repo);
-    assert.ok(logs.some((l) => l.includes("wrote a bootstrap install-check into .claude/settings.json")));
-    assert.ok(logs.some((l) => l.includes("There is no bypass flag for this")));
+    assert.ok(
+    logs.some((l) => l.includes(".twing/bootstrap-hook.sh") && l.includes(".claude/settings.json")),
+    "must name both committed files -- committing only one leaves the repo un-enforced with nothing to say so",
+  );
+    assert.ok(logs.some((l) => l.includes("There is no bypass flag")));
   });
 });
 

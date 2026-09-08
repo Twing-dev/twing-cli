@@ -146,7 +146,10 @@ test("runProjectEnableEnforcement: writes the bootstrap hook into the repo's .cl
     hooks?: { PreToolUse?: { matcher?: string; hooks: { command: string }[] }[] };
   };
   assert.ok(settings.hooks?.PreToolUse?.some((e) => e.matcher === "Edit|Write" && e.hooks.some((h) => isBootstrapHook(h))));
-  assert.ok(logs.some((l) => l.includes("wrote a bootstrap install-check")));
+  assert.ok(
+    logs.some((l) => l.includes(".twing/bootstrap-hook.sh") && l.includes(".claude/settings.json")),
+    "must name both committed files, not just the settings one",
+  );
 });
 
 test("runProjectEnableEnforcement: warns (but still writes) when the repo has no .twing/twing.yml yet", async () => {
