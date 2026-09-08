@@ -32,3 +32,10 @@ simulator/.workspaces/
 # `git add -A` can't sweep one in.
 /deploy/docker/backups-offbox/
 
+
+# Editor swap/backup files. `.claude/` is committed now (it carries the
+# bootstrap hook entries), so an editor left open on settings.json drops a
+# .swp right beside a tracked file -- which is how one got committed.
+*.swp
+*.swo
+*~
