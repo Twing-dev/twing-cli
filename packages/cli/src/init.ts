@@ -172,6 +172,18 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     }
   }
 
+  // Before authenticating, deliberately: installing the binary needs no
+  // credentials, and doing it second meant an auth failure left the machine
+  // with no hook at all. For a bootstrap run that is the difference between
+  // two very different failures -- the committed hook falling back to its
+  // generic "could not install itself" deny, versus the Go gate's own
+  // precise, well-tested message naming exactly which of "no cached token",
+  // "token rejected" or "coordinator unreachable" it hit, with the command
+  // that fixes it. Auth can still fail below; this just makes it fail into
+  // the good message.
+  const hookPath = await deps.ensureHookInstalled();
+  console.log(`twing init: hook installed at ${hookPath}`);
+
   const { token: authToken, adminRole } = await resolveAuthToken(repoRoot, serverUrl, options);
   // Self-declared, attribution-only (§17 Phase 4) -- only ever sent when
   // there's no real token, i.e. only reaches the wire on a no_auth server.
@@ -181,9 +193,6 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // already-cached no_auth server still forces the registration call in
   // `seedConstraints` even when this repo's manifest is empty.
   const noAuth = getServerAuth(readConfig(), serverUrl)?.noAuth === true;
-
-  const hookPath = await deps.ensureHookInstalled();
-  console.log(`twing init: hook installed at ${hookPath}`);
 
   // Hook wiring is machine-global now (§ install-once onboarding work) --
   // wired once into ~/.claude/settings.json, covers every repo on this

@@ -60,6 +60,30 @@ import { readClaudeSettings, writeClaudeSettings, type HookMatcherEntry } from "
 
 export const BOOTSTRAP_HOOK_MARKER = "# twing-bootstrap-hook-v3";
 
+/**
+ * Every marker string this hook has ever shipped under, current one first.
+ *
+ * Recognising the old ones is not housekeeping -- it is what makes an
+ * upgrade possible at all. `enableInstallEnforcement` finds the entry to
+ * replace by marker, so a marker it doesn't recognise is one it appends
+ * *beside* instead of replacing. That is exactly what the v2 -> v3 rename
+ * caused: a repo carrying v2 ended up with both entries, Claude Code ran
+ * both, and the stale v2 denied every edit forever (v2 requires the global
+ * `~/.claude/settings.json` wiring, which v3's `--unattended` bootstrap
+ * deliberately never creates). A repo could go from "not auto-installing"
+ * to "permanently blocked" by running the very command meant to fix it.
+ *
+ * So: never remove an entry from this list, even long after that version
+ * stops being written. Repos hold committed copies indefinitely -- the only
+ * thing that rewrites one is an admin re-running `twing init`/`twing
+ * project enable-enforcement` and committing the result.
+ */
+export const KNOWN_BOOTSTRAP_HOOK_MARKERS = [
+  BOOTSTRAP_HOOK_MARKER,
+  "# twing-install-enforcement-hook-v2",
+  "# twing-install-enforcement-hook-v1",
+];
+
 const ENFORCEMENT_MATCHER = "Edit|Write";
 
 /**
@@ -94,21 +118,35 @@ export function bootstrapHookScript(): string {
     'if [ -f "$settings" ] && grep -qF "$hook_bin" "$settings" 2>/dev/null; then',
     "  exit 0",
     "fi",
-    "# First edit on a machine that has never run twing: install it rather than",
-    "# demanding someone else do it. Unprivileged by construction -- the prefix",
-    "# is under $HOME (no sudo, unlike npm install -g), and --unattended skips",
-    "# the OS-service step. Installing into twing's own directory rather than",
-    "# running straight from npx matters: the daemon launch marker records this",
-    "# path, and npm may evict its own cache at any time, which would leave a",
-    "# marker that works today and silently fails weeks later.",
+    "# First edit on a machine that has never run twing: set it up rather than",
+    "# demanding someone else do it. Everything below is unprivileged -- the",
+    "# install prefix is under $HOME (no sudo, unlike npm install -g), and",
+    "# --unattended skips the OS-service step.",
+    "#",
+    "# Output goes to a log rather than /dev/null. Discarding it meant a",
+    "# precise, actionable error (`gh auth login` is the common one) was",
+    "# thrown away and replaced by a message guessing at three possible",
+    "# causes -- see the deny text below, which now points here instead.",
     'lib="$HOME/.twing/lib"',
     'cli="$lib/node_modules/@twing/cli/dist/index.js"',
+    'log="$HOME/.twing/bootstrap.log"',
     'if [ ! -x "$hook_bin" ]; then',
-    '  npm install --prefix "$lib" @twing/cli@latest --no-fund --no-audit --loglevel=error >/dev/null 2>&1 </dev/null',
-    '  [ -f "$cli" ] && node "$cli" init --unattended >/dev/null 2>&1 </dev/null',
+    '  mkdir -p "$HOME/.twing"',
+    '  { echo "=== twing bootstrap $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="; } >> "$log" 2>/dev/null',
+    "  # Reuse a twing that is already on PATH before fetching another copy:",
+    "  # a machine with a working global install needs no download at all, and",
+    "  # installing a second copy beside it is confusing to anyone inspecting",
+    "  # this hook (it reads as the repo insisting on its own binary).",
+    '  if command -v twing >/dev/null 2>&1; then',
+    '    twing init --unattended >> "$log" 2>&1 </dev/null',
+    "  fi",
+    '  if [ ! -x "$hook_bin" ]; then',
+    '    npm install --prefix "$lib" @twing/cli@latest --no-fund --no-audit --loglevel=error >> "$log" 2>&1 </dev/null',
+    '    [ -f "$cli" ] && node "$cli" init --unattended >> "$log" 2>&1 </dev/null',
+    "  fi",
     "fi",
     'if [ ! -x "$hook_bin" ]; then',
-    "  printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"twing could not install itself on this machine, so this repo is not coordinating edits right now.\\n\\n  This repo uses twing (https://twing.dev, source at\\n  https://github.com/Twing-dev/twing-cli) to stop two AI sessions\\n  silently colliding on the same code. Its setup runs automatically\\n  from a hook this repo commits -- normally with nothing to do by\\n  hand -- and that automatic setup just failed.\\n\\n  This is an operational failure, not a task for you to work around:\\n  do not try to install it another way, and do not edit or remove the\\n  hook (that hits this same check anyway). Report it to whoever runs\\n  this repo.\\n\\n  Usual causes, in order\\n    - no network, or npm is unreachable from this machine\\n    - node/npm is missing or too old (needs Node >= 20)\\n    - no GitHub credential available: twing authenticates via the gh\\n      CLI when running unattended, so `gh auth login` may be needed\\n\\n  To see the real error, a human can run twing setup by hand -- instructions at https://github.com/Twing-dev/twing-cli\"}}'",
+    "  printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"twing could not install itself on this machine, so this repo is not coordinating edits right now.\\n\\n  This repo uses twing (https://twing.dev, source at\\n  https://github.com/Twing-dev/twing-cli) to stop two AI sessions\\n  silently colliding on the same code. Its setup runs automatically\\n  from a hook this repo commits -- normally with nothing to do by\\n  hand -- and that automatic setup just failed.\\n\\n  This is an operational failure, not a task for you to work around:\\n  do not try to install it another way, and do not edit or remove the\\n  hook (that hits this same check anyway). Report it to whoever runs\\n  this repo.\\n\\n  The actual error was written to ~/.twing/bootstrap.log -- read that\\n  file and report what it says. Do not guess from this message; the\\n  log has the real cause. The most common one is that twing needs a\\n  GitHub credential to verify your access to this repo, and none was\\n  available non-interactively, which `gh auth login` fixes.\"}}'",
     "  exit 0",
     "fi",
     "# Hand the real decision to the installed hook: same binary, same",
@@ -122,13 +160,37 @@ function settingsPath(repoRoot: string): string {
   return path.join(repoRoot, ".claude", "settings.json");
 }
 
-function findMarkedEntry(entries: HookMatcherEntry[]): { entryIndex: number; hookIndex: number } | undefined {
+function isBootstrapHook(command: string): boolean {
+  return KNOWN_BOOTSTRAP_HOOK_MARKERS.some((marker) => command.startsWith(marker));
+}
+
+/** Every bootstrap-hook entry present, any version, in document order.
+ *
+ * Returns all of them rather than the first because a repo can legitimately
+ * be carrying more than one: the v2 -> v3 marker rename appended instead of
+ * replacing, so repos upgraded while that bug was live hold two. Both fire,
+ * and the stale one denies -- so an upgrade has to collapse them, not just
+ * rewrite whichever it happened to find. */
+function findMarkedEntries(entries: HookMatcherEntry[]): { entryIndex: number; hookIndex: number }[] {
+  const found: { entryIndex: number; hookIndex: number }[] = [];
   for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
     if (entries[entryIndex].matcher !== ENFORCEMENT_MATCHER) continue;
-    const hookIndex = entries[entryIndex].hooks.findIndex((h) => h.command.startsWith(BOOTSTRAP_HOOK_MARKER));
-    if (hookIndex !== -1) return { entryIndex, hookIndex };
+    entries[entryIndex].hooks.forEach((h, hookIndex) => {
+      if (isBootstrapHook(h.command)) found.push({ entryIndex, hookIndex });
+    });
   }
-  return undefined;
+  return found;
+}
+
+/** Drops the located hooks, and any matcher entry left with none. Removes
+ * back-to-front so earlier indices stay valid as it goes. */
+function removeMarked(entries: HookMatcherEntry[], marked: { entryIndex: number; hookIndex: number }[]): void {
+  for (const { entryIndex, hookIndex } of [...marked].reverse()) {
+    entries[entryIndex].hooks.splice(hookIndex, 1);
+  }
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].matcher === ENFORCEMENT_MATCHER && entries[i].hooks.length === 0) entries.splice(i, 1);
+  }
 }
 
 /** True if this repo's committed `.claude/settings.json` already has the
@@ -137,7 +199,7 @@ function findMarkedEntry(entries: HookMatcherEntry[]): { entryIndex: number; hoo
  * out-of-date one). */
 export function isInstallEnforcementWired(repoRoot: string): boolean {
   const settings = readClaudeSettings(settingsPath(repoRoot));
-  return findMarkedEntry(settings.hooks?.PreToolUse ?? []) !== undefined;
+  return findMarkedEntries(settings.hooks?.PreToolUse ?? []).length > 0;
 }
 
 /** Read-merge-write into `<repoRoot>/.claude/settings.json` (git-tracked --
@@ -154,12 +216,20 @@ export function enableInstallEnforcement(repoRoot: string): boolean {
 
   settings.hooks ??= {};
   const entries = (settings.hooks.PreToolUse ??= []);
-  const found = findMarkedEntry(entries);
+  const marked = findMarkedEntries(entries);
 
-  if (found) {
-    const existingCommand = entries[found.entryIndex].hooks[found.hookIndex].command;
-    if (existingCommand === script) return false;
-    entries[found.entryIndex].hooks[found.hookIndex] = { type: "command", command: script };
+  if (marked.length > 0) {
+    // Already exactly right: one entry, current script. Nothing to write.
+    const [first, ...stale] = marked;
+    const current = entries[first.entryIndex].hooks[first.hookIndex].command;
+    if (stale.length === 0 && current === script) return false;
+
+    // Upgrade in place, keeping this entry's position and its siblings, then
+    // drop any other bootstrap hooks -- older versions, or the duplicate a
+    // pre-fix upgrade left behind. Leaving one would mean two hooks firing
+    // for every tool call, and a stale one denies unconditionally.
+    entries[first.entryIndex].hooks[first.hookIndex] = { type: "command", command: script };
+    removeMarked(entries, stale);
     writeClaudeSettings(target, settings);
     return true;
   }
@@ -174,22 +244,21 @@ export function enableInstallEnforcement(repoRoot: string): boolean {
   return true;
 }
 
-/** Inverse of `enableInstallEnforcement`: removes only the marked hook
- * object, preserving any sibling hooks under the same matcher entry and
- * dropping the matcher entry itself only if it becomes empty. Returns true
- * iff anything was removed. */
+/** Inverse of `enableInstallEnforcement`: removes twing's bootstrap hooks --
+ * every version, including a duplicate left by a pre-fix upgrade --
+ * preserving any sibling hooks under the same matcher entry and dropping a
+ * matcher entry only once it is empty. Returns true iff anything was
+ * removed. */
 export function disableInstallEnforcement(repoRoot: string): boolean {
   const target = settingsPath(repoRoot);
   const settings = readClaudeSettings(target);
   const entries = settings.hooks?.PreToolUse;
   if (!entries) return false;
 
-  const found = findMarkedEntry(entries);
-  if (!found) return false;
+  const marked = findMarkedEntries(entries);
+  if (marked.length === 0) return false;
 
-  entries[found.entryIndex].hooks.splice(found.hookIndex, 1);
-  if (entries[found.entryIndex].hooks.length === 0) entries.splice(found.entryIndex, 1);
-
+  removeMarked(entries, marked);
   writeClaudeSettings(target, settings);
   return true;
 }

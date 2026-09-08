@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { bootstrapHookScript, isInstallEnforcementWired, enableInstallEnforcement, disableInstallEnforcement, BOOTSTRAP_HOOK_MARKER } from "./enforce-hooks.js";
+import { bootstrapHookScript, isInstallEnforcementWired, enableInstallEnforcement, disableInstallEnforcement, BOOTSTRAP_HOOK_MARKER, KNOWN_BOOTSTRAP_HOOK_MARKERS } from "./enforce-hooks.js";
 
 interface HookCommand {
   type: "command";
@@ -246,4 +246,98 @@ test("bootstrapHookScript: silent no-op when the repo has no .twing/twing.yml", 
   const { stdout, status } = runScript(repo, fakeHome(false, false), pathWithFailingNpx());
   assert.equal(status, 0);
   assert.equal(stdout, "", "not a twing repo -- must not even attempt a bootstrap");
+});
+
+// --- cross-version upgrade (regression: the v2 -> v3 marker rename) --------
+//
+// The marker stem changed in v3 (twing-install-enforcement-hook-vN ->
+// twing-bootstrap-hook-vN). Matching is by prefix, so an older entry became
+// invisible to the upgrade and got appended beside rather than replaced.
+// Both then fired, and the stale one denied unconditionally -- v2 requires
+// the global wiring that v3's --unattended bootstrap deliberately never
+// creates. Running the command meant to fix a repo could brick it.
+
+const V2_MARKER = "# twing-install-enforcement-hook-v2";
+const V1_MARKER = "# twing-install-enforcement-hook-v1";
+
+function seedRepoWithHook(marker: string): string {
+  const repoRoot = tmpRepoRoot();
+  fs.mkdirSync(path.dirname(settingsPath(repoRoot)), { recursive: true });
+  fs.writeFileSync(
+    settingsPath(repoRoot),
+    JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: `${marker}\n...old script...` }] }] } }),
+  );
+  return repoRoot;
+}
+
+function bootstrapCommands(repoRoot: string): string[] {
+  const settings = readSettings(repoRoot);
+  return (settings.hooks?.PreToolUse ?? []).flatMap((e) => e.hooks.map((h) => h.command)).filter((c) => KNOWN_BOOTSTRAP_HOOK_MARKERS.some((m) => c.startsWith(m)));
+}
+
+for (const [label, marker] of [["v2", V2_MARKER], ["v1", V1_MARKER]] as const) {
+  test(`enableInstallEnforcement: upgrades a ${label} entry in place rather than appending beside it`, () => {
+    const repoRoot = seedRepoWithHook(marker);
+    assert.equal(enableInstallEnforcement(repoRoot), true);
+
+    const hooks = bootstrapCommands(repoRoot);
+    assert.equal(hooks.length, 1, `exactly one bootstrap hook must survive -- two would both fire, and the stale ${label} denies unconditionally`);
+    assert.equal(hooks[0], bootstrapHookScript());
+  });
+}
+
+test("enableInstallEnforcement: collapses a repo already broken by the pre-fix upgrade (v2 AND v3 present)", () => {
+  // The state a repo lands in if it ran enable-enforcement while the rename
+  // bug was live. Re-running must heal it, not preserve the deadlock.
+  const repoRoot = tmpRepoRoot();
+  fs.mkdirSync(path.dirname(settingsPath(repoRoot)), { recursive: true });
+  fs.writeFileSync(
+    settingsPath(repoRoot),
+    JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: "Edit|Write", hooks: [
+            { type: "command", command: `${V2_MARKER}\n...stale deny script...` },
+            { type: "command", command: bootstrapHookScript() },
+          ]},
+        ],
+      },
+    }),
+  );
+
+  assert.equal(enableInstallEnforcement(repoRoot), true, "must report a change -- there is a stale entry to remove");
+  const hooks = bootstrapCommands(repoRoot);
+  assert.equal(hooks.length, 1);
+  assert.equal(hooks[0], bootstrapHookScript());
+});
+
+test("isInstallEnforcementWired: recognises an older version's entry", () => {
+  // Otherwise `twing project enable-enforcement` would report "already
+  // present" or "nothing to remove" about a hook that is plainly there.
+  assert.equal(isInstallEnforcementWired(seedRepoWithHook(V2_MARKER)), true);
+});
+
+test("disableInstallEnforcement: removes older versions and duplicates too, leaving siblings", () => {
+  const repoRoot = tmpRepoRoot();
+  fs.mkdirSync(path.dirname(settingsPath(repoRoot)), { recursive: true });
+  fs.writeFileSync(
+    settingsPath(repoRoot),
+    JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: "Edit|Write", hooks: [
+            { type: "command", command: "some-other-tool" },
+            { type: "command", command: `${V2_MARKER}\n...stale...` },
+            { type: "command", command: bootstrapHookScript() },
+          ]},
+        ],
+      },
+    }),
+  );
+
+  assert.equal(disableInstallEnforcement(repoRoot), true);
+  assert.equal(bootstrapCommands(repoRoot).length, 0, "every twing bootstrap hook must go, not just the current one");
+  const settings = readSettings(repoRoot);
+  const survivors = (settings.hooks?.PreToolUse ?? []).flatMap((e) => e.hooks.map((h) => h.command));
+  assert.deepEqual(survivors, ["some-other-tool"], "another tool's hook must survive untouched");
 });
