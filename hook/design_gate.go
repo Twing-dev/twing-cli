@@ -417,19 +417,50 @@ func twingCLIPath() string {
 	return "twing"
 }
 
-// resolveTwingCommand rewrites a leading `twing ` in a suggested command to
-// whatever actually runs here. Applied at the single point where commands
-// are rendered, so every call site can keep writing the readable bare form.
-func resolveTwingCommand(command string) string {
-	const prefix = "twing "
-	if !strings.HasPrefix(command, prefix) {
-		return command
+// twingSubcommands is every verb that makes `twing <verb>` an instruction
+// the reader is meant to run, as opposed to prose about twing itself.
+//
+// Matching on the verb, rather than on the bare word "twing", is what keeps
+// this from mangling sentences: the gate says "twing blocks rather than
+// risk...", "twing checked your edit...", "twing compared your plan...".
+// None of those verbs is a subcommand, and no subcommand reads as prose.
+// `serve` is deliberately absent -- "twing serve" names the coordination
+// server, never something to run on the developer's machine.
+var twingSubcommands = []string{
+	"init", "login", "join", "whoami", "keygen", "design",
+	"project", "admin", "align", "daemon", "constraints", "uninstall", "servers",
+}
+
+// withResolvedTwingCLI rewrites `twing <subcommand>` anywhere in a rendered
+// message to whatever actually runs on this machine.
+//
+// Applied to every field, not just command ones: several of the most
+// useful instructions live inside explanatory notes ("...link this into it
+// instead: twing design amend --id <id>"), which are not commands
+// structurally but are still commands the reader has to type.
+//
+// Applied per field *before* wrapping, never to the finished message: an
+// absolute path is far longer than the bare name it replaces, so rewriting
+// afterwards would leave lines wrapped at the wrong width -- and split a
+// command across a line break mid-token, which a test caught doing exactly
+// that to `twing design amend`.
+func withResolvedTwingCLI(message string) string {
+	// A message that tells the reader to `npm install -g` first describes a
+	// machine that will have a bare `twing` on PATH once they do. More than
+	// that: the version-mismatch deny exists precisely to get them off the
+	// stale copy this shim currently points at, so rewriting there would
+	// pin them to the build they are trying to replace.
+	if strings.Contains(message, "npm install -g") {
+		return message
 	}
 	cli := twingCLIPath()
 	if cli == "twing" {
-		return command
+		return message
 	}
-	return cli + " " + strings.TrimPrefix(command, prefix)
+	for _, sub := range twingSubcommands {
+		message = strings.ReplaceAll(message, "twing "+sub, cli+" "+sub)
+	}
+	return message
 }
 
 // denyAction is one entry under "What now": what it achieves, the command
@@ -473,11 +504,11 @@ func writeWrapped(b *strings.Builder, text, indent string) {
 // through it, so the messages cannot drift apart into separate dialects.
 func denyMessage(headline, why string, details []denyDetail, actions []denyAction) string {
 	var b strings.Builder
-	b.WriteString(headline)
+	b.WriteString(withResolvedTwingCLI(headline))
 
 	if why != "" {
 		b.WriteString("\n")
-		writeWrapped(&b, why, denyIndent)
+		writeWrapped(&b, withResolvedTwingCLI(why), denyIndent)
 	}
 
 	if len(details) > 0 {
@@ -488,7 +519,7 @@ func denyMessage(headline, why string, details []denyDetail, actions []denyActio
 				continue
 			}
 			if d.Label == "" {
-				b.WriteString("\n" + denyIndent + strings.Repeat(" ", denyDetailLabelWidth) + d.Value)
+				b.WriteString("\n" + denyIndent + strings.Repeat(" ", denyDetailLabelWidth) + withResolvedTwingCLI(d.Value))
 				continue
 			}
 			fmt.Fprintf(&b, "\n%s%-*s%s", denyIndent, denyDetailLabelWidth, d.Label, d.Value)
@@ -500,10 +531,10 @@ func denyMessage(headline, why string, details []denyDetail, actions []denyActio
 		for _, a := range actions {
 			b.WriteString("\n" + denyActionIndent + a.Label)
 			if a.Command != "" {
-				b.WriteString("\n" + denyCommandIndent + resolveTwingCommand(a.Command))
+				b.WriteString("\n" + denyCommandIndent + withResolvedTwingCLI(a.Command))
 			}
 			if a.Note != "" {
-				writeWrapped(&b, a.Note, denyCommandIndent)
+				writeWrapped(&b, withResolvedTwingCLI(a.Note), denyCommandIndent)
 			}
 		}
 	}
