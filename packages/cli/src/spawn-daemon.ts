@@ -11,7 +11,7 @@
 import { spawn } from "node:child_process";
 import * as net from "node:net";
 import { defaultSocketPath } from "@twing/core";
-import { daemonMainPath, writeDaemonLaunchMarker } from "./daemon-service.js";
+import { resolveDaemonScript, writeDaemonLaunchMarker } from "./daemon-service.js";
 
 function isDaemonRunning(socketPath: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -41,7 +41,9 @@ export async function ensureDaemonRunning(options: { mayEvict?: boolean } = {}):
   const socketPath = defaultSocketPath();
   if (await isDaemonRunning(socketPath)) return "already-running";
 
-  const child = spawn(process.execPath, [daemonMainPath()], {
+  // The same entrypoint the marker records, so a spawn here and a later
+  // self-heal from the marker can never disagree about which daemon runs.
+  const child = spawn(process.execPath, [resolveDaemonScript()], {
     detached: true,
     stdio: "ignore",
     // `mayEvict` is only ever set by `twing daemon restart` -- see

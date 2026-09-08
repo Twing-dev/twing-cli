@@ -518,7 +518,9 @@ the live incident this was found from.
 `hook/twing-hook` binary, `openrouter_key.txt`, `simulator/.workspaces/`,
 and the `deploy/`-generated `twing-serve.log`/`.pid`. Everything
 machine-local (`daemon.sock`, `daemon.pid`, `daemon-launch.json`,
-`gate-overrides.json`, the multi-server auth-token config) lives under
+`gate-overrides.json`, the multi-server auth-token config, and `lib/` —
+where the zero-touch bootstrap `npm install --prefix`es the CLI so the
+launch marker never points into npm's evictable cache) lives under
 `~/.twing/` — never inside this repo's working tree, so none of it was ever
 something `.gitignore` needed to name. (Older installs may still have a
 `~/Library/LaunchAgents/dev.twing.daemon.plist` or

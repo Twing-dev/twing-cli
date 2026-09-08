@@ -76,7 +76,7 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
     console.log(`  - any launchd/systemd definition for the twing daemon`);
     console.log(`  - the running daemon (socket ${defaultSocketPath()})`);
     console.log(`  - twing's hook entries in ~/.claude/settings.json (${hookPath})`);
-    console.log(`  - ${dir} (hook binary, cached tokens, gate overrides, captured sessions)`);
+    console.log(`  - ${dir} (hook binary, the ~/.twing/lib CLI install, cached tokens, gate overrides, captured sessions)`);
     console.log("twing uninstall --dry-run: would NOT touch any repo's committed .claude/settings.json");
     return;
   }

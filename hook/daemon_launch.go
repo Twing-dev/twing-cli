@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -92,6 +93,19 @@ func selfHealDaemon() {
 	logFile, err := os.OpenFile(filepath.Join(home, ".twing", "daemon.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err == nil {
 		defer logFile.Close()
+	}
+
+	// A marker naming a script that no longer exists is a daemon that will
+	// never come back, and node's own "Cannot find module" is easy to miss
+	// among ordinary startup noise. Name the cause directly instead: it is
+	// almost always a marker written from a transient location (an npm cache
+	// entry that has since been evicted) rather than the stable
+	// ~/.twing/lib install -- see resolveDaemonScript in daemon-service.ts.
+	if _, err := os.Stat(marker.Script); err != nil {
+		if logFile != nil {
+			fmt.Fprintf(logFile, "twing hook: daemon launch marker points at a missing script (%s) -- re-run `twing init` to rewrite it\n", marker.Script)
+		}
+		return
 	}
 
 	cmd := exec.Command(marker.Node, marker.Script)

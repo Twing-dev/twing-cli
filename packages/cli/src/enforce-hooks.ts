@@ -13,9 +13,10 @@
  * `npm install -g` needs a writable global prefix, so on a system-Node box
  * it needs sudo, which a hook (no TTY) can never supply: even a fully
  * cooperative agent would have failed. So the hook now *performs* the
- * setup it used to demand -- unprivileged (`npx`, a user-owned cache) and
- * with no human in the loop -- and execs the installed binary. Enforcement
- * is preserved: twing ends up active either way. Only the friction goes.
+ * setup it used to demand -- unprivileged (`npm install --prefix` into
+ * `~/.twing/lib`, which needs no elevation) and with no human in the loop
+ * -- then execs the installed binary. Enforcement is preserved: twing ends
+ * up active either way. Only the friction goes.
  *
  * Distinct in kind from
  * `wire-hooks.ts`'s `wireHooks`, which only ever writes the machine-global
@@ -66,9 +67,11 @@ const ENFORCEMENT_MATCHER = "Edit|Write";
  * across every developer's machine unmodified -- `$HOME` is a literal shell
  * variable in the committed text, expanded locally at hook-execution time
  * on each developer's own machine, unlike `wireHooks`' baked-in resolved
- * path (which only works on the machine it was wired on). No `jq`/`node`/
- * `npx` on this steady-state path -- only `git`, `test`, `grep`, `printf`,
- * universally present on any POSIX `sh`. A failed `git rev-parse` or a
+ * path (which only works on the machine it was wired on). The steady-state
+ * path -- every run after the first on a given machine -- shells out to
+ * nothing but `git`, `test`, `grep` and `exec`, all universally present on
+ * any POSIX `sh`; `npm`/`node` are touched only by the one-time install
+ * branch. A failed `git rev-parse` or a
  * missing `.twing/twing.yml` exits 0 with no stdout at all, mirroring the
  * existing codebase idiom (`hook/design_gate.go`'s `resolveRepoRelative`/
  * `readCoordinatorServerURL` `ok=false` paths) that silent no-output means
@@ -92,13 +95,20 @@ export function bootstrapHookScript(): string {
     "  exit 0",
     "fi",
     "# First edit on a machine that has never run twing: install it rather than",
-    "# demanding someone else do it. Unprivileged by construction -- npx writes",
-    "# to its own user-owned cache, and --unattended skips the OS-service step.",
+    "# demanding someone else do it. Unprivileged by construction -- the prefix",
+    "# is under $HOME (no sudo, unlike npm install -g), and --unattended skips",
+    "# the OS-service step. Installing into twing's own directory rather than",
+    "# running straight from npx matters: the daemon launch marker records this",
+    "# path, and npm may evict its own cache at any time, which would leave a",
+    "# marker that works today and silently fails weeks later.",
+    'lib="$HOME/.twing/lib"',
+    'cli="$lib/node_modules/@twing/cli/dist/index.js"',
     'if [ ! -x "$hook_bin" ]; then',
-    "  npx -y @twing/cli@latest init --unattended >/dev/null 2>&1 </dev/null",
+    '  npm install --prefix "$lib" @twing/cli@latest --no-fund --no-audit --loglevel=error >/dev/null 2>&1 </dev/null',
+    '  [ -f "$cli" ] && node "$cli" init --unattended >/dev/null 2>&1 </dev/null',
     "fi",
     'if [ ! -x "$hook_bin" ]; then',
-    "  printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"twing could not install itself on this machine, so this repo is not coordinating edits right now.\\n\\n  This repo uses twing (https://twing.dev, source at\\n  https://github.com/Twing-dev/twing-cli) to stop two AI sessions\\n  silently colliding on the same code. Its setup runs automatically\\n  from a hook this repo commits -- normally with nothing to do by\\n  hand -- and that automatic setup just failed.\\n\\n  This is an operational failure, not a task for you to work around:\\n  do not try to install it another way, and do not edit or remove the\\n  hook (that hits this same check anyway). Report it to whoever runs\\n  this repo.\\n\\n  Usual causes, in order\\n    - no network, or npm is unreachable from this machine\\n    - node/npx is missing or too old (needs Node >= 20)\\n    - no GitHub credential available: twing authenticates via the gh\\n      CLI when running unattended, so `gh auth login` may be needed\\n\\n  A human can see the real reason by running: npx @twing/cli@latest init\"}}'",
+    "  printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"twing could not install itself on this machine, so this repo is not coordinating edits right now.\\n\\n  This repo uses twing (https://twing.dev, source at\\n  https://github.com/Twing-dev/twing-cli) to stop two AI sessions\\n  silently colliding on the same code. Its setup runs automatically\\n  from a hook this repo commits -- normally with nothing to do by\\n  hand -- and that automatic setup just failed.\\n\\n  This is an operational failure, not a task for you to work around:\\n  do not try to install it another way, and do not edit or remove the\\n  hook (that hits this same check anyway). Report it to whoever runs\\n  this repo.\\n\\n  Usual causes, in order\\n    - no network, or npm is unreachable from this machine\\n    - node/npm is missing or too old (needs Node >= 20)\\n    - no GitHub credential available: twing authenticates via the gh\\n      CLI when running unattended, so `gh auth login` may be needed\\n\\n  To see the real error, a human can run twing setup by hand -- instructions at https://github.com/Twing-dev/twing-cli\"}}'",
     "  exit 0",
     "fi",
     "# Hand the real decision to the installed hook: same binary, same",

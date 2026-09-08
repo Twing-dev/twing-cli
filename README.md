@@ -172,14 +172,19 @@ repo then carries it, and Claude Code runs it before any `Edit`/`Write`.
 On a machine that has never run twing, that hook **installs twing itself**:
 
 ```sh
-npx -y @twing/cli@latest init --unattended
+npm install --prefix ~/.twing/lib @twing/cli@latest
+node ~/.twing/lib/node_modules/@twing/cli/dist/index.js init --unattended
 ```
 
-Nothing to type, no sudo, no browser. `npx` writes only to its own
-user-owned cache, and `--unattended` skips the one privileged step (the
-launchd/systemd service). Once the binary is in place the hook `exec`s it,
-so the real design gate decides the verdict as usual. Later runs are a
-`test -x` plus an `exec` -- no network, no measurable cost.
+Nothing to type, no sudo, no browser -- the prefix is under your own home
+directory, unlike `npm install -g`, and `--unattended` skips the one
+privileged step. Installing into twing's own directory (rather than running
+straight from `npx`) is deliberate: the daemon launch marker records that
+path, and npm may evict its own cache at any time, which would leave a
+marker that works today and silently stops working weeks later. Once the
+binary is in place the hook `exec`s it, so the real design gate decides the
+verdict as usual. Later runs are a `test -x` plus an `exec` -- no network,
+no measurable cost.
 
 **Why it installs rather than instructs.** Earlier versions denied the edit
 and told the agent to run `npm install -g @twing/cli && twing init`. That

@@ -55,6 +55,40 @@ export function daemonMainPath(): string {
   return path.join(path.dirname(fileURLToPath(import.meta.url)), "daemon", "main.js");
 }
 
+/** Where the zero-touch bootstrap installs `@twing/cli` (`enforce-hooks.ts`
+ * runs `npm install --prefix` here). Owned by twing, under the developer's
+ * own home directory: no elevation needed to write it, and nothing else
+ * ever garbage-collects it. */
+export function twingLibDir(): string {
+  return path.join(os.homedir(), ".twing", "lib");
+}
+
+function stableDaemonMainPath(): string {
+  return path.join(twingLibDir(), "node_modules", "@twing", "cli", "dist", "daemon", "main.js");
+}
+
+/**
+ * The daemon entrypoint to record in the launch marker, and to spawn from.
+ *
+ * Prefers the copy under `~/.twing/lib` when one exists, because the marker
+ * has to keep working long after the process that wrote it is gone. A
+ * bootstrap run executes inside a short-lived `npx`/`npm exec` process whose
+ * own files live in npm's cache (`~/.npm/_npx/<hash>/`), and npm is free to
+ * evict that cache whenever it likes -- `npm cache clean`, or simply age.
+ * Recording that path yields a marker that works today and silently fails
+ * weeks later, which is precisely the failure the marker exists to prevent.
+ * It also became much more likely once the daemon started exiting on idle:
+ * the marker is now re-read routinely rather than almost never.
+ *
+ * Falls back to this build's own sibling path -- correct for a global
+ * install or a contributor's checkout, where the running copy is already
+ * as stable as anything else on the machine.
+ */
+export function resolveDaemonScript(): string {
+  const stable = stableDaemonMainPath();
+  return fs.existsSync(stable) ? stable : daemonMainPath();
+}
+
 interface DaemonLaunchMarker {
   node: string;
   script: string;
@@ -72,7 +106,7 @@ function daemonLaunchMarkerPath(): string {
  * `twing-cli` upgrade that moves `daemon/main.js` is picked up
  * automatically the next time either caller runs. */
 export function writeDaemonLaunchMarker(): void {
-  const marker: DaemonLaunchMarker = { node: process.execPath, script: daemonMainPath() };
+  const marker: DaemonLaunchMarker = { node: process.execPath, script: resolveDaemonScript() };
   const target = daemonLaunchMarkerPath();
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, JSON.stringify(marker, null, 2) + "\n");
