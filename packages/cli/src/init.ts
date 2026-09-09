@@ -34,7 +34,7 @@ import { ensureDaemonRunning } from "./spawn-daemon.js";
 import { twingLibDir } from "./daemon-service.js";
 import { requireAuth, isReachableCoordinator } from "./auth.js";
 import { runKeygen } from "./keygen.js";
-import { runJoinGithub } from "./join.js";
+import { runJoinGithub, linkGithubIdentity } from "./join.js";
 import { promptLine } from "./prompt-line.js";
 
 /** twing's own hosted coordinator -- offered as the interactive prompt's
@@ -398,6 +398,13 @@ async function resolveAuthToken(repoRoot: string, serverUrl: string, options: In
           console.log(`twing init: automatic GitHub-verified join didn't work (${err instanceof Error ? err.message : err}) -- falling back`);
         }
       }
+      // Already a member, so no join is needed -- but this is the one moment
+      // this machine can prove both "I am this twing identity" (the PAT it
+      // just used) and "I am this GitHub account" (a gh token) in a single
+      // call. Linking them here is what lets every *other* machine this
+      // person uses be recognised rather than refused. Silent and
+      // best-effort; see linkGithubIdentity.
+      await linkGithubIdentity({ cwd: repoRoot, server: serverUrl, authToken: auth.authToken });
       return { token: auth.authToken, adminRole: membership.role === "admin" };
     }
     return { token: auth.authToken, adminRole: false };

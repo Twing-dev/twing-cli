@@ -282,3 +282,50 @@ export async function runJoinGithub(options: JoinOptions): Promise<JoinGithubRes
   );
   return { token: twingToken ?? existingToken!, founded: result.founded ?? false, role: result.role };
 }
+
+/**
+ * Attaches this machine's verified GitHub account to the identity it
+ * already authenticates as.
+ *
+ * This is the migration, and it is why nobody has to run anything for it. A
+ * machine that already holds a PAT also, almost always, has a `gh` token --
+ * so a single authenticated call proves both halves at once and the
+ * coordinator can link them. From then on *any other* machine this person
+ * uses is recognised by the verified account instead of being refused with
+ * "a developer identity for ... already exists", which is the wall that
+ * blocked two real onboarding attempts.
+ *
+ * Deliberately quiet and deliberately non-fatal:
+ *
+ *  - Never runs the device flow. If `gh` has no token there is simply
+ *    nothing to link, and interrupting a working `init` to ask for a
+ *    browser approval would be a worse trade than staying unlinked.
+ *  - Never throws. The caller is already authenticated and already
+ *    working; a failed link costs a future convenience, not this run.
+ *  - Says nothing on the common path (already linked, or nothing to do).
+ *    The one thing worth printing is a *refusal*, which means this GitHub
+ *    account is attached to a different twing identity -- a real situation
+ *    a human has to resolve, not noise.
+ */
+export async function linkGithubIdentity(options: { cwd: string; server: string; authToken: string }): Promise<void> {
+  try {
+    const repoRoot = findRepoRoot(options.cwd);
+    const github = githubBinding(repoRoot);
+    if (!github) return;
+
+    const githubToken = githubTokenFromGhCli();
+    if (!githubToken) return;
+
+    const { res, result } = await postJoinViaGithub(
+      normalizeServerUrl(options.server),
+      computeProjectId(repoRoot),
+      { githubToken, githubOwner: github.owner, githubRepo: github.repo },
+      options.authToken,
+    );
+    if (!res.ok && result.error) {
+      console.log(`twing init: couldn't link your GitHub account -- ${result.error}`);
+    }
+  } catch {
+    // Best-effort by design; see the doc comment.
+  }
+}
