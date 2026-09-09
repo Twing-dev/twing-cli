@@ -43,3 +43,44 @@ export async function fetchRepoPermissions(githubToken: string, owner: string, r
     admin: body.permissions.admin ?? false,
   };
 }
+
+export interface GithubUser {
+  /** GitHub's numeric user id, stringified. Stable across renames, and
+   * never reused -- which is why identity keys on it rather than on
+   * `login`. */
+  id: string;
+  login: string;
+}
+
+/**
+ * Resolves *who* a GitHub token belongs to, via `GET /user`.
+ *
+ * The companion to `fetchRepoPermissions`, and the piece that was missing:
+ * twing used a developer's GitHub token to decide their *role* and then
+ * discarded the account, keying identity on a client-supplied
+ * `git config user.email` instead. That left the server unable to tell one
+ * person's second machine from a stranger who guessed an email -- so it
+ * refused both.
+ *
+ * Same error handling as `fetchRepoPermissions` deliberately: `undefined`
+ * on any non-200, with no distinction worth surfacing further up. A caller
+ * that cannot identify the account simply proceeds without a verified
+ * identity, exactly as before this existed.
+ */
+export async function fetchGithubUser(githubToken: string): Promise<GithubUser | undefined> {
+  try {
+    const res = await fetch("https://api.github.com/user", {
+      headers: {
+        authorization: `Bearer ${githubToken}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "twing-cli",
+      },
+    });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { id?: number; login?: string };
+    if (typeof body.id !== "number" || !body.login) return undefined;
+    return { id: String(body.id), login: body.login };
+  } catch {
+    return undefined; // network/parse failure is "no verified account", never a hard error
+  }
+}

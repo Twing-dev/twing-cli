@@ -43,8 +43,32 @@ import {
   projectRecords as projectRecordsTable,
   projectMemberships as projectMembershipsTable,
   developers as developersTable,
+  developerTokens as developerTokensTable,
   invites as invitesTable,
 } from "./db/schema.js";
+
+/**
+ * A GitHub account the *server* verified, by calling `GET /user` with the
+ * token the caller supplied -- never anything the client asserted about
+ * itself.
+ *
+ * This distinction is the whole point. Before this existed, twing used a
+ * developer's GitHub token to check their repo permissions (deriving a
+ * *role*) and then discarded the account, keying the identity on
+ * `body.label` -- `git config user.email`, client-supplied and unverified.
+ * Two things followed. Anyone with pull access could mint an identity under
+ * any unclaimed string, including a colleague's email. And the server could
+ * not distinguish "the same person on a second machine" from "someone who
+ * typed the same email", so it had to refuse the first in order to refuse
+ * the second -- observed live twice, with no self-service way out.
+ */
+export interface GithubAccount {
+  /** GitHub's numeric user id, as a string. The identity key: logins are
+   * renameable and reusable, ids are neither. */
+  id: string;
+  /** Display only, refreshed on every join -- never matched on. */
+  login: string;
+}
 
 export interface Organization {
   id: string;
@@ -103,6 +127,14 @@ export interface Invite {
   consumedAt?: number;
   consumedBy?: string;
 }
+
+/**
+ * Who is making a join/found call. `github` is present only when the server
+ * itself verified it (`fetchGithubUser`), never when a client claimed it.
+ */
+export type JoinParams =
+  | { developerId: string; github?: GithubAccount }
+  | { tokenHash: string; label: string; github?: GithubAccount };
 
 export interface ResolvedIdentity {
   developerId: string;
@@ -281,8 +313,10 @@ export class IdentityStore {
     const existing = this.db.select().from(developersTable).where(eq(developersTable.developerId, label)).get();
     if (existing) {
       this.db.update(developersTable).set({ tokenHash }).where(eq(developersTable.developerId, label)).run(); // recovery: rotate a lost PAT rather than erroring
+      this.replaceTokens(label, tokenHash, "bootstrap recovery"); // the previous PAT was lost -- assume it is compromised
     } else {
       this.db.insert(developersTable).values({ developerId: label, tokenHash, createdAt: Date.now() }).run();
+      this.issueToken(label, tokenHash, "bootstrap");
     }
     this.grantOrgMembership(org.id, label, "admin");
     try {
@@ -372,6 +406,7 @@ export class IdentityStore {
       }
       developerId = params.label;
       this.db.insert(developersTable).values({ developerId, tokenHash: params.tokenHash, createdAt: Date.now() }).run();
+      this.issueToken(developerId, params.tokenHash, params.label);
     }
 
     this.db.update(invitesTable).set({ consumedAt: Date.now(), consumedBy: developerId }).where(eq(invitesTable.code, code)).run();
@@ -389,6 +424,145 @@ export class IdentityStore {
       if (project?.orgId) this.grantOrgMembership(project.orgId, developerId, "member", /* onlyIfAbsent */ true);
     }
     return { developerId };
+  }
+
+  /**
+   * Records one credential for an identity. Additive: issuing a token to a
+   * new machine leaves every other machine's token working, which is the
+   * behaviour that makes onboarding a second machine possible at all.
+   */
+  private issueToken(developerId: string, tokenHash: string, label?: string): void {
+    this.db
+      .insert(developerTokensTable)
+      .values({ tokenHash, developerId, label: label ?? null, createdAt: Date.now() })
+      .onConflictDoNothing()
+      .run();
+  }
+
+  /**
+   * Replaces every credential an identity holds with one. Used only by
+   * `bootstrap`'s recovery path, whose premise is that the previous PAT was
+   * *lost* -- and a lost secret should be assumed compromised, so adding a
+   * token beside it would leave the thing you are recovering from valid.
+   */
+  private replaceTokens(developerId: string, tokenHash: string, label?: string): void {
+    this.db.delete(developerTokensTable).where(eq(developerTokensTable.developerId, developerId)).run();
+    this.issueToken(developerId, tokenHash, label);
+  }
+
+  /** The identity behind a verified GitHub account, if twing already knows
+   * it. Matched on the numeric id only -- see `GithubAccount`. */
+  private developerByGithubUserId(githubUserId: string) {
+    return this.db.select().from(developersTable).where(eq(developersTable.githubUserId, githubUserId)).get();
+  }
+
+  /**
+   * Attaches a verified GitHub account to an existing identity.
+   *
+   * This is the migration path, and it costs the developer nothing: a
+   * machine that already holds a PAT also has a `gh` token, so a single
+   * authenticated call proves both halves at once and the link happens with
+   * nobody running anything.
+   *
+   * Refuses loudly when the account is already attached elsewhere. Silently
+   * re-pointing it would move an identity's history -- claims, designs,
+   * memberships and activity all key on `developerId` -- and quietly merging
+   * two people's work is worse than making someone look at it.
+   */
+  linkGithubAccount(developerId: string, github: GithubAccount): { ok: true } | { error: string } {
+    const holder = this.developerByGithubUserId(github.id);
+    if (holder && holder.developerId !== developerId) {
+      return {
+        error:
+          `GitHub account @${github.login} is already linked to the twing identity "${holder.developerId}", ` +
+          `so it can't also be linked to "${developerId}". Two identities for one person is something an admin ` +
+          `should resolve deliberately (their work is attributed separately and stays that way) rather than ` +
+          `something twing merges on its own.`,
+      };
+    }
+    this.db
+      .update(developersTable)
+      .set({ githubUserId: github.id, githubLogin: github.login })
+      .where(eq(developersTable.developerId, developerId))
+      .run();
+    return { ok: true };
+  }
+
+  /**
+   * The `developerId` to create for a newly-seen GitHub account.
+   *
+   * The verified login, so that one person reads the same in the CLI and in
+   * twing-monitor -- the divergence documented in `app.ts`'s alignment-thread
+   * note is exactly what two identities for one human looks like in practice.
+   *
+   * Disambiguated with the numeric id in the (very unlikely) case that some
+   * existing identity already answers to that exact string: an email-keyed
+   * `developerId` contains an `@`, so a collision means someone deliberately
+   * chose a bare label that happens to be this login.
+   */
+  private developerIdForGithub(github: GithubAccount): string {
+    const taken = this.db.select().from(developersTable).where(eq(developersTable.developerId, github.login)).get();
+    return taken ? `${github.login}-${github.id}` : github.login;
+  }
+
+  /**
+   * Turns "who is making this call" into a `developerId`, for the two paths
+   * that can carry a verified GitHub account.
+   *
+   * Resolution order, and why each branch exists:
+   *
+   * 1. **Authenticated.** They proved an identity with a PAT. If a verified
+   *    GitHub account came along too, link it -- that is the whole migration,
+   *    performed by a machine that happens to hold both proofs, with no
+   *    command run by anyone.
+   * 2. **Verified GitHub account we have seen before.** This *is* that
+   *    person. Issue this machine its own credential and carry on. Before
+   *    this branch existed the call failed here with "a developer identity
+   *    for ... already exists", which is what blocked every second machine.
+   * 3. **Verified GitHub account we have not seen.** A genuinely new
+   *    developer; create them keyed on the verified account.
+   * 4. **No GitHub account at all** (the invite/`keygen` path, and any
+   *    non-GitHub-hosted repo). Unchanged, including the collision error --
+   *    with nothing verified, an existing label really could be anyone.
+   */
+  private resolveJoiningDeveloper(params: JoinParams): { developerId: string } | { error: string } {
+    if ("developerId" in params) {
+      const known = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.developerId)).get();
+      if (!known) return { error: "unknown developer" };
+      if (params.github) {
+        const linked = this.linkGithubAccount(params.developerId, params.github);
+        if ("error" in linked) return linked;
+      }
+      return { developerId: params.developerId };
+    }
+
+    if (params.github) {
+      const known = this.developerByGithubUserId(params.github.id);
+      if (known) {
+        // Same person, new machine. Refresh the display login (it may have
+        // been renamed) and give this machine its own credential.
+        this.db
+          .update(developersTable)
+          .set({ githubLogin: params.github.login })
+          .where(eq(developersTable.developerId, known.developerId))
+          .run();
+        this.issueToken(known.developerId, params.tokenHash, params.label);
+        return { developerId: known.developerId };
+      }
+      const developerId = this.developerIdForGithub(params.github);
+      this.db
+        .insert(developersTable)
+        .values({ developerId, tokenHash: params.tokenHash, createdAt: Date.now(), githubUserId: params.github.id, githubLogin: params.github.login })
+        .run();
+      this.issueToken(developerId, params.tokenHash, params.label);
+      return { developerId };
+    }
+
+    const existing = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.label)).get();
+    if (existing) return { error: identityAlreadyExistsError(params.label) };
+    this.db.insert(developersTable).values({ developerId: params.label, tokenHash: params.tokenHash, createdAt: Date.now() }).run();
+    this.issueToken(params.label, params.tokenHash, params.label);
+    return { developerId: params.label };
   }
 
   private grantOrgMembership(orgId: string, developerId: string, role: Role, onlyIfAbsent = false): void {
@@ -429,8 +603,15 @@ export class IdentityStore {
 
   resolveToken(token: string): ResolvedIdentity | undefined {
     const hash = sha256Hex(token);
-    const developer = this.db.select().from(developersTable).where(eq(developersTable.tokenHash, hash)).get();
-    if (!developer) return undefined;
+    // developer_tokens, not developers.token_hash: one identity holds one
+    // credential per machine now. The legacy column is still written on
+    // creation (so a rollback keeps working) but is no longer consulted for
+    // authentication -- reading both would resurrect a token that per-machine
+    // revocation had removed.
+    const issued = this.db.select().from(developerTokensTable).where(eq(developerTokensTable.tokenHash, hash)).get();
+    if (!issued) return undefined;
+    const developer = this.db.select().from(developersTable).where(eq(developersTable.developerId, issued.developerId)).get();
+    if (!developer) return undefined; // token outlived its identity
 
     const orgRows = this.db.select().from(orgMembershipsTable).where(eq(orgMembershipsTable.developerId, developer.developerId)).all();
     const projectRows = this.db.select().from(projectMembershipsTable).where(eq(projectMembershipsTable.developerId, developer.developerId)).all();
@@ -447,6 +628,9 @@ export class IdentityStore {
     if (result.changes === 0) return false;
     this.db.delete(orgMembershipsTable).where(eq(orgMembershipsTable.developerId, developerId)).run();
     this.db.delete(projectMembershipsTable).where(eq(projectMembershipsTable.developerId, developerId)).run();
+    // Every machine's credential, not just the legacy one -- a revoked
+    // developer with a surviving token is a revocation that did not happen.
+    this.db.delete(developerTokensTable).where(eq(developerTokensTable.developerId, developerId)).run();
     return true;
   }
 
@@ -541,23 +725,13 @@ export class IdentityStore {
    * separation `redeemInvite` keeps between "what role" and "mint/attach
    * identity."
    */
-  joinProject(projectId: string, role: Role, params: { developerId: string } | { tokenHash: string; label: string }): RedeemResult {
+  joinProject(projectId: string, role: Role, params: JoinParams): RedeemResult {
     const project = this.getProjectRecord(projectId);
     if (!project) return { error: "no such project" };
 
-    let developerId: string;
-    if ("developerId" in params) {
-      const known = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.developerId)).get();
-      if (!known) return { error: "unknown developer" };
-      developerId = params.developerId;
-    } else {
-      const existing = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.label)).get();
-      if (existing) {
-        return { error: identityAlreadyExistsError(params.label) };
-      }
-      developerId = params.label;
-      this.db.insert(developersTable).values({ developerId, tokenHash: params.tokenHash, createdAt: Date.now() }).run();
-    }
+    const resolved = this.resolveJoiningDeveloper(params);
+    if ("error" in resolved) return resolved;
+    const developerId = resolved.developerId;
 
     this.grantProjectMembership(projectId, developerId, role);
     // No org to join at all for a project founded via GitHub (orgId unset,
@@ -581,22 +755,12 @@ export class IdentityStore {
    * halves of the same route, split apart only by "does a project record
    * already exist").
    */
-  foundProjectViaGithub(projectId: string, params: { developerId: string } | { tokenHash: string; label: string }, github: { owner: string; repo: string }): RedeemResult {
+  foundProjectViaGithub(projectId: string, params: JoinParams, github: { owner: string; repo: string }): RedeemResult {
     if (this.isProjectFounded(projectId)) return { error: "project already founded" };
 
-    let developerId: string;
-    if ("developerId" in params) {
-      const known = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.developerId)).get();
-      if (!known) return { error: "unknown developer" };
-      developerId = params.developerId;
-    } else {
-      const existing = this.db.select().from(developersTable).where(eq(developersTable.developerId, params.label)).get();
-      if (existing) {
-        return { error: identityAlreadyExistsError(params.label) };
-      }
-      developerId = params.label;
-      this.db.insert(developersTable).values({ developerId, tokenHash: params.tokenHash, createdAt: Date.now() }).run();
-    }
+    const resolved = this.resolveJoiningDeveloper(params);
+    if ("error" in resolved) return resolved;
+    const developerId = resolved.developerId;
 
     this.db
       .insert(projectRecordsTable)

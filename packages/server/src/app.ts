@@ -38,8 +38,8 @@ import { findDesignDivergences } from "./design-divergence.js";
 import { enrichReviews } from "./review-enrich.js";
 import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind, type AlignmentThread } from "./alignment-store.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
-import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role } from "./identity-store.js";
-import { fetchRepoPermissions } from "./github-client.js";
+import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
+import { fetchRepoPermissions, fetchGithubUser } from "./github-client.js";
 
 interface ClaimsRequestBody {
   projectId?: string;
@@ -2254,10 +2254,16 @@ export function createApp(options: CreateAppOptions = {}) {
     const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
     const existing = bearer ? identities.resolveToken(bearer) : undefined;
 
-    const params = existing
-      ? { developerId: existing.developerId }
-      : body.tokenHash && body.label
-        ? { tokenHash: body.tokenHash, label: body.label }
+    // Who this token belongs to, verified here rather than taken on trust
+    // from the client. Undefined only when GitHub itself wouldn't say (a
+    // token scoped too narrowly, a hiccup) -- in which case this behaves
+    // exactly as it did before verified identity existed.
+    const github = await fetchGithubUser(body.githubToken);
+
+    const params: JoinParams | undefined = existing
+      ? { developerId: existing.developerId, github }
+      : body.tokenHash && (body.label || github)
+        ? { tokenHash: body.tokenHash, label: body.label ?? github!.login, github }
         : undefined;
     if (!params) {
       return c.json({ error: "expected { tokenHash, label } when not already authenticated" }, 400);

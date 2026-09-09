@@ -4759,9 +4759,17 @@ test("POST /v1/projects/:id/join-via-github: an already-founded project ignores 
   const admin = await bootstrapAdmin(app, dataDir);
   identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
 
-  let calledUrl: string | undefined;
+  // Two GitHub calls are made now -- the permission check and the identity
+  // lookup (fetchGithubUser) -- so this records all of them and asserts on
+  // the repos one. Matching "the last URL fetched" would silently start
+  // passing/failing on call order rather than on the thing under test.
+  const calledUrls: string[] = [];
   const fetchSpy = (async (url: string | URL | Request) => {
-    calledUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    calledUrls.push(href);
+    if (href === "https://api.github.com/user") {
+      return new Response(JSON.stringify({ id: 4242, login: "mallory" }), { status: 200 });
+    }
     return new Response(JSON.stringify({ permissions: { pull: true, triage: true, push: true, maintain: false, admin: false } }), { status: 200 });
   }) as typeof fetch;
 
@@ -4774,7 +4782,12 @@ test("POST /v1/projects/:id/join-via-github: an already-founded project ignores 
       body: JSON.stringify({ githubToken: "gh-token-mallory", githubOwner: "someone-elses-org", githubRepo: "unrelated-repo", tokenHash: sha256Hex("mallorys-pat"), label: "mallory@example.com" }),
     });
     assert.equal(res.status, 200);
-    assert.equal(calledUrl, "https://api.github.com/repos/acme/widgets", "must check permissions against the stored binding, never a client claim");
+    const repoCalls = calledUrls.filter((u) => u.includes("/repos/"));
+    assert.deepEqual(repoCalls, ["https://api.github.com/repos/acme/widgets"], "must check permissions against the stored binding, never a client claim");
+    assert.ok(
+      !calledUrls.some((u) => u.includes("someone-elses-org") || u.includes("unrelated-repo")),
+      "the client-claimed repo must never be contacted at all",
+    );
   });
 });
 

@@ -85,9 +85,54 @@ export const projectMemberships = sqliteTable(
 
 export const developers = sqliteTable("developers", {
   developerId: text("developer_id").primaryKey(),
+  // Legacy single-PAT column. Superseded by `developer_tokens` (below),
+  // which is what `resolveToken` reads; still written on identity creation
+  // so a rollback to the previous release keeps working, and dropped a
+  // release after that. Never read for authentication any more.
   tokenHash: text("token_hash").notNull().unique(),
   createdAt: integer("created_at").notNull(),
+  // The verified GitHub account behind this identity, when there is one.
+  //
+  // Keyed on GitHub's **numeric** id, never the login: logins are
+  // renameable and reusable, ids are not, so a rename must not look like a
+  // different person (and someone taking a freed-up login must not look
+  // like the same one). `githubLogin` is display only and is refreshed on
+  // every join.
+  //
+  // Nullable because the invite/`keygen` path never involves GitHub at all
+  // -- that is a first-class way to use twing, not a legacy one. Unique
+  // because one GitHub account is one identity; the attempt to attach a
+  // second is refused rather than silently merged (see `linkGithubAccount`).
+  githubUserId: text("github_user_id").unique(),
+  githubLogin: text("github_login"),
 });
+
+/**
+ * One row per credential, so one identity can hold several -- which is the
+ * whole point.
+ *
+ * `developers.token_hash` is `UNIQUE`, i.e. exactly one PAT per person, so a
+ * second machine could only ever work by copying the first machine's secret
+ * (which is what `twing login --token` does). That made per-machine
+ * credentials structurally impossible, and it is the reason a developer
+ * could not be onboarded twice without a human moving a secret by hand.
+ *
+ * `label` names the machine the token was issued to, which is what later
+ * makes "revoke that laptop" expressible without revoking the person.
+ */
+export const developerTokens = sqliteTable(
+  "developer_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    developerId: text("developer_id").notNull(),
+    label: text("label"),
+    createdAt: integer("created_at").notNull(),
+  },
+  // Authentication looks up by token_hash (the primary key), but revoking a
+  // developer deletes every token they hold -- an unindexed scan of a table
+  // that grows with machines, not people.
+  (t) => [index("developer_tokens_developer_idx").on(t.developerId)],
+);
 
 export const invites = sqliteTable("invites", {
   code: text("code").primaryKey(),
