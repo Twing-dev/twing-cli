@@ -565,6 +565,35 @@ export class IdentityStore {
     return { developerId: params.label };
   }
 
+  /**
+   * Signs a verified GitHub account in and hands its identity a fresh
+   * credential -- the dashboard's equivalent of what a machine gets from
+   * `join-via-github`.
+   *
+   * **Recognises, never creates.** The route behind this is unauthenticated
+   * by necessity (obtaining a credential is the point) and carries no project
+   * context, so minting an identity here would let anyone holding any GitHub
+   * account create one on someone else's coordinator. Identities are created
+   * on the CLI path instead, where real repo permission is checked first --
+   * so the answer for an unlinked account is "onboard once through a repo",
+   * not "here is an identity".
+   */
+  startGithubSession(github: GithubAccount, tokenHash: string, label?: string): { developerId: string } | { error: string } {
+    const known = this.developerByGithubUserId(github.id);
+    if (!known) {
+      return {
+        error:
+          `@${github.login} isn't linked to a twing identity on this coordinator yet. Run twing in a repo ` +
+          `this coordinator knows about once -- that verifies your access to it and links this GitHub account ` +
+          `-- and then sign in here.`,
+      };
+    }
+    // A rename since the last sign-in is just a new display name.
+    this.db.update(developersTable).set({ githubLogin: github.login }).where(eq(developersTable.developerId, known.developerId)).run();
+    this.issueToken(known.developerId, tokenHash, label ?? "twing-monitor");
+    return { developerId: known.developerId };
+  }
+
   private grantOrgMembership(orgId: string, developerId: string, role: Role, onlyIfAbsent = false): void {
     const existing = this.db
       .select()
