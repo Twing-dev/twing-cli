@@ -599,7 +599,43 @@ func authActions(selfInstalled ...denyAction) []denyAction {
 	return append(selfInstalled, gateOffAction)
 }
 
+// A managed (bootstrap-hook-provisioned) machine gets a richer set of
+// options than authActions' shared ghAuthLoginAction+gateOffAction pair:
+// unlike authRejectedReason's two cases (an existing token that is merely
+// expired, or valid for the wrong project), "never signed in at all" has two
+// genuine self-serve fixes that don't need GitHub auth at all -- an invite
+// (first time) or a previously-saved PAT (this machine's local state was
+// reset, e.g. after `twing uninstall`). Both name the shim path rather than
+// bare `twing`, since there is nothing on PATH here (ensureCliShim() in
+// init.ts runs before identity resolution can fail, so the shim itself is
+// always present by the time this message can fire).
 func authRequiredReason(serverURL string) string {
+	if isManagedInstall() {
+		return denyMessage(
+			"twing can't check for conflicts -- this machine isn't signed in.",
+			"twing tried to sign in automatically using this machine's GitHub credential and found "+
+				"none. "+failClosedWhy,
+			[]denyDetail{{"Coordinator", serverURL}},
+			[]denyAction{
+				{
+					Label:   "Preferred: sign in with GitHub",
+					Command: "gh auth login",
+					Note:    "Then just retry your edit -- twing finishes signing in on its own, nothing else to run.",
+				},
+				{
+					Label:   "First time using twing here, no GitHub auth available",
+					Command: "twing init --invite <CODE-FROM-YOUR-ADMIN>",
+					Note:    "Mints your personal access token -- save it somewhere safe (a password manager); you'll need it again if this machine's twing state is ever reset.",
+				},
+				{
+					Label:   "Used twing before, just re-authenticating this machine",
+					Command: "twing login --token <YOUR-SAVED-PAT>",
+					Note:    "Lost that token and have no GitHub auth either? Ask an admin for a new invite.",
+				},
+				gateOffAction,
+			},
+		)
+	}
 	return denyMessage(
 		"twing can't check for conflicts -- this machine isn't signed in.",
 		failClosedWhy,
@@ -772,6 +808,17 @@ func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 	// a system-Node box; `twing` is not on PATH at all). Report it as the
 	// operational failure it is, the same shape the bootstrap hook's own
 	// failure message uses, and point at the log that has the real cause.
+	//
+	// The named causes below are the same family as bootstrap-hook.sh's own
+	// first-install failure (enforce-hooks.ts's denyJsonLine) -- this is that
+	// same install machinery, just re-run to catch up a version instead of
+	// starting from nothing -- plus two causes unique to a retry: the update
+	// has a hard 3-minute budget (versionRecoveryTimeout) that a slow link can
+	// exceed even though it would have succeeded given longer, and a repeat
+	// failure goes quiet for 30 minutes (recentlyAttemptedVersionRecovery)
+	// rather than retrying on every single edit -- naming that here is what
+	// stops a reader from assuming the next edit will simply try again right
+	// away.
 	if isManagedInstall() {
 		return denyMessage(
 			"twing can't check for conflicts -- this machine's twing is out of date and couldn't update itself.",
@@ -779,7 +826,11 @@ func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 				"blocks rather than risk enforcing conflict checks incorrectly. twing installs and "+
 				"updates itself on this machine, with nothing for you or anyone else to run -- so "+
 				"this is an operational failure, not a task for you to work around. Do not try to "+
-				"install or update it another way.",
+				"install or update it another way. Common causes: no network/DNS, the npm registry "+
+				"or github.com specifically blocked or unreachable (a corporate proxy can allow one "+
+				"and not the other), disk full, or the update simply ran out of its 3-minute budget on "+
+				"a slow link. Once failed, it stays quiet for 30 minutes before trying again on its "+
+				"own -- this will not necessarily clear on your very next edit.",
 			[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
 			[]denyAction{
 				{

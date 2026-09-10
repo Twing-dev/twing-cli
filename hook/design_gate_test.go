@@ -1484,11 +1484,12 @@ func TestHookVersionMismatchReason_SelfInstalledKeepsTheRunnableCommands(t *test
 func TestAuthReasons_ManagedInstallPointAtGhNotTwing(t *testing.T) {
 	pinInstallKind(t, true)
 
-	// attemptAuthRecovery has already run `twing init --unattended` and
-	// failed by the time any of these render, and it fails for one reason:
-	// no GitHub credential. Every twing command would hit the same wall.
+	// authRejectedReason's two cases are genuinely different from
+	// authRequiredReason below: an *existing* token that is merely stale or
+	// valid for the wrong project has no self-serve fix that skips GitHub
+	// auth, so these still point only at gh auth login (+ the escape hatch)
+	// and must not name a twing command with nothing on PATH to run it.
 	for name, msg := range map[string]string{
-		"authRequired":    flattenMessage(authRequiredReason("https://example.com")),
 		"authRejected401": flattenMessage(authRejectedReason(http.StatusUnauthorized, "https://example.com")),
 		"authRejected403": flattenMessage(authRejectedReason(http.StatusForbidden, "https://example.com")),
 	} {
@@ -1504,6 +1505,33 @@ func TestAuthReasons_ManagedInstallPointAtGhNotTwing(t *testing.T) {
 		// regardless of how twing got here.
 		if !strings.Contains(msg, "TWING_DESIGN_GATE=off") {
 			t.Errorf("%s: should keep the gate-off escape hatch: %s", name, msg)
+		}
+	}
+}
+
+// Unlike authRejectedReason above, "never signed in at all" has two genuine
+// self-serve fixes that need no GitHub auth: an invite (first time using
+// twing here) or a previously-saved PAT (this machine's twing state was
+// reset, e.g. by `twing uninstall`). Both resolve through
+// withResolvedTwingCLI to the real shim path -- ensureCliShim() in init.ts
+// runs before identity resolution can fail, so unlike the "nothing on PATH"
+// premise the test above still holds for, the shim is always present by the
+// time this message can fire.
+func TestAuthRequiredReason_ManagedInstallOffersInviteAndSavedPAT(t *testing.T) {
+	pinInstallKind(t, true)
+	msg := flattenMessage(authRequiredReason("https://example.com"))
+
+	if !strings.Contains(msg, "gh auth login") {
+		t.Errorf("should still lead with the GitHub credential: %s", msg)
+	}
+	for _, want := range []string{"init --invite", "login --token", "save it somewhere safe", "TWING_DESIGN_GATE=off"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("should offer %q: %s", want, msg)
+		}
+	}
+	for _, forbidden := range []string{"twing join", "twing whoami"} {
+		if strings.Contains(msg, forbidden) {
+			t.Errorf("must not name unrelated command %q: %s", forbidden, msg)
 		}
 	}
 }

@@ -255,9 +255,15 @@ function denyJsonLine(): string {
     "",
     "  The actual error was written to ~/.twing/bootstrap.log -- read that",
     "  file and report what it says. Do not guess from this message; the",
-    "  log has the real cause. The most common one is that twing needs a",
-    "  GitHub credential to verify your access to this repo, and none was",
-    "  available non-interactively, which `gh auth login` fixes.",
+    "  log has the real cause. This step needs no GitHub credential and no",
+    "  sign-in of any kind -- it only downloads twing itself, so a GitHub",
+    "  auth problem is never the cause here (that shows up later, as a",
+    "  different, separate message, once twing is actually installed).",
+    "  Look instead for: no network/DNS, the npm registry or github.com",
+    "  specifically blocked or unreachable (a corporate proxy can allow",
+    "  one and not the other), the wrong OS/CPU release asset missing for",
+    "  this machine, `npm`/`node` not on PATH in the environment Claude",
+    "  Code itself runs in, or no free disk space under $HOME.",
   ].join("\n");
 
   const payload = JSON.stringify({

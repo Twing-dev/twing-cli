@@ -296,7 +296,18 @@ test("bootstrapHookScript: denies with an operational message when bootstrap can
   assert.match(reason, /operational failure, not a task for you to work around/i);
   assert.match(reason, /https:\/\/twing\.dev/);
   assert.match(reason, /github\.com\/Twing-dev\/twing-cli/);
-  assert.match(reason, /gh auth login/, "names the credential twing needs when unattended");
+  // This step (fetching the CLI package + hook binary) needs no credential
+  // at all -- ensureHookInstalled() in init.ts runs *before* identity
+  // resolution can fail, deliberately, so a real gh-auth-missing machine
+  // still ends up with a working hook binary and never reaches this message
+  // (it gets authRequiredReason's "not signed in" deny instead, once the
+  // hook exists). Naming gh-auth here was wrong and pointed people at a fix
+  // that was never the actual cause; this must instead name the causes that
+  // really do block a pure download -- network, the registry/GitHub host
+  // specifically, or the local environment.
+  assert.ok(!/gh auth login/.test(reason), "must not blame GitHub auth -- this step needs no credential");
+  assert.match(reason, /npm registry or github\.com/i, "names the real causes of a download failure");
+  assert.match(reason, /disk space/i);
 });
 
 test("bootstrapHookScript: a failed bootstrap logs the real error rather than discarding it", () => {
