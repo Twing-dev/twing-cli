@@ -44,7 +44,7 @@ import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind, typ
 import { CaptureStore } from "./capture-store.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
-import { fetchRepoPermissions, fetchGithubUser, type GithubUser } from "./github-client.js";
+import { fetchRepoPermissions, fetchGithubUser, type GithubUser, type GithubRepoPermissions } from "./github-client.js";
 import {
   getInstallationToken,
   listInstallationRepos,
@@ -53,7 +53,6 @@ import {
   readFile as readGithubFile,
   exchangeUserCode,
   type GithubAppCredentials,
-  type CommitFileResult,
 } from "./github-app-client.js";
 
 interface ClaimsRequestBody {
@@ -383,6 +382,14 @@ ${items ? `<ul>${items}</ul>` : ""}
  * above does for a CLI caller. Never throws; every failure is folded into
  * the returned `detail` string for the confirmation page.
  */
+/** Shared with `/v1/projects/:id/join-via-github` below -- both grant twing
+ * `admin` on real GitHub `maintain`/`admin` permission and `member`
+ * otherwise; kept as one function after review found the two call sites
+ * had drifted into hand-duplicated copies of the same rule. */
+function resolveGithubRole(permissions: GithubRepoPermissions): Role {
+  return permissions.maintain || permissions.admin ? "admin" : "member";
+}
+
 async function setUpOneRepoViaGithubApp(args: {
   identities: IdentityStore;
   installationToken: string;
@@ -398,59 +405,117 @@ async function setUpOneRepoViaGithubApp(args: {
   const branch = await getDefaultBranch(installationToken, owner, repo);
   if (!branch) return { ok: false, detail: "could not read the repo's default branch -- installation token may lack access" };
 
-  const existingManifest = await readGithubFile(installationToken, owner, repo, ".twing/twing.yml", branch);
-  const manifestResult = renderManifestWithCoordinator(existingManifest, targetServerUrl);
+  // Every read below distinguishes "confirmed absent" (safe to treat as
+  // new) from every other kind of failure (transient error -- refuse rather
+  // than risk generating a bare file over one we just couldn't read this
+  // time). Found in review: collapsing those together here would have meant
+  // a flaky read of an *existing* .twing/twing.yml with real constraints
+  // could get silently overwritten with a bare minimal one.
+  const manifestRead = await readGithubFile(installationToken, owner, repo, ".twing/twing.yml", branch);
+  if (!manifestRead.ok && !manifestRead.notFound) {
+    return { ok: false, detail: "could not read the existing .twing/twing.yml (a transient GitHub error) -- left untouched, try again" };
+  }
+  const manifestResult = renderManifestWithCoordinator(manifestRead.ok ? manifestRead.content : undefined, targetServerUrl);
   if (manifestResult.conflictingExisting) {
     return { ok: false, detail: `.twing/twing.yml already points at a different coordinator (${manifestResult.conflictingExisting}) -- left untouched` };
   }
 
-  const existingSettingsText = await readGithubFile(installationToken, owner, repo, ".claude/settings.json", branch);
+  const settingsRead = await readGithubFile(installationToken, owner, repo, ".claude/settings.json", branch);
+  if (!settingsRead.ok && !settingsRead.notFound) {
+    return { ok: false, detail: "could not read the existing .claude/settings.json (a transient GitHub error) -- left untouched, try again" };
+  }
   let settings: ClaudeSettings = {};
-  if (existingSettingsText) {
+  if (settingsRead.ok) {
     try {
-      settings = JSON.parse(existingSettingsText) as ClaudeSettings;
+      settings = JSON.parse(settingsRead.content) as ClaudeSettings;
     } catch {
       return { ok: false, detail: ".claude/settings.json exists but isn't valid JSON -- left untouched to avoid clobbering it" };
     }
   }
-  mergeBootstrapHookEntries(settings);
+  const settingsChanged = mergeBootstrapHookEntries(settings);
   const settingsText = JSON.stringify(settings, null, 2) + "\n";
 
-  const commitResults = await Promise.all([
-    manifestResult.changed
-      ? commitFile(installationToken, owner, repo, ".twing/twing.yml", manifestResult.content, branch, "twing: configure coordinator (GitHub App setup)")
-      : Promise.resolve<CommitFileResult>({ ok: true }),
-    commitFile(installationToken, owner, repo, ".claude/settings.json", settingsText, branch, "twing: wire bootstrap hook (GitHub App setup)"),
-    commitFile(installationToken, owner, repo, ".twing/bootstrap-hook.sh", bootstrapHookScript(), branch, "twing: add bootstrap hook (GitHub App setup)"),
-  ]);
-  const failed = commitResults.find((r) => !r.ok);
-  if (failed) return { ok: false, detail: failed.error ?? "failed to commit one or more setup files" };
+  const bootstrapRead = await readGithubFile(installationToken, owner, repo, ".twing/bootstrap-hook.sh", branch);
+  if (!bootstrapRead.ok && !bootstrapRead.notFound) {
+    return { ok: false, detail: "could not read the existing .twing/bootstrap-hook.sh (a transient GitHub error) -- left untouched, try again" };
+  }
+  const freshBootstrapScript = bootstrapHookScript();
+  const bootstrapChanged = !bootstrapRead.ok || bootstrapRead.content !== freshBootstrapScript;
+
+  // Sequential, not Promise.all: three PUTs on the same branch each do their
+  // own read-sha-then-advance-ref, so concurrent writes here can race on
+  // that ref and 409 -- confirmed in review. Each is also skipped outright
+  // when unchanged (and passed its already-known sha when not, skipping
+  // commitFile's own redundant pre-read), so a repeat setup_action=update
+  // over an already-onboarded repo -- every currently granted repo, not
+  // just a newly added one -- commits nothing instead of three no-op
+  // commits polluting history every time.
+  if (manifestResult.changed) {
+    const res = await commitFile(
+      installationToken,
+      owner,
+      repo,
+      ".twing/twing.yml",
+      manifestResult.content,
+      branch,
+      "twing: configure coordinator (GitHub App setup)",
+      manifestRead.ok ? manifestRead.sha : null,
+    );
+    if (!res.ok) return { ok: false, detail: res.error ?? "failed to commit .twing/twing.yml" };
+  }
+  if (settingsChanged) {
+    const res = await commitFile(
+      installationToken,
+      owner,
+      repo,
+      ".claude/settings.json",
+      settingsText,
+      branch,
+      "twing: wire bootstrap hook (GitHub App setup)",
+      settingsRead.ok ? settingsRead.sha : null,
+    );
+    if (!res.ok) return { ok: false, detail: res.error ?? "failed to commit .claude/settings.json" };
+  }
+  if (bootstrapChanged) {
+    const res = await commitFile(
+      installationToken,
+      owner,
+      repo,
+      ".twing/bootstrap-hook.sh",
+      freshBootstrapScript,
+      branch,
+      "twing: add bootstrap hook (GitHub App setup)",
+      bootstrapRead.ok ? bootstrapRead.sha : null,
+    );
+    if (!res.ok) return { ok: false, detail: res.error ?? "failed to commit .twing/bootstrap-hook.sh" };
+  }
+  const filesNote = manifestResult.changed || settingsChanged || bootstrapChanged ? `files committed to ${branch}` : `already up to date on ${branch}`;
 
   if (!isDefaultServer) {
-    return { ok: true, detail: `files committed to ${branch}; ${targetServerUrl} will found the project on its first real hook run` };
+    return { ok: true, detail: `${filesNote}; ${targetServerUrl} will found the project on its first real hook run` };
   }
 
   const permissions = await fetchRepoPermissions(userToken, owner, repo);
   if (!permissions) {
-    return { ok: true, detail: `files committed to ${branch}, but couldn't verify your role -- sign in once via the CLI or dashboard to attach one` };
+    return { ok: true, detail: `${filesNote}, but couldn't verify your role -- sign in once via the CLI or dashboard to attach one` };
   }
-  const role: Role = permissions.maintain || permissions.admin ? "admin" : "member";
+  const role = resolveGithubRole(permissions);
   const projectId = computeProjectIdForGithubRepo(owner, repo);
   const project = identities.getProjectRecord(projectId);
   const params: JoinParams = { tokenHash: placeholderTokenHash(), label: "github-app", github: { id: installer.id, login: installer.login } };
 
   if (!project) {
     if (role !== "admin") {
-      return { ok: true, detail: `files committed to ${branch}; not founded on ${targetServerUrl} yet -- your GitHub role there isn't admin/maintain` };
+      return { ok: true, detail: `${filesNote}; not founded on ${targetServerUrl} yet -- your GitHub role there isn't admin/maintain` };
     }
     const founded = identities.foundProjectViaGithub(projectId, params, { owner, repo });
-    if ("error" in founded) return { ok: true, detail: `files committed to ${branch}, but founding failed: ${founded.error}` };
-    return { ok: true, detail: `files committed to ${branch}; project founded on ${targetServerUrl}, you're admin` };
+    if ("error" in founded) return { ok: true, detail: `${filesNote}, but founding failed: ${founded.error}` };
+    return { ok: true, detail: `${filesNote}; project founded on ${targetServerUrl}, you're admin` };
   }
 
   const joined = identities.joinProject(projectId, role, params);
-  if ("error" in joined) return { ok: true, detail: `files committed to ${branch}, but joining failed: ${joined.error}` };
-  return { ok: true, detail: `files committed to ${branch}; you joined the existing project on ${targetServerUrl} as ${role}` };
+  if ("error" in joined) return { ok: true, detail: `${filesNote}, but joining failed: ${joined.error}` };
+  return { ok: true, detail: `${filesNote}; you joined the existing project on ${targetServerUrl} as ${role}` };
 }
 
 type Variables = { identity: ResolvedIdentity };
@@ -2594,7 +2659,7 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!permissions || !permissions.pull) {
       return c.json({ error: "this GitHub token doesn't have access to this repo" }, 403);
     }
-    const role: Role = permissions.maintain || permissions.admin ? "admin" : "member";
+    const role: Role = resolveGithubRole(permissions);
 
     const header = c.req.header("authorization") ?? "";
     const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
@@ -2727,20 +2792,28 @@ export function createApp(options: CreateAppOptions = {}) {
       }
 
       const repos = await listInstallationRepos(installationToken);
-      const results: { owner: string; repo: string; ok: boolean; detail: string }[] = [];
-      for (const { owner, repo } of repos) {
-        const outcome = await setUpOneRepoViaGithubApp({
-          identities,
-          installationToken,
-          userToken,
-          installer,
-          owner,
-          repo,
-          targetServerUrl,
-          isDefaultServer,
-        });
-        results.push({ owner, repo, ...outcome });
-      }
+      // Parallel across repos (each touches its own branch/ref on GitHub's
+      // side and its own projectId row on ours, so there's no shared state
+      // to race) -- sequential here just multiplied an already-latent
+      // multi-round-trip-per-repo handler by the repo count for no reason,
+      // found in review. The race this file's own doc comment warns about
+      // is *within* one repo's three file writes, handled inside
+      // `setUpOneRepoViaGithubApp` itself, not across repos.
+      const results = await Promise.all(
+        repos.map(async ({ owner, repo }) => {
+          const outcome = await setUpOneRepoViaGithubApp({
+            identities,
+            installationToken,
+            userToken,
+            installer,
+            owner,
+            repo,
+            targetServerUrl,
+            isDefaultServer,
+          });
+          return { owner, repo, ...outcome };
+        }),
+      );
 
       return c.html(githubAppResultPage("twing setup complete", `Signed in as @${installer.login}.`, results));
     });

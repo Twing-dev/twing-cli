@@ -11,6 +11,14 @@
  * API (`llm-client.ts`, `github-client.ts`) -- GitHub App auth needs exactly
  * one JWT shape (RS256, `iss` = App ID, short-lived), not a general-purpose
  * JWT library.
+ *
+ * **Every exported function here fails soft, never throws** -- a network-level
+ * failure (DNS, TLS, timeout) is caught right at the `fetch` call, same as an
+ * ordinary non-2xx response; `setUpOneRepoViaGithubApp` (`app.ts`) depends on
+ * this to fold every failure into one repo's result rather than aborting the
+ * whole multi-repo route with an unhandled rejection (found in review: only
+ * `exchangeUserCode` actually had the try/catch this file's original doc
+ * comment claimed for all of them).
  */
 
 import * as crypto from "node:crypto";
@@ -55,17 +63,22 @@ async function githubRequest(path: string, token: string, init?: RequestInit): P
 /** Exchanges the App's JWT for an installation access token -- the
  * credential every write call below actually uses; the JWT itself can only
  * mint tokens, not call the rest of the API. `undefined` on any non-200
- * (installation revoked mid-flow, bad credentials, etc.), same "caller
- * treats every failure identically" convention `github-client.ts` uses. */
+ * (installation revoked mid-flow, bad credentials, etc.) or network-level
+ * failure, same "caller treats every failure identically" convention
+ * `github-client.ts` uses. */
 export async function getInstallationToken(
   creds: Pick<GithubAppCredentials, "appId" | "privateKeyPem">,
   installationId: string,
 ): Promise<string | undefined> {
-  const jwt = mintAppJwt(creds);
-  const res = await githubRequest(`/app/installations/${encodeURIComponent(installationId)}/access_tokens`, jwt, { method: "POST" });
-  if (!res.ok) return undefined;
-  const body = (await res.json()) as { token?: string };
-  return body.token;
+  try {
+    const jwt = mintAppJwt(creds);
+    const res = await githubRequest(`/app/installations/${encodeURIComponent(installationId)}/access_tokens`, jwt, { method: "POST" });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { token?: string };
+    return body.token;
+  } catch {
+    return undefined;
+  }
 }
 
 export interface InstalledRepo {
@@ -74,19 +87,39 @@ export interface InstalledRepo {
 }
 
 /** The repo(s) this installation was granted -- one or many, whatever the
- * admin selected in GitHub's own install UI. */
+ * admin selected in GitHub's own install UI. Paginates (`per_page=100`,
+ * following pages until a short page ends it) -- an unpaginated single call
+ * silently dropped everything past the API's default 30-per-page for an
+ * "all repositories" install on a larger org, found in review. Best-effort
+ * on a mid-pagination failure: returns whatever pages already succeeded
+ * rather than discarding them, since a partial onboarding pass is strictly
+ * better than none. */
 export async function listInstallationRepos(installationToken: string): Promise<InstalledRepo[]> {
-  const res = await githubRequest("/installation/repositories", installationToken);
-  if (!res.ok) return [];
-  const body = (await res.json()) as { repositories?: { name: string; owner: { login: string } }[] };
-  return (body.repositories ?? []).map((r) => ({ owner: r.owner.login, repo: r.name }));
+  const repos: InstalledRepo[] = [];
+  try {
+    for (let page = 1; ; page++) {
+      const res = await githubRequest(`/installation/repositories?per_page=100&page=${page}`, installationToken);
+      if (!res.ok) break;
+      const body = (await res.json()) as { repositories?: { name: string; owner: { login: string } }[] };
+      const batch = body.repositories ?? [];
+      repos.push(...batch.map((r) => ({ owner: r.owner.login, repo: r.name })));
+      if (batch.length < 100) break;
+    }
+  } catch {
+    // Best-effort -- fall through to whatever pages already succeeded.
+  }
+  return repos;
 }
 
 export async function getDefaultBranch(installationToken: string, owner: string, repo: string): Promise<string | undefined> {
-  const res = await githubRequest(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, installationToken);
-  if (!res.ok) return undefined;
-  const body = (await res.json()) as { default_branch?: string };
-  return body.default_branch;
+  try {
+    const res = await githubRequest(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, installationToken);
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { default_branch?: string };
+    return body.default_branch;
+  } catch {
+    return undefined;
+  }
 }
 
 function encodeContentsPath(filePath: string): string {
@@ -101,10 +134,17 @@ export interface CommitFileResult {
 /**
  * Contents API create-or-update (`PUT /repos/{owner}/{repo}/contents/{path}`),
  * straight to `branch` -- no PR, matching the confirmed "push straight to
- * the default branch" decision for this flow. Reads the file's current `sha`
- * first, since GitHub requires it for an update-in-place; a 404 there just
- * means "doesn't exist yet" (the expected case on first setup), not an
- * error.
+ * the default branch" decision for this flow.
+ *
+ * `knownSha` lets a caller that already read the file (`readFile`, below)
+ * skip this function's own pre-read entirely: omit it (or leave it
+ * `undefined`) to have `commitFile` fetch the current sha itself, pass a
+ * sha string when you already have one (an update), or pass `null` when
+ * you've already confirmed the file doesn't exist (a create) -- distinct
+ * from "didn't check," which still triggers the internal GET. Skipping a
+ * redundant read isn't just an efficiency nicety here: fewer reads between
+ * "what does this file currently say" and "write over it" narrows the
+ * window for a stale-sha race against a concurrent external commit.
  */
 export async function commitFile(
   installationToken: string,
@@ -114,48 +154,71 @@ export async function commitFile(
   content: string,
   branch: string,
   message: string,
+  knownSha?: string | null,
 ): Promise<CommitFileResult> {
-  const encodedPath = encodeContentsPath(filePath);
-  const getRes = await githubRequest(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`, installationToken);
-  let sha: string | undefined;
-  if (getRes.ok) {
-    const existing = (await getRes.json()) as { sha?: string };
-    sha = existing.sha;
-  } else if (getRes.status !== 404) {
-    return { ok: false, error: `failed to read existing ${filePath}: ${getRes.status}` };
-  }
+  try {
+    const encodedPath = encodeContentsPath(filePath);
+    let sha: string | undefined;
+    if (knownSha !== undefined) {
+      sha = knownSha ?? undefined;
+    } else {
+      const getRes = await githubRequest(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`, installationToken);
+      if (getRes.ok) {
+        const existing = (await getRes.json()) as { sha?: string };
+        sha = existing.sha;
+      } else if (getRes.status !== 404) {
+        return { ok: false, error: `failed to read existing ${filePath}: ${getRes.status}` };
+      }
+    }
 
-  const putRes = await githubRequest(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`, installationToken, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      message,
-      content: Buffer.from(content, "utf8").toString("base64"),
-      branch,
-      ...(sha ? { sha } : {}),
-    }),
-  });
-  if (!putRes.ok) return { ok: false, error: `failed to write ${filePath}: ${putRes.status}` };
-  return { ok: true };
+    const putRes = await githubRequest(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`, installationToken, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message,
+        content: Buffer.from(content, "utf8").toString("base64"),
+        branch,
+        ...(sha ? { sha } : {}),
+      }),
+    });
+    if (!putRes.ok) return { ok: false, error: `failed to write ${filePath}: ${putRes.status}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: `network error writing ${filePath}: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
+export type ReadFileResult =
+  | { ok: true; content: string; sha: string }
+  | { ok: false; notFound: true }
+  | { ok: false; notFound: false };
+
 /**
- * Reads back a file's raw text via the Contents API, or `undefined` if it
- * doesn't exist (a 404) or can't be decoded -- used to merge into an
- * existing `.claude/settings.json` (another tool's hooks must survive)
- * rather than blindly overwriting it, mirroring `enforce-hooks.ts`'s
- * read-merge-write discipline for the local-disk path.
+ * Reads back a file's raw text (and sha, so a caller that goes on to
+ * `commitFile` can skip its own redundant pre-read) via the Contents API.
+ *
+ * `notFound` distinguishes "confirmed absent" (404) from every other kind of
+ * failure (a transient 403/429/500, a network error, undecodable content) --
+ * collapsing those together was a real bug, found in review: a caller that
+ * can't tell "doesn't exist yet" from "couldn't check" has no way to avoid
+ * treating a *transient read failure on an existing file* as if the file
+ * were new, which for `.twing/twing.yml` specifically means generating and
+ * committing a bare minimal document over one that may have had real
+ * `constraints`/`require_human_review` sections -- silent data loss. Callers
+ * here (`setUpOneRepoViaGithubApp`) must branch on `notFound` explicitly
+ * rather than treating every `ok: false` the same way.
  */
-export async function readFile(installationToken: string, owner: string, repo: string, filePath: string, branch: string): Promise<string | undefined> {
-  const encodedPath = encodeContentsPath(filePath);
-  const res = await githubRequest(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`, installationToken);
-  if (!res.ok) return undefined;
-  const body = (await res.json()) as { content?: string; encoding?: string };
-  if (!body.content || body.encoding !== "base64") return undefined;
+export async function readFile(installationToken: string, owner: string, repo: string, filePath: string, branch: string): Promise<ReadFileResult> {
   try {
-    return Buffer.from(body.content, "base64").toString("utf8");
+    const encodedPath = encodeContentsPath(filePath);
+    const res = await githubRequest(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`, installationToken);
+    if (res.status === 404) return { ok: false, notFound: true };
+    if (!res.ok) return { ok: false, notFound: false };
+    const body = (await res.json()) as { content?: string; encoding?: string; sha?: string };
+    if (!body.content || body.encoding !== "base64" || !body.sha) return { ok: false, notFound: false };
+    return { ok: true, content: Buffer.from(body.content, "base64").toString("utf8"), sha: body.sha };
   } catch {
-    return undefined;
+    return { ok: false, notFound: false };
   }
 }
 

@@ -4,8 +4,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
-import type { Claim } from "@twing/core";
+import type { Claim, ClaudeSettings } from "@twing/core";
 import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS } from "@twing/core";
+import { renderManifestWithCoordinator, mergeBootstrapHookEntries, bootstrapHookScript } from "@twing/core";
 import { createApp, type GithubAppConfig } from "./app.js";
 import { createDb } from "./db/client.js";
 import { IdentityStore } from "./identity-store.js";
@@ -5390,7 +5391,7 @@ function githubAppMockFetch(): typeof fetch {
     if (url === "https://api.github.com/user") {
       return new Response(JSON.stringify({ id: 555, login: "octoadmin" }), { status: 200 });
     }
-    if (url === "https://api.github.com/installation/repositories") {
+    if (url.startsWith("https://api.github.com/installation/repositories")) {
       return new Response(JSON.stringify({ repositories: [{ name: "repo1", owner: { login: "acme" } }] }), { status: 200 });
     }
     if (/\/repos\/acme\/repo1$/.test(url)) {
@@ -5513,4 +5514,55 @@ test("GET /v1/github-app/setup: same GitHub id installing twice founds once, the
   const projectId = computeProjectIdForGithubRepo("acme", "repo1");
   const project = identities.getProjectRecord(projectId);
   assert.equal(identities.getProjectRole(projectId, project!.foundedBy), "admin");
+});
+
+test("GET /v1/github-app/setup: a repo already fully onboarded (all three files already correct) makes zero commits on a repeat run", async () => {
+  const githubApp = testGithubAppConfig();
+  const { app } = freshApp({ githubApp });
+
+  const manifestContent = renderManifestWithCoordinator(undefined, githubApp.defaultServerUrl).content;
+  const settings: ClaudeSettings = {};
+  mergeBootstrapHookEntries(settings);
+  const settingsContent = JSON.stringify(settings, null, 2) + "\n";
+  const bootstrapContent = bootstrapHookScript();
+
+  const contentByPath: Record<string, string> = {
+    "/repos/acme/repo1/contents/.twing/twing.yml": manifestContent,
+    "/repos/acme/repo1/contents/.claude/settings.json": settingsContent,
+    "/repos/acme/repo1/contents/.twing/bootstrap-hook.sh": bootstrapContent,
+  };
+
+  let putCount = 0;
+  const res = await withMockFetch(
+    (async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (url === "https://github.com/login/oauth/access_token") return new Response(JSON.stringify({ access_token: "user-token-abc" }), { status: 200 });
+      if (/\/app\/installations\/.+\/access_tokens$/.test(url) && method === "POST") return new Response(JSON.stringify({ token: "install-token-xyz" }), { status: 201 });
+      if (url === "https://api.github.com/user") return new Response(JSON.stringify({ id: 555, login: "octoadmin" }), { status: 200 });
+      if (url.startsWith("https://api.github.com/installation/repositories")) {
+        return new Response(JSON.stringify({ repositories: [{ name: "repo1", owner: { login: "acme" } }] }), { status: 200 });
+      }
+      if (/\/repos\/acme\/repo1$/.test(url)) {
+        return new Response(
+          JSON.stringify({ default_branch: "main", permissions: { pull: true, triage: true, push: true, maintain: true, admin: true } }),
+          { status: 200 },
+        );
+      }
+      if (method === "PUT") {
+        putCount++;
+        return new Response(JSON.stringify({ content: {} }), { status: 200 });
+      }
+      const pathOnly = new URL(url).pathname;
+      const content = contentByPath[pathOnly];
+      if (content !== undefined) {
+        return new Response(JSON.stringify({ content: Buffer.from(content, "utf8").toString("base64"), encoding: "base64", sha: `sha-${pathOnly}` }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch in test: ${method} ${url}`);
+    }) as typeof fetch,
+    async () => app.request("/v1/github-app/setup?installation_id=999&setup_action=update&code=c1"),
+  );
+
+  const html = await res.text();
+  assert.ok(html.includes("already up to date"), html);
+  assert.equal(putCount, 0, "nothing changed, so nothing should be committed");
 });
