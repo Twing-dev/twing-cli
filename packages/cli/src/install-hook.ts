@@ -22,6 +22,98 @@ export function hookBinaryPath(): string {
   return path.join(os.homedir(), ".twing", "bin", `twing-hook${ext}`);
 }
 
+/** Where `ensureCliShim` puts a runnable `twing`, beside the hook binary. */
+export function cliShimPath(): string {
+  return path.join(os.homedir(), ".twing", "bin", "twing");
+}
+
+/**
+ * Makes the CLI runnable on a machine onboarded by the committed bootstrap
+ * hook.
+ *
+ * That path deliberately avoids `npm install -g` (it would need sudo on a
+ * system-Node box, which a hook has no TTY to supply), so the CLI lands in
+ * `~/.twing/lib/node_modules/` with nothing on `PATH` pointing at it --
+ * while every remediation message the design gate prints says to run
+ * `twing design register ...`. The result was a gate that blocks correctly
+ * and then names a command that does not exist: strictly worse than no
+ * gate, because there is no way forward. Found live.
+ *
+ * A small wrapper here fixes that without touching `PATH` or anyone's
+ * shell rc (neither of which could help the already-running session
+ * anyway) -- the gate points at this absolute path when a bare `twing`
+ * isn't resolvable (`resolveTwingCommand`, hook/design_gate.go). It lives
+ * beside `twing-hook`, in a directory twing already owns, so `twing
+ * uninstall` reclaims it for free.
+ *
+ * Harmless for a global install, which already has a real `twing` on
+ * `PATH` and will simply keep using it. Never throws -- a machine where
+ * this can't be written still has a working gate, just a less convenient
+ * one.
+ */
+export function ensureCliShim(): string | null {
+  // Windows has no equivalent of this shim, and the committed bootstrap
+  // hook that makes it necessary is POSIX-only anyway (documented gap).
+  if (process.platform === "win32") return null;
+
+  // dist/install-hook.js -> dist/index.js: this build's own entrypoint,
+  // whichever copy is running.
+  const cliEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.js");
+  const shim = cliShimPath();
+  try {
+    if (!fs.existsSync(cliEntry)) return null;
+    fs.mkdirSync(path.dirname(shim), { recursive: true });
+    // A wrapper rather than a symlink, deliberately: a symlink inherits the
+    // target's permissions, and `dist/index.js` is only executable when npm
+    // installed the package (it sets the bit for a `bin` entry) -- not in a
+    // contributor's checkout, where tsc just writes a plain file. Naming
+    // the interpreter explicitly also sidesteps shebang resolution
+    // entirely. Same {node, script} shape the daemon launch marker uses.
+    replaceFileAtomically(shim, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(cliEntry)} "$@"\n`, 0o755);
+    return shim;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Writes `target` by way of a temp file in the same directory, so the
+ * replacement is a single atomic rename rather than a truncate-and-refill.
+ *
+ * Both files this is used for are *executed*, and both are now replaced by
+ * an update that a running hook can start (hook/version_recovery.go). A
+ * plain `writeFileSync` truncates in place, so a concurrent invocation --
+ * two tool calls in the same second is entirely ordinary -- can be executing
+ * the file mid-write: `ETXTBSY` on Linux, or a half-written binary that
+ * fails in some less obvious way. A rename never exposes a partial file, and
+ * a process already running the old inode keeps running it unharmed.
+ *
+ * Same directory deliberately: a rename across filesystems isn't atomic (and
+ * on many setups isn't even permitted), which is exactly what a temp file
+ * under the system tmpdir would risk.
+ */
+function replaceFileAtomically(target: string, contents: Uint8Array | string, mode: number): void {
+  const tmp = `${target}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, contents);
+    if (process.platform !== "win32") {
+      fs.chmodSync(tmp, mode);
+    }
+    try {
+      fs.renameSync(tmp, target);
+    } catch {
+      // Windows refuses to rename onto an existing file. Unlinking first
+      // reopens the race this exists to close, so it stays the fallback
+      // rather than the method.
+      fs.rmSync(target, { force: true });
+      fs.renameSync(tmp, target);
+    }
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
 /** Walks up from this module's own install location looking for a `hook/`
  * Go module directory — the monorepo dev-mode layout, i.e. "this is a
  * twing-cli contributor's own checkout." */
@@ -61,30 +153,55 @@ export function releaseAssetName(): string | null {
   return `twing-hook-${osName}-${archName}${ext}`;
 }
 
-/** Fetches the latest published release's binary for this platform,
- * writing it to `target`. GitHub's `/releases/latest/download/<asset>` URL
- * always redirects to the current latest release's matching asset -- no
- * API token, no rate limit, works from a plain `fetch`. Returns false (never
- * throws) on any failure: no release published yet, wrong platform, a
- * network hiccup -- all fall through to the next tier the same way. */
-export async function fetchPrebuiltHook(target: string): Promise<boolean> {
+/**
+ * Fetches a published release's binary for this platform, writing it to
+ * `target`. No API token, no rate limit, works from a plain `fetch`.
+ *
+ * **Prefers the release matching `version`, not whatever is newest.** The
+ * gate compares the *hook binary's* stamped version against the
+ * coordinator's, and every automatic update pins the npm install to a
+ * specific version on purpose -- the daemon's `performSelfUpdate` and the
+ * gate's `attemptVersionRecovery` both install `@twing/cli@<the
+ * coordinator's version>` precisely so that chasing `latest` cannot swap one
+ * mismatch for another. Refreshing the hook from `/releases/latest/`
+ * regardless threw that away at the final step: install the right package,
+ * then overwrite its hook binary with a different version's. Whenever the
+ * coordinator is not at the newest release -- a staged rollout, a rollback,
+ * a deliberately pinned deployment -- the update could never converge, and a
+ * machine that repairs itself automatically would repair itself into the
+ * same 426 every time.
+ *
+ * Falls back to `/releases/latest/`, which covers a version published to npm
+ * before its hook release finished uploading, and any caller with no version
+ * to offer.
+ *
+ * Returns false (never throws) on any failure: no release published yet,
+ * wrong platform, a network hiccup -- all fall through to the next tier the
+ * same way.
+ */
+export async function fetchPrebuiltHook(target: string, version?: string): Promise<boolean> {
   const asset = releaseAssetName();
   if (!asset) return false;
 
-  const url = `https://github.com/${RELEASE_REPO}/releases/latest/download/${asset}`;
-  try {
-    const res = await fetch(url, { redirect: "follow" });
-    if (!res.ok) return false;
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, bytes);
-    if (process.platform !== "win32") {
-      fs.chmodSync(target, 0o755);
-    }
-    return true;
-  } catch {
-    return false;
+  const base = `https://github.com/${RELEASE_REPO}/releases`;
+  const urls = [`${base}/latest/download/${asset}`];
+  if (version && version !== "unknown") {
+    urls.unshift(`${base}/download/v${version}/${asset}`);
   }
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { redirect: "follow" });
+      if (!res.ok) continue;
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      replaceFileAtomically(target, bytes, 0o755);
+      return true;
+    } catch {
+      // This URL didn't work; try the fallback before giving up.
+    }
+  }
+  return false;
 }
 
 /** Returns the installed binary path -- building from source, fetching a
@@ -126,7 +243,10 @@ export async function ensureHookInstalled(): Promise<string> {
     return target;
   }
 
-  if (await fetchPrebuiltHook(target)) {
+  // Matched to this npm package's own version, so an install's two halves
+  // -- the CLI, and the hook binary whose version the gate actually sends --
+  // can never disagree. See fetchPrebuiltHook's doc comment.
+  if (await fetchPrebuiltHook(target, getCliVersion())) {
     return target;
   }
 

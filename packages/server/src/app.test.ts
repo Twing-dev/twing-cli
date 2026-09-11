@@ -4924,9 +4924,17 @@ test("POST /v1/projects/:id/join-via-github: an already-founded project ignores 
   const admin = await bootstrapAdmin(app, dataDir);
   identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
 
-  let calledUrl: string | undefined;
+  // Two GitHub calls are made now -- the permission check and the identity
+  // lookup (fetchGithubUser) -- so this records all of them and asserts on
+  // the repos one. Matching "the last URL fetched" would silently start
+  // passing/failing on call order rather than on the thing under test.
+  const calledUrls: string[] = [];
   const fetchSpy = (async (url: string | URL | Request) => {
-    calledUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    calledUrls.push(href);
+    if (href === "https://api.github.com/user") {
+      return new Response(JSON.stringify({ id: 4242, login: "mallory" }), { status: 200 });
+    }
     return new Response(JSON.stringify({ permissions: { pull: true, triage: true, push: true, maintain: false, admin: false } }), { status: 200 });
   }) as typeof fetch;
 
@@ -4939,7 +4947,12 @@ test("POST /v1/projects/:id/join-via-github: an already-founded project ignores 
       body: JSON.stringify({ githubToken: "gh-token-mallory", githubOwner: "someone-elses-org", githubRepo: "unrelated-repo", tokenHash: sha256Hex("mallorys-pat"), label: "mallory@example.com" }),
     });
     assert.equal(res.status, 200);
-    assert.equal(calledUrl, "https://api.github.com/repos/acme/widgets", "must check permissions against the stored binding, never a client claim");
+    const repoCalls = calledUrls.filter((u) => u.includes("/repos/"));
+    assert.deepEqual(repoCalls, ["https://api.github.com/repos/acme/widgets"], "must check permissions against the stored binding, never a client claim");
+    assert.ok(
+      !calledUrls.some((u) => u.includes("someone-elses-org") || u.includes("unrelated-repo")),
+      "the client-claimed repo must never be contacted at all",
+    );
   });
 });
 
@@ -5267,4 +5280,77 @@ test("there is no route to read or delete a capture", async () => {
     const res = await app.request(path, { method, headers: bearer(admin.token) });
     assert.equal(res.status, 404, `${method} ${path} should not exist`);
   }
+});
+
+// --- GitHub sign-in for the dashboard ---------------------------------------
+
+test("POST /v1/auth/github/session: a linked account gets a credential for its existing identity", async () => {
+  const { app, dataDir, identities } = freshApp();
+  await bootstrapAdmin(app, dataDir);
+  identities.foundProjectViaGithub(
+    "proj-1",
+    { tokenHash: sha256Hex("cli-pat"), label: "alice@example.com", github: { id: "77", login: "alice" } },
+    { owner: "acme", repo: "widgets" },
+  );
+
+  const fetchSpy = (async () => new Response(JSON.stringify({ id: 77, login: "alice" }), { status: 200 })) as typeof fetch;
+  const res = await withMockFetch(fetchSpy, async () =>
+    app.request("/v1/auth/github/session", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ githubToken: "gh-token", tokenHash: sha256Hex("dashboard-pat") }),
+    }),
+  );
+
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { developerId: string };
+  // The same identity the CLI uses -- which is the whole point; a separate
+  // dashboard identity is what made an admin see zero alignment threads.
+  assert.equal(body.developerId, "alice");
+  assert.equal(identities.resolveToken("dashboard-pat")?.developerId, "alice");
+});
+
+test("POST /v1/auth/github/session: an unlinked account is refused, not silently given an identity", async () => {
+  // Unauthenticated route, no project context: minting here would let anyone
+  // with any GitHub account create an identity on someone else's coordinator.
+  const { app, dataDir } = freshApp();
+  await bootstrapAdmin(app, dataDir);
+
+  const fetchSpy = (async () => new Response(JSON.stringify({ id: 999, login: "stranger" }), { status: 200 })) as typeof fetch;
+  const res = await withMockFetch(fetchSpy, async () =>
+    app.request("/v1/auth/github/session", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ githubToken: "gh-token", tokenHash: sha256Hex("would-be-pat") }),
+    }),
+  );
+
+  assert.equal(res.status, 403);
+  assert.match((await res.json() as { error: string }).error, /isn't linked to a twing identity/);
+});
+
+test("POST /v1/auth/github/session: a token GitHub doesn't recognise is rejected", async () => {
+  const { app, dataDir } = freshApp();
+  await bootstrapAdmin(app, dataDir);
+  const fetchSpy = (async () => new Response("bad credentials", { status: 401 })) as typeof fetch;
+  const res = await withMockFetch(fetchSpy, async () =>
+    app.request("/v1/auth/github/session", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ githubToken: "nope", tokenHash: sha256Hex("x") }),
+    }),
+  );
+  assert.equal(res.status, 401);
+});
+
+test("the GitHub sign-in routes are reachable without a credential", async () => {
+  // They exist to obtain one, so requiring one would be circular. Asserted
+  // explicitly because the auth middleware's exemption list is easy to
+  // regress and the failure mode is a dashboard nobody can log into.
+  const { app, dataDir } = freshApp();
+  await bootstrapAdmin(app, dataDir);
+  const fetchSpy = (async () => new Response(JSON.stringify({ device_code: "d", user_code: "ABCD-1234" }), { status: 200 })) as typeof fetch;
+  const res = await withMockFetch(fetchSpy, async () => app.request("/v1/auth/github/device", { method: "POST" }));
+  assert.notEqual(res.status, 401, "must not sit behind the bearer-token middleware");
+  assert.equal(res.status, 200);
 });

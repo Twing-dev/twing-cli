@@ -21,28 +21,24 @@
  *    pre-0.2.6 case by construction: signals need no protocol support.
  *
  * `DaemonRestartDeps` follows `init.ts`'s `InitDeps` convention -- every
- * real side effect here is a process signal, a `launchctl`/`systemctl`
- * subprocess, or a socket round trip, none of which a test can stand up
- * cheaply. Production callers never pass it.
+ * real side effect here is a process signal, a detached spawn, or a socket
+ * round trip, none of which a test can stand up cheaply. Production callers never pass it.
  */
 
 import * as net from "node:net";
 import { execFileSync } from "node:child_process";
 import { defaultSocketPath } from "@twing/core";
-import { isServiceInstalled } from "./daemon-service.js";
 import { queryDaemonIdentity, requestDaemonShutdown, type DaemonIdentity } from "./daemon-client.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
 
-export type ServiceKind = "launchd" | "systemd" | "none";
-
 export interface DaemonRestartDeps {
   socketPath: string;
-  serviceKind(): ServiceKind;
-  restartService(kind: "launchd" | "systemd"): void;
   identity(): Promise<DaemonIdentity | null>;
   requestShutdown(): Promise<boolean>;
   socketAlive(): Promise<boolean>;
   signal(pid: number, sig: NodeJS.Signals): void;
+  /** Started with eviction permitted: a restart is the one path where a
+   * live-but-wedged holder should be taken off the socket. */
   spawnDaemon(): Promise<"already-running" | "started" | "failed">;
   /** How long each liveness poll waits between attempts. ~2s total budget
    * in production, same as it has always been. */
@@ -64,20 +60,11 @@ function defaultDeps(): DaemonRestartDeps {
   const socketPath = defaultSocketPath();
   return {
     socketPath,
-    serviceKind: isServiceInstalled,
-    restartService: (kind) => {
-      if (kind === "launchd") {
-        const uid = typeof process.getuid === "function" ? process.getuid() : "";
-        execFileSync("launchctl", ["kickstart", "-k", `gui/${uid}/dev.twing.daemon`], { stdio: "inherit" });
-      } else {
-        execFileSync("systemctl", ["--user", "restart", "twing-daemon.service"], { stdio: "inherit" });
-      }
-    },
     identity: queryDaemonIdentity,
     requestShutdown: requestDaemonShutdown,
     socketAlive: () => probeSocketAlive(socketPath),
     signal: (pid, sig) => process.kill(pid, sig),
-    spawnDaemon: ensureDaemonRunning,
+    spawnDaemon: () => ensureDaemonRunning({ mayEvict: true }),
     pollIntervalMs: 250,
   };
 }
@@ -130,53 +117,43 @@ async function terminateByPid(deps: DaemonRestartDeps, pid: number): Promise<boo
 }
 
 /**
- * Restarts a running daemon, however it was started. Two paths:
+ * Restarts a running daemon: ask it to shut down over the socket, escalate
+ * to `SIGTERM` by pid if it won't, then spawn a replacement the same way
+ * `twing init` does. Finishes by confirming a *different* process now holds
+ * the socket -- never by asking only whether *something* does.
  *
- * - An OS-level service (launchd/systemd) is actually loaded: restart it via
- *   the service manager, NOT the socket `shutdown` message. systemd's
- *   `Restart=on-failure` does not respawn on a clean exit code 0, so a
- *   graceful self-shutdown would leave the daemon stopped on Linux; a
- *   service-manager restart SIGTERMs the old process instead, which the
- *   existing signal handler (runDaemonForeground) already handles cleanly.
- * - No service loaded (Windows, install never ran, or a leftover plist for a
- *   job launchd no longer tracks -- see `isServiceInstalled`): socket
- *   `shutdown`, escalating to `SIGTERM` by pid, then the same spawn fallback
- *   `twing init` uses.
- *
- * Either way, finishes by confirming a different process now holds the
- * socket -- never by asking only whether *something* does.
+ * There is no service-manager branch any more: the launchd/systemd install
+ * is gone (see `daemon-service.ts`). This is also the one path allowed to
+ * evict a live-but-wedged holder, since it is the only one a human invokes
+ * explicitly -- `spawnDaemon` here sets that flag, and no auto-start path
+ * does. See `EVICTION_ENV` in `daemon/server.ts`.
  */
 export async function runDaemonRestart(deps: DaemonRestartDeps = defaultDeps()): Promise<void> {
   const before = await deps.identity();
-  const kind = deps.serviceKind();
 
-  if (kind !== "none") {
-    deps.restartService(kind);
-  } else {
-    const acked = await deps.requestShutdown();
-    // No ack means either nothing was listening (fine) or a daemon too old
-    // to understand `shutdown` is still there (not fine) -- one probe tells
-    // the two apart without burning the full wait budget on the common case.
-    let gone = acked ? await waitForSocketGone(deps) : !(await deps.socketAlive());
+  const acked = await deps.requestShutdown();
+  // No ack means either nothing was listening (fine) or a daemon too old
+  // to understand `shutdown` is still there (not fine) -- one probe tells
+  // the two apart without burning the full wait budget on the common case.
+  let gone = acked ? await waitForSocketGone(deps) : !(await deps.socketAlive());
 
-    if (!gone) {
-      if (!before?.pid) {
-        // Listening, didn't ack, and predates identity support -- so there's
-        // no pid to signal. Say so, instead of spawning a second daemon that
-        // loses the race and lets this report success anyway.
-        throw new Error(
-          `twing daemon restart: a daemon too old to answer \`shutdown\` or \`get_identity\` still holds ${deps.socketPath}. ` +
-            `Find it with \`lsof ${deps.socketPath}\` and kill it manually, then re-run.`,
-        );
-      }
-      gone = await terminateByPid(deps, before.pid);
-      if (!gone) {
-        throw new Error(`twing daemon restart: pid ${before.pid} still holds ${deps.socketPath} after a shutdown request and SIGTERM -- kill it manually and re-run`);
-      }
+  if (!gone) {
+    if (!before?.pid) {
+      // Listening, didn't ack, and predates identity support -- so there's
+      // no pid to signal. Say so, instead of spawning a second daemon that
+      // loses the race and lets this report success anyway.
+      throw new Error(
+        `twing daemon restart: a daemon too old to answer \`shutdown\` or \`get_identity\` still holds ${deps.socketPath}. ` +
+          `Find it with \`lsof ${deps.socketPath}\` and kill it manually, then re-run.`,
+      );
     }
-
-    await deps.spawnDaemon();
+    gone = await terminateByPid(deps, before.pid);
+    if (!gone) {
+      throw new Error(`twing daemon restart: pid ${before.pid} still holds ${deps.socketPath} after a shutdown request and SIGTERM -- kill it manually and re-run`);
+    }
   }
+
+  await deps.spawnDaemon();
 
   if (!(await waitForFreshDaemon(deps, before?.pid))) {
     // The two failures are worth telling apart: nothing came back at all,

@@ -32,9 +32,25 @@ simulator/.workspaces/
 # `git add -A` can't sweep one in.
 /deploy/docker/backups-offbox/
 
-# Hook commands in here are absolute, $HOME-specific paths baked in by
-# `twing init` (hookBinaryPath()) -- committing it breaks on every machine
-# whose $HOME differs from whoever committed it last (hit live, 2026-08-11:
-# a checked-in /home/remote/... entry errored with ENOENT on this machine).
-# Run `twing init` locally to (re)generate it instead.
-.claude/settings.json
+
+# Editor swap/backup files. `.claude/` is committed now (it carries the
+# bootstrap hook entries), so an editor left open on settings.json drops a
+# .swp right beside a tracked file -- which is how one got committed.
+*.swp
+*.swo
+*~
+
+# Claude Code's own machine-local state inside the now-committed `.claude/`.
+# `settings.json` there is shared team config (the twing bootstrap hook
+# entries) and stays tracked; everything below is per-machine or per-session
+# and must not be. These were only ever excluded via `.git/info/exclude`,
+# which Claude Code writes locally and git never shares -- so this machine
+# was protected and every teammate's clone was not. `settings.local.json` in
+# particular is the documented per-machine override, and was covered by
+# neither.
+/.claude/settings.local.json
+/.claude/scheduled_tasks.lock
+/.claude/scheduled_tasks.json
+/.claude/routines/.state/
+/.claude/worktrees/
+/.claude/checkpoints/

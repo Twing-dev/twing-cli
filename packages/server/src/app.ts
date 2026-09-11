@@ -40,8 +40,8 @@ import { enrichReviews } from "./review-enrich.js";
 import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind, type AlignmentThread } from "./alignment-store.js";
 import { CaptureStore } from "./capture-store.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
-import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role } from "./identity-store.js";
-import { fetchRepoPermissions } from "./github-client.js";
+import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
+import { fetchRepoPermissions, fetchGithubUser } from "./github-client.js";
 
 interface ClaimsRequestBody {
   projectId?: string;
@@ -208,6 +208,13 @@ export interface CreateAppOptions {
    * on these routes, not public data, so the allowlist has to be explicit
    * origins a self-hosted operator opts in by name. */
   corsOrigins?: string[];
+  /** OAuth App client id for the dashboard's GitHub sign-in, forwarded to
+   * GitHub's device-flow endpoints. Defaults to the same public client id
+   * the CLI uses (`join.ts`) so a self-hosted coordinator works unconfigured;
+   * a device-flow client id is not a secret, and there is no client secret in
+   * this flow at all. `TWING_GITHUB_CLIENT_ID` overrides it for an operator
+   * who would rather approvals name their own OAuth App. */
+  githubClientId?: string;
   /** What `/v1/version` reports, and what the version-mismatch middleware
    * below compares an incoming `x-twing-hook-version` header against.
    * Defaults to this package's own `package.json` version -- injectable
@@ -253,6 +260,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const extractModel = options.extractModel ?? "google.gemma-4-31b";
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
   const noAuth = options.noAuth ?? false;
+  const githubClientId = options.githubClientId ?? process.env.TWING_GITHUB_CLIENT_ID ?? "Ov23liSaEt1UliMyahy6";
   const publicProjectIds = options.publicProjectIds;
   const version = options.version ?? getServerVersion();
 
@@ -308,6 +316,9 @@ export function createApp(options: CreateAppOptions = {}) {
     if (/^\/v1\/invites\/[^/]+\/redeem$/.test(c.req.path)) return next();
     if (/^\/v1\/projects\/[^/]+\/join-via-github$/.test(c.req.path)) return next();
     if (c.req.path === "/v1/version") return next();
+    // The dashboard's GitHub sign-in: by definition it runs before anyone
+    // has a credential, which is the thing it exists to obtain.
+    if (c.req.path.startsWith("/v1/auth/github/")) return next();
     if (noAuth) {
       // §17 Phase 4: no bearer token at all -- a self-declared developerId
       // is still required on every request (attribution for align/§17's
@@ -2359,10 +2370,16 @@ export function createApp(options: CreateAppOptions = {}) {
     const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
     const existing = bearer ? identities.resolveToken(bearer) : undefined;
 
-    const params = existing
-      ? { developerId: existing.developerId }
-      : body.tokenHash && body.label
-        ? { tokenHash: body.tokenHash, label: body.label }
+    // Who this token belongs to, verified here rather than taken on trust
+    // from the client. Undefined only when GitHub itself wouldn't say (a
+    // token scoped too narrowly, a hiccup) -- in which case this behaves
+    // exactly as it did before verified identity existed.
+    const github = await fetchGithubUser(body.githubToken);
+
+    const params: JoinParams | undefined = existing
+      ? { developerId: existing.developerId, github }
+      : body.tokenHash && (body.label || github)
+        ? { tokenHash: body.tokenHash, label: body.label ?? github!.login, github }
         : undefined;
     if (!params) {
       return c.json({ error: "expected { tokenHash, label } when not already authenticated" }, 400);
@@ -2385,6 +2402,78 @@ export function createApp(options: CreateAppOptions = {}) {
     if ("error" in result) return c.json(result, 400);
     console.log(`twing serve: ${result.developerId} joined project ${projectId.slice(0, 12)} via GitHub as ${role}`);
     return c.json({ ...result, role, founded: false });
+  });
+
+
+  // --- GitHub sign-in for twing-monitor -------------------------------------
+  //
+  // The dashboard used to require pasting a PAT, obtained by running `twing
+  // init` and then `twing servers --show-token` -- a CLI round trip for
+  // something that should just be signing in, and the reason a person's
+  // dashboard identity could differ from their CLI one.
+  //
+  // These three routes exist because **GitHub's device-flow endpoints send no
+  // `Access-Control-Allow-Origin`** (verified against both), so a browser
+  // cannot call them directly however much one would like it to. The
+  // coordinator forwards instead. It already talks to GitHub, and keeping the
+  // OAuth client id server-side is a small bonus.
+
+  app.post("/v1/auth/github/device", async (c) => {
+    try {
+      const res = await fetch("https://github.com/login/device/code", {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ client_id: githubClientId, scope: "repo" }),
+      });
+      return c.json((await res.json()) as Record<string, unknown>, res.ok ? 200 : 502);
+    } catch {
+      return c.json({ error: "couldn't reach GitHub to start sign-in" }, 502);
+    }
+  });
+
+  app.post("/v1/auth/github/poll", async (c) => {
+    const body = (await c.req.json().catch(() => undefined)) as { deviceCode?: string } | undefined;
+    if (!body?.deviceCode) return c.json({ error: "expected { deviceCode }" }, 400);
+    try {
+      const res = await fetch("https://github.com/login/oauth/access_token", {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({
+          client_id: githubClientId,
+          device_code: body.deviceCode,
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        }),
+      });
+      // GitHub answers 200 with {error:"authorization_pending"} while the
+      // human is still approving, so the status is not the signal here --
+      // pass the body through and let the caller poll on its contents.
+      return c.json((await res.json()) as Record<string, unknown>);
+    } catch {
+      return c.json({ error: "couldn't reach GitHub while waiting for approval" }, 502);
+    }
+  });
+
+  /**
+   * Exchanges an approved GitHub token for a twing PAT.
+   *
+   * **Only recognises accounts twing has already seen linked.** It does not
+   * create identities: this route is unauthenticated by necessity and carries
+   * no project context, so minting one here would let anybody with a GitHub
+   * account create an identity on someone else's coordinator. Linking happens
+   * on the CLI path instead, where real repo permission is checked first.
+   */
+  app.post("/v1/auth/github/session", async (c) => {
+    const body = (await c.req.json().catch(() => undefined)) as { githubToken?: string; tokenHash?: string; label?: string } | undefined;
+    if (!body?.githubToken || !body.tokenHash) {
+      return c.json({ error: "expected { githubToken, tokenHash }" }, 400);
+    }
+    const github = await fetchGithubUser(body.githubToken);
+    if (!github) return c.json({ error: "GitHub didn't recognise that token" }, 401);
+
+    const session = identities.startGithubSession(github, body.tokenHash, body.label);
+    if ("error" in session) return c.json(session, 403);
+    console.log(`twing serve: ${session.developerId} signed in via GitHub (@${github.login})`);
+    return c.json(session);
   });
 
   // §17.9: the ground-truth backstop. Checks one literal path against the

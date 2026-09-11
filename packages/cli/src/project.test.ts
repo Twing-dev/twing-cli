@@ -21,6 +21,7 @@ import {
   runProjectDisableEnforcement,
 } from "./project.js";
 import { tmpRepo, withHome, cacheToken, withMockFetch, captureConsole, jsonResponse, captureFetch } from "./test-support.js";
+import { isBootstrapHook } from "./enforce-hooks.js";
 
 const SERVER_URL = "http://localhost:9999";
 const PROJECT_ID = "proj-1";
@@ -144,8 +145,11 @@ test("runProjectEnableEnforcement: writes the bootstrap hook into the repo's .cl
   const settings = JSON.parse(fs.readFileSync(path.join(repo, ".claude", "settings.json"), "utf8")) as {
     hooks?: { PreToolUse?: { matcher?: string; hooks: { command: string }[] }[] };
   };
-  assert.ok(settings.hooks?.PreToolUse?.some((e) => e.matcher === "Edit|Write" && e.hooks.some((h) => h.command.includes("twing-install-enforcement-hook"))));
-  assert.ok(logs.some((l) => l.includes("wrote a bootstrap install-check")));
+  assert.ok(settings.hooks?.PreToolUse?.some((e) => e.matcher === "Edit|Write" && e.hooks.some((h) => isBootstrapHook(h))));
+  assert.ok(
+    logs.some((l) => l.includes(".twing/bootstrap-hook.sh") && l.includes(".claude/settings.json")),
+    "must name both committed files, not just the settings one",
+  );
 });
 
 test("runProjectEnableEnforcement: warns (but still writes) when the repo has no .twing/twing.yml yet", async () => {
@@ -170,7 +174,7 @@ test("runProjectDisableEnforcement: removes a previously-written hook", async ()
   const settings = JSON.parse(fs.readFileSync(path.join(repo, ".claude", "settings.json"), "utf8")) as {
     hooks?: { PreToolUse?: { matcher?: string; hooks: { command: string }[] }[] };
   };
-  assert.ok(!settings.hooks?.PreToolUse?.some((e) => e.hooks.some((h) => h.command.includes("twing-install-enforcement-hook"))));
+  assert.ok(!settings.hooks?.PreToolUse?.some((e) => e.hooks.some((h) => isBootstrapHook(h))));
 });
 
 test("runProjectDisableEnforcement: no-op when nothing is wired", async () => {

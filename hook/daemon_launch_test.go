@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -155,11 +156,17 @@ func TestSelfHealDaemon_DaemonDown_SpawnsMarkerCommand(t *testing.T) {
 	t.Setenv("TWING_SOCK", filepath.Join(t.TempDir(), "no-such.sock"))
 
 	sentinel := filepath.Join(home, "sentinel")
-	// /usr/bin/touch <sentinel> -- a real, trivial, fast command standing
-	// in for `node <daemon/main.js>`; proves selfHealDaemon actually
-	// invokes marker.Node/marker.Script, not the real daemon spawn path
-	// itself (that's spawn-daemon.ts's own territory, TS-side).
-	writeDaemonLaunchMarkerFile(t, home, daemonLaunchMarker{Node: "/usr/bin/touch", Script: sentinel})
+	// /bin/sh <script> -- a real interpreter running a real script file,
+	// mirroring production's `node <daemon/main.js>` shape (Script must be
+	// an existing file, which selfHealDaemon now verifies). Proves
+	// selfHealDaemon actually invokes marker.Node/marker.Script, not the
+	// real daemon spawn path itself (that's spawn-daemon.ts's own
+	// territory, TS-side).
+	script := filepath.Join(home, "fake-daemon.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+sentinel+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeDaemonLaunchMarkerFile(t, home, daemonLaunchMarker{Node: "/bin/sh", Script: script})
 
 	selfHealDaemon()
 
@@ -171,4 +178,31 @@ func TestSelfHealDaemon_DaemonDown_SpawnsMarkerCommand(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Error("selfHealDaemon() never spawned the marker's command within 2s")
+}
+
+func TestSelfHealDaemon_MarkerScriptMissing_DoesNotSpawnAndSaysWhy(t *testing.T) {
+	// A marker written from a transient location (an npm cache entry npm has
+	// since evicted) names a script that no longer exists. Spawning it would
+	// fail deep inside node with a "Cannot find module" that is easy to miss;
+	// the cause is named in the daemon log instead. See resolveDaemonScript
+	// in daemon-service.ts, which is what stops such markers being written.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TWING_SOCK", filepath.Join(t.TempDir(), "no-such.sock"))
+	if err := os.MkdirAll(filepath.Join(home, ".twing"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	gone := filepath.Join(home, "evicted-cache", "daemon", "main.js")
+	writeDaemonLaunchMarkerFile(t, home, daemonLaunchMarker{Node: "/bin/sh", Script: gone})
+
+	selfHealDaemon()
+
+	logBytes, err := os.ReadFile(filepath.Join(home, ".twing", "daemon.log"))
+	if err != nil {
+		t.Fatalf("expected a daemon log explaining the stale marker: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "missing script") {
+		t.Errorf("daemon.log = %q, want it to name the missing script", string(logBytes))
+	}
 }

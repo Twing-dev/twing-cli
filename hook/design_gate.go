@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -384,6 +385,84 @@ const (
 // several conflicts or rules.
 type denyDetail struct{ Label, Value string }
 
+// twingCLIPath returns how to invoke the twing CLI on this machine.
+//
+// Every "What now" command below is written as a bare `twing ...`, which
+// assumed the only way to install twing was `npm install -g` -- that puts
+// `twing` on PATH. The zero-touch bootstrap deliberately does not use -g
+// (it needs sudo on a system-Node box, and a hook has no TTY to answer a
+// password prompt), so on a bootstrap-onboarded machine the CLI exists at
+// ~/.twing/bin/twing but nothing on PATH points at it. Printing a bare
+// `twing ...` there names a command the reader cannot run: the gate blocks
+// correctly and then gives instructions that fail, which is worse than not
+// gating at all. Found live -- an agent looked for `twing`, found only
+// `twing-hook`, and correctly refused to guess.
+//
+// Prefers the bare name when it actually resolves (the common case, and
+// what a human expects to see); falls back to the absolute shim path,
+// which works without touching PATH or any shell rc -- neither of which
+// could help the already-running session anyway.
+func twingCLIPath() string {
+	if _, err := exec.LookPath("twing"); err == nil {
+		return "twing"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "twing"
+	}
+	shim := filepath.Join(home, ".twing", "bin", "twing")
+	if info, err := os.Stat(shim); err == nil && !info.IsDir() {
+		return shim
+	}
+	return "twing"
+}
+
+// twingSubcommands is every verb that makes `twing <verb>` an instruction
+// the reader is meant to run, as opposed to prose about twing itself.
+//
+// Matching on the verb, rather than on the bare word "twing", is what keeps
+// this from mangling sentences: the gate says "twing blocks rather than
+// risk...", "twing checked your edit...", "twing compared your plan...".
+// None of those verbs is a subcommand, and no subcommand reads as prose.
+// `serve` is deliberately absent -- "twing serve" names the coordination
+// server, never something to run on the developer's machine.
+var twingSubcommands = []string{
+	"init", "login", "join", "whoami", "keygen", "design",
+	"project", "admin", "align", "daemon", "constraints", "uninstall", "servers",
+}
+
+// withResolvedTwingCLI rewrites `twing <subcommand>` anywhere in a rendered
+// message to whatever actually runs on this machine.
+//
+// Applied to every field, not just command ones: several of the most
+// useful instructions live inside explanatory notes ("...link this into it
+// instead: twing design amend --id <id>"), which are not commands
+// structurally but are still commands the reader has to type.
+//
+// Applied per field *before* wrapping, never to the finished message: an
+// absolute path is far longer than the bare name it replaces, so rewriting
+// afterwards would leave lines wrapped at the wrong width -- and split a
+// command across a line break mid-token, which a test caught doing exactly
+// that to `twing design amend`.
+func withResolvedTwingCLI(message string) string {
+	// A message that tells the reader to `npm install -g` first describes a
+	// machine that will have a bare `twing` on PATH once they do. More than
+	// that: the version-mismatch deny exists precisely to get them off the
+	// stale copy this shim currently points at, so rewriting there would
+	// pin them to the build they are trying to replace.
+	if strings.Contains(message, "npm install -g") {
+		return message
+	}
+	cli := twingCLIPath()
+	if cli == "twing" {
+		return message
+	}
+	for _, sub := range twingSubcommands {
+		message = strings.ReplaceAll(message, "twing "+sub, cli+" "+sub)
+	}
+	return message
+}
+
 // denyAction is one entry under "What now": what it achieves, the command
 // that does it (optional -- some actions are advice, not a command), and an
 // optional caveat. The command lives on its own line rather than beside the
@@ -425,11 +504,11 @@ func writeWrapped(b *strings.Builder, text, indent string) {
 // through it, so the messages cannot drift apart into separate dialects.
 func denyMessage(headline, why string, details []denyDetail, actions []denyAction) string {
 	var b strings.Builder
-	b.WriteString(headline)
+	b.WriteString(withResolvedTwingCLI(headline))
 
 	if why != "" {
 		b.WriteString("\n")
-		writeWrapped(&b, why, denyIndent)
+		writeWrapped(&b, withResolvedTwingCLI(why), denyIndent)
 	}
 
 	if len(details) > 0 {
@@ -440,7 +519,7 @@ func denyMessage(headline, why string, details []denyDetail, actions []denyActio
 				continue
 			}
 			if d.Label == "" {
-				b.WriteString("\n" + denyIndent + strings.Repeat(" ", denyDetailLabelWidth) + d.Value)
+				b.WriteString("\n" + denyIndent + strings.Repeat(" ", denyDetailLabelWidth) + withResolvedTwingCLI(d.Value))
 				continue
 			}
 			fmt.Fprintf(&b, "\n%s%-*s%s", denyIndent, denyDetailLabelWidth, d.Label, d.Value)
@@ -452,10 +531,10 @@ func denyMessage(headline, why string, details []denyDetail, actions []denyActio
 		for _, a := range actions {
 			b.WriteString("\n" + denyActionIndent + a.Label)
 			if a.Command != "" {
-				b.WriteString("\n" + denyCommandIndent + a.Command)
+				b.WriteString("\n" + denyCommandIndent + withResolvedTwingCLI(a.Command))
 			}
 			if a.Note != "" {
-				writeWrapped(&b, a.Note, denyCommandIndent)
+				writeWrapped(&b, withResolvedTwingCLI(a.Note), denyCommandIndent)
 			}
 		}
 	}
@@ -490,16 +569,81 @@ var gateOffAction = denyAction{
 const failClosedWhy = "twing blocks rather than risk letting two people edit the same thing " +
 	"without either of them noticing."
 
+// ghAuthLoginAction is the only thing worth naming to a machine that was set
+// up by the committed bootstrap hook. On those machines attemptAuthRecovery
+// has already run `twing init --unattended` and failed, and it fails for one
+// reason: `gh` is absent or logged out, so there was no credential to sign in
+// with. Every twing command below would hit the same wall.
+//
+// It needs a human at a terminal, which is the point -- the agent's job here
+// is to report, not to go hunting for another way in.
+var ghAuthLoginAction = denyAction{
+	Label:   "Someone needs to give twing a GitHub credential",
+	Command: "gh auth login",
+	Note:    "twing signs itself in from this and already tried; it found none. Needs a human at a terminal -- report it rather than working around it.",
+}
+
+// authActions picks between the self-serve twing commands and the single
+// thing a bootstrapped machine can act on.
+//
+// Naming `twing login` / `twing init` / `twing join` to a machine where
+// nobody installed twing is the same mistake the version-mismatch deny made:
+// there is no `twing` on PATH there, so the instruction is unrunnable, and an
+// unrunnable instruction arriving as denied tool output is exactly what a
+// careful agent is right to refuse. On a machine where the developer did
+// install twing, those commands are real and stay.
+func authActions(selfInstalled ...denyAction) []denyAction {
+	if isManagedInstall() {
+		return []denyAction{ghAuthLoginAction, gateOffAction}
+	}
+	return append(selfInstalled, gateOffAction)
+}
+
+// A managed (bootstrap-hook-provisioned) machine gets a richer set of
+// options than authActions' shared ghAuthLoginAction+gateOffAction pair:
+// unlike authRejectedReason's two cases (an existing token that is merely
+// expired, or valid for the wrong project), "never signed in at all" has two
+// genuine self-serve fixes that don't need GitHub auth at all -- an invite
+// (first time) or a previously-saved PAT (this machine's local state was
+// reset, e.g. after `twing uninstall`). Both name the shim path rather than
+// bare `twing`, since there is nothing on PATH here (ensureCliShim() in
+// init.ts runs before identity resolution can fail, so the shim itself is
+// always present by the time this message can fire).
 func authRequiredReason(serverURL string) string {
+	if isManagedInstall() {
+		return denyMessage(
+			"twing can't check for conflicts -- this machine isn't signed in.",
+			"twing tried to sign in automatically using this machine's GitHub credential and found "+
+				"none. "+failClosedWhy,
+			[]denyDetail{{"Coordinator", serverURL}},
+			[]denyAction{
+				{
+					Label:   "Preferred: sign in with GitHub",
+					Command: "gh auth login",
+					Note:    "Then just retry your edit -- twing finishes signing in on its own, nothing else to run.",
+				},
+				{
+					Label:   "First time using twing here, no GitHub auth available",
+					Command: "twing init --invite <CODE-FROM-YOUR-ADMIN>",
+					Note:    "Mints your personal access token -- save it somewhere safe (a password manager); you'll need it again if this machine's twing state is ever reset.",
+				},
+				{
+					Label:   "Used twing before, just re-authenticating this machine",
+					Command: "twing login --token <YOUR-SAVED-PAT>",
+					Note:    "Lost that token and have no GitHub auth either? Ask an admin for a new invite.",
+				},
+				gateOffAction,
+			},
+		)
+	}
 	return denyMessage(
 		"twing can't check for conflicts -- this machine isn't signed in.",
 		failClosedWhy,
 		[]denyDetail{{"Coordinator", serverURL}},
-		[]denyAction{
-			{Label: "Sign in", Command: fmt.Sprintf("twing login --server %s", serverURL)},
-			{Label: "Or set this repo up from scratch", Command: "twing init"},
-			gateOffAction,
-		},
+		authActions(
+			denyAction{Label: "Sign in", Command: fmt.Sprintf("twing login --server %s", serverURL)},
+			denyAction{Label: "Or set this repo up from scratch", Command: "twing init"},
+		),
 	)
 }
 
@@ -517,15 +661,14 @@ func authRejectedReason(status int, serverURL string) string {
 			"Your sign-in worked, but this project didn't accept it. Usually that means "+
 				"you haven't been added to it yet. "+failClosedWhy,
 			[]denyDetail{{"Coordinator", serverURL}, {"Response", "403 access denied"}},
-			[]denyAction{
-				{
+			authActions(
+				denyAction{
 					Label:   "Join this project",
 					Command: "twing join --github",
 					Note:    "Run this from inside this repo. It uses your GitHub access to decide your role.",
 				},
-				{Label: "See what you currently have access to", Command: "twing whoami"},
-				gateOffAction,
-			},
+				denyAction{Label: "See what you currently have access to", Command: "twing whoami"},
+			),
 		)
 	}
 	return denyMessage(
@@ -533,10 +676,9 @@ func authRejectedReason(status int, serverURL string) string {
 		"The coordinator didn't recognise this machine's saved credentials. They may have "+
 			"expired or been revoked. "+failClosedWhy,
 		[]denyDetail{{"Coordinator", serverURL}, {"Response", "401 not recognised"}},
-		[]denyAction{
-			{Label: "Sign in again", Command: "twing join --github", Note: "Run this from inside this repo."},
-			gateOffAction,
-		},
+		authActions(
+			denyAction{Label: "Sign in again", Command: "twing join --github", Note: "Run this from inside this repo."},
+		),
 	)
 }
 
@@ -588,31 +730,74 @@ func hookVersionMismatchReasonFromResponse(res *http.Response) string {
 	if serverVersion == "" {
 		serverVersion = "unknown"
 	}
+
+	// Fix it rather than instruct someone to. On a machine set up by the
+	// committed bootstrap hook this is fully automatic: update, then replay
+	// this same event through the binary that replaced this one and answer
+	// with its verdict, so the edit proceeds and the developer never sees a
+	// deny at all. Scoped to PreToolUse because that is the only event where
+	// the deny blocks anything; a SessionEnd drain is not worth a
+	// minutes-long update. See version_recovery.go.
+	//
+	// os.Exit rather than a return value: this is one of four call sites
+	// funnelling into here, all of which return a deny *string*, and there
+	// is no answer in that vocabulary for "the verdict is already written."
+	// Exiting 0 with the new binary's output on stdout is exactly the
+	// contract main() would have satisfied anyway.
+	if currentHookEvent == "PreToolUse" {
+		if out, ok := recoverVersionAndRerun(serverVersion); ok {
+			_, _ = os.Stdout.Write(out)
+			os.Exit(0)
+		}
+	}
+
 	return hookVersionMismatchReason(version, serverVersion)
 }
 
-// hookVersionMismatchReason picks the direction-appropriate message: if
-// this machine is *behind*, the update command really does fix it -- all
-// three steps matter, not just npm install -g. Found live, 2026-08-27,
-// via a real sandboxed end-to-end test: `npm install -g @twing/cli@latest
-// && twing daemon restart` alone refreshes the npm-published CLI/daemon
-// code but never touches this machine's separately-fetched hook binary
-// (ensureHookInstalled() only runs as part of `twing init`) -- so a
-// Claude Code session that followed that exact two-step instruction still
-// failed the retry, since the hook is what actually sends the version
-// this gate checks. `twing init` is safe to re-run (idempotent, see
-// init.ts's own doc comment) and is what actually refreshes the hook.
-// If this machine is somehow *ahead* of the coordinator, that command can't help
-// -- "latest" on npm is what this machine already has; npm has no way to
-// move backwards to an older, coordinator-declared version, and shouldn't.
-// The operational invariant (documented in deploy/docker/README.md) is
-// that the coordinator is only ever updated to declare a version already
-// published to npm, so this branch should be unreachable in practice --
-// handled anyway, since "unreachable in practice" isn't "impossible."
-// Unparseable versions (compareVersions' ok=false -- "unknown", the
-// bootstrap-gap sentinel, or "dev", an unstamped local build) fall
-// through to the client-behind message, the safer default since it's
-// also the overwhelmingly more common real case.
+// hookVersionMismatchReason checks install type before direction, not the
+// other way around (reversed from the original shape -- found via a set of
+// hypothetical-but-real scenarios worked through with the operator,
+// 2026-09-10). Self-heal (version_recovery.go) is symmetric: it pins to
+// serverVersion and runs identically whether that means installing forward
+// or backward, so "a managed install's self-heal already tried and failed"
+// is exactly the same operational story regardless of which direction the
+// mismatch runs -- checking direction first used to route a managed+ahead
+// failure into the generic "please wait for the coordinator" text below,
+// which doesn't mention self-heal at all and is wrong for that case.
+//
+// Direction only matters once self-heal was never attempted in the first
+// place, which is the self-installed branch below. Both of its commands
+// pin to serverVersion exactly, not `latest`: an npm-published `latest` can
+// be ahead of what this specific coordinator is actually running (release
+// tags publish to npm immediately; redeploying any given coordinator is a
+// separate, later, manual step -- deploy/docker/README.md documents this
+// race for the reverse direction already). A self-installed "behind"
+// machine that copy-pasted a hardcoded `@latest` here would land ahead of
+// the coordinator instead of matching it -- found via the same review,
+// simply by asking what happens if npm's latest has moved past the
+// coordinator by the time this fires, which the "@latest" text couldn't
+// have accounted for either way.
+//
+// Found live, 2026-08-27, via a real sandboxed end-to-end test: `npm
+// install -g @twing/cli@<version> && twing daemon restart` alone refreshes
+// the npm-published CLI/daemon code but never touches this machine's
+// separately-fetched hook binary (ensureHookInstalled() only runs as part
+// of `twing init`) -- so a Claude Code session that followed that exact
+// two-step instruction still failed the retry, since the hook is what
+// actually sends the version this gate checks. `twing init` is safe to
+// re-run (idempotent, see init.ts's own doc comment) and is what actually
+// refreshes the hook. Both directions need all three steps for the same
+// reason.
+//
+// Pinning the self-installed commands to serverVersion introduced its own
+// unparseable-input case, immediately caught by code review: serverVersion
+// can be the literal string "unknown" (hookVersionMismatchReasonFromResponse's
+// sentinel for an empty/malformed 426 body), and `@unknown` 404s off npm --
+// worse than the `@latest` it replaced. installTarget (below) falls back to
+// `latest` only when versionParts can't parse serverVersion at all,
+// matching the same ok=false condition the ahead-vs-behind comparison
+// already treats as "not ahead" -- both branches agree on what counts as a
+// real version.
 //
 // Deliberately omits gateOffAction, unlike every other reason function in
 // this file (found live, 2026-08-27: a genuinely fresh Claude Code session
@@ -627,24 +812,91 @@ func hookVersionMismatchReasonFromResponse(res *http.Response) string {
 // always has one: update. Suppressing the whole gate instead of just
 // updating is strictly worse and never actually necessary here.
 func hookVersionMismatchReason(hookVersion, serverVersion string) string {
-	if cmp, ok := compareVersions(hookVersion, serverVersion); ok && cmp > 0 {
+	// A machine set up by the committed bootstrap hook gets here only after
+	// recoverVersionAndRerun has already tried to update it -- in *either*
+	// direction, since self-heal pins to serverVersion regardless of
+	// whether that means installing forward or backward -- and failed, so
+	// there is nothing left to ask of the reader -- and the commands below
+	// would be unrunnable there anyway (`npm install -g` needs sudo on a
+	// system-Node box; `twing` is not on PATH at all). Report it as the
+	// operational failure it is, the same shape the bootstrap hook's own
+	// failure message uses, and point at the log that has the real cause.
+	//
+	// The named causes below are the same family as bootstrap-hook.sh's own
+	// first-install failure (enforce-hooks.ts's denyJsonLine) -- this is that
+	// same install machinery, just re-run to catch up a version instead of
+	// starting from nothing -- plus two causes unique to a retry: the update
+	// has a hard 3-minute budget (versionRecoveryTimeout) that a slow link can
+	// exceed even though it would have succeeded given longer, and a repeat
+	// failure goes quiet for 30 minutes (recentlyAttemptedVersionRecovery)
+	// rather than retrying on every single edit -- naming that here is what
+	// stops a reader from assuming the next edit will simply try again right
+	// away.
+	if isManagedInstall() {
 		return denyMessage(
-			"twing can't check for conflicts -- the coordination server needs an update.",
-			"This machine is newer than what the coordinator currently declares. There's "+
-				"nothing to fix here -- an operator needs to redeploy the coordinator to catch up.",
+			"twing can't check for conflicts -- this machine's twing doesn't match the coordinator and couldn't fix itself.",
+			"A mismatched version might not understand the coordinator's current API, so twing "+
+				"blocks rather than risk enforcing conflict checks incorrectly. twing installs and "+
+				"updates itself on this machine, with nothing for you or anyone else to run -- so "+
+				"this is an operational failure, not a task for you to work around. Do not try to "+
+				"install or update it another way. Common causes: no network/DNS, the npm registry "+
+				"or github.com specifically blocked or unreachable (a corporate proxy can allow one "+
+				"and not the other), disk full, or the update simply ran out of its 3-minute budget on "+
+				"a slow link. Once failed, it stays quiet for 30 minutes before trying again on its "+
+				"own -- this will not necessarily clear on your very next edit.",
 			[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
 			[]denyAction{
-				{Label: "Please wait for the coordinator to update, then retry"},
+				{
+					Label: "Report this, with the real cause",
+					Note:  "~/.twing/design-coordinator.log records what the update actually did. Read it and report what it says rather than guessing from this message.",
+				},
 			},
 		)
 	}
+
+	// Self-installed: self-heal never touches this (managedInstall() is
+	// false), so it really is on the reader to run something -- and which
+	// direction determines what that something is. Both pin to
+	// serverVersion exactly, matching every other install path in this
+	// codebase (self-update.ts, version_recovery.go, fetchPrebuiltHook) --
+	// `latest` is deliberately never used here, since npm's latest can
+	// itself be ahead of what this specific coordinator is running.
+	//
+	// Except when serverVersion itself isn't a real version: an empty/
+	// malformed 426 body becomes the literal string "unknown"
+	// (hookVersionMismatchReasonFromResponse), and `@unknown` would 404 off
+	// npm -- worse than the `@latest` this replaced, since that at least
+	// always installed something. installTarget falls back to `latest` only
+	// in that narrow case; every real, parseable server version still pins
+	// exactly. (Found by code review, 2026-09-10 -- the ahead-branch
+	// comparison below already treats an unparseable serverVersion as
+	// "not ahead," so this fallback and that comparison agree on what
+	// counts as parseable.)
+	installTarget := serverVersion
+	if _, ok := versionParts(serverVersion); !ok {
+		installTarget = "latest"
+	}
+
+	if cmp, ok := compareVersions(hookVersion, serverVersion); ok && cmp > 0 {
+		return denyMessage(
+			"twing can't check for conflicts -- this machine's twing-cli is newer than the coordinator.",
+			"Nothing is wrong with the coordinator -- this machine most likely ran `npm install -g "+
+				"@twing/cli@latest` at a moment when npm's latest had already moved past what this "+
+				"coordinator is currently running. Downgrade this machine to match it.",
+			[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
+			[]denyAction{
+				{Label: "Downgrade to match, then retry", Command: fmt.Sprintf("npm install -g @twing/cli@%s && twing init && twing daemon restart", installTarget)},
+			},
+		)
+	}
+
 	return denyMessage(
 		"twing can't check for conflicts -- this machine's twing-cli is out of date.",
 		"A mismatched version might not understand the coordinator's current API, "+
 			"so twing blocks rather than risk enforcing conflict checks incorrectly.",
 		[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
 		[]denyAction{
-			{Label: "Update, then retry", Command: "npm install -g @twing/cli@latest && twing init && twing daemon restart"},
+			{Label: "Update, then retry", Command: fmt.Sprintf("npm install -g @twing/cli@%s && twing init && twing daemon restart", installTarget)},
 		},
 	)
 }
@@ -706,6 +958,15 @@ func handleExitPlanModeSingle(payload hookPayload, config twingConfig) {
 		return
 	}
 
+	if config.AuthToken == "" && !config.NoAuth {
+		// Try to fix it rather than instruct someone to. `init --unattended`
+		// resolves a GitHub token from `gh auth token` and joins this
+		// project non-interactively; if it works, re-resolve and carry on as
+		// though the credential had been there all along.
+		if attemptAuthRecovery(config.RepoRoot) {
+			config = resolveServerConfig(payload.Cwd)
+		}
+	}
 	if config.AuthToken == "" && !config.NoAuth {
 		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
 		return
@@ -808,6 +1069,11 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 		g := groups[key]
 		cfg := g.config
 
+		if cfg.AuthToken == "" && !cfg.NoAuth {
+			if attemptAuthRecovery(g.candidates[0].RepoRoot) {
+				cfg = resolveServerConfig(g.candidates[0].RepoRoot)
+			}
+		}
 		if cfg.AuthToken == "" && !cfg.NoAuth {
 			writeJSON(authRequiredOutput("PreToolUse", cfg.ServerURL))
 			return
@@ -1629,6 +1895,16 @@ func handleEditWriteGate(payload hookPayload) {
 		return
 	}
 
+	if config.AuthToken == "" && !config.NoAuth {
+		// Fix it rather than instruct someone to: `init --unattended`
+		// resolves a GitHub token from `gh auth token` and joins this
+		// project without a human. If it works, re-resolve and carry on as
+		// though the credential had been there all along -- the edit
+		// proceeds instead of costing the agent a denial and a chore.
+		if attemptAuthRecovery(config.RepoRoot) {
+			config = resolveServerConfigForFile(payload.Cwd, input.FilePath)
+		}
+	}
 	if config.AuthToken == "" && !config.NoAuth {
 		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
 		return

@@ -15,6 +15,14 @@ import * as path from "node:path";
 export interface HookCommand {
   type: "command";
   command: string;
+  /** Exec-form arguments, each passed as one argument with no shell
+   * quoting. Claude Code expands its path placeholders (`${CLAUDE_PROJECT_DIR}`
+   * and friends) here as well as in `command`, which is what lets
+   * `enforce-hooks.ts` point a repo's committed entries at a script file
+   * inside that repo rather than inlining the whole script as an escaped
+   * JSON string. Absent on the entries `wire-hooks.ts` writes, which name
+   * an already-resolved absolute binary path and take no arguments. */
+  args?: string[];
 }
 
 export interface HookMatcherEntry {

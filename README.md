@@ -39,16 +39,17 @@ own instead? See "Self-hosting your own coordinator" below.
    `.twing/twing.yml`, `--server`/`TWING_SERVER`, or an interactive prompt
    if neither exists yet (just press Enter to accept twing's own hosted
    coordinator, shown as the default).
-2. **Authenticates** -- verifies your GitHub permissions on this repo via
-   an OAuth device flow and mints a local PAT (only its hash reaches the
-   server). Admin/maintain access founds an untouched project and makes
+2. **Authenticates** -- verifies your GitHub permissions on this repo and
+   mints a local PAT (only its hash reaches the server). Uses the `gh`
+   CLI's token when one is available, falling back to a browser OAuth
+   device flow. Admin/maintain access founds an untouched project and makes
    you its admin; any other repo access just joins it. Non-GitHub repos
    use a separate auth path -- see "Self-hosting your own coordinator"
    below. If this makes you the project's admin -- founding it, or later
    re-running `init` as one -- it also commits a bootstrap hook into this
-   repo's own `.claude/settings.json` so every future teammate is required
-   to run `twing init` themselves before their first edit; see "Install
-   enforcement" below.
+   repo's own `.claude/settings.json`, so every future teammate gets twing
+   set up automatically on their first edit; see "Zero-touch onboarding"
+   below.
 3. **Sets up the local pieces** -- installs `twing-hook`, wires it into
    Claude Code's hooks (once per machine), and starts a background daemon.
    The daemon exists because each hook invocation is a fresh, stateless
@@ -188,76 +189,102 @@ them would retroactively delete work that went quiet under the old policy.
 Once a design does go dormant it stays resumable for a further week before
 expiring for good, independently of this setting.
 
-## Install enforcement
+## Zero-touch onboarding
 
-Separate from the design-conflict gate above, and a lot simpler: whoever
-founds a project (or already holds admin/maintain on it) has `init` also
-commit a small POSIX shell script into the repo's own `.claude/settings.json`
--- git-tracked, not machine-local. From then on, every clone of the repo
-refuses `Edit`/`Write` in Claude Code until that machine has actually run
-`twing init` -- closing the gap where hook wiring was otherwise entirely
-per-machine and per-developer opt-in, so a teammate who never ran `init`
-would have no hooks at all and nothing enforcing anything.
+Separate from the design-conflict gate above, and aimed at a different
+problem: getting twing *onto* a teammate's machine without them having to do
+anything.
 
-The script only checks two purely local things -- is `twing-hook` installed,
-and is it wired into `~/.claude/settings.json` -- no network call, so it
-costs nothing once you're set up. If either is missing, it denies with the
-fix:
+Whoever founds a project (or already holds admin/maintain on it) has `init`
+commit two git-tracked files: `.twing/bootstrap-hook.sh`, a small POSIX
+shell script, and the `.claude/settings.json` entries that point Claude Code
+at it. Every clone of the repo carries both, and the script runs on every
+hook event -- the same set the machine-global wiring covers, so a machine
+driven only by the committed files still gets the whole product rather than
+just the gate. On a machine that has never run twing, it **installs twing
+itself**:
 
 ```sh
-npm install -g @twing/cli && twing init
+npm install --prefix ~/.twing/lib @twing/cli@latest
+node ~/.twing/lib/node_modules/@twing/cli/dist/index.js init --unattended
 ```
 
-There's deliberately no escape hatch (no env var, no flag) -- unlike
-`TWING_DESIGN_GATE=off` for the conflict gate above, this one is meant to be
-mandatory, not developer-optional. The only way to lift it is for an admin
-to edit or remove the committed hook (reviewed like any other repo change),
-or run:
+Nothing to type, no sudo, no browser -- the prefix is under your own home
+directory, unlike `npm install -g`, and `--unattended` skips the one
+privileged step. Installing into twing's own directory (rather than running
+straight from `npx`) is deliberate: the daemon launch marker records that
+path, and npm may evict its own cache at any time, which would leave a
+marker that works today and silently stops working weeks later. Once the
+binary is in place the hook `exec`s it, so the real design gate decides the
+verdict as usual. Later runs are a `test -x` plus an `exec` -- no network,
+no subprocess, no measurable cost.
+
+**Why it installs rather than instructs.** Earlier versions denied the edit
+and told the agent to run `npm install -g @twing/cli && twing init`. That
+failed twice over. An install instruction arriving as *denied tool output*
+is indistinguishable from a prompt-injection attempt, so a well-behaved
+agent refuses it -- confirmed live, a real session refused even after its
+operator explicitly said to proceed, and was right to. And `npm install -g`
+needs a writable global prefix, so on a system-Node box it needs `sudo`,
+which a hook (no TTY) can never supply: even a fully cooperative agent would
+have failed. Enforcement is unchanged -- twing ends up active either way --
+but the friction is gone.
+
+**Authentication comes along for the ride.** An install with no credential
+would just fail at the gate instead of at the install, so when running
+unattended twing reuses the GitHub token from the `gh` CLI (`gh auth
+token`) rather than starting the browser device flow. Same repo-permission
+check, same server-derived role -- one less thing a human has to be present
+for. If `gh` isn't installed or isn't logged in, the bootstrap reports that
+plainly; `gh auth login` (or one interactive `twing init`) fixes it.
+
+**It keeps itself current, too.** If the coordinator moves ahead of a
+machine's twing, the gate updates that machine in place and replays the same
+edit through the new binary -- so the edit simply proceeds. Nothing is asked
+of anyone: on a machine where nobody installed twing, no twing command is
+ever named, because none of them would run there (`npm install -g` needs
+sudo on a system-Node box, and there is no `twing` on `PATH` at all). If the
+update genuinely can't happen, you get an operational report pointing at
+`~/.twing/design-coordinator.log`, not a command list.
+
+**Installing twing yourself keeps working.** `npm install -g @twing/cli`
+followed by `twing init` writes machine-global wiring, and the committed
+script stands down the moment it sees `~/.claude/settings.json` already
+referencing the binary -- Claude Code merges hooks from every settings scope
+and runs all of them, so without that guard both would fire on every tool
+call. Your copy is yours: twing won't replace a package you installed
+deliberately, and version-mismatch and sign-in messages keep naming the
+commands that genuinely work on your machine. Global wiring also covers the
+one case the committed files can't -- a session started in a directory
+*containing* twing repos rather than inside one, where there is no
+repo-local settings file to load.
+
+**Turning it on and off** -- both are plain local file edits, no server call
+and no auth, since the real authorization is your own branch protection / PR
+review on the committed file:
 
 ```sh
 twing project enable-enforcement    # writes it
 twing project disable-enforcement   # removes it
 ```
 
-Both are pure local file edits -- no server call, no auth -- since the real
-authorization here is GitHub's own branch protection/PR review on the
-committed file, not twing's role system. Remember to commit and push
-whatever `enable-enforcement`/`init` writes yourself; twing has no way to do
-that for you.
+Remember to commit and push both files that `enable-enforcement`/`init`
+writes (`.twing/bootstrap-hook.sh` and `.claude/settings.json`);
+twing has no way to do that for you. Non-GitHub-hosted projects,
+`--invite`/`--no-auth` onboarding, and repos founded before this existed
+don't get the hook written automatically -- run `twing project
+enable-enforcement` once you're that project's admin.
 
-Non-GitHub-hosted projects, `--invite`/`--no-auth` onboarding, and a repo
-founded before this feature existed don't get this hook written
-automatically -- run `twing project enable-enforcement` yourself once
-you're that project's admin.
+The script assumes a POSIX `sh` (macOS/Linux). Windows hook-execution
+behavior for this mechanism hasn't been verified -- a known gap, same as
+`init`'s OS-level service install.
 
-The script assumes a POSIX `sh` (as on macOS/Linux); Windows hook-execution
-behavior for this specific mechanism hasn't been verified yet -- treat it as
-a known gap on that platform for now, same as `init`'s own OS-level
-service install already does.
-
-**What the message actually says, and why.** A deny that opens with "twing
-is not installed on this machine yet" is this gate, not the design-conflict
-gate above -- it means this machine has never run `twing init` at all. Note
-for anyone reading this section expecting it to be advice reaching the
-agent that hits this: it is not -- that agent is almost never in *this*
-repo (`.claude/settings.json`'s hook script ships into whichever repo an
-admin runs `twing init` in, which is virtually always someone else's), so
-it has no access to this README, no git history explaining any of this, no
-context at all beyond the message text itself. Which is exactly why the
-message doesn't just say "run this command" -- an install instruction
-arriving as denied tool output is indistinguishable from a supply-chain
-prompt-injection attempt on its face, and a reasonably cautious agent
-should (and, tested live, will) refuse it even after being told to proceed,
-having no way to independently check whether `@twing/cli` is real. So the
-deny message instead gives concrete, externally-checkable evidence a fresh
-agent actually can verify on its own: the product site (`twing.dev`), the
-open-source repo it can go read before running anything
-(`github.com/Twing-dev/twing-cli`), and the correct way to check npm's real
-version history (`npm view @twing/cli time.created`/`versions` -- the
-default `npm view` output only shows the *latest* release's publish date,
-easy to misread as the whole package's age). It also notes that editing
-`.claude/settings.json` directly to strip the hook hits this same check --
-there's no self-service way around it that way either.
+**If the bootstrap fails** (no network, npm unreachable, no `gh`
+credential), the hook denies with an *operational* report -- what failed and
+who to tell -- explicitly not an instruction for the agent to install
+anything another way. Only the `PreToolUse` entries can carry a verdict at
+all; the rest stay silent rather than emit output for an event that has no
+meaning for it. That is a rare path, not the default one.
 
 ### Quick command reference
 
@@ -526,7 +553,8 @@ via TypeScript project references. `npm link` in `packages/cli` gives you a
 
 | Command                                                                                            | What it does                                                                                                                                                                                                                                                                                                                                                                                                           |
 | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github]`                          | One-time setup per machine: discovers/bootstraps the coordinator, authenticates (GitHub-verified join/found by default for a GitHub-hosted repo; `--invite` to redeem one instead; `--no-github` to skip straight to the old "no cached PAT" error; `--no-auth` to declare this coordinator has no identity verification at all), hook install, hook wiring (including the design gate), daemon start. Safe to re-run. |
+| `twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]`           | One-time setup per machine: discovers/bootstraps the coordinator, authenticates (GitHub-verified join/found by default for a GitHub-hosted repo; `--invite` to redeem one instead; `--no-github` to skip straight to the old "no cached PAT" error; `--no-auth` to declare this coordinator has no identity verification at all), hook install, hook wiring (including the design gate), daemon start. `--unattended` is what the committed bootstrap hook runs: never prompts, never opens a browser, and skips the OS-service install and global wiring -- see "Zero-touch onboarding". Safe to re-run. |
+| `twing uninstall [--dry-run]`                                                                      | Undoes what `init` set up on this machine: stops the daemon, removes any launchd/systemd definition left by an older init, unwires twing's hooks from `~/.claude/settings.json`, and deletes `~/.twing`. Run it *before* `npm uninstall -g @twing/cli` -- on its own, that leaves the daemon running and the hooks pointing at a deleted binary. Never touches a repo's committed `.claude/settings.json`; that's `twing project disable-enforcement`.                                     |
 | `twing login [--server <url>] [--token <pat>]`                                                     | Just cache an already-generated PAT for a server -- no hook install, no settings wiring, no daemon start. For a second machine, or a stale local config.                                                                                                                                                                                                                                                               |
 | `twing join --github [--server <url>]`                                                             | Just the GitHub-verified authentication step `init` does by default -- generates/reuses a PAT and (re-)checks your GitHub role on this repo, without the rest of `init`.                                                                                                                                                                                                                                               |
 | `twing keygen --invite <code> [--server <url>]`                                                    | Just the authentication part of redeeming an invite -- generates a PAT locally (or reuses an existing one for this server) without the rest of `init`.                                                                                                                                                                                                                                                                 |
@@ -534,9 +562,9 @@ via TypeScript project references. `npm link` in `packages/cli` gives you a
 | `twing admin bootstrap --token <bootstrap-token>`                                                  | Break-glass: claims the server's one-time bootstrap token, creating the first org and its admin.                                                                                                                                                                                                                                                                                                                       |
 | `twing admin invite` / `list-invites` / `revoke-invite` / `revoke-developer` / `list-developers`   | Org-scoped admin actions (§17.10).                                                                                                                                                                                                                                                                                                                                                                                     |
 | `twing project invite` / `list-invites` / `revoke-invite` / `remove-developer` / `list-developers` | Project-scoped admin actions -- a project's own admins, not just org admins, can run these.                                                                                                                                                                                                                                                                                                                            |
-| `twing project enable-enforcement` / `disable-enforcement`                                        | Writes/removes the install-enforcement bootstrap hook in this repo's `.claude/settings.json` -- see "Install enforcement" above. Local file edit only, no server call; commit and push it yourself.                                                                                                                                                                                                                   |
+| `twing project enable-enforcement` / `disable-enforcement`                                        | Writes/removes the zero-touch bootstrap hook in this repo's `.claude/settings.json` -- see "Zero-touch onboarding" above. Local file edit only, no server call; commit and push it yourself.                                                                                                                                                                                                                   |
 | `twing align`                                                                                      | Local constraint checks plus a server round-trip for cross-session divergence findings.                                                                                                                                                                                                                                                                                                                                |
-| `twing daemon`                                                                                     | Runs the daemon in the foreground (rarely needed manually -- `init` already starts it detached, or as a persistent OS-level service).                                                                                                                                                                                                                                                                                  |
+| `twing daemon`                                                                                     | Runs the daemon in the foreground (rarely needed manually -- `init` starts it detached, and the hook restarts it on demand; it exits on its own once idle).                                                                                                                                                                                                                                                            |
 | `twing design register/resolve/amend/resume/close/list/reviews`                                    | Design-conflict gate commands, see above.                                                                                                                                                                                                                                                                                                                                                                              |
 | `twing constraints list [--project <id>] [--server <url>]`                                         | Lists every constraint currently enforced for a project.                                                                                                                                                                                                                                                                                                                                                               |
 | `twing constraints remove --id <constraintId> [--server <url>]`                                    | Admin-gated, unilateral, immediate -- see below.                                                                                                                                                                                                                                                                                                                                                                       |

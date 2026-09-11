@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "e3d7dd71-2ced-4a25-9359-e03d31261457",
-  "prevId": "f0a26b57-851d-43cf-8cd8-8be8c012b064",
+  "id": "589d5841-5313-4804-9600-b264d34756bd",
+  "prevId": "bdf24565-b296-45fb-a58f-7b129d41ceee",
   "tables": {
     "activity_events": {
       "name": "activity_events",
@@ -600,6 +600,52 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "developer_tokens": {
+      "name": "developer_tokens",
+      "columns": {
+        "token_hash": {
+          "name": "token_hash",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "developer_id": {
+          "name": "developer_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "label": {
+          "name": "label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "developer_tokens_developer_idx": {
+          "name": "developer_tokens_developer_idx",
+          "columns": [
+            "developer_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "developers": {
       "name": "developers",
       "columns": {
@@ -623,6 +669,20 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "github_user_id": {
+          "name": "github_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "github_login": {
+          "name": "github_login",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {
@@ -630,6 +690,13 @@
           "name": "developers_token_hash_unique",
           "columns": [
             "token_hash"
+          ],
+          "isUnique": true
+        },
+        "developers_github_user_id_unique": {
+          "name": "developers_github_user_id_unique",
+          "columns": [
+            "github_user_id"
           ],
           "isUnique": true
         }

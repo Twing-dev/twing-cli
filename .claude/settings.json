@@ -1,0 +1,107 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
+              "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
+              "PreToolUse"
+            ]
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
+              "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
+              "PreToolUse"
+            ]
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
+              "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
+              "PostToolUse"
+            ]
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
+              "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
+              "SessionStart"
+            ]
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
+              "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
+              "UserPromptSubmit"
+            ]
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "-c",
+              "test -f \"$1\" || exit 0; exec sh \"$1\" \"$2\"",
+              "twing-bootstrap-hook",
+              "${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh",
+              "SessionEnd"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

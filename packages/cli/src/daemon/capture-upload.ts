@@ -89,6 +89,17 @@ export class CaptureUploader {
     this.timer = undefined;
   }
 
+  /** Shutdown counterpart to `start()`, mirroring `Syncer.stopAndFlush` --
+   * one last send on the way out so a session's final stretch isn't left
+   * sitting on disk until the *next* daemon happens to pick the file back
+   * up. `flush()` never throws (see its doc comment), so unlike the
+   * Syncer's version this needs no try/catch of its own; the await is
+   * what matters, so the process doesn't exit mid-request. */
+  async stopAndFlush(): Promise<void> {
+    this.stop();
+    await this.flush();
+  }
+
   /**
    * Sends whatever each registered session has gained since its last
    * successful send. Never throws: an upload failure is logged and the

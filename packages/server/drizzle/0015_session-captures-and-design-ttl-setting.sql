@@ -10,4 +10,5 @@ CREATE TABLE `captures` (
 	`updated_at` integer NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `captures_developer_session` ON `captures` (`developer_id`,`session_id`);
+CREATE UNIQUE INDEX `captures_developer_session` ON `captures` (`developer_id`,`session_id`);--> statement-breakpoint
+ALTER TABLE `project_records` ADD `design_active_ttl_ms` integer;

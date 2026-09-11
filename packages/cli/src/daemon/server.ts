@@ -15,7 +15,7 @@ import {
   type Claim,
   type CallEdge,
 } from "@twing/core";
-import { extractClaim } from "./claims.js";
+import { extractClaim, resolveProjectCoordinator } from "./claims.js";
 import { captureSession } from "./transcript.js";
 import { CaptureUploader } from "./capture-upload.js";
 import { Syncer, daemonVersion } from "./sync.js";
@@ -35,13 +35,32 @@ export interface DaemonHandle {
   close(): Promise<void>;
 }
 
-/** Set by the launchd plist / systemd unit, and by nothing else. Three
- * things can start a daemon on this machine (the service manager,
- * `spawn-daemon.ts`'s detached fallback, and the Go hook's self-heal); only
- * the supervised one is allowed to evict a squatter holding the socket. If
- * any of them could evict, they can evict each other in a loop -- and
- * launchd's `KeepAlive: true` would happily feed that loop. */
-const SUPERVISED_ENV = "TWING_DAEMON_SUPERVISED";
+/** Set by `twing daemon restart`, and by nothing else -- the marker for
+ * "a human explicitly asked for the running daemon to be replaced," which
+ * is the only situation where taking the socket from a live holder is the
+ * right move.
+ *
+ * Two other things start daemons on this machine (`spawn-daemon.ts`'s
+ * detached child and the Go hook's self-heal), and neither sets this: if
+ * more than one starter could evict, they can evict each other in a loop.
+ * Keeping the capability on the one explicitly-invoked path means there is
+ * never a second candidate to ping-pong against.
+ *
+ * This replaced `TWING_DAEMON_SUPERVISED`, which the launchd plist and
+ * systemd unit used to set. That gate disappeared with the OS-level
+ * service; the capability had to move somewhere that still exists, and an
+ * explicit restart is a better home for it than a service manager that
+ * never detected a wedged daemon in the first place (`Restart=on-failure`
+ * and `KeepAlive` fire on *exit*, and a wedged daemon has not exited). */
+const EVICTION_ENV = "TWING_DAEMON_EVICT";
+
+/** How long the daemon sits with no client connection before exiting --
+ * see `armIdleExit` in `startDaemon` for why it exits at all. Generous
+ * relative to a session's own rhythm (the hook connects on every
+ * UserPromptSubmit and every Edit/Write), so this only fires between
+ * sessions, never inside one. `TWING_DAEMON_IDLE_MS` overrides it, mainly
+ * so tests don't have to wait half an hour. */
+const IDLE_EXIT_MS = Number(process.env.TWING_DAEMON_IDLE_MS ?? 30 * 60 * 1000);
 
 /** Written beside the socket (so a `TWING_SOCK` override keeps its own
  * pidfile) at startup, removed on clean shutdown. Its job is to make a
@@ -126,23 +145,27 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** At most one eviction per process start. After that, failing is the
- * correct outcome: exit non-zero and let the service manager back off
- * rather than retry-looping against whatever keeps taking the socket.
- * launchd's ~10s throttle is a backstop, not a bound. */
+ * correct outcome: exit non-zero rather than retry-looping against whatever
+ * keeps taking the socket. */
 let evictionAttempted = false;
 
 /**
  * Removes a stale socket file left behind by a crashed daemon, without
  * clobbering a socket that's actually live (would break a running instance).
  *
- * When the socket *is* live and this process is the supervised instance,
- * evicts the holder instead of only reporting the conflict -- the stuck
- * state a service manager alone can never resolve, since `KeepAlive`
- * respawns a daemon that then loses the same race forever. Three
- * constraints keep the eviction from becoming a worse bug than the one it
- * fixes: only the supervised instance may evict (see `SUPERVISED_ENV`),
- * only once per start, and never against a process that can't be
- * identified.
+ * When the socket *is* live, evicting the holder is only appropriate for a
+ * daemon started by an explicit `twing daemon restart` -- the one case
+ * where a human has actually asked for the running instance to be replaced.
+ * That restriction is what stops two daemons evicting each other in a loop:
+ * the auto-start paths (`spawn-daemon.ts`'s detached child and the Go
+ * hook's self-heal) can *never* evict, so there is never more than one
+ * candidate evictor in play. It also matches what eviction is for -- a
+ * wedged daemon still answering the socket, which self-heal by definition
+ * cannot detect, since to it a wedged daemon looks alive.
+ *
+ * Two further constraints keep the eviction from becoming a worse bug than
+ * the one it fixes: only once per start, and never against a process that
+ * can't be identified.
  */
 async function clearStaleSocket(socketPath: string): Promise<void> {
   if (!fs.existsSync(socketPath)) return;
@@ -155,7 +178,7 @@ async function clearStaleSocket(socketPath: string): Promise<void> {
   const identity = await probeIdentity(socketPath);
   const describe = identity ? `pid ${identity.pid}, version ${identity.version}` : "an unidentified process";
 
-  if (process.env[SUPERVISED_ENV] !== "1" || evictionAttempted) {
+  if (process.env[EVICTION_ENV] !== "1" || evictionAttempted) {
     throw new Error(`twing daemon: ${socketPath} is already in use by a running daemon (${describe})`);
   }
   evictionAttempted = true;
@@ -210,8 +233,9 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
   // daemon to exit cleanly regardless of how it was started (foreground,
   // spawn-daemon.ts's detached child, or an installed OS service).
   const onShutdownRequested = async (): Promise<void> => {
-    syncer.stop();
-    captureUploader.stop();
+    clearTimeout(idleTimer);
+    await syncer.stopAndFlush();
+    await captureUploader.stopAndFlush();
     server.close(() => {
       removePidFile(socketPath);
       if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
@@ -219,7 +243,43 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
     });
   };
 
+  // Idle-exit. The daemon has no work between Claude Code sessions: claims
+  // only arrive from hooks, notices are only consumed at SessionStart/
+  // UserPromptSubmit, and session_end drains. So a daemon nobody has talked
+  // to in IDLE_EXIT_MS is pure liability -- it is the long-lived process
+  // that goes stale across a `twing-cli` upgrade and then squats the socket
+  // at the old version (GitHub issue #20's 8-day orphan). Bounding its
+  // lifetime makes that failure mode structurally impossible rather than
+  // something eviction has to clean up after.
+  //
+  // Nothing is lost by exiting: the Go hook's self-heal
+  // (hook/daemon_launch.go) starts a fresh daemon from the launch marker
+  // the moment one is needed again, and every piece of state that matters
+  // across a restart is already durable -- transcript watermarks are on
+  // disk, notice cursors re-fetch, claims are TTL'd, and the pending batch
+  // is flushed by `stopAndFlush` above.
+  let idleTimer: ReturnType<typeof setTimeout>;
+  const armIdleExit = (): void => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => void onShutdownRequested(), IDLE_EXIT_MS);
+    // Never hold the event loop open on the idle timer's own account: it
+    // exists to end the process, not to keep it alive.
+    idleTimer.unref?.();
+  };
+
+  // A completed self-update leaves this process running the code it just
+  // replaced. Cycling it is the point: the hook's self-heal starts a fresh
+  // daemon from the launch marker the update rewrote, so the new binary,
+  // CLI and daemon all match the coordinator.
+  syncer.onSelfUpdated = async () => {
+    console.log("twing daemon: self-updated; shutting down so a fresh daemon starts on the new code");
+    await onShutdownRequested();
+  };
+
   const server = net.createServer((conn) => {
+    // Any client at all counts as activity -- a connection is what a live
+    // session looks like from here, regardless of which message it carries.
+    armIdleExit();
     const decoder = new FrameDecoder();
 
     conn.on("data", (chunk) => {
@@ -256,20 +316,27 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
   // stale bookkeeping the identity work exists to stop trusting.
   writePidFile(socketPath);
 
+  // Start the clock now, not on the first connection: a daemon spawned by a
+  // session that then dies before ever connecting must still exit on its
+  // own rather than linger forever.
+  armIdleExit();
+
   return {
     socketPath,
     claims,
     callEdges,
-    close: () =>
-      new Promise<void>((resolve) => {
-        syncer.stop();
-    captureUploader.stop();
+    close: async () => {
+      clearTimeout(idleTimer);
+      await syncer.stopAndFlush();
+      await captureUploader.stopAndFlush();
+      await new Promise<void>((resolve) => {
         server.close(() => {
           removePidFile(socketPath);
           if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
           resolve();
         });
-      }),
+      });
+    },
   };
 }
 
@@ -361,6 +428,18 @@ function handleMessage(
     // with no prior claims (see its doc comment for the one remaining gap).
     const versionMismatch = syncer.versionMismatch() ?? undefined;
     conn.write(encodeFrame({ type: "notices", items, versionMismatch }));
+    // After the reply, never before it: this can shell out to git the first
+    // time it sees a repo, and the hook is waiting on the frame above.
+    // `enqueue` used to be the only thing that registered a coordinator, so
+    // a machine whose every edit was denied never registered one at all --
+    // see resolveProjectCoordinator's doc comment for the deadlock that
+    // created. This message fires on every SessionStart/UserPromptSubmit
+    // regardless of whether edits are landing, which is exactly what that
+    // needs.
+    setImmediate(() => {
+      const coordinator = req.cwd ? resolveProjectCoordinator(req.cwd) : null;
+      if (coordinator) syncer.registerProjectServer(coordinator.projectId, coordinator.serverUrl);
+    });
     return;
   }
 

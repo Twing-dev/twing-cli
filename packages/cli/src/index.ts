@@ -2,6 +2,8 @@
 import { startDaemon } from "./daemon/server.js";
 import { defaultSocketPath, authFetch, computeDeveloperId, readConfig } from "@twing/core";
 import { runInit } from "./init.js";
+import { installTwingHintResolution } from "./twing-command.js";
+import { runUninstall } from "./uninstall.js";
 import { getCliVersion } from "./version.js";
 import { runDaemonRestart } from "./daemon-restart.js";
 import { runLogin } from "./login.js";
@@ -74,7 +76,8 @@ function printUsage(): void {
     [
       "Usage:",
       "  twing --version | -v",
-      "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github]",
+      "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]",
+      "  twing uninstall [--dry-run]",
       "  twing login [--server <url>] [--token <pat>]",
       "  twing keygen --invite <code> [--server <url>] [--label <email>]",
       "  twing whoami [--server <url>] [--show-token]",
@@ -397,7 +400,17 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "init":
-      await runInit({ server: flags.server, invite: flags.invite, noAuth: flags["no-auth"] === "true", noGithub: flags["no-github"] === "true", cwd: process.cwd() });
+      await runInit({
+        server: flags.server,
+        invite: flags.invite,
+        noAuth: flags["no-auth"] === "true",
+        noGithub: flags["no-github"] === "true",
+        unattended: flags.unattended === "true",
+        cwd: process.cwd(),
+      });
+      return;
+    case "uninstall":
+      await runUninstall({ dryRun: flags["dry-run"] === "true" });
       return;
     case "login":
       await runLogin({ server: flags.server, token: flags.token, cwd: process.cwd() });
@@ -446,6 +459,13 @@ async function main(): Promise<void> {
       process.exit(1);
   }
 }
+
+// Before anything prints: hints like "run `twing login`" assume a `twing`
+// on PATH, which a bootstrap-onboarded machine does not have. Installed
+// here so both console output and the thrown-error handler below inherit
+// it -- see twing-command.ts for why it is a choke point and why only
+// backticked spans are touched.
+installTwingHintResolution();
 
 main().catch((err) => {
   console.error(err instanceof Error ? err.message : err);

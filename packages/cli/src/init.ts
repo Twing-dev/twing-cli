@@ -7,6 +7,9 @@
  * start the daemon. Safe to re-run.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   findRepoRoot,
   loadManifestFromFile,
@@ -25,14 +28,14 @@ import {
   designActiveTtlMs,
   type Manifest,
 } from "@twing/core";
-import { ensureHookInstalled } from "./install-hook.js";
+import { ensureHookInstalled, ensureCliShim } from "./install-hook.js";
 import { wireHooks, stripLegacyRepoLocalHooks } from "./wire-hooks.js";
 import { enableInstallEnforcement } from "./enforce-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
-import { installDaemonService, type ServiceInstallResult } from "./daemon-service.js";
+import { twingLibDir } from "./daemon-service.js";
 import { requireAuth, isReachableCoordinator } from "./auth.js";
 import { runKeygen } from "./keygen.js";
-import { runJoinGithub } from "./join.js";
+import { runJoinGithub, linkGithubIdentity } from "./join.js";
 import { promptLine } from "./prompt-line.js";
 
 /** twing's own hosted coordinator -- offered as the interactive prompt's
@@ -58,6 +61,23 @@ export interface InitOptions {
    * PAT" error instead. For a headless/CI run that can't complete a device
    * flow, or anyone who'd rather use `--invite` explicitly. */
   noGithub?: boolean;
+  /** Zero-touch onboarding: this run was triggered by the repo-committed
+   * bootstrap hook (`enforce-hooks.ts`), not by a human at a terminal.
+   * Nothing may prompt, nothing may wait on a browser, and nothing may ask
+   * for privileges:
+   *
+   *  - no interactive coordinator prompt (the repo's committed
+   *    `.twing/twing.yml` is the only acceptable source here -- the hook
+   *    only fires for repos that already have one)
+   *  - no GitHub device flow; auth resolves from `gh auth token` or fails
+   *    cleanly (`join.ts`)
+   *  - no global `~/.claude/settings.json` wiring: the committed hook is
+   *    already firing for this repo, and adding a global entry would make
+   *    both fire for every tool call (see `enforce-hooks.ts`'s guard)
+   *
+   * The daemon still starts -- it's unprivileged, and without it capture,
+   * symbol-conflict detection and notice delivery all silently no-op. */
+  unattended?: boolean;
   cwd: string;
 }
 
@@ -79,10 +99,9 @@ export interface InitDeps {
   stripLegacyRepoLocalHooks: (repoRoot: string, hookPath: string) => boolean;
   enableInstallEnforcement: (repoRoot: string) => boolean;
   ensureDaemonRunning: () => Promise<"already-running" | "started" | "failed">;
-  installDaemonService: () => Promise<ServiceInstallResult>;
 }
 
-const defaultInitDeps: InitDeps = { ensureHookInstalled, wireHooks, stripLegacyRepoLocalHooks, enableInstallEnforcement, ensureDaemonRunning, installDaemonService };
+const defaultInitDeps: InitDeps = { ensureHookInstalled, wireHooks, stripLegacyRepoLocalHooks, enableInstallEnforcement, ensureDaemonRunning };
 
 export async function runInit(options: InitOptions, deps: InitDeps = defaultInitDeps): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
@@ -99,6 +118,16 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   let rawServerUrl = explicitServer ?? manifest.coordinator.serverUrl;
   let promptedServer = false;
   if (!rawServerUrl) {
+    // Unattended runs have no one to ask. This should be unreachable in
+    // practice -- the bootstrap hook only fires for repos that already
+    // carry a committed .twing/twing.yml -- so treat it as a real error
+    // rather than silently defaulting a coordinator into someone's repo.
+    if (options.unattended) {
+      throw new Error(
+        "twing init --unattended: no coordinator configured for this repo. " +
+          "Expected a committed .twing/twing.yml, or an explicit --server/TWING_SERVER.",
+      );
+    }
     rawServerUrl = await promptLine(
       `twing init: no coordinator configured for this repo -- enter the twing server URL [${DEFAULT_COORDINATOR_URL}]: `,
       DEFAULT_COORDINATOR_URL,
@@ -148,6 +177,35 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     }
   }
 
+  // Before authenticating, deliberately: installing the binary needs no
+  // credentials, and doing it second meant an auth failure left the machine
+  // with no hook at all. For a bootstrap run that is the difference between
+  // two very different failures -- the committed hook falling back to its
+  // generic "could not install itself" deny, versus the Go gate's own
+  // precise, well-tested message naming exactly which of "no cached token",
+  // "token rejected" or "coordinator unreachable" it hit, with the command
+  // that fixes it. Auth can still fail below; this just makes it fail into
+  // the good message.
+  const hookPath = await deps.ensureHookInstalled();
+  console.log(`twing init: hook installed at ${hookPath}`);
+
+  // A runnable `twing` beside the hook binary. On a machine onboarded by
+  // the committed bootstrap hook there is otherwise no `twing` anywhere on
+  // PATH -- that path avoids `npm install -g` on purpose -- so the design
+  // gate would block with instructions naming a command that doesn't
+  // exist. No-op for a global install, which already has a real one.
+  ensureCliShim();
+
+  // Converge on one copy. The bootstrap installs the CLI into
+  // ~/.twing/lib when it can't find an existing `twing`; once a real
+  // install is driving `init`, that copy is redundant and would sit there
+  // diverging in version. Pruning it must happen BEFORE the daemon launch
+  // marker is rewritten below (ensureDaemonRunning), because the marker
+  // can point straight into this directory -- see resolveDaemonScript.
+  // Self-healing either way: if the global install is later removed, the
+  // next edit re-bootstraps a fresh copy.
+  pruneRedundantBootstrapCopy();
+
   const { token: authToken, adminRole } = await resolveAuthToken(repoRoot, serverUrl, options);
   // Self-declared, attribution-only (§17 Phase 4) -- only ever sent when
   // there's no real token, i.e. only reaches the wire on a no_auth server.
@@ -158,14 +216,21 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // `seedConstraints` even when this repo's manifest is empty.
   const noAuth = getServerAuth(readConfig(), serverUrl)?.noAuth === true;
 
-  const hookPath = await deps.ensureHookInstalled();
-  console.log(`twing init: hook installed at ${hookPath}`);
-
   // Hook wiring is machine-global now (§ install-once onboarding work) --
   // wired once into ~/.claude/settings.json, covers every repo on this
   // machine from here on, not just this one.
-  const wired = deps.wireHooks(hookPath);
-  console.log(wired ? "twing init: wired hooks into ~/.claude/settings.json (all repos on this machine)" : "twing init: hooks already wired in ~/.claude/settings.json");
+  //
+  // Deliberately skipped when unattended: the repo's committed bootstrap
+  // hook is what invoked this run and is already firing for this repo.
+  // Claude Code merges hooks across settings scopes and runs all of them,
+  // so adding a global entry here would make both fire for every tool call
+  // -- duplicate claims, two gate checks per Edit. The committed hook
+  // stands down on its own once global wiring exists (a deliberate `twing
+  // init` later), so exactly one source stays authoritative either way.
+  if (!options.unattended) {
+    const wired = deps.wireHooks(hookPath);
+    console.log(wired ? "twing init: wired hooks into ~/.claude/settings.json (all repos on this machine)" : "twing init: hooks already wired in ~/.claude/settings.json");
+  }
 
   // Upgrade migration: a repo `init`'d before wiring went global may still
   // have twing's own entries in its *local* .claude/settings.json --
@@ -184,47 +249,29 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // member-role caller. Writes (never commits/pushes) a repo-local,
   // git-tracked .claude/settings.json -- twing has no way to push a repo
   // file on the caller's behalf.
-  if (adminRole) {
+  // Never on an unattended run: this writes a git-tracked file, which is an
+  // admin's deliberate act, not something a teammate's first Edit should do
+  // to their working tree on their behalf.
+  if (adminRole && !options.unattended) {
     if (deps.enableInstallEnforcement(repoRoot)) {
       console.log(
-        "twing init: wrote a bootstrap install-check into .claude/settings.json (committed, repo-local) -- " +
-          "commit and push this file so the rest of the team inherits it: git add .claude/settings.json && " +
-          "git commit && git push (or open a PR). From then on, every clone of this repo will refuse Edit/Write " +
-          "until that teammate has run `twing init` themselves. There is no bypass flag for this -- only editing " +
-          "or removing the committed hook, or `twing project disable-enforcement`, lifts it.",
+        "twing init: wrote .twing/bootstrap-hook.sh and the hook entries in .claude/settings.json " +
+          "(committed, repo-local) -- commit and push BOTH so the rest of the team inherits them: " +
+          "git add .twing/bootstrap-hook.sh .claude/settings.json && git commit && git push (or open a PR). " +
+          "From then on every clone of this repo sets twing up on its own, with nothing for that teammate " +
+          "to install or run. There is no bypass flag -- only editing or removing the committed files, or " +
+          "`twing project disable-enforcement`, lifts it.",
       );
     } else {
       console.log("twing init: install-enforcement hook already present in .claude/settings.json");
     }
   }
 
-  // §5 restart-survival: best-effort OS-level service install (launchd on
-  // macOS, systemd --user on Linux) so the daemon comes back on its own
-  // after a reboot -- tried FIRST, before the plain spawn fallback below,
-  // so a supported platform's daemon is actually started/held by the
-  // service manager rather than by this process's own detached child.
-  // Found live, 2026-08-26: the reverse order (spawn fallback, then
-  // install-service) raced the two against the same socket -- the fallback
-  // always grabbed it first, so the systemd-managed instance crash-looped
-  // on every single init, permanently unable to hold the socket even
-  // though installDaemonService reported "installed". Never fails init
-  // over this, same philosophy as seedConstraints below. Windows has no
-  // clean privilege-free service equivalent (installDaemonService returns
-  // "unsupported" there); the Go hook's SessionStart self-heal
-  // (hook/daemon_launch.go) is that platform's restart-survival story
-  // instead, same as the spawn fallback below covers it meanwhile.
-  const serviceStatus = await deps.installDaemonService();
-  if (serviceStatus === "installed") {
-    console.log("twing init: daemon installed as a persistent OS-level service (survives reboot)");
-  } else if (serviceStatus === "failed") {
-    console.log("twing init: OS-level service install failed (non-fatal) -- falling back to a plain spawn, won't auto-restart after a reboot without a new twing init/session self-heal");
-  } else {
-    console.log("twing init: no persistent OS-level service on this platform -- restart-survival relies on the hook's SessionStart self-heal instead");
-  }
-
-  // Idempotent regardless of what happened above: a no-op if the service
-  // (or an earlier session) already has the daemon up, the actual startup
-  // path if not.
+  // Idempotent: a no-op if an earlier session already has the daemon up,
+  // the actual startup path if not. Also (re)writes the launch marker, which
+  // is what the Go hook's SessionStart self-heal reads to bring the daemon
+  // back after a reboot or an idle exit -- there is no OS-level service
+  // involved any more, see daemon-service.ts for why that was removed.
   const daemonStatus = await deps.ensureDaemonRunning();
   if (daemonStatus === "failed") {
     // Non-fatal, same as every other optional step here -- but said out
@@ -346,12 +393,19 @@ async function resolveAuthToken(repoRoot: string, serverUrl: string, options: In
       const membership = await resolveGithubMembership(serverUrl, computeProjectId(repoRoot), auth.authToken);
       if (!membership.member) {
         try {
-          const joined = await runJoinGithub({ cwd: repoRoot, server: serverUrl });
+          const joined = await runJoinGithub({ cwd: repoRoot, server: serverUrl, unattended: options.unattended });
           return { token: joined.token, adminRole: joined.role === "admin" };
         } catch (err) {
           console.log(`twing init: automatic GitHub-verified join didn't work (${err instanceof Error ? err.message : err}) -- falling back`);
         }
       }
+      // Already a member, so no join is needed -- but this is the one moment
+      // this machine can prove both "I am this twing identity" (the PAT it
+      // just used) and "I am this GitHub account" (a gh token) in a single
+      // call. Linking them here is what lets every *other* machine this
+      // person uses be recognised rather than refused. Silent and
+      // best-effort; see linkGithubIdentity.
+      await linkGithubIdentity({ cwd: repoRoot, server: serverUrl, authToken: auth.authToken });
       return { token: auth.authToken, adminRole: membership.role === "admin" };
     }
     return { token: auth.authToken, adminRole: false };
@@ -360,13 +414,34 @@ async function resolveAuthToken(repoRoot: string, serverUrl: string, options: In
   if (options.noGithub) return { token: await requireAuth(serverUrl, "twing init"), adminRole: false };
   if (githubBinding(repoRoot)) {
     try {
-      const joined = await runJoinGithub({ cwd: repoRoot, server: serverUrl });
+      const joined = await runJoinGithub({ cwd: repoRoot, server: serverUrl, unattended: options.unattended });
       return { token: joined.token, adminRole: joined.role === "admin" };
     } catch (err) {
       console.log(`twing init: automatic GitHub-verified join didn't work (${err instanceof Error ? err.message : err}) -- falling back`);
     }
   }
   return { token: await requireAuth(serverUrl, "twing init"), adminRole: false };
+}
+
+/** Removes the bootstrap's own `~/.twing/lib` copy of the CLI when this
+ * process is not itself running from it -- i.e. a global (or checkout)
+ * install is now in charge, so the second copy is dead weight that would
+ * only drift out of version. A no-op when this very process *is* the
+ * bootstrap copy (deleting the code you are executing is not clever), and
+ * best-effort throughout: failing to tidy up must never fail `init`. */
+function pruneRedundantBootstrapCopy(): void {
+  const lib = twingLibDir();
+  try {
+    if (!fs.existsSync(lib)) return;
+    // Resolve both sides: a symlinked/realpath-differing checkout must not
+    // fool this into deleting the tree it is running from.
+    const selfDir = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));
+    if (selfDir.startsWith(fs.realpathSync(lib))) return;
+    fs.rmSync(lib, { recursive: true, force: true });
+    console.log(`twing init: removed the redundant bootstrap copy at ${lib} (this install supersedes it)`);
+  } catch {
+    // Left behind at worst -- harmless, just duplicated.
+  }
 }
 
 /** §17.2's cold-start seed: forward this repo's local `.twing/twing.yml`

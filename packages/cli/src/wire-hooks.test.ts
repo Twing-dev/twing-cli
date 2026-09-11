@@ -18,8 +18,19 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { wireHooks, stripLegacyRepoLocalHooks } from "./wire-hooks.js";
-import { bootstrapHookScript } from "./enforce-hooks.js";
+import { wireHooks, stripLegacyRepoLocalHooks, unwireHooks } from "./wire-hooks.js";
+/** A v3-shaped committed entry: the whole script inlined as the `command`.
+ * v4 moved the script to a committed file and points at it through `args`,
+ * but repos hold committed copies of older shapes indefinitely -- and a
+ * bootstrap hook that reached the *global* file (found live, before the
+ * $HOME guard existed) is by definition one of those older ones, since the
+ * guard now refuses to write a new one there at all. So the legacy shape is
+ * the realistic fixture for this sweep; the v4 shape is covered separately
+ * below. */
+const LEGACY_INLINE_BOOTSTRAP_HOOK = "# twing-bootstrap-hook-v3\nrepo_root=$(git rev-parse --show-toplevel)\n...";
+
+/** The v4 shape, for the one case that still has to recognise it. */
+const BOOTSTRAP_HOOK_V4 = { type: "command" as const, command: "sh", args: ["${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh", "PreToolUse"] };
 
 interface HookCommand {
   type: "command";
@@ -120,7 +131,7 @@ test("stripLegacyRepoLocalHooks: never removes an install-enforcement hook entry
     JSON.stringify({
       hooks: {
         PostToolUse: [{ matcher: "Edit|Write|Read|Grep|Glob", hooks: [{ type: "command", command: HOOK_PATH }] }],
-        PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }],
+        PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: LEGACY_INLINE_BOOTSTRAP_HOOK }] }],
       },
     }),
   );
@@ -130,5 +141,130 @@ test("stripLegacyRepoLocalHooks: never removes an install-enforcement hook entry
 
   const settings: ClaudeSettings = JSON.parse(fs.readFileSync(repoSettingsPath, "utf8"));
   assert.deepEqual(settings.hooks?.PostToolUse, [], "the legacy entry's matcher block is now empty");
-  assert.deepEqual(settings.hooks?.PreToolUse, [{ matcher: "Edit|Write", hooks: [{ type: "command", command: bootstrapHookScript() }] }], "the enforcement hook must be untouched, byte-for-byte");
+  assert.deepEqual(settings.hooks?.PreToolUse, [{ matcher: "Edit|Write", hooks: [{ type: "command", command: LEGACY_INLINE_BOOTSTRAP_HOOK }] }], "the enforcement hook must be untouched, byte-for-byte");
+});
+
+// --- unwireHooks (twing uninstall) -------------------------------------------
+
+test("unwireHooks: removes every twing entry from ~/.claude/settings.json and returns true", () => {
+  withIsolatedHome(() => {
+    wireHooks(HOOK_PATH);
+    const changed = unwireHooks(HOOK_PATH);
+    assert.equal(changed, true);
+
+    const settings = readSettings();
+    const remaining = Object.values(settings.hooks ?? {}).flat();
+    assert.deepEqual(remaining, [], "leaving entries behind would point Claude Code at a deleted binary");
+  });
+});
+
+test("unwireHooks: leaves another tool's hooks and unrelated settings untouched", () => {
+  withIsolatedHome(() => {
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(
+      settingsPath(),
+      JSON.stringify({ someOtherTopLevelSetting: true, hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "some-other-tool" }] }] } }),
+    );
+    wireHooks(HOOK_PATH);
+    unwireHooks(HOOK_PATH);
+
+    const settings = readSettings();
+    assert.equal(settings.someOtherTopLevelSetting, true);
+    const remaining = Object.values(settings.hooks ?? {}).flat().flatMap((e) => e.hooks.map((h) => h.command));
+    assert.deepEqual(remaining, ["some-other-tool"]);
+  });
+});
+
+test("unwireHooks: no-op (returns false) when nothing is wired", () => {
+  withIsolatedHome(() => {
+    assert.equal(unwireHooks(HOOK_PATH), false);
+  });
+});
+
+// --- unwireHooks vs a bootstrap hook in the GLOBAL file (regression) ---------
+//
+// Found live: `twing uninstall` reported "no twing hook entries" while a
+// bootstrap hook sat in ~/.claude/settings.json. unwireHooks matched only
+// `command === hookPath` (the binary), so the script entry was invisible.
+// Not cosmetic -- a bootstrap hook in the *global* file fires for every repo
+// with a .twing/twing.yml, so the next edit anywhere silently reinstalled
+// twing while uninstall claimed success.
+
+test("unwireHooks: removes a bootstrap hook sitting in the global settings", () => {
+  withIsolatedHome(() => {
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(
+      settingsPath(),
+      JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: LEGACY_INLINE_BOOTSTRAP_HOOK }] }] } }),
+    );
+
+    assert.equal(unwireHooks(HOOK_PATH), true, "must report the removal, not 'nothing was there'");
+    const settings = readSettings();
+    assert.deepEqual(Object.values(settings.hooks ?? {}).flat(), [], "leaving it re-installs twing on the next edit in any repo");
+  });
+});
+
+test("unwireHooks: removes an older bootstrap version too", () => {
+  withIsolatedHome(() => {
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(
+      settingsPath(),
+      JSON.stringify({
+        hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: "# twing-install-enforcement-hook-v2\nold" }] }] },
+      }),
+    );
+    assert.equal(unwireHooks(HOOK_PATH), true);
+    assert.deepEqual(Object.values(readSettings().hooks ?? {}).flat(), []);
+  });
+});
+
+test("unwireHooks: removes a v4 bootstrap hook, which names its script through args", () => {
+  // v4 entries run `sh <script> <event>`, so the marker is in the committed
+  // file rather than the command string. Matching only on `command` would
+  // sweep every older shape and silently miss the current one.
+  withIsolatedHome(() => {
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(settingsPath(), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [BOOTSTRAP_HOOK_V4] }] } }));
+    assert.equal(unwireHooks(HOOK_PATH), true);
+    assert.deepEqual(Object.values(readSettings().hooks ?? {}).flat(), []);
+  });
+});
+
+test("unwireHooks: removes binary and bootstrap entries together, sparing other tools", () => {
+  withIsolatedHome(() => {
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(
+      settingsPath(),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [{ matcher: "Edit|Write", hooks: [
+            { type: "command", command: "some-other-tool" },
+            { type: "command", command: LEGACY_INLINE_BOOTSTRAP_HOOK },
+            { type: "command", command: HOOK_PATH },
+          ]}],
+        },
+      }),
+    );
+
+    assert.equal(unwireHooks(HOOK_PATH), true);
+    const survivors = Object.values(readSettings().hooks ?? {}).flat().flatMap((e) => e.hooks.map((h) => h.command));
+    assert.deepEqual(survivors, ["some-other-tool"]);
+  });
+});
+
+test("stripLegacyRepoLocalHooks: still spares a repo's committed bootstrap hook", () => {
+  // The opt-in is deliberate: this runs against a repo's own committed file
+  // during `init`, where removing the bootstrap hook would silently undo an
+  // admin's enforcement decision. Only uninstall's global sweep is widened.
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "twing-strip-scope-"));
+  const repoSettings = path.join(repoRoot, ".claude", "settings.json");
+  fs.mkdirSync(path.dirname(repoSettings), { recursive: true });
+  fs.writeFileSync(
+    repoSettings,
+    JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: LEGACY_INLINE_BOOTSTRAP_HOOK }] }] } }),
+  );
+
+  assert.equal(stripLegacyRepoLocalHooks(repoRoot, HOOK_PATH), false);
+  const settings: ClaudeSettings = JSON.parse(fs.readFileSync(repoSettings, "utf8"));
+  assert.equal(settings.hooks?.PreToolUse?.[0].hooks[0].command, LEGACY_INLINE_BOOTSTRAP_HOOK);
 });

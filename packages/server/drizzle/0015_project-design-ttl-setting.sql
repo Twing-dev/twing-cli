@@ -1,1 +1,0 @@
-ALTER TABLE `project_records` ADD `design_active_ttl_ms` integer;
