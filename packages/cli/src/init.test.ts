@@ -473,6 +473,44 @@ function writeManifest(repo: string, yaml: string): void {
   fs.writeFileSync(path.join(repo, ".twing", "twing.yml"), yaml);
 }
 
+// The capture-ON line is the one sentence someone reads while deciding to
+// let their conversation be recorded, so it has to describe where the
+// conversation actually goes. It said "on this machine, and nowhere else"
+// for a release after the daemon started uploading to the coordinator --
+// accurate for phase 1, wrong from the upload onward, and nothing failed
+// when it drifted. These two assertions are what makes the next such drift
+// fail loudly instead of silently understating the destination.
+test("runInit: the capture-ON line names the coordinator it uploads to, not just the local path", async () => {
+  const { fetch } = bodyCapturingFetch();
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo();
+    writeManifest(repo, `coordinator:\n  serverUrl: ${SERVER_URL}\ncapture:\n  enabled: true\n`);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, noAuth: true }, deps)));
+
+    const line = logs.find((l) => l.includes("session capture ON"));
+    assert.ok(line, `expected a capture-ON line, got: ${logs.join(" | ")}`);
+    assert.ok(line!.includes(SERVER_URL), `the destination must be named, not implied: ${line}`);
+    assert.ok(
+      !/nowhere else/i.test(line!),
+      `must not claim the conversation stays on this machine -- the daemon uploads it: ${line}`,
+    );
+  });
+});
+
+test("runInit: the capture-off line stays silent about any destination", async () => {
+  const { fetch } = bodyCapturingFetch();
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo(SERVER_URL); // no capture block at all -- opt-in, so off
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, noAuth: true }, deps)));
+
+    const line = logs.find((l) => l.includes("session capture"));
+    assert.ok(line?.includes("off"), `expected the off line, got: ${logs.join(" | ")}`);
+    assert.ok(!line!.includes(SERVER_URL), "nothing is uploaded when capture is off, so naming a destination would be misleading");
+  });
+});
+
 test("runInit: seeds the repo's settings.designDormantAfter to the coordinator as milliseconds", async () => {
   const { fetch, seedBodies } = bodyCapturingFetch();
   const { deps } = fakeDeps();
