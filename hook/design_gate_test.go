@@ -279,6 +279,14 @@ func TestHandleEditWriteGate_HookVersionMismatch_Denies(t *testing.T) {
 }
 
 func TestHandleEditWriteGate_HookAheadOfServer_DeniesWithWaitMessage(t *testing.T) {
+	// Managed: self-heal already tried this exact upgrade-or-downgrade and
+	// failed, so this stays direction-agnostic -- no runnable command
+	// either way, just the log. See
+	// TestHookVersionMismatchReason_ManagedAheadMatchesManagedBehind for the
+	// unit-level version of this same claim; a self-installed machine that
+	// is ahead gets a materially different (and runnable) message instead --
+	// see TestHandleEditWriteGate_SelfInstalledAheadOfServer_DeniesWithDowngradeCommand.
+	pinInstallKind(t, true)
 	original := version
 	version = "9.9.9"
 	t.Cleanup(func() { version = original })
@@ -298,11 +306,44 @@ func TestHandleEditWriteGate_HookAheadOfServer_DeniesWithWaitMessage(t *testing.
 	if decision != "deny" {
 		t.Fatalf("decision = %q, want deny", decision)
 	}
-	if !strings.Contains(reason, "coordination server needs an update") {
-		t.Errorf("reason = %q, want the server-behind message, not the client-behind one", reason)
+	if !strings.Contains(reason, "design-coordinator.log") {
+		t.Errorf("reason = %q, want the managed operational-failure message, pointing at the log", reason)
 	}
 	if strings.Contains(reason, "npm install") {
-		t.Errorf("reason = %q, should not suggest npm install -g when this machine is ahead, not behind", reason)
+		t.Errorf("reason = %q, should not suggest npm install -g on a managed install -- there is nothing on PATH to run it", reason)
+	}
+}
+
+// A self-installed machine that is ahead of the coordinator gets a real,
+// runnable fix -- downgrade to match -- unlike the managed case above,
+// since self-heal never touches a self-installed machine in either
+// direction.
+func TestHandleEditWriteGate_SelfInstalledAheadOfServer_DeniesWithDowngradeCommand(t *testing.T) {
+	pinInstallKind(t, false)
+	original := version
+	version = "9.9.9"
+	t.Cleanup(func() { version = original })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusUpgradeRequired)
+		_, _ = w.Write([]byte(`{"error":"hook_version_mismatch","hookVersion":"9.9.9","serverVersion":"0.2.5"}`))
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny", decision)
+	}
+	if !strings.Contains(reason, "npm install -g @twing/cli@0.2.5") {
+		t.Errorf("reason = %q, want a downgrade command pinned to the coordinator's exact version", reason)
+	}
+	if strings.Contains(reason, "an operator needs to redeploy the coordinator") {
+		t.Errorf("reason = %q, must not blame the coordinator for this machine's own over-install", reason)
 	}
 }
 
@@ -1449,8 +1490,8 @@ func TestHookVersionMismatchReason_ManagedInstallNamesNoCommand(t *testing.T) {
 			t.Errorf("managed install must not be told to run %q: %s", forbidden, msg)
 		}
 	}
-	if !strings.Contains(msg, "couldn't update itself") {
-		t.Errorf("should say the automatic update failed, got: %s", msg)
+	if !strings.Contains(msg, "couldn't fix itself") {
+		t.Errorf("should say the automatic fix failed, got: %s", msg)
 	}
 	if !strings.Contains(msg, "operational failure") {
 		t.Errorf("should frame this as operational, not as a task for the agent: %s", msg)
@@ -1473,10 +1514,72 @@ func TestHookVersionMismatchReason_SelfInstalledKeepsTheRunnableCommands(t *test
 	// update is fine and the commands genuinely work. `twing init` in
 	// particular must stay: neither npm install -g nor daemon restart
 	// refreshes the separately-fetched hook binary, which is what actually
-	// sends the version this gate checks (found live, 2026-08-27).
-	for _, want := range []string{"npm install -g @twing/cli@latest", "twing init", "twing daemon restart"} {
+	// sends the version this gate checks (found live, 2026-08-27). Pinned
+	// to the coordinator's exact version, not `latest` -- npm's latest can
+	// itself be ahead of what this coordinator is running, and a machine
+	// that copy-pasted `@latest` here would land ahead instead of matching
+	// (found 2026-09-10, working through the ahead/behind cases by hand).
+	for _, want := range []string{"npm install -g @twing/cli@0.2.20", "twing init", "twing daemon restart"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("self-installed machine should still be told to run %q: %s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "@latest") {
+		t.Error("must not suggest @latest -- it can be ahead of this specific coordinator")
+	}
+}
+
+// Pinning to serverVersion regressed on exactly the input
+// hookVersionMismatchReasonFromResponse can actually produce: "unknown", its
+// sentinel for an empty/malformed 426 body. `@unknown` would 404 off npm --
+// worse than the `@latest` this replaced, which always installed something.
+// Found by code review, 2026-09-10.
+func TestHookVersionMismatchReason_UnparseableServerVersionFallsBackToLatest(t *testing.T) {
+	pinInstallKind(t, false)
+	msg := flattenMessage(hookVersionMismatchReason("0.2.19", "unknown"))
+
+	if !strings.Contains(msg, "npm install -g @twing/cli@latest") {
+		t.Errorf("an unparseable server version must fall back to @latest, not name it literally: %s", msg)
+	}
+	if strings.Contains(msg, "@unknown") {
+		t.Errorf("must never produce an uninstallable @unknown command: %s", msg)
+	}
+}
+
+// The mirror image of the test above: a self-installed machine that is
+// *ahead* of the coordinator (most likely `npm install -g @twing/cli@latest`
+// running at a moment npm's latest had already passed this coordinator) has
+// exactly the same fix available as the behind case -- downgrade to match --
+// and self-heal never touches a self-installed machine either way, so
+// unlike the managed-ahead case this one really does need a runnable
+// command, not just a "wait" message.
+func TestHookVersionMismatchReason_SelfInstalledAheadIsToldToDowngrade(t *testing.T) {
+	pinInstallKind(t, false)
+	msg := flattenMessage(hookVersionMismatchReason("0.2.21", "0.2.20"))
+
+	if !strings.Contains(msg, "npm install -g @twing/cli@0.2.20") {
+		t.Errorf("should be told to downgrade to the coordinator's exact version: %s", msg)
+	}
+	if strings.Contains(msg, "an operator needs to redeploy the coordinator") {
+		t.Errorf("must not blame the coordinator -- this machine over-installed, not the server: %s", msg)
+	}
+}
+
+// The managed case stays direction-agnostic: self-heal (version_recovery.go)
+// already tried and failed regardless of which way the mismatch runs, so
+// "ahead" and "behind" are the same operational story and must produce the
+// same kind of message -- no runnable command, point at the log.
+func TestHookVersionMismatchReason_ManagedAheadMatchesManagedBehind(t *testing.T) {
+	pinInstallKind(t, true)
+	ahead := flattenMessage(hookVersionMismatchReason("0.2.21", "0.2.20"))
+	behind := flattenMessage(hookVersionMismatchReason("0.2.19", "0.2.20"))
+
+	for name, msg := range map[string]string{"ahead": ahead, "behind": behind} {
+		if !strings.Contains(msg, "design-coordinator.log") {
+			t.Errorf("%s: should point at the log, not a command: %s", name, msg)
+		}
+		if strings.Contains(msg, "npm install") {
+			t.Errorf("%s: must not name npm install -- self-heal already tried and there is nothing on PATH: %s", name, msg)
 		}
 	}
 }

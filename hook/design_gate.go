@@ -754,28 +754,50 @@ func hookVersionMismatchReasonFromResponse(res *http.Response) string {
 	return hookVersionMismatchReason(version, serverVersion)
 }
 
-// hookVersionMismatchReason picks the direction-appropriate message: if
-// this machine is *behind*, the update command really does fix it -- all
-// three steps matter, not just npm install -g. Found live, 2026-08-27,
-// via a real sandboxed end-to-end test: `npm install -g @twing/cli@latest
-// && twing daemon restart` alone refreshes the npm-published CLI/daemon
-// code but never touches this machine's separately-fetched hook binary
-// (ensureHookInstalled() only runs as part of `twing init`) -- so a
-// Claude Code session that followed that exact two-step instruction still
-// failed the retry, since the hook is what actually sends the version
-// this gate checks. `twing init` is safe to re-run (idempotent, see
-// init.ts's own doc comment) and is what actually refreshes the hook.
-// If this machine is somehow *ahead* of the coordinator, that command can't help
-// -- "latest" on npm is what this machine already has; npm has no way to
-// move backwards to an older, coordinator-declared version, and shouldn't.
-// The operational invariant (documented in deploy/docker/README.md) is
-// that the coordinator is only ever updated to declare a version already
-// published to npm, so this branch should be unreachable in practice --
-// handled anyway, since "unreachable in practice" isn't "impossible."
-// Unparseable versions (compareVersions' ok=false -- "unknown", the
-// bootstrap-gap sentinel, or "dev", an unstamped local build) fall
-// through to the client-behind message, the safer default since it's
-// also the overwhelmingly more common real case.
+// hookVersionMismatchReason checks install type before direction, not the
+// other way around (reversed from the original shape -- found via a set of
+// hypothetical-but-real scenarios worked through with the operator,
+// 2026-09-10). Self-heal (version_recovery.go) is symmetric: it pins to
+// serverVersion and runs identically whether that means installing forward
+// or backward, so "a managed install's self-heal already tried and failed"
+// is exactly the same operational story regardless of which direction the
+// mismatch runs -- checking direction first used to route a managed+ahead
+// failure into the generic "please wait for the coordinator" text below,
+// which doesn't mention self-heal at all and is wrong for that case.
+//
+// Direction only matters once self-heal was never attempted in the first
+// place, which is the self-installed branch below. Both of its commands
+// pin to serverVersion exactly, not `latest`: an npm-published `latest` can
+// be ahead of what this specific coordinator is actually running (release
+// tags publish to npm immediately; redeploying any given coordinator is a
+// separate, later, manual step -- deploy/docker/README.md documents this
+// race for the reverse direction already). A self-installed "behind"
+// machine that copy-pasted a hardcoded `@latest` here would land ahead of
+// the coordinator instead of matching it -- found via the same review,
+// simply by asking what happens if npm's latest has moved past the
+// coordinator by the time this fires, which the "@latest" text couldn't
+// have accounted for either way.
+//
+// Found live, 2026-08-27, via a real sandboxed end-to-end test: `npm
+// install -g @twing/cli@<version> && twing daemon restart` alone refreshes
+// the npm-published CLI/daemon code but never touches this machine's
+// separately-fetched hook binary (ensureHookInstalled() only runs as part
+// of `twing init`) -- so a Claude Code session that followed that exact
+// two-step instruction still failed the retry, since the hook is what
+// actually sends the version this gate checks. `twing init` is safe to
+// re-run (idempotent, see init.ts's own doc comment) and is what actually
+// refreshes the hook. Both directions need all three steps for the same
+// reason.
+//
+// Pinning the self-installed commands to serverVersion introduced its own
+// unparseable-input case, immediately caught by code review: serverVersion
+// can be the literal string "unknown" (hookVersionMismatchReasonFromResponse's
+// sentinel for an empty/malformed 426 body), and `@unknown` 404s off npm --
+// worse than the `@latest` it replaced. installTarget (below) falls back to
+// `latest` only when versionParts can't parse serverVersion at all,
+// matching the same ok=false condition the ahead-vs-behind comparison
+// already treats as "not ahead" -- both branches agree on what counts as a
+// real version.
 //
 // Deliberately omits gateOffAction, unlike every other reason function in
 // this file (found live, 2026-08-27: a genuinely fresh Claude Code session
@@ -790,22 +812,13 @@ func hookVersionMismatchReasonFromResponse(res *http.Response) string {
 // always has one: update. Suppressing the whole gate instead of just
 // updating is strictly worse and never actually necessary here.
 func hookVersionMismatchReason(hookVersion, serverVersion string) string {
-	if cmp, ok := compareVersions(hookVersion, serverVersion); ok && cmp > 0 {
-		return denyMessage(
-			"twing can't check for conflicts -- the coordination server needs an update.",
-			"This machine is newer than what the coordinator currently declares. There's "+
-				"nothing to fix here -- an operator needs to redeploy the coordinator to catch up.",
-			[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
-			[]denyAction{
-				{Label: "Please wait for the coordinator to update, then retry"},
-			},
-		)
-	}
 	// A machine set up by the committed bootstrap hook gets here only after
-	// recoverVersionAndRerun has already tried to update it and failed, so
-	// there is nothing left to ask of the reader -- and the three commands
-	// below would be unrunnable there anyway (`npm install -g` needs sudo on
-	// a system-Node box; `twing` is not on PATH at all). Report it as the
+	// recoverVersionAndRerun has already tried to update it -- in *either*
+	// direction, since self-heal pins to serverVersion regardless of
+	// whether that means installing forward or backward -- and failed, so
+	// there is nothing left to ask of the reader -- and the commands below
+	// would be unrunnable there anyway (`npm install -g` needs sudo on a
+	// system-Node box; `twing` is not on PATH at all). Report it as the
 	// operational failure it is, the same shape the bootstrap hook's own
 	// failure message uses, and point at the log that has the real cause.
 	//
@@ -821,7 +834,7 @@ func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 	// away.
 	if isManagedInstall() {
 		return denyMessage(
-			"twing can't check for conflicts -- this machine's twing is out of date and couldn't update itself.",
+			"twing can't check for conflicts -- this machine's twing doesn't match the coordinator and couldn't fix itself.",
 			"A mismatched version might not understand the coordinator's current API, so twing "+
 				"blocks rather than risk enforcing conflict checks incorrectly. twing installs and "+
 				"updates itself on this machine, with nothing for you or anyone else to run -- so "+
@@ -841,13 +854,49 @@ func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 		)
 	}
 
+	// Self-installed: self-heal never touches this (managedInstall() is
+	// false), so it really is on the reader to run something -- and which
+	// direction determines what that something is. Both pin to
+	// serverVersion exactly, matching every other install path in this
+	// codebase (self-update.ts, version_recovery.go, fetchPrebuiltHook) --
+	// `latest` is deliberately never used here, since npm's latest can
+	// itself be ahead of what this specific coordinator is running.
+	//
+	// Except when serverVersion itself isn't a real version: an empty/
+	// malformed 426 body becomes the literal string "unknown"
+	// (hookVersionMismatchReasonFromResponse), and `@unknown` would 404 off
+	// npm -- worse than the `@latest` this replaced, since that at least
+	// always installed something. installTarget falls back to `latest` only
+	// in that narrow case; every real, parseable server version still pins
+	// exactly. (Found by code review, 2026-09-10 -- the ahead-branch
+	// comparison below already treats an unparseable serverVersion as
+	// "not ahead," so this fallback and that comparison agree on what
+	// counts as parseable.)
+	installTarget := serverVersion
+	if _, ok := versionParts(serverVersion); !ok {
+		installTarget = "latest"
+	}
+
+	if cmp, ok := compareVersions(hookVersion, serverVersion); ok && cmp > 0 {
+		return denyMessage(
+			"twing can't check for conflicts -- this machine's twing-cli is newer than the coordinator.",
+			"Nothing is wrong with the coordinator -- this machine most likely ran `npm install -g "+
+				"@twing/cli@latest` at a moment when npm's latest had already moved past what this "+
+				"coordinator is currently running. Downgrade this machine to match it.",
+			[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
+			[]denyAction{
+				{Label: "Downgrade to match, then retry", Command: fmt.Sprintf("npm install -g @twing/cli@%s && twing init && twing daemon restart", installTarget)},
+			},
+		)
+	}
+
 	return denyMessage(
 		"twing can't check for conflicts -- this machine's twing-cli is out of date.",
 		"A mismatched version might not understand the coordinator's current API, "+
 			"so twing blocks rather than risk enforcing conflict checks incorrectly.",
 		[]denyDetail{{"This machine", hookVersion}, {"Server", serverVersion}},
 		[]denyAction{
-			{Label: "Update, then retry", Command: "npm install -g @twing/cli@latest && twing init && twing daemon restart"},
+			{Label: "Update, then retry", Command: fmt.Sprintf("npm install -g @twing/cli@%s && twing init && twing daemon restart", installTarget)},
 		},
 	)
 }

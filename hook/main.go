@@ -114,18 +114,17 @@ func handleCacheCheck(payload hookPayload) {
 		messages = append(messages, item.Message)
 	}
 	if vm := result.VersionMismatch; vm != nil {
-		// Same direction-awareness as design_gate.go's hookVersionMismatchReason
-		// -- npm install -g only ever helps when this machine is the one
-		// behind. cmp>0 (ahead of the coordinator) should be unreachable in
-		// practice per the coordinator's own publish-then-deploy discipline,
-		// but is still handled rather than left to print a nonsense
-		// instruction if it ever isn't.
-		if cmp, ok := compareVersions(vm.ClientVersion, vm.ServerVersion); ok && cmp > 0 {
-			messages = append(messages, fmt.Sprintf(
-				"twing: this machine's twing-cli (%s) is newer than the coordinator (%s). "+
-					"Coordination server needs an update. Please wait.",
-				vm.ClientVersion, vm.ServerVersion))
-		} else if isManagedInstall() {
+		// Install type before direction, matching design_gate.go's
+		// hookVersionMismatchReason (reversed from this function's own
+		// original shape, same code review that fixed that one, 2026-09-10 --
+		// this was a second, parallel copy of the same bugs, unfixed until
+		// now). Self-heal is symmetric: a managed install's self-heal already
+		// tried and failed regardless of which direction the mismatch runs,
+		// so checking direction first used to route a managed+ahead mismatch
+		// into the generic "please wait for the coordinator" text below,
+		// which is wrong for that case -- self-heal did try, and the
+		// coordinator isn't the thing that needs fixing.
+		if isManagedInstall() {
 			// twing installed itself on this machine, so it updates itself
 			// too -- the gate does it on the next Edit (version_recovery.go).
 			// Naming commands here would be worse than useless: `npm install
@@ -139,10 +138,35 @@ func handleCacheCheck(payload hookPayload) {
 					"~/.twing/design-coordinator.log has the reason; report it rather than installing twing another way.",
 				vm.ClientVersion, vm.ServerVersion))
 		} else {
-			messages = append(messages, fmt.Sprintf(
-				"twing: this machine's twing-cli (%s) does not match the coordinator's expected version (%s). "+
-					"Run `npm install -g @twing/cli@latest && twing init && twing daemon restart`.",
-				vm.ClientVersion, vm.ServerVersion))
+			// Self-installed: self-heal never touches this, so direction
+			// determines which command actually helps -- and both pin to the
+			// coordinator's exact version, not `latest` (npm's latest can
+			// itself be ahead of what this coordinator is running -- the
+			// same fix as design_gate.go's, same reasoning). installTarget
+			// falls back to `latest` if ServerVersion ever isn't a real,
+			// parseable version: sync.ts's versionMismatch() only stores one
+			// it successfully parsed from a real /v1/version response, so
+			// this isn't known to be reachable today, but `@<garbage>` would
+			// 404 off npm just the same as design_gate.go's "unknown"
+			// sentinel does, so the same guard is cheap insurance here too.
+			installTarget := vm.ServerVersion
+			if _, ok := versionParts(vm.ServerVersion); !ok {
+				installTarget = "latest"
+			}
+			if cmp, ok := compareVersions(vm.ClientVersion, vm.ServerVersion); ok && cmp > 0 {
+				messages = append(messages, fmt.Sprintf(
+					"twing: this machine's twing-cli (%s) is newer than the coordinator (%s). Nothing is "+
+						"wrong with the coordinator -- this machine most likely ran `npm install -g "+
+						"@twing/cli@latest` at a moment npm's latest had already moved past this "+
+						"coordinator. Run `npm install -g @twing/cli@%s && twing init && twing daemon "+
+						"restart` to downgrade and match it.",
+					vm.ClientVersion, vm.ServerVersion, installTarget))
+			} else {
+				messages = append(messages, fmt.Sprintf(
+					"twing: this machine's twing-cli (%s) does not match the coordinator's expected version "+
+						"(%s). Run `npm install -g @twing/cli@%s && twing init && twing daemon restart`.",
+					vm.ClientVersion, vm.ServerVersion, installTarget))
+			}
 		}
 	}
 	if len(messages) == 0 {
