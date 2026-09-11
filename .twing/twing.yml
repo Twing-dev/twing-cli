@@ -41,5 +41,16 @@ require_human_review:
 capture:
   enabled: true
 
+# Project knobs, seeded to the coordinator by `twing init` (admin-gated,
+# same as the constraints above) and enforced only there.
+settings:
+  # How long a design can sit with no activity before the coordinator
+  # demotes it to `dormant` -- excluded from conflict checks, still
+  # resumable with `twing design resume`, and terminally expired a further
+  # week after that. Stated explicitly even though it matches the built-in
+  # default: this is the repo the setting is dogfooded in, and a written
+  # number is what makes changing it a visible, reviewable edit.
+  designDormantAfter: 7d
+
 coordinator:
   serverUrl: https://coordination-server.twing.dev
