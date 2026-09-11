@@ -84,6 +84,18 @@ export function computeProjectId(repoRoot: string): string {
   return readOrCreatePersistedId(path.join(repoRoot, ".git", "twing-project-id"));
 }
 
+/** `projectId` for a GitHub repo identified by owner/repo alone, with no
+ * local checkout to read `origin` from -- the same hash `computeProjectId`
+ * produces from any canonical form of that repo's remote URL
+ * (`canonicalizeRemoteUrl` normalizes scheme/auth/`.git`/trailing-slash/case
+ * away, so this agrees with a real clone's `git remote get-url origin`
+ * regardless of which form that remote happens to be in). For callers with
+ * no working tree at all -- currently just the GitHub App Setup URL route,
+ * `packages/server`, which only ever sees `owner`/`repo`. */
+export function computeProjectIdForGithubRepo(owner: string, repo: string): string {
+  return crypto.createHash("sha256").update(canonicalizeRemoteUrl(`https://github.com/${owner}/${repo}`)).digest("hex");
+}
+
 /** Suggests a `developerId` from `git config user.email` -- used only as
  * the default label offered at `twing keygen`/`admin bootstrap` time, and
  * by `align.ts`'s no-server git-diff fallback path (which never talks to a

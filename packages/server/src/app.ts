@@ -11,8 +11,11 @@
 
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import type { Claim, CallEdge, DesignStatement, DesignConstraintType, Finding, PendingReview } from "@twing/core";
+import * as fs from "node:fs";
+import * as crypto from "node:crypto";
+import type { Claim, CallEdge, DesignStatement, DesignConstraintType, Finding, PendingReview, ClaudeSettings } from "@twing/core";
 import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS } from "@twing/core";
+import { computeProjectIdForGithubRepo, renderManifestWithCoordinator, bootstrapHookScript, mergeBootstrapHookEntries } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
 import { findClaimConflicts, type ClaimFindingMatch } from "./checks.js";
@@ -41,7 +44,17 @@ import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind, typ
 import { CaptureStore } from "./capture-store.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
-import { fetchRepoPermissions, fetchGithubUser } from "./github-client.js";
+import { fetchRepoPermissions, fetchGithubUser, type GithubUser } from "./github-client.js";
+import {
+  getInstallationToken,
+  listInstallationRepos,
+  getDefaultBranch,
+  commitFile,
+  readFile as readGithubFile,
+  exchangeUserCode,
+  type GithubAppCredentials,
+  type CommitFileResult,
+} from "./github-app-client.js";
 
 interface ClaimsRequestBody {
   projectId?: string;
@@ -215,6 +228,15 @@ export interface CreateAppOptions {
    * this flow at all. `TWING_GITHUB_CLIENT_ID` overrides it for an operator
    * who would rather approvals name their own OAuth App. */
   githubClientId?: string;
+  /** GitHub App credentials for zero-touch admin onboarding
+   * (`/v1/github-app/install`, `/v1/github-app/setup`) -- a *different*
+   * GitHub entity from `githubClientId`'s public device-flow OAuth App
+   * above. Undefined (the default; also what an incomplete
+   * `TWING_GITHUB_APP_*` env-var set resolves to) mounts neither route --
+   * self-hosted deployments that never register their own App see no
+   * behavior change at all. See `resolveGithubAppConfig`'s doc comment for
+   * the env vars this can come from instead. */
+  githubApp?: GithubAppConfig;
   /** What `/v1/version` reports, and what the version-mismatch middleware
    * below compares an incoming `x-twing-hook-version` header against.
    * Defaults to this package's own `package.json` version -- injectable
@@ -227,6 +249,208 @@ export interface CreateAppOptions {
    * today -- this repo doesn't expect any deployment but this one to ever
    * set it. See the auth middleware below for the actual mechanism. */
   publicProjectIds?: string[];
+}
+
+/** `GithubAppCredentials` plus the two fields specific to this server's
+ * onboarding routes: `appSlug` builds the public install URL
+ * (`github.com/apps/{slug}/installations/new`), `defaultServerUrl` is what
+ * `.twing/twing.yml` gets when an admin doesn't type a custom coordinator on
+ * `/v1/github-app/install` -- normally this server's own externally-reachable
+ * URL, since the Setup URL callback that does the founding/seeding below is
+ * *this* server. */
+export interface GithubAppConfig extends GithubAppCredentials {
+  appSlug: string;
+  defaultServerUrl: string;
+}
+
+/**
+ * Resolves GitHub App credentials from explicit options first, then
+ * `TWING_GITHUB_APP_ID` / `TWING_GITHUB_APP_PRIVATE_KEY` (or
+ * `TWING_GITHUB_APP_PRIVATE_KEY_PATH`, a file path -- a multi-line PEM is
+ * awkward to carry as a single env var value in some deployment tooling) /
+ * `TWING_GITHUB_APP_CLIENT_ID` / `TWING_GITHUB_APP_CLIENT_SECRET` /
+ * `TWING_GITHUB_APP_SLUG` / `TWING_GITHUB_APP_DEFAULT_SERVER_URL`.
+ * `undefined` unless every field resolves -- an operator who hasn't
+ * registered a GitHub App (the common case; this is opt-in) gets neither
+ * route mounted, not a route that 500s on every request.
+ */
+function resolveGithubAppConfig(explicit?: GithubAppConfig): GithubAppConfig | undefined {
+  if (explicit) return explicit;
+  const appId = process.env.TWING_GITHUB_APP_ID;
+  const privateKeyPem = readGithubAppPrivateKeyFromEnv();
+  const clientId = process.env.TWING_GITHUB_APP_CLIENT_ID;
+  const clientSecret = process.env.TWING_GITHUB_APP_CLIENT_SECRET;
+  const appSlug = process.env.TWING_GITHUB_APP_SLUG;
+  const defaultServerUrl = process.env.TWING_GITHUB_APP_DEFAULT_SERVER_URL;
+  if (!appId || !privateKeyPem || !clientId || !clientSecret || !appSlug || !defaultServerUrl) return undefined;
+  return { appId, privateKeyPem, clientId, clientSecret, appSlug, defaultServerUrl };
+}
+
+function readGithubAppPrivateKeyFromEnv(): string | undefined {
+  if (process.env.TWING_GITHUB_APP_PRIVATE_KEY) return process.env.TWING_GITHUB_APP_PRIVATE_KEY;
+  const keyPath = process.env.TWING_GITHUB_APP_PRIVATE_KEY_PATH;
+  if (!keyPath) return undefined;
+  try {
+    return fs.readFileSync(keyPath, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeUrlForCompare(url: string): string {
+  return url.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+/** Loose but real validation for a coordinator URL typed by hand into
+ * /v1/github-app/install's form: must actually parse as a URL, and must be
+ * `https:` -- every documented coordinator (hosted or self-hosted) in this
+ * codebase is https, and accepting `http:` here would be an easy way to
+ * commit a repo's `coordinator.serverUrl` to something that silently never
+ * gets a design-gate deny page over TLS. */
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+const HTML_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]!);
+}
+
+/** A placeholder credential for the identity this flow creates/attaches to
+ * -- `resolveJoiningDeveloper` requires *some* `tokenHash` when not already
+ * authenticated, but nothing here ever needs to present the matching raw
+ * token: the identity this call resolves is GitHub-linked by construction
+ * (see the flow's header comment above), so the admin can authenticate
+ * later via `twing join --github` or the dashboard's GitHub sign-in
+ * instead, exactly as if they'd run `join --github` themselves first. The
+ * raw bytes are discarded immediately -- only their hash is ever stored,
+ * and nothing that could reconstruct them is logged or returned. */
+function placeholderTokenHash(): string {
+  return crypto.createHash("sha256").update(crypto.randomBytes(32)).digest("hex");
+}
+
+function githubAppInstallPage(githubApp: GithubAppConfig, prefillServer: string): string {
+  const installUrl = `https://github.com/apps/${encodeURIComponent(githubApp.appSlug)}/installations/new`;
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Set up twing</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a}
+label{display:block;margin:1.25rem 0 0.25rem;font-weight:600}
+input{width:100%;padding:0.5rem;font-size:1rem;box-sizing:border-box;border:1px solid #ccc;border-radius:4px}
+button{margin-top:1.5rem;padding:0.6rem 1.2rem;font-size:1rem;cursor:pointer;border-radius:4px;border:1px solid #1a1a1a;background:#1a1a1a;color:#fff}
+p.hint{color:#666;font-size:0.9rem}
+code{background:#f2f2f2;padding:0.1rem 0.3rem;border-radius:3px}
+</style></head>
+<body>
+<h1>Set up twing</h1>
+<p>Installing the twing GitHub App onboards a repository automatically: it commits <code>.twing/twing.yml</code>, <code>.claude/settings.json</code>, and <code>.twing/bootstrap-hook.sh</code>, and registers the repo with a coordinator -- no local install needed.</p>
+<form method="GET" action="${installUrl}">
+<label for="server">Coordinator server URL (optional)</label>
+<input id="server" name="state" type="url" pattern="https://.+" placeholder="${escapeHtml(githubApp.defaultServerUrl)}" value="${escapeHtml(prefillServer)}">
+<p class="hint">Leave blank to use the default coordinator (<code>${escapeHtml(githubApp.defaultServerUrl)}</code>). Enter your own self-hosted <code>twing serve</code> URL instead if you run one -- the repo still gets configured either way, this just decides which coordinator it points at.</p>
+<button type="submit">Continue to GitHub</button>
+</form>
+</body></html>`;
+}
+
+function githubAppResultPage(title: string, message: string, results: { owner: string; repo: string; ok: boolean; detail: string }[]): string {
+  const items = results
+    .map((r) => `<li>${r.ok ? "&#9989;" : "&#10060;"} <strong>${escapeHtml(r.owner)}/${escapeHtml(r.repo)}</strong> -- ${escapeHtml(r.detail)}</li>`)
+    .join("\n");
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a}
+ul{padding-left:1.2rem}
+</style></head>
+<body>
+<h1>${escapeHtml(title)}</h1>
+<p>${escapeHtml(message)}</p>
+${items ? `<ul>${items}</ul>` : ""}
+</body></html>`;
+}
+
+/**
+ * Per-repo work for the Setup URL callback: generate + commit the three
+ * onboarding files (same generators `enforce-hooks.ts` uses locally, via
+ * `@twing/core`'s `repo-setup.ts`/`manifest.ts`), then -- only when the
+ * target coordinator is *this* server -- resolve the installer's role and
+ * found/join the project directly, exactly like `/v1/projects/:id/join-via-github`
+ * above does for a CLI caller. Never throws; every failure is folded into
+ * the returned `detail` string for the confirmation page.
+ */
+async function setUpOneRepoViaGithubApp(args: {
+  identities: IdentityStore;
+  installationToken: string;
+  userToken: string;
+  installer: GithubUser;
+  owner: string;
+  repo: string;
+  targetServerUrl: string;
+  isDefaultServer: boolean;
+}): Promise<{ ok: boolean; detail: string }> {
+  const { identities, installationToken, userToken, installer, owner, repo, targetServerUrl, isDefaultServer } = args;
+
+  const branch = await getDefaultBranch(installationToken, owner, repo);
+  if (!branch) return { ok: false, detail: "could not read the repo's default branch -- installation token may lack access" };
+
+  const existingManifest = await readGithubFile(installationToken, owner, repo, ".twing/twing.yml", branch);
+  const manifestResult = renderManifestWithCoordinator(existingManifest, targetServerUrl);
+  if (manifestResult.conflictingExisting) {
+    return { ok: false, detail: `.twing/twing.yml already points at a different coordinator (${manifestResult.conflictingExisting}) -- left untouched` };
+  }
+
+  const existingSettingsText = await readGithubFile(installationToken, owner, repo, ".claude/settings.json", branch);
+  let settings: ClaudeSettings = {};
+  if (existingSettingsText) {
+    try {
+      settings = JSON.parse(existingSettingsText) as ClaudeSettings;
+    } catch {
+      return { ok: false, detail: ".claude/settings.json exists but isn't valid JSON -- left untouched to avoid clobbering it" };
+    }
+  }
+  mergeBootstrapHookEntries(settings);
+  const settingsText = JSON.stringify(settings, null, 2) + "\n";
+
+  const commitResults = await Promise.all([
+    manifestResult.changed
+      ? commitFile(installationToken, owner, repo, ".twing/twing.yml", manifestResult.content, branch, "twing: configure coordinator (GitHub App setup)")
+      : Promise.resolve<CommitFileResult>({ ok: true }),
+    commitFile(installationToken, owner, repo, ".claude/settings.json", settingsText, branch, "twing: wire bootstrap hook (GitHub App setup)"),
+    commitFile(installationToken, owner, repo, ".twing/bootstrap-hook.sh", bootstrapHookScript(), branch, "twing: add bootstrap hook (GitHub App setup)"),
+  ]);
+  const failed = commitResults.find((r) => !r.ok);
+  if (failed) return { ok: false, detail: failed.error ?? "failed to commit one or more setup files" };
+
+  if (!isDefaultServer) {
+    return { ok: true, detail: `files committed to ${branch}; ${targetServerUrl} will found the project on its first real hook run` };
+  }
+
+  const permissions = await fetchRepoPermissions(userToken, owner, repo);
+  if (!permissions) {
+    return { ok: true, detail: `files committed to ${branch}, but couldn't verify your role -- sign in once via the CLI or dashboard to attach one` };
+  }
+  const role: Role = permissions.maintain || permissions.admin ? "admin" : "member";
+  const projectId = computeProjectIdForGithubRepo(owner, repo);
+  const project = identities.getProjectRecord(projectId);
+  const params: JoinParams = { tokenHash: placeholderTokenHash(), label: "github-app", github: { id: installer.id, login: installer.login } };
+
+  if (!project) {
+    if (role !== "admin") {
+      return { ok: true, detail: `files committed to ${branch}; not founded on ${targetServerUrl} yet -- your GitHub role there isn't admin/maintain` };
+    }
+    const founded = identities.foundProjectViaGithub(projectId, params, { owner, repo });
+    if ("error" in founded) return { ok: true, detail: `files committed to ${branch}, but founding failed: ${founded.error}` };
+    return { ok: true, detail: `files committed to ${branch}; project founded on ${targetServerUrl}, you're admin` };
+  }
+
+  const joined = identities.joinProject(projectId, role, params);
+  if ("error" in joined) return { ok: true, detail: `files committed to ${branch}, but joining failed: ${joined.error}` };
+  return { ok: true, detail: `files committed to ${branch}; you joined the existing project on ${targetServerUrl} as ${role}` };
 }
 
 type Variables = { identity: ResolvedIdentity };
@@ -261,6 +485,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
   const noAuth = options.noAuth ?? false;
   const githubClientId = options.githubClientId ?? process.env.TWING_GITHUB_CLIENT_ID ?? "Ov23liSaEt1UliMyahy6";
+  const githubApp = resolveGithubAppConfig(options.githubApp);
   const publicProjectIds = options.publicProjectIds;
   const version = options.version ?? getServerVersion();
 
@@ -319,6 +544,11 @@ export function createApp(options: CreateAppOptions = {}) {
     // The dashboard's GitHub sign-in: by definition it runs before anyone
     // has a credential, which is the thing it exists to obtain.
     if (c.req.path.startsWith("/v1/auth/github/")) return next();
+    // GitHub App install/setup: a plain browser GET (the pre-install
+    // landing page) and GitHub's own Setup URL redirect, neither of which
+    // can carry a twing bearer token -- same reasoning as the dashboard
+    // sign-in immediately above.
+    if (c.req.path.startsWith("/v1/github-app/")) return next();
     if (noAuth) {
       // §17 Phase 4: no bearer token at all -- a self-declared developerId
       // is still required on every request (attribution for align/§17's
@@ -2404,6 +2634,117 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ ...result, role, founded: false });
   });
 
+  // --- GitHub App zero-touch admin onboarding -------------------------------
+  //
+  // Lets an admin go from "nothing" to "repo fully onboarded" entirely from
+  // GitHub's own web UI (Settings -> Applications -> Install), the same way
+  // the dashboard's GitHub sign-in below removed the CLI requirement on the
+  // developer side. A GitHub App rather than growing the device-flow OAuth
+  // App above: its install flow *is* GitHub's own web UI (repo picker
+  // included), and installation tokens are scoped to just the granted
+  // repo(s) instead of the OAuth App's account-wide `repo` scope every
+  // device-flow sign-in requests.
+  //
+  // Bring-your-own-coordinator: a GitHub App has exactly one Setup URL, tied
+  // to one backend at registration time, so it can't dynamically proxy to an
+  // arbitrary self-hosted `twing serve`. `/v1/github-app/install`'s `state`
+  // carries whichever server the admin chose (defaulting to this server's
+  // own `githubApp.defaultServerUrl`) through to the Setup URL callback
+  // unchanged (GitHub's own install-flow behavior, not ours). When it's this
+  // server's own default, the callback founds the project + resolves a role
+  // directly below; for any other (self-hosted) server, it only commits the
+  // three files -- the existing zero-touch bootstrap path
+  // (`bootstrap-hook.sh`'s first real run) does the actual founding against
+  // that server later, exactly as it already does for any committed
+  // `twing.yml`, without this server needing a trusted call into someone
+  // else's coordinator.
+  //
+  // Known gap, documented rather than fixed here: this resolves identity via
+  // `developerByGithubUserId`, same as `join-via-github` above, so repeated
+  // App installs (or App + CLI `join --github`) by the same
+  // GitHub-authenticated person always resolve to the same identity -- but
+  // it inherits the same pre-existing fork risk `join --github` already has
+  // for someone who already holds a *different*, non-GitHub-linked twing
+  // identity (invite-based, `--no-auth`, the git-email fallback) and links
+  // GitHub for the first time here. See `identity-store.ts`'s
+  // `startGithubSession`/`linkGithubIdentity` doc comments for the full
+  // explanation -- a real fix (identity merge/reconciliation) is a separate,
+  // larger change, not part of this flow.
+  if (githubApp) {
+    app.get("/v1/github-app/install", (c) => {
+      const prefill = c.req.query("server") ?? "";
+      return c.html(githubAppInstallPage(githubApp, prefill));
+    });
+
+    app.get("/v1/github-app/setup", async (c) => {
+      const installationId = c.req.query("installation_id");
+      const setupAction = c.req.query("setup_action");
+      const code = c.req.query("code");
+      const state = (c.req.query("state") ?? "").trim();
+
+      if (setupAction !== "install" && setupAction !== "update") {
+        return c.html(githubAppResultPage("twing setup", "Nothing to do for this installation event.", []));
+      }
+      if (!installationId || !code) {
+        return c.html(
+          githubAppResultPage(
+            "twing setup failed",
+            'Missing installation_id or code -- make sure "Request user authorization (OAuth) during installation" is enabled on this GitHub App.',
+            [],
+          ),
+          400,
+        );
+      }
+
+      // `state` is whatever the admin typed into /v1/github-app/install's
+      // free-text "custom coordinator" field, round-tripped through GitHub
+      // unchanged -- validated here, not there, since a client-side check
+      // is only ever a hint. A malformed value is refused outright rather
+      // than silently falling back to the default coordinator: that fallback
+      // would quietly point a self-hoster's repo at *our* coordinator
+      // instead of the one they typed, which is a worse surprise than an
+      // explicit "fix your URL and try again."
+      if (state && !isHttpsUrl(state)) {
+        return c.html(
+          githubAppResultPage(
+            "twing setup failed",
+            `"${state}" doesn't look like a coordinator URL (expected https://...) -- go back and re-enter it, or leave the field blank to use the default.`,
+            [],
+          ),
+          400,
+        );
+      }
+      const targetServerUrl = state || githubApp.defaultServerUrl;
+      const isDefaultServer = normalizeUrlForCompare(targetServerUrl) === normalizeUrlForCompare(githubApp.defaultServerUrl);
+
+      const [userToken, installationToken] = await Promise.all([exchangeUserCode(githubApp, code), getInstallationToken(githubApp, installationId)]);
+      if (!userToken || !installationToken) {
+        return c.html(githubAppResultPage("twing setup failed", "Could not authenticate with GitHub -- try installing again.", []), 502);
+      }
+      const installer = await fetchGithubUser(userToken);
+      if (!installer) {
+        return c.html(githubAppResultPage("twing setup failed", "Could not verify who installed this -- try again.", []), 502);
+      }
+
+      const repos = await listInstallationRepos(installationToken);
+      const results: { owner: string; repo: string; ok: boolean; detail: string }[] = [];
+      for (const { owner, repo } of repos) {
+        const outcome = await setUpOneRepoViaGithubApp({
+          identities,
+          installationToken,
+          userToken,
+          installer,
+          owner,
+          repo,
+          targetServerUrl,
+          isDefaultServer,
+        });
+        results.push({ owner, repo, ...outcome });
+      }
+
+      return c.html(githubAppResultPage("twing setup complete", `Signed in as @${installer.login}.`, results));
+    });
+  }
 
   // --- GitHub sign-in for twing-monitor -------------------------------------
   //

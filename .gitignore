@@ -22,6 +22,17 @@ simulator/.workspaces/
 # deploy/docker's real secrets file -- deploy/docker/.env.example is the
 # committed template.
 /deploy/docker/.env
+# The GitHub App's downloaded private key. The *directory* stays committed
+# (deploy/docker/secrets/.gitkeep) so docker-compose.yml's bind mount always
+# has a real directory to mount even when no key has been placed there --
+# confirmed live: bind-mounting a *file* path that doesn't exist on the host
+# makes Docker silently create an empty, root-owned directory at that path
+# instead (on both sides of the mount), which a non-root self-hoster who
+# never configures the GitHub App then can't even remove without sudo.
+# Mounting an always-real directory sidesteps that -- a missing key inside
+# it is a clean, ordinary ENOENT the app already handles.
+/deploy/docker/secrets/*
+!/deploy/docker/secrets/.gitkeep
 # deploy/docker's runtime data (SQLite db, bootstrap token) -- created by
 # `mkdir -p data`, bind-mounted into the container, never committed.
 /deploy/docker/data/

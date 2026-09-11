@@ -165,30 +165,58 @@ export interface UpsertCoordinatorResult {
   conflictingExisting?: string;
 }
 
+export interface RenderManifestResult {
+  /** The document's text, whether or not anything changed -- always safe to
+   * write back verbatim. */
+  content: string;
+  changed: boolean;
+  /** Set when the document already declares a *different* serverUrl -- the
+   * render leaves it untouched rather than clobbering a team's shared
+   * value, mirroring `upsertCoordinatorServerUrl`'s own refusal. */
+  conflictingExisting?: string;
+}
+
 /**
- * Bootstraps or updates `coordinator.serverUrl` in `.twing/twing.yml`,
- * preserving every other section's content/comments/formatting exactly
- * (`yaml.parseDocument`, not parse+stringify, which would flatten
- * comments). Creates the file if it doesn't exist yet. Refuses to silently
+ * Pure counterpart to `upsertCoordinatorServerUrl`, below: given a manifest's
+ * current text (or `undefined` for "doesn't exist yet"), returns the text it
+ * should have with `coordinator.serverUrl` set -- no filesystem access, so a
+ * caller with no local checkout to read/write (the GitHub App Setup URL
+ * route, `packages/server`, writing through GitHub's Contents API instead)
+ * can use the exact same rendering `upsertCoordinatorServerUrl` uses for a
+ * disk write. Preserves every other section's content/comments/formatting
+ * exactly (`yaml.parseDocument`, not parse+stringify).
+ */
+export function renderManifestWithCoordinator(existingContent: string | undefined, serverUrl: string): RenderManifestResult {
+  const doc = existingContent !== undefined ? parseDocument(existingContent) : new Document({});
+
+  const existing = doc.getIn(["coordinator", "serverUrl"]);
+  if (typeof existing === "string" && existing !== serverUrl) {
+    return { content: existingContent ?? doc.toString(), changed: false, conflictingExisting: existing };
+  }
+  if (existing === serverUrl) {
+    return { content: existingContent!, changed: false }; // already correct -- nothing to do
+  }
+
+  doc.setIn(["coordinator", "serverUrl"], serverUrl);
+  return { content: doc.toString(), changed: true };
+}
+
+/**
+ * Bootstraps or updates `coordinator.serverUrl` in `.twing/twing.yml` on
+ * local disk. Creates the file if it doesn't exist yet. Refuses to silently
  * overwrite an already-committed *different* value -- callers (`init`) are
  * expected to warn and leave the file untouched on conflict rather than
  * repoint a whole team's coordinator without an explicit, deliberate edit.
  */
 export function upsertCoordinatorServerUrl(filePath: string, serverUrl: string): UpsertCoordinatorResult {
   const exists = fs.existsSync(filePath);
-  const doc = exists ? parseDocument(fs.readFileSync(filePath, "utf8")) : new Document({});
+  const existingContent = exists ? fs.readFileSync(filePath, "utf8") : undefined;
+  const result = renderManifestWithCoordinator(existingContent, serverUrl);
+  if (result.conflictingExisting !== undefined) return { written: false, conflictingExisting: result.conflictingExisting };
+  if (!result.changed) return { written: false };
 
-  const existing = doc.getIn(["coordinator", "serverUrl"]);
-  if (typeof existing === "string" && existing !== serverUrl) {
-    return { written: false, conflictingExisting: existing };
-  }
-  if (existing === serverUrl) {
-    return { written: false }; // already correct -- nothing to do
-  }
-
-  doc.setIn(["coordinator", "serverUrl"], serverUrl);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, doc.toString());
+  fs.writeFileSync(filePath, result.content);
   return { written: true };
 }
 

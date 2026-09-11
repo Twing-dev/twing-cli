@@ -13,3 +13,4 @@ export * from "./http.js";
 export * from "./call-graph.js";
 export * from "./gate-overrides.js";
 export * from "./claude-settings.js";
+export * from "./repo-setup.js";

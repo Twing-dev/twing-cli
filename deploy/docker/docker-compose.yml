@@ -25,6 +25,25 @@ services:
       # checkout itself (not /opt) so `docker compose up` never needs root
       # just to create its own data directory.
       - ./data:/data
+      # The GitHub App's private key (optional -- only needed when
+      # TWING_GITHUB_APP_* is configured in .env). `env_file` above injects
+      # .env's *variables* into the container, but a path one of those
+      # variables points at still has to be mounted separately -- the host
+      # file otherwise doesn't exist inside the container at all, and
+      # TWING_GITHUB_APP_PRIVATE_KEY_PATH resolves to nothing.
+      #
+      # Mounts the *directory*, not the key file directly -- confirmed live
+      # (`docker run -v host-file-that-does-not-exist:...`) that bind-mounting
+      # a single file whose host path doesn't exist makes Docker silently
+      # create an empty, root-owned directory there instead, on both sides of
+      # the mount. For every deployment that never configures the GitHub App
+      # (the common case -- this feature is opt-in), that would plant a
+      # phantom directory in the checkout that a non-root user can't even
+      # `rm` without sudo. `./secrets/` is always a real directory (its
+      # `.gitkeep` keeps it in every checkout), so the mount always succeeds;
+      # a key that was never placed inside it is then just an ordinary,
+      # already-handled ENOENT, not a filesystem-type mismatch.
+      - ./secrets:/run/secrets:ro
     # No `ports:` here deliberately -- this is never published to the host.
     # Only the caddy service below can reach it, container-to-container
     # over this compose project's own network (service-name DNS, hence

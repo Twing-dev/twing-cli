@@ -6,7 +6,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import type { Claim } from "@twing/core";
 import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS } from "@twing/core";
-import { createApp } from "./app.js";
+import { createApp, type GithubAppConfig } from "./app.js";
 import { createDb } from "./db/client.js";
 import { IdentityStore } from "./identity-store.js";
 import { Store } from "./store.js";
@@ -54,7 +54,7 @@ async function waitFor(predicate: () => Promise<boolean> | boolean, timeoutMs = 
   throw new Error(`waitFor: predicate never became true within ${timeoutMs}ms`);
 }
 
-function freshApp(options: { corsOrigins?: string[]; version?: string; publicProjectIds?: string[] } = {}) {
+function freshApp(options: { corsOrigins?: string[]; version?: string; publicProjectIds?: string[]; githubApp?: GithubAppConfig } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-app-test-"));
   // In-memory DB for speed -- these tests don't need cross-instance
   // persistence (that's design-store.test.ts/identity-store.test.ts's job).
@@ -82,6 +82,7 @@ function freshApp(options: { corsOrigins?: string[]; version?: string; publicPro
     corsOrigins: options.corsOrigins,
     version: options.version,
     publicProjectIds: options.publicProjectIds,
+    githubApp: options.githubApp,
   });
   return { app, dataDir, identities, store, designs, constraints, alignmentThreads, captures };
 }
@@ -5353,4 +5354,163 @@ test("the GitHub sign-in routes are reachable without a credential", async () =>
   const res = await withMockFetch(fetchSpy, async () => app.request("/v1/auth/github/device", { method: "POST" }));
   assert.notEqual(res.status, 401, "must not sit behind the bearer-token middleware");
   assert.equal(res.status, 200);
+});
+
+// --- GitHub App zero-touch admin onboarding ---------------------------------
+
+function testGithubAppConfig(overrides: Partial<GithubAppConfig> = {}): GithubAppConfig {
+  const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const privateKeyPem = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
+  return {
+    appId: "1",
+    privateKeyPem,
+    clientId: "app-client-id",
+    clientSecret: "app-client-secret",
+    appSlug: "twing-test-app",
+    defaultServerUrl: "https://coordinator.example",
+    ...overrides,
+  };
+}
+
+/** Routes every GitHub call the Setup URL handler makes for a single
+ * `acme/repo1` installation with nothing committed yet: user/installation
+ * token exchange, the installer's identity, the one granted repo, its
+ * default branch + permissions (same `/repos/{owner}/{repo}` endpoint both
+ * `getDefaultBranch` and `fetchRepoPermissions` hit), a 404 on every
+ * Contents API pre-read (first-time setup), and a 201 on every PUT. */
+function githubAppMockFetch(): typeof fetch {
+  return (async (url: string, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    if (url === "https://github.com/login/oauth/access_token") {
+      return new Response(JSON.stringify({ access_token: "user-token-abc" }), { status: 200 });
+    }
+    if (/\/app\/installations\/.+\/access_tokens$/.test(url) && method === "POST") {
+      return new Response(JSON.stringify({ token: "install-token-xyz" }), { status: 201 });
+    }
+    if (url === "https://api.github.com/user") {
+      return new Response(JSON.stringify({ id: 555, login: "octoadmin" }), { status: 200 });
+    }
+    if (url === "https://api.github.com/installation/repositories") {
+      return new Response(JSON.stringify({ repositories: [{ name: "repo1", owner: { login: "acme" } }] }), { status: 200 });
+    }
+    if (/\/repos\/acme\/repo1$/.test(url)) {
+      return new Response(
+        JSON.stringify({ default_branch: "main", permissions: { pull: true, triage: true, push: true, maintain: true, admin: true } }),
+        { status: 200 },
+      );
+    }
+    if (/\/repos\/acme\/repo1\/contents\//.test(url) && method === "PUT") {
+      return new Response(JSON.stringify({ content: {} }), { status: 201 });
+    }
+    if (/\/repos\/acme\/repo1\/contents\//.test(url)) {
+      return new Response("not found", { status: 404 }); // pre-read: nothing committed yet
+    }
+    throw new Error(`unexpected fetch in test: ${method} ${url}`);
+  }) as typeof fetch;
+}
+
+test("GET /v1/github-app/install and /v1/github-app/setup are not mounted when no GitHub App is configured", async () => {
+  const { app } = freshApp();
+  const install = await app.request("/v1/github-app/install");
+  assert.equal(install.status, 404);
+  const setup = await app.request("/v1/github-app/setup?installation_id=1&setup_action=install&code=c");
+  assert.equal(setup.status, 404);
+});
+
+test("GET /v1/github-app/install: reachable without a credential, links to the App's install URL with the app slug", async () => {
+  const githubApp = testGithubAppConfig();
+  const { app } = freshApp({ githubApp });
+  const res = await app.request("/v1/github-app/install");
+  assert.equal(res.status, 200);
+  const html = await res.text();
+  assert.ok(html.includes(`github.com/apps/${githubApp.appSlug}/installations/new`));
+});
+
+test("GET /v1/github-app/setup: 400 when installation_id or code is missing", async () => {
+  const { app } = freshApp({ githubApp: testGithubAppConfig() });
+  const res = await app.request("/v1/github-app/setup?setup_action=install");
+  assert.equal(res.status, 400);
+});
+
+test("GET /v1/github-app/setup: 400 on a malformed state param, refused rather than silently falling back to the default coordinator, no GitHub calls made", async () => {
+  const { app } = freshApp({ githubApp: testGithubAppConfig() });
+  const res = await withMockFetch(
+    (async () => {
+      throw new Error("should not call GitHub before validating state");
+    }) as typeof fetch,
+    async () => app.request("/v1/github-app/setup?installation_id=1&setup_action=install&code=c&state=not-a-url"),
+  );
+  assert.equal(res.status, 400);
+  const html = await res.text();
+  assert.ok(html.includes("not-a-url"));
+});
+
+test("GET /v1/github-app/setup: an http:// (non-https) state is also refused", async () => {
+  const { app } = freshApp({ githubApp: testGithubAppConfig() });
+  const res = await app.request("/v1/github-app/setup?installation_id=1&setup_action=install&code=c&state=" + encodeURIComponent("http://insecure.example"));
+  assert.equal(res.status, 400);
+});
+
+test("GET /v1/github-app/setup: a non-install/update setup_action is a no-op 200, no GitHub calls made", async () => {
+  const { app } = freshApp({ githubApp: testGithubAppConfig() });
+  const res = await withMockFetch(
+    (async () => {
+      throw new Error("should not call GitHub for a non-install setup_action");
+    }) as typeof fetch,
+    async () => app.request("/v1/github-app/setup?setup_action=delete"),
+  );
+  assert.equal(res.status, 200);
+});
+
+test("GET /v1/github-app/setup: happy path against the default coordinator founds the project and grants admin", async () => {
+  const githubApp = testGithubAppConfig();
+  const { app, identities } = freshApp({ githubApp });
+  const res = await withMockFetch(githubAppMockFetch(), async () =>
+    app.request("/v1/github-app/setup?installation_id=999&setup_action=install&code=the-code"),
+  );
+  assert.equal(res.status, 200);
+  const html = await res.text();
+  assert.ok(html.includes("acme/repo1"));
+  assert.ok(html.includes("founded"));
+
+  const { computeProjectIdForGithubRepo } = await import("@twing/core");
+  const projectId = computeProjectIdForGithubRepo("acme", "repo1");
+  const project = identities.getProjectRecord(projectId);
+  assert.ok(project, "project should be founded on this coordinator");
+  assert.equal(project!.githubOwner, "acme");
+  assert.equal(project!.githubRepo, "repo1");
+  const role = identities.getProjectRole(projectId, project!.foundedBy);
+  assert.equal(role, "admin");
+});
+
+test("GET /v1/github-app/setup: a non-default (self-hosted) coordinator commits files but does not found the project here", async () => {
+  const githubApp = testGithubAppConfig();
+  const { app, identities } = freshApp({ githubApp });
+  const customServer = "https://self-hosted.example";
+  const res = await withMockFetch(githubAppMockFetch(), async () =>
+    app.request(`/v1/github-app/setup?installation_id=999&setup_action=install&code=the-code&state=${encodeURIComponent(customServer)}`),
+  );
+  assert.equal(res.status, 200);
+  const html = await res.text();
+  assert.ok(html.includes(customServer));
+
+  const { computeProjectIdForGithubRepo } = await import("@twing/core");
+  const projectId = computeProjectIdForGithubRepo("acme", "repo1");
+  assert.equal(identities.getProjectRecord(projectId), undefined, "founding is deferred to the self-hosted coordinator's own bootstrap");
+});
+
+test("GET /v1/github-app/setup: same GitHub id installing twice founds once, then joins the existing project rather than re-founding", async () => {
+  const githubApp = testGithubAppConfig();
+  const { app, identities } = freshApp({ githubApp });
+  const first = await withMockFetch(githubAppMockFetch(), async () => app.request("/v1/github-app/setup?installation_id=999&setup_action=install&code=c1"));
+  assert.ok((await first.text()).includes("founded"));
+
+  const second = await withMockFetch(githubAppMockFetch(), async () => app.request("/v1/github-app/setup?installation_id=999&setup_action=update&code=c2"));
+  const secondHtml = await second.text();
+  assert.ok(secondHtml.includes("joined"), "second install should join the already-founded project, not found it again");
+
+  const { computeProjectIdForGithubRepo } = await import("@twing/core");
+  const projectId = computeProjectIdForGithubRepo("acme", "repo1");
+  const project = identities.getProjectRecord(projectId);
+  assert.equal(identities.getProjectRole(projectId, project!.foundedBy), "admin");
 });
