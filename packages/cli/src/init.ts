@@ -287,9 +287,20 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // off, so without this a typo'd key (`enable:`, `capture: true`) is
   // indistinguishable from a repo that simply hasn't opted in -- and `init`
   // is where someone who just edited the manifest would look.
+  //
+  // Names the coordinator explicitly (2026-09-11). This line used to end
+  // "on this machine, and nowhere else" -- written for phase 1, when
+  // capture genuinely stopped at the local file, and false from the moment
+  // the daemon's upload shipped. A stale string is bad anywhere; in the one
+  // sentence somebody reads while turning conversation capture *on* it is
+  // the worst kind, because it understates where their words go at exactly
+  // the moment they are deciding whether to let them go there. Consent was
+  // still a deliberate edit to a committed file, so nobody was captured
+  // without opting in -- but they opted in against a description that had
+  // stopped being accurate, which is not the same as having consented.
   console.log(
     captureEnabled(manifest)
-      ? "twing init: session capture ON for this repo -- filtered conversation is written to ~/.twing/sessions/ on this machine, and nowhere else"
+      ? `twing init: session capture ON for this repo -- filtered, redacted conversation is written to ~/.twing/sessions/ on this machine and uploaded to this repo's coordinator (${serverUrl}). Turn it off with \`capture: {enabled: false}\` in .twing/twing.yml.`
       : "twing init: session capture off (set `capture: {enabled: true}` in .twing/twing.yml to turn it on)",
   );
 
