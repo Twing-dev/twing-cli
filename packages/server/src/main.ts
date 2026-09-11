@@ -76,6 +76,12 @@ const publicProjectIds = process.env.TWING_PUBLIC_PROJECT_IDS?.split(",")
 
 const app = createApp({
   db,
+  // Forwarded so blob-backed state lands beside the database rather than in
+  // the home default: `CaptureStore` writes session captures to files under
+  // `<dataDir>/captures`, and without this a server configured with
+  // TWING_SERVE_DATA_DIR wrote its blobs somewhere else entirely (found
+  // live the first time a real `twing serve` took an upload).
+  ...dataDirOptions,
   extractModel,
   semanticCheckModel,
   constraints: new ConstraintStore(db),

@@ -12,6 +12,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Claim, CallEdge, DesignStatement, DesignConstraintType, Finding, PendingReview } from "@twing/core";
+import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
 import { findClaimConflicts, type ClaimFindingMatch } from "./checks.js";
@@ -37,6 +38,7 @@ import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
 import { enrichReviews } from "./review-enrich.js";
 import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind, type AlignmentThread } from "./alignment-store.js";
+import { CaptureStore } from "./capture-store.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
 import { fetchRepoPermissions, fetchGithubUser } from "./github-client.js";
@@ -121,6 +123,14 @@ interface SeedRequestBody {
    * never updated on a re-seed of an already-founded project. */
   githubOwner?: string;
   githubRepo?: string;
+  /** The repo's committed `settings:` block (2026-09-11), already parsed
+   * and range-checked client-side by `init.ts` (`designActiveTtlMs`,
+   * @twing/core's manifest.ts) -- re-checked here anyway, since a client
+   * is not a trust boundary. Distinguish absent from `{}`: an old CLI that
+   * doesn't know about settings omits the key entirely and must leave a
+   * project's stored setting alone, whereas a current CLI whose manifest
+   * has no `settings:` block sends `{}` and means "clear it." */
+  settings?: { designActiveTtlMs?: number };
 }
 
 interface JoinViaGithubRequestBody {
@@ -154,6 +164,9 @@ interface RedeemRequestBody {
   label?: string;
 }
 
+/** Per-request record cap for `/v1/captures` -- see the route's comment. */
+const MAX_CAPTURE_RECORDS_PER_REQUEST = 5000;
+
 export interface CreateAppOptions {
   /** Shared Drizzle handle every store below is built from -- pass one
    * explicitly to share a single database across a test; otherwise built
@@ -168,6 +181,9 @@ export interface CreateAppOptions {
   constraints?: ConstraintStore;
   identities?: IdentityStore;
   alignmentThreads?: AlignmentThreadStore;
+  /** Session capture sink. Injected in tests so the blob directory is a
+   * temp dir rather than the real `~/.twing/serve-data/captures`. */
+  captures?: CaptureStore;
   /** Bedrock model id for design-extract.ts's plan->fields extraction (see
    * llm-client.ts's header comment) -- defaults to the same model
    * semanticCheckModel does below, the one this repo's own eval validated
@@ -222,6 +238,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const constraintStore = options.constraints ?? new ConstraintStore(db);
   const identities = options.identities ?? new IdentityStore(db, { dataDir: options.dataDir });
   const alignmentThreads = options.alignmentThreads ?? new AlignmentThreadStore(db);
+  const captures = options.captures ?? new CaptureStore(db, options.dataDir ? { capturesDir: `${options.dataDir}/captures` } : {});
   const activityLog = new DrizzleActivityLog(db);
   // Tightening alignment threads item 4 (2026-08-27): wired here, after
   // both `designs` and `alignmentThreads` locals exist, rather than only
@@ -1039,6 +1056,52 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ items });
   });
 
+  /**
+   * Session capture ingest. Write-only by design: there is no GET, no
+   * DELETE and no sweep anywhere in this package, because distillation --
+   * the reason capture exists -- is not designed yet. This is the sink that
+   * lets data accumulate until it is, and nothing reads what it writes.
+   *
+   * Appends to the session's blob rather than replacing it: a session here
+   * can run for days, and the daemon uploads on its ordinary sync debounce
+   * rather than waiting for an end that may never come.
+   *
+   * `developerId` is the identity resolved from the bearer token, never a
+   * client field -- the ordinary rule for every write in this package
+   * (§17.10). `projectIds` are different in kind and deliberately *not*
+   * verified against membership: they are inert labels today, only the
+   * capturing machine can compute one (a projectId comes from a git remote
+   * on its filesystem), and a legitimate one may name a repo this
+   * coordinator has never heard of. Dropping those to enforce a membership
+   * check would discard exactly the attribution data this records for
+   * later. Whoever builds attribution has to treat them as claims, not
+   * facts -- which is why they are stored as the client's set rather than
+   * resolved into a single owning project here.
+   */
+  app.post("/v1/captures", async (c) => {
+    const identity = c.get("identity");
+    const body = await c.req.json<{ sessionId?: unknown; records?: unknown; projectIds?: unknown }>().catch(() => null);
+    if (!body || typeof body.sessionId !== "string" || body.sessionId.length === 0 || !Array.isArray(body.records)) {
+      return c.json({ error: "expected { sessionId: string, records: object[], projectIds?: string[] }" }, 400);
+    }
+    // Bounded per request so one upload can't pin the event loop or the
+    // disk; the daemon chunks anything larger. Generous enough that a
+    // normal session's whole backlog arrives in a handful of requests.
+    if (body.records.length > MAX_CAPTURE_RECORDS_PER_REQUEST) {
+      return c.json({ error: `too many records in one request (max ${MAX_CAPTURE_RECORDS_PER_REQUEST})` }, 413);
+    }
+    const records = body.records.filter((record): record is Record<string, unknown> => !!record && typeof record === "object" && !Array.isArray(record));
+    const projectIds = Array.isArray(body.projectIds) ? body.projectIds.filter((id): id is string => typeof id === "string") : undefined;
+
+    const summary = captures.append({
+      sessionId: body.sessionId,
+      developerId: identity.developerId,
+      records,
+      projectIds,
+    });
+    return c.json(summary);
+  });
+
   /** Authorization for the two *mutating* alignment-thread routes (reply,
    * close): only the two parties on a thread can act on it -- this stays a
    * private, voluntary reconciliation channel between the two developers it
@@ -1257,7 +1320,18 @@ export function createApp(options: CreateAppOptions = {}) {
       // No truncation (dropped 2026-08-18, was capped at 2000 chars) -- see
       // DesignStatement.rawPlanExcerpt's doc comment in @twing/core for why.
       rawPlanExcerpt: body.rawPlanText,
-      ttlMs: body.ttlMs,
+      // An explicit per-registration `ttlMs` still wins (nothing sends one
+      // today); otherwise this project's own seeded `settings:` value, and
+      // only then DesignRegistry's built-in default. Resolved here rather
+      // than inside `register()` so the store keeps taking a plain number
+      // and stays unaware of the identity tables.
+      //
+      // This is one of the two halves that make a settings change complete:
+      // designs registered from here on get the value at registration, and
+      // designs already open get re-timed when it's seeded
+      // (`retimeActiveDesigns`, called from /v1/constraints/seed). Neither
+      // alone covers the whole population.
+      ttlMs: body.ttlMs ?? identities.getProjectRecord(body.projectId)?.designActiveTtlMs,
       groupId: body.groupId,
     });
 
@@ -2200,7 +2274,38 @@ export function createApp(options: CreateAppOptions = {}) {
     // compatibility (old CLI builds still send it) but no longer branches
     // on anything -- `DesignConstraintType` collapsed to the single value
     // "constraint" (see DesignVerdict's doc comment in core/types.ts).
+    // `settings:` (2026-09-11) rides on this call rather than a route of
+    // its own because it's the same thing constraints are -- a committed
+    // file's contents, pushed by the admin-gated `twing init` -- and
+    // splitting it out would mean a second round trip with an identical
+    // authorization check. Validated *before* anything is written, so a
+    // bad value rejects the whole request rather than half-applying it as
+    // "constraints seeded, settings 400."
+    const ttlMs = body.settings?.designActiveTtlMs;
+    if (ttlMs !== undefined && (!Number.isSafeInteger(ttlMs) || ttlMs < MIN_DESIGN_ACTIVE_TTL_MS || ttlMs > MAX_DESIGN_ACTIVE_TTL_MS)) {
+      return c.json({ error: `settings.designActiveTtlMs must be between ${MIN_DESIGN_ACTIVE_TTL_MS} and ${MAX_DESIGN_ACTIVE_TTL_MS} ms -- got ${ttlMs}` }, 400);
+    }
+
     const added = body.constraints.map((entry) => constraintStore.add(projectId, entry.statement, entry.scope, "constraint", "seeded"));
+    // Only an omitted `settings` key leaves the stored value alone (an old
+    // CLI that predates this); a present one is authoritative, so deleting
+    // the block from the committed file and re-running `init` clears the
+    // override rather than leaving the last seeded value in force forever.
+    if (body.settings !== undefined) {
+      identities.setDesignActiveTtlMs(projectId, ttlMs);
+      // ...and the project's already-live designs move with it, rather than
+      // running out the window they happened to be registered under (see
+      // `retimeActiveDesigns`). `?? DEFAULT` is what makes *clearing* the
+      // setting symmetric with setting it: both are a real re-time, not
+      // just a stored-value change. Designs registered after this point get
+      // the same number at registration, so the two halves cover the whole
+      // population between them.
+      const retimed = designs.retimeActiveDesigns(projectId, ttlMs ?? DEFAULT_DESIGN_ACTIVE_TTL_MS);
+      if (retimed > 0) {
+        console.log(`twing serve: re-timed ${retimed} live design(s) in project ${projectId.slice(0, 12)} to ttlMs=${ttlMs ?? DEFAULT_DESIGN_ACTIVE_TTL_MS}`);
+      }
+    }
+
     return c.json({ seeded: added.length });
   });
 

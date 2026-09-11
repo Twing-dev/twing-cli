@@ -17,9 +17,16 @@ import {
 } from "@twing/core";
 import { extractClaim, resolveProjectCoordinator } from "./claims.js";
 import { captureSession } from "./transcript.js";
+import { CaptureUploader } from "./capture-upload.js";
 import { Syncer, daemonVersion } from "./sync.js";
 
 const STARTED_AT = Date.now();
+
+/** Module-level, like `startCapture` itself: capture is driven from the
+ * message handler rather than from `startDaemon`'s closure, and a session's
+ * uploads have to outlive any single hook event. Started and stopped with
+ * the daemon below. */
+const captureUploader = new CaptureUploader();
 
 export interface DaemonHandle {
   socketPath: string;
@@ -215,6 +222,7 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
   const claims: Claim[] = [];
   const callEdges: CallEdge[] = [];
   const syncer = new Syncer();
+  captureUploader.start();
   // A session only ever belongs to one developerId (§8), learned the first
   // time it produces a claim -- needed because get_notices only carries
   // sessionId (§4), not developerId.
@@ -227,6 +235,7 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
   const onShutdownRequested = async (): Promise<void> => {
     clearTimeout(idleTimer);
     await syncer.stopAndFlush();
+    await captureUploader.stopAndFlush();
     server.close(() => {
       removePidFile(socketPath);
       if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
@@ -319,6 +328,7 @@ export async function startDaemon(socketPath: string): Promise<DaemonHandle> {
     close: async () => {
       clearTimeout(idleTimer);
       await syncer.stopAndFlush();
+      await captureUploader.stopAndFlush();
       await new Promise<void>((resolve) => {
         server.close(() => {
           removePidFile(socketPath);
@@ -498,6 +508,9 @@ function startCapture(input: { sessionId: string; cwd?: string; transcriptPath?:
       if (result.turnsWritten > 0 || result.pathsWritten > 0) {
         console.log(`twing daemon: captured ${result.turnsWritten} turns, ${result.pathsWritten} new paths for session ${input.sessionId}`);
       }
+      // Registration only; the upload itself runs on the uploader's own
+      // debounce. A capture pass must never wait on a coordinator.
+      captureUploader.register(input.sessionId, result.targets);
     })
     .catch((err) => {
       console.error("twing daemon: session capture failed", err);

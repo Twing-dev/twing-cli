@@ -10,7 +10,9 @@
  * true for the advisory/align path but stale for that seeding path, so
  * don't take it as a blanket guarantee. `coordinator` is different in kind
  * from all of the above: it is never uploaded anywhere, it's read purely
- * locally to know where to send everything else.
+ * locally to know where to send everything else. `settings` (2026-09-11) is
+ * a third kind again -- uploaded by that same seed and then acted on only
+ * by the coordinator, never locally; see `SettingsConfig` below.
  *
  * (2026-08-19: dropped a `triggers`/`TriggerRule`/`matchTriggers` section
  * that used to live here -- symbol-name-regex duplicate-work detection,
@@ -23,6 +25,7 @@
  */
 
 import { parse as parseYaml, parseDocument, Document } from "yaml";
+import { MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS } from "./types.js";
 import { minimatch } from "minimatch";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -70,19 +73,48 @@ export interface CaptureConfig {
   enabled?: boolean;
 }
 
+/** Project-level knobs a repo's admins can tune (2026-09-11), as opposed
+ * to the rules (`constraints`/`require_human_review`) and the wiring
+ * (`coordinator`/`capture`) above. Third kind of section in this file, and
+ * a third relationship to the coordinator: unlike `coordinator`/`capture`
+ * (purely local) and unlike `constraints` (uploaded *and* evaluated
+ * locally), a setting is uploaded and then enforced **only** server-side --
+ * `init` seeds it alongside constraints (`POST /v1/constraints/seed`) and
+ * nothing on this side ever acts on it again. That's deliberate: the Go
+ * hook registers most designs (`ExitPlanMode`) and is held to reading
+ * nothing and deciding nothing (§4), so a setting every registration path
+ * would have to parse and send itself would mean teaching it to. Seeding
+ * also makes "admin" mean something enforceable -- the seed route requires
+ * project `admin` role on an already-founded project, so changing a
+ * setting in a committed file that nobody with admin ever seeds does
+ * nothing, exactly like a constraint nobody seeded.
+ *
+ * Values are kept here as the literal strings the file contained; the
+ * accessors below are what interpret and range-check them, so an
+ * unparseable value is distinguishable from an absent one at the one call
+ * site that cares (`init`, which warns) rather than silently identical. */
+export interface SettingsConfig {
+  /** How long a design can go with no activity before the coordinator
+   * demotes it to `dormant` -- a duration string (`"7d"`, `"36h"`,
+   * `"90m"`). Absent means `DEFAULT_DESIGN_ACTIVE_TTL_MS`. */
+  designDormantAfter?: string;
+}
+
 export interface Manifest {
   requireHumanReview: RequireHumanReviewRule[];
   constraints: ConstraintRule[];
   coordinator: CoordinatorConfig;
   capture: CaptureConfig;
+  settings: SettingsConfig;
 }
 
-const EMPTY_MANIFEST: Manifest = { requireHumanReview: [], constraints: [], coordinator: {}, capture: {} };
+const EMPTY_MANIFEST: Manifest = { requireHumanReview: [], constraints: [], coordinator: {}, capture: {}, settings: {} };
 
 export function parseManifest(yamlText: string): Manifest {
   const doc = (parseYaml(yamlText) ?? {}) as Record<string, unknown>;
   const coordinator = (doc.coordinator ?? {}) as Record<string, unknown>;
   const capture = (doc.capture ?? {}) as Record<string, unknown>;
+  const settings = (doc.settings ?? {}) as Record<string, unknown>;
   return {
     requireHumanReview: asArray(doc.require_human_review).map((r) => ({
       path: r.path as string | undefined,
@@ -98,6 +130,19 @@ export function parseManifest(yamlText: string): Manifest {
     },
     capture: {
       enabled: typeof capture.enabled === "boolean" ? capture.enabled : undefined,
+    },
+    settings: {
+      // A YAML scalar like `designDormantAfter: 7d` parses as a string
+      // already; one written unquoted as a bare number (`7`) parses as a
+      // number and is kept verbatim as its text, so the accessor below
+      // gets to reject it for having no unit rather than this parser
+      // silently guessing which unit was meant.
+      designDormantAfter:
+        typeof settings.designDormantAfter === "string"
+          ? settings.designDormantAfter
+          : typeof settings.designDormantAfter === "number"
+            ? String(settings.designDormantAfter)
+            : undefined,
     },
   };
 }
@@ -175,6 +220,46 @@ export function matchRequireHumanReview(manifest: Manifest, relPath: string, sym
     else if (rule.symbol && rule.symbol === symbolId) reasons.push(rule.reason);
   }
   return reasons;
+}
+
+/**
+ * Parses a `settings:` duration string -- an integer and a unit suffix,
+ * `s`/`m`/`h`/`d` (`"90m"`, `"36h"`, `"7d"`). Returns `undefined` for
+ * anything else, the unit-less `"7"` included: this file has exactly one
+ * duration setting today and getting its unit wrong by an order of
+ * magnitude is the realistic mistake, so requiring the unit is worth more
+ * than accepting a convenient shorthand.
+ */
+export function parseDuration(raw: string): number | undefined {
+  const match = /^\s*(\d+)\s*(s|m|h|d)\s*$/.exec(raw);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  const unitMs = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000, d: 24 * 60 * 60 * 1000 }[match[2] as "s" | "m" | "h" | "d"];
+  const ms = value * unitMs;
+  return Number.isSafeInteger(ms) ? ms : undefined;
+}
+
+/**
+ * This repo's `settings: designDormantAfter` as milliseconds, or
+ * `undefined` when it's absent, unparseable, or outside
+ * `MIN_DESIGN_ACTIVE_TTL_MS`..`MAX_DESIGN_ACTIVE_TTL_MS` -- all three
+ * collapse to "this project has no override," which leaves
+ * `DEFAULT_DESIGN_ACTIVE_TTL_MS` in force. Out of range is refused, never
+ * clamped (see those constants' own comment): an admin who wrote `365d`
+ * should find out it didn't take, not quietly get 90.
+ *
+ * Callers that can tell the user something (`init`) should check
+ * `manifest.settings.designDormantAfter` themselves for a present-but-
+ * rejected value and say so -- from here the two are indistinguishable on
+ * purpose, since the daemon and the hook load this file constantly and
+ * neither has anywhere useful to put a complaint.
+ */
+export function designActiveTtlMs(manifest: Manifest): number | undefined {
+  const raw = manifest.settings.designDormantAfter;
+  if (raw === undefined) return undefined;
+  const ms = parseDuration(raw);
+  if (ms === undefined || ms < MIN_DESIGN_ACTIVE_TTL_MS || ms > MAX_DESIGN_ACTIVE_TTL_MS) return undefined;
+  return ms;
 }
 
 /** The `capture:` switch's one consumer-facing question, so no caller has

@@ -23,7 +23,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
-    "test": "node --test dist/*.test.js"
+    "test": "node --test dist/*.test.js dist/*/*.test.js"
   },
   "dependencies": {
     "@twing/core": "^0.2.24",

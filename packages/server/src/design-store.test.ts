@@ -398,6 +398,26 @@ test("DesignRegistry: sweepExpired terminally expires a dormant design past the 
   registry.stop();
 });
 
+test("DesignRegistry: the dormant grace period is measured from dormancy, so a long active window can't eat it (2026-09-11)", () => {
+  const registry = freshRegistry();
+  // A project that set its own long window via `settings: designDormantAfter`
+  // -- here as long as the dormant TTL itself, which under the old
+  // shared-`lastActivityAt` basis expired the design in the very sweep pass
+  // that made it dormant, taking resume() with it.
+  const ttlMs = DEFAULT_DESIGN_DORMANT_TTL_MS;
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs });
+
+  registry.sweepExpired(a.createdAt + ttlMs + 1);
+  assert.equal(registry.get(a.id)?.status, "dormant", "the pass that dorms it must not also expire it");
+
+  registry.sweepExpired(a.createdAt + ttlMs + DEFAULT_DESIGN_DORMANT_TTL_MS - 1);
+  assert.equal(registry.get(a.id)?.status, "dormant", "still resumable right up to the end of the full dormant TTL");
+
+  registry.sweepExpired(a.createdAt + ttlMs + DEFAULT_DESIGN_DORMANT_TTL_MS + 1);
+  assert.equal(registry.get(a.id)?.status, "expired");
+  registry.stop();
+});
+
 test("DesignRegistry: openDesigns excludes dormant designs -- this is the actual n² fix", () => {
   const registry = freshRegistry();
   const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 10 });
@@ -1013,5 +1033,74 @@ test("DesignRegistry: listReviewsPage paginates and composes with the pending/de
   const all = registry.listReviewsPage("p1", { filter: "all", limit: 1 });
   assert.equal(all.items.length, 1);
   assert.ok(all.nextBefore !== undefined);
+  registry.stop();
+});
+
+test("DesignRegistry: retimeActiveDesigns moves live designs onto a new window without counting as activity", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const DAY = 24 * 60 * 60 * 1000;
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "in flight", creates: [], touches: [], dependsOn: [], ttlMs: 5 * DAY });
+  const before = registry.get(a.id)!;
+
+  assert.equal(registry.retimeActiveDesigns("p1", 3 * DAY), 1);
+  const after = registry.get(a.id)!;
+  assert.equal(after.ttlMs, 3 * DAY);
+  assert.equal(after.lastActivityAt, before.lastActivityAt, "a re-time must not read as activity -- that would make tightening extend the design's life");
+  assert.equal(after.status, "open");
+
+  // The tightening has to actually bite: day 4 was inside the old 5d
+  // window and is outside the new 3d one.
+  registry.sweepExpired(a.createdAt + 4 * DAY);
+  assert.equal(registry.get(a.id)?.status, "dormant");
+
+  const events = log.eventsForProject("p1").filter((e) => e.kind === "design_retimed");
+  assert.equal(events.length, 1, "one row per re-timing, not per design");
+  assert.deepEqual(events[0].payload, { ttlMs: 3 * DAY, designCount: 1 });
+  registry.stop();
+});
+
+test("DesignRegistry: retimeActiveDesigns is a no-op for an unchanged value, and logs nothing", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 1000 });
+
+  // `twing init` re-run against an unchanged manifest -- the overwhelmingly
+  // common case, and it must not write or log anything.
+  assert.equal(registry.retimeActiveDesigns("p1", 1000), 0);
+  assert.equal(log.eventsForProject("p1").filter((e) => e.kind === "design_retimed").length, 0);
+  assert.equal(registry.get(a.id)?.ttlMs, 1000);
+  registry.stop();
+});
+
+test("DesignRegistry: retimeActiveDesigns leaves dormant designs alone, and other projects untouched", () => {
+  const db = createDb({ memory: true });
+  const registry = new DesignRegistry(db);
+  const DAY = 24 * 60 * 60 * 1000;
+  const dormant = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "dormant", creates: [], touches: [], dependsOn: [], ttlMs: 5 * DAY });
+  const other = registry.register({ projectId: "p2", developerId: "d1", sessionId: "s2", summary: "other project", creates: [], touches: [], dependsOn: [], ttlMs: 5 * DAY });
+  registry.sweepExpired(dormant.createdAt + 5 * DAY + 1);
+  assert.equal(registry.get(dormant.id)?.status, "dormant", "sanity check");
+
+  assert.equal(registry.retimeActiveDesigns("p1", 3 * DAY), 0, "nothing live in p1 to re-time");
+  // Re-timing a dormant design would move its *expiry* (lastActivityAt +
+  // ttlMs + DORMANT_TTL), so tightening the dormancy window would
+  // retroactively kill designs that already went dormant under the old one.
+  assert.equal(registry.get(dormant.id)?.ttlMs, 5 * DAY);
+  assert.equal(registry.get(other.id)?.ttlMs, 5 * DAY, "a re-time is scoped to one project");
+  registry.stop();
+});
+
+test("DesignRegistry: retimeActiveDesigns covers flagged designs too -- they're still live scope", () => {
+  const db = createDb({ memory: true });
+  const registry = new DesignRegistry(db);
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], ttlMs: 5000 });
+  registry.flag(a.id, "file_overlap");
+
+  assert.equal(registry.retimeActiveDesigns("p1", 3000), 1);
+  assert.equal(registry.get(a.id)?.ttlMs, 3000);
+  assert.equal(registry.get(a.id)?.status, "flagged", "re-timing must not change status");
   registry.stop();
 });

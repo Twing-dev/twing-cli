@@ -27,7 +27,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { captureEnabled, filterTranscriptEntry, findRepoRoot, loadManifestFromFile, twingConfigPath, type CapturedRecord } from "@twing/core";
+import { captureEnabled, computeProjectId, filterTranscriptEntry, findRepoRoot, loadManifestFromFile, reposForEntry, twingConfigPath, type CapturedRecord, type RepoResolver } from "@twing/core";
 import { redact } from "./redact.js";
 
 /** Read the transcript delta in bounded chunks rather than one big buffer:
@@ -45,12 +45,27 @@ export interface CaptureInput {
   /** Absolute path to the transcript JSONL, as forwarded by the hook.
    * Absent from an older hook binary -- treated as "nothing to capture". */
   transcriptPath?: string;
-  /** The session's cwd, used to find the repo whose `.twing/twing.yml`
-   * governs capture. Absent/unresolvable means no repo opted out, which is
-   * the same as enabled (see `CaptureConfig`). */
+  /** The session's cwd. Only a fast path now, not the decision: if the repo
+   * it sits in has opted in, the whole session qualifies from its first
+   * byte and no boundary needs finding. Otherwise consent is decided from
+   * the repos the session actually *touched* -- see `findCaptureStart`.
+   * Absent or outside any repo is not consent, and never was. */
   cwd?: string;
   /** Overridable for tests; production always uses `defaultSessionsDir()`. */
   sessionsDir?: string;
+}
+
+/**
+ * One opted-in repo this session touched that has a coordinator configured
+ * -- everything the uploader needs to send the capture somewhere, resolved
+ * here because only this side can resolve any of it: the repo root comes
+ * from walking the filesystem, the projectId from that repo's git remote,
+ * and the coordinator from its committed manifest.
+ */
+export interface CaptureTarget {
+  repoRoot: string;
+  projectId: string;
+  serverUrl: string;
 }
 
 export interface CaptureResult {
@@ -60,12 +75,29 @@ export interface CaptureResult {
   pathsWritten: number;
   /** Byte offset now recorded as read. */
   offset: number;
+  /** On the pass that turned capture on, the byte offset it reached back
+   * to. Absent on every later pass. */
+  startedFrom?: number;
+  /** Where this session's capture may be uploaded, across every opted-in
+   * repo it has touched so far -- not only the ones touched this pass, so a
+   * pass that adds no new paths still reports the full set. Empty when the
+   * opted-in repos have no coordinator configured, which is a perfectly
+   * ordinary local-only capture. */
+  targets: CaptureTarget[];
 }
 
 interface CaptureState {
   transcriptPath: string;
   /** Bytes of the transcript already captured. */
   offset: number;
+  /** Whether capture has turned on for this session. Sticky on purpose:
+   * once any repo the session touched has opted in, the session is captured
+   * for the rest of its life, including stretches that touch nothing or
+   * touch repos that never opted in. A session is one working context and
+   * its conversation is entangled across repos -- re-deciding per pass
+   * would shred it, and the boundary that does matter (what precedes the
+   * first opted-in touch) is settled once, by `findCaptureStart`. */
+  enabled?: boolean;
   /** Every file path already emitted for this session, so a `paths` record
    * only ever carries what's genuinely new. */
   paths: string[];
@@ -91,10 +123,9 @@ export function captureSession(input: CaptureInput): Promise<CaptureResult> {
 }
 
 async function runCapture(input: CaptureInput): Promise<CaptureResult> {
-  const empty = (skipped: CaptureResult["skipped"], offset = 0): CaptureResult => ({ skipped, turnsWritten: 0, pathsWritten: 0, offset });
+  const empty = (skipped: CaptureResult["skipped"], offset = 0): CaptureResult => ({ skipped, turnsWritten: 0, pathsWritten: 0, offset, targets: [] });
 
   if (!input.transcriptPath) return empty("no-transcript-path");
-  if (!captureAllowed(input.cwd)) return empty("disabled");
 
   let stat: fs.Stats;
   try {
@@ -117,6 +148,30 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   // over rather than reading from the middle of a line.
   let offset = state.transcriptPath === input.transcriptPath ? state.offset : 0;
   if (offset > stat.size) offset = 0;
+
+  // Consent, decided once per session and then sticky. Until some repo the
+  // session touched has opted in, nothing is captured *and the watermark is
+  // never advanced* -- that is what leaves the earlier bytes available to
+  // reach back over on the pass that finally turns capture on.
+  const resolve = createRepoResolver();
+  const isOptedIn = createOptedInCache();
+  const projectId = createProjectIdCache();
+  const coordinator = createCoordinatorCache();
+  let startedFrom: number | undefined;
+
+  if (!state.enabled) {
+    const root = cwdRepo(input.cwd, resolve);
+    if (root !== undefined && isOptedIn(root)) {
+      // The session is rooted in a repo that opted in: no boundary to find,
+      // the whole session qualifies from its first byte.
+      startedFrom = 0;
+    } else {
+      startedFrom = await findCaptureStart(input.transcriptPath, stat.size, isOptedIn, resolve);
+      if (startedFrom === undefined) return empty("disabled");
+    }
+    offset = startedFrom;
+  }
+
   if (offset === stat.size) return empty("nothing-new", offset);
 
   const seenPaths = new Set(state.paths);
@@ -146,7 +201,24 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     // per tool call: they cost well under 1% of a transcript in total, and
     // they're the only signal answering "which repos did this session
     // touch" -- but only if they aren't repeated thousands of times.
-    records.push({ type: "paths", ts: new Date().toISOString(), paths: newPaths.map(redact) });
+    //
+    // Resolved to projectIds here, on the only machine that can: see
+    // `CapturedRecord`'s note. Absolute paths stay too -- they are what a
+    // later fold routes on -- but they mean nothing to a server on their
+    // own.
+    const projects: string[] = [];
+    for (const candidate of newPaths) {
+      const root = resolve(candidate);
+      if (root === undefined || !isOptedIn(root)) continue;
+      const id = projectId(root);
+      if (id !== undefined && !projects.includes(id)) projects.push(id);
+    }
+    records.push({
+      type: "paths",
+      ts: new Date().toISOString(),
+      paths: newPaths.map(redact),
+      ...(projects.length > 0 ? { projects } : {}),
+    });
   }
 
   if (records.length > 0) {
@@ -156,9 +228,25 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     await fsp.appendFile(capturePath, header + records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
   }
 
+  // Session-level, over every path seen so far rather than only this pass's
+  // new ones: a pass that captures turns but names no new file must still
+  // report where the capture goes, or an upload would stall waiting for a
+  // path that may never come.
+  const targets: CaptureTarget[] = [];
+  for (const candidate of seenPaths) {
+    const root = resolve(candidate);
+    if (root === undefined || !isOptedIn(root)) continue;
+    if (targets.some((t) => t.repoRoot === root)) continue;
+    const serverUrl = coordinator(root);
+    const id = projectId(root);
+    if (serverUrl === undefined || id === undefined) continue;
+    targets.push({ repoRoot: root, projectId: id, serverUrl });
+  }
+
   await writeState(statePath, {
     transcriptPath: input.transcriptPath,
     offset: readTo,
+    enabled: true,
     paths: [...seenPaths],
     updatedAt: new Date().toISOString(),
   });
@@ -167,37 +255,144 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     turnsWritten: records.filter((r) => r.type === "turn").length,
     pathsWritten: newPaths.length,
     offset: readTo,
+    targets,
+    ...(startedFrom !== undefined ? { startedFrom } : {}),
   };
 }
 
 /**
- * The repo-level `capture:` switch, which is the *only* thing that turns
- * capture on (see `CaptureConfig`: opt-in). Resolved fresh from the
- * manifest on disk each pass -- the same thing `claims.ts` does rather than
- * trusting anything the daemon happens to have cached, since a read-only
- * session never registers a project with the `Syncer` at all.
+ * Whether one repository has opted in, via the `capture:` switch in its own
+ * committed `.twing/twing.yml`. Opt-in is the whole model: the absence of
+ * that file, or of the switch inside it, can never stand in for somebody
+ * deliberately editing it.
  *
- * Both "no cwd" and "not a repo" resolve to *not* capturing: consent comes
- * from a committed file somebody deliberately edited, so the absence of
- * that file can never stand in for it.
- *
- * **Known gap, multi-repo sessions.** `cwd` here is the session's root, not
- * the repo of any individual turn -- one session can span several repos
- * (the transcript this was built against spanned three), and this decides
- * for the whole session from the root repo's manifest alone. So a session
- * rooted in an opted-in repo captures its turns about sibling repos that
- * never opted in. Bounded today because nothing leaves the machine; it has
- * to be settled before phase 2 transmits anything, and it is the same
- * question as the plan's open multi-repo attribution decision.
+ * Memoized per capture pass rather than per daemon: a manifest edited
+ * mid-session takes effect on the next pass, the same freshness `claims.ts`
+ * gets by re-reading rather than trusting anything cached.
  */
-function captureAllowed(cwd: string | undefined): boolean {
-  if (!cwd) return false;
-  try {
-    return captureEnabled(loadManifestFromFile(twingConfigPath(findRepoRoot(cwd))));
-  } catch {
-    // Not a repo, or an unreadable manifest -- nothing opted in.
-    return false;
-  }
+function createOptedInCache(): (repoRoot: string) => boolean {
+  const cache = new Map<string, boolean>();
+  return (repoRoot: string): boolean => {
+    const cached = cache.get(repoRoot);
+    if (cached !== undefined) return cached;
+    let enabled = false;
+    try {
+      enabled = captureEnabled(loadManifestFromFile(twingConfigPath(repoRoot)));
+    } catch {
+      enabled = false; // unreadable manifest: nothing opted in
+    }
+    cache.set(repoRoot, enabled);
+    return enabled;
+  };
+}
+
+/**
+ * The twing `projectId` for a repo, memoized per capture pass.
+ *
+ * Memoized because `computeProjectId` shells out to `git remote get-url`:
+ * once per distinct repo per pass is fine, once per path mention is not.
+ *
+ * Only ever called for repos that opted in. Beyond matching the consent
+ * model, that keeps this away from its own side effect -- for a repo with
+ * no remote, `computeProjectId` *writes* `.git/twing-project-id` -- so
+ * merely observing a path in some unrelated checkout never leaves a mark
+ * inside it.
+ */
+function createProjectIdCache(): (repoRoot: string) => string | undefined {
+  const cache = new Map<string, string | undefined>();
+  return (repoRoot: string): string | undefined => {
+    if (cache.has(repoRoot)) return cache.get(repoRoot);
+    let id: string | undefined;
+    try {
+      id = computeProjectId(repoRoot);
+    } catch {
+      id = undefined; // no git, no remote, unwritable .git -- attribution is best-effort
+    }
+    cache.set(repoRoot, id);
+    return id;
+  };
+}
+
+/** A repo's configured coordinator, memoized per pass. Absent is ordinary:
+ * a repo can opt into capture without ever having run `twing init`, and its
+ * capture simply stays on this machine. */
+function createCoordinatorCache(): (repoRoot: string) => string | undefined {
+  const cache = new Map<string, string | undefined>();
+  return (repoRoot: string): string | undefined => {
+    if (cache.has(repoRoot)) return cache.get(repoRoot);
+    let url: string | undefined;
+    try {
+      url = loadManifestFromFile(twingConfigPath(repoRoot)).coordinator.serverUrl;
+    } catch {
+      url = undefined;
+    }
+    cache.set(repoRoot, url);
+    return url;
+  };
+}
+
+/** The repo containing the session's cwd, or undefined when cwd is absent
+ * or isn't inside a repo at all. */
+function cwdRepo(cwd: string | undefined, resolve: RepoResolver): string | undefined {
+  if (!cwd) return undefined;
+  return resolve(cwd);
+}
+
+/**
+ * Where a retroactive capture may begin, or `undefined` when this session
+ * has not touched an opted-in repo at all and must not be captured yet.
+ *
+ * Capture starts at the point the session first *touched* an opted-in repo
+ * -- not at its first edit there. The first touch is a read, which is what
+ * makes this retroactive enough to be worth doing: in the 42,117-line
+ * transcript this was built against, twing-cli's first touch was line 117
+ * and its first edit line 781, three hours of exploration later. Anchoring
+ * on the edit would have thrown away the part worth keeping.
+ *
+ * From that point the walk runs backward and stops hard at the last entry
+ * that touched a repo which has *not* opted in. That line is the consent
+ * boundary: nothing before it concerned the repo whose manifest granted
+ * permission, so it is a different unit of work and never leaves this
+ * machine. Entries touching no repo at all -- discussion, a scratch file --
+ * do not stop the walk, which is what lets the reasoning that preceded the
+ * first read come along with it.
+ *
+ * Implemented as one forward pass rather than a scan-then-rewind: the stop
+ * is simply the end of the most recent foreign-touch line seen before the
+ * first opted-in touch.
+ */
+async function findCaptureStart(
+  transcriptPath: string,
+  size: number,
+  isOptedIn: (repoRoot: string) => boolean,
+  resolve: RepoResolver,
+): Promise<number | undefined> {
+  let start: number | undefined;
+  let boundary = 0;
+
+  await forEachNewLine(transcriptPath, 0, size, (line, lineStart) => {
+    if (start !== undefined) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const repos = reposForEntry(filterTranscriptEntry(parsed), resolve);
+    if (repos.length === 0) return; // touched no repo: neither a trigger nor a boundary
+
+    // An entry touching an opted-in repo *and* a foreign one still counts
+    // as the first opted-in touch: it is work in the consenting repo, and
+    // stopping on it would put the boundary after the very line that
+    // granted permission.
+    if (repos.some(isOptedIn)) {
+      start = boundary;
+      return;
+    }
+    boundary = lineStart + Buffer.byteLength(line, "utf8") + 1;
+  });
+
+  return start;
 }
 
 /**
@@ -207,12 +402,13 @@ function captureAllowed(cwd: string | undefined): boolean {
  * we read it -- is deliberately left outside the returned watermark, so the
  * next pass picks it up whole instead of splitting a JSON object in two.
  */
-async function forEachNewLine(filePath: string, from: number, to: number, onLine: (line: string) => void): Promise<number> {
+async function forEachNewLine(filePath: string, from: number, to: number, onLine: (line: string, lineStart: number) => void): Promise<number> {
   const handle = await fsp.open(filePath, "r");
   try {
     const buffer = Buffer.alloc(READ_CHUNK_BYTES);
     let position = from;
     let consumed = from;
+    let lineStart = from;
     // Carried as bytes, not a string: a UTF-8 sequence split across a chunk
     // boundary would decode to replacement characters (and throw the byte
     // accounting below off) if each chunk were decoded independently.
@@ -231,7 +427,12 @@ async function forEachNewLine(filePath: string, from: number, to: number, onLine
       }
 
       for (const line of chunk.subarray(0, lastBreak).toString("utf8").split("\n")) {
-        if (line.length > 0) onLine(line);
+        if (line.length > 0) onLine(line, lineStart);
+        // Advance past this line and its terminator. Byte length, not
+        // string length: a line carrying any non-ASCII character occupies
+        // more bytes than it has characters, and every offset downstream of
+        // this is a file position.
+        lineStart += Buffer.byteLength(line, "utf8") + 1;
       }
       carry = Buffer.from(chunk.subarray(lastBreak + 1));
       consumed = position - carry.length;
@@ -249,6 +450,7 @@ async function readState(statePath: string, transcriptPath: string): Promise<Cap
     return {
       transcriptPath: typeof parsed.transcriptPath === "string" ? parsed.transcriptPath : transcriptPath,
       offset: typeof parsed.offset === "number" && parsed.offset >= 0 ? parsed.offset : 0,
+      enabled: parsed.enabled === true,
       paths: Array.isArray(parsed.paths) ? parsed.paths.filter((p): p is string => typeof p === "string") : [],
       updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
     };
@@ -259,7 +461,7 @@ async function readState(statePath: string, transcriptPath: string): Promise<Cap
     // the alternative (guessing an offset, and silently losing whatever
     // sits before the guess). `writeState` is write-then-rename precisely
     // so this stays the rare path.
-    return { transcriptPath, offset: 0, paths: [], updatedAt: "" };
+    return { transcriptPath, offset: 0, enabled: false, paths: [], updatedAt: "" };
   }
 }
 
@@ -270,4 +472,52 @@ async function writeState(statePath: string, state: CaptureState): Promise<void>
   const tmp = `${statePath}.tmp`;
   await fsp.writeFile(tmp, JSON.stringify(state) + "\n", "utf8");
   await fsp.rename(tmp, statePath);
+}
+
+/**
+ * A `RepoResolver` over the real filesystem, memoized per instance.
+ *
+ * Memoization is not an optimization here so much as a precondition: the
+ * transcript this was built against names paths 42,117 times across a
+ * handful of directories, and an unmemoized walk would stat the same
+ * ancestors on every one of them, on the daemon's own event loop.
+ *
+ * The walk starts at the path itself rather than its parent, which handles
+ * files and directories with one code path and no `stat`: for a file,
+ * `<file>/.git` simply doesn't exist and the walk moves up as it would
+ * anyway. Every directory visited on the way is backfilled with the answer,
+ * so the second path under a repo resolves in one map lookup.
+ *
+ * Returns `undefined` rather than a fallback when nothing above the path is
+ * a repo -- see `RepoResolver`'s doc comment in `@twing/core` for why that
+ * distinction carries weight for capture consent.
+ */
+export function createRepoResolver(): RepoResolver {
+  const cache = new Map<string, string | undefined>();
+
+  return (absPath: string): string | undefined => {
+    const visited: string[] = [];
+    let dir = absPath;
+
+    for (;;) {
+      if (cache.has(dir)) {
+        const hit = cache.get(dir);
+        for (const seen of visited) cache.set(seen, hit);
+        return hit;
+      }
+      visited.push(dir);
+
+      if (fs.existsSync(path.join(dir, ".git"))) {
+        for (const seen of visited) cache.set(seen, dir);
+        return dir;
+      }
+
+      const parent = path.dirname(dir);
+      if (parent === dir) {
+        for (const seen of visited) cache.set(seen, undefined);
+        return undefined;
+      }
+      dir = parent;
+    }
+  };
 }

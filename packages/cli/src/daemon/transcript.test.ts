@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { captureSession } from "./transcript.js";
+import { captureSession, createRepoResolver } from "./transcript.js";
 
 /** A scratch dir that is also an opted-in repo: capture is opt-in, so
  * every test that expects anything to be captured has to pass a `cwd`
@@ -241,4 +241,193 @@ test("captureSession: overlapping passes for one session serialize instead of do
     .filter((r) => r.type === "turn")
     .map((r) => r.text);
   assert.deepEqual(texts, ["one", "two"]);
+});
+
+// createRepoResolver runs against the real filesystem (the one place in
+// capture that does), so these use real directories rather than fixtures.
+
+test("createRepoResolver: a file inside a repo resolves to the repo root", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-resolver-"));
+  fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "src", "net"), { recursive: true });
+  const resolve = createRepoResolver();
+
+  // The file need not exist -- a Write names a path before creating it.
+  assert.equal(resolve(path.join(dir, "src", "net", "retry.ts")), dir);
+  assert.equal(resolve(dir), dir, "the repo root itself resolves to itself");
+});
+
+test("createRepoResolver: a path outside every repo resolves to undefined, not to itself", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-not-a-repo-"));
+  const resolve = createRepoResolver();
+
+  assert.equal(resolve(path.join(dir, "scratch.txt")), undefined, "inventing a repo here would let a scratch file act like a project");
+});
+
+test("createRepoResolver: the nearest repo root wins for a nested checkout", () => {
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), "twing-outer-"));
+  fs.mkdirSync(path.join(outer, ".git"), { recursive: true });
+  const inner = path.join(outer, "vendor", "inner");
+  fs.mkdirSync(path.join(inner, ".git"), { recursive: true });
+  const resolve = createRepoResolver();
+
+  assert.equal(resolve(path.join(inner, "src", "a.ts")), inner);
+  assert.equal(resolve(path.join(outer, "src", "a.ts")), outer);
+});
+
+// Memoization is a precondition rather than an optimization: a session
+// names paths tens of thousands of times across a handful of directories.
+// Observed through behavior -- the answer survives the repo marker being
+// deleted underneath it, which is only possible if it was cached.
+test("createRepoResolver: repeated lookups are served from the cache", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-resolver-cache-"));
+  fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+  const resolve = createRepoResolver();
+
+  assert.equal(resolve(path.join(dir, "src", "a.ts")), dir);
+  fs.rmSync(path.join(dir, ".git"), { recursive: true, force: true });
+
+  assert.equal(resolve(path.join(dir, "src", "b.ts")), dir, "a sibling path reuses the ancestors already walked");
+});
+
+// Session-level consent and the retroactive reach-back. These are the two
+// decisions repo attribution exists to serve, so they are exercised against
+// real repos on disk rather than fakes.
+
+/** A repo that either has or hasn't opted in, plus a transcript-shaped
+ * absolute path inside it. */
+function repo(optedIn: boolean): { root: string; file: (name: string) => string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), optedIn ? "twing-optedin-" : "twing-foreign-"));
+  fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(root, ".twing"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".twing", "twing.yml"), optedIn ? "capture:\n  enabled: true\n" : "coordinator:\n  serverUrl: http://localhost:8787\n");
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  return { root, file: (name: string) => path.join(root, "src", name) };
+}
+
+// The measured shape this is built for: the first touch of an opted-in repo
+// is a *read*, hours before the first edit there, and the reasoning that
+// led to it sits in turns that name no file at all.
+test("captureSession: capture reaches back over discussion to the point the opted-in repo was first touched", async () => {
+  const optedIn = repo(true);
+  const foreign = repo(false);
+  const { transcript, sessionsDir } = scratch();
+
+  fs.writeFileSync(
+    transcript,
+    humanTurn("the previous task's question") +
+      toolCall(foreign.file("old.ts")) +
+      humanTurn("now let's look at the other project") +
+      assistantTurn("Reading it.") +
+      toolCall(optedIn.file("new.ts")) +
+      assistantTurn("Found the bug."),
+  );
+
+  const result = await captureSession({ sessionId: "reach1", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  const texts = readCapture(sessionsDir, "reach1")
+    .filter((r) => r.type === "turn")
+    .map((r) => r.text);
+  assert.deepEqual(texts, ["now let's look at the other project", "Reading it.", "Found the bug."]);
+  assert.ok(result.startedFrom !== undefined && result.startedFrom > 0, "it reached back, but not to the start of the session");
+});
+
+// The consent boundary. Everything before the last foreign touch belongs to
+// a unit of work that never concerned the repo which granted permission,
+// and must never be captured -- not even to be trimmed later.
+test("captureSession: nothing before a non-opted-in repo's touch is captured", async () => {
+  const optedIn = repo(true);
+  const foreign = repo(false);
+  const { transcript, sessionsDir } = scratch();
+
+  fs.writeFileSync(
+    transcript,
+    humanTurn("SECRET client discussion") + toolCall(foreign.file("client.ts")) + toolCall(optedIn.file("ours.ts")) + assistantTurn("ok"),
+  );
+
+  await captureSession({ sessionId: "reach2", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  const raw = fs.readFileSync(path.join(sessionsDir, "reach2.jsonl"), "utf8");
+  assert.ok(!raw.includes("SECRET client discussion"), "the previous task never leaves the machine");
+  assert.match(raw, /"ok"/);
+});
+
+test("captureSession: with no foreign touch before it, the reach-back runs to the start of the session", async () => {
+  const optedIn = repo(true);
+  const foreign = repo(false);
+  const { transcript, sessionsDir } = scratch();
+
+  fs.writeFileSync(transcript, humanTurn("what does this project do?") + toolCall(optedIn.file("a.ts")) + assistantTurn("Here."));
+
+  const result = await captureSession({ sessionId: "reach3", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  assert.equal(result.startedFrom, 0);
+  const texts = readCapture(sessionsDir, "reach3")
+    .filter((r) => r.type === "turn")
+    .map((r) => r.text);
+  assert.deepEqual(texts, ["what does this project do?", "Here."]);
+});
+
+// Until something opts in, the watermark must not advance -- that is the
+// whole mechanism that leaves earlier bytes reachable.
+test("captureSession: a session touching no opted-in repo captures nothing and does not advance", async () => {
+  const foreign = repo(false);
+  const { transcript, sessionsDir } = scratch();
+  fs.writeFileSync(transcript, humanTurn("just this project") + toolCall(foreign.file("a.ts")));
+
+  const result = await captureSession({ sessionId: "reach4", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  assert.equal(result.skipped, "disabled");
+  assert.deepEqual(readCapture(sessionsDir, "reach4"), []);
+  assert.equal(fs.existsSync(path.join(sessionsDir, "reach4.state.json")), false, "no watermark yet, so nothing is skipped past");
+});
+
+test("captureSession: once on, capture stays on for turns that touch nothing or touch only a non-opted-in repo", async () => {
+  const optedIn = repo(true);
+  const foreign = repo(false);
+  const { transcript, sessionsDir } = scratch();
+
+  fs.writeFileSync(transcript, toolCall(optedIn.file("a.ts")) + assistantTurn("captured"));
+  const first = await captureSession({ sessionId: "sticky1", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+  assert.equal(first.turnsWritten, 1);
+
+  // A stretch that would never have turned capture on by itself.
+  fs.appendFileSync(transcript, toolCall(foreign.file("b.ts")) + assistantTurn("still captured") + humanTurn("and this"));
+  const second = await captureSession({ sessionId: "sticky1", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  assert.equal(second.turnsWritten, 2);
+  assert.equal(second.startedFrom, undefined, "the boundary is settled once, not re-decided every pass");
+});
+
+// Project attribution. A projectId is derived from a repo's git remote, so
+// the capturing machine is the only one that can compute one -- a server
+// receiving absolute paths has no way to attribute them afterwards.
+
+test("captureSession: paths records carry the projectId of opted-in repos, and only those", async (t) => {
+  const optedIn = repo(true);
+  const foreign = repo(false);
+  // A real projectId needs a git remote; without one `computeProjectId`
+  // falls back to a persisted random id, which is just as valid here.
+  const { transcript, sessionsDir } = scratch();
+  fs.writeFileSync(transcript, toolCall(optedIn.file("a.ts")) + toolCall(foreign.file("b.ts")) + assistantTurn("done"));
+
+  await captureSession({ sessionId: "attr1", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
+
+  const record = readCapture(sessionsDir, "attr1").find((r) => r.type === "paths");
+  const projects = (record?.projects ?? []) as string[];
+  assert.equal(projects.length, 1, "one project: the opted-in repo, never the foreign one");
+  // Either shape is valid: a sha256 of the canonicalized remote, or -- as
+  // here, with no remote to hash -- the per-repo persisted random id.
+  assert.match(projects[0], /^[0-9a-f]{64}$|^[0-9a-f-]{36}$/);
+  assert.ok(fs.existsSync(path.join(optedIn.root, ".git", "twing-project-id")), "the opted-in repo is where that id is persisted");
+
+  // The foreign repo's paths are still captured (forward stickiness), they
+  // are simply never attributed to a project.
+  const paths = (record?.paths ?? []) as string[];
+  assert.ok(
+    paths.some((p) => p.startsWith(foreign.root)),
+    "the path is kept",
+  );
+  assert.equal(fs.existsSync(path.join(foreign.root, ".git", "twing-project-id")), false, "and no identity is minted inside a repo that never opted in");
 });

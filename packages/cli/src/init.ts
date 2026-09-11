@@ -25,6 +25,7 @@ import {
   getServerAuth,
   setServerAuth,
   writeConfig,
+  designActiveTtlMs,
   type Manifest,
 } from "@twing/core";
 import { ensureHookInstalled, ensureCliShim } from "./install-hook.js";
@@ -478,7 +479,30 @@ async function seedConstraints(
   // it can't stay silent just because there's nothing else to seed.
   // §17 Phase 4: and on a no-auth coordinator it's the *only* thing that
   // registers the project at all, so it fires there regardless.
-  if (manifest.constraints.length === 0 && reviewRules.length === 0 && !github && !noAuth) return;
+  // `settings:` (2026-09-11): parsed and range-checked here, on the one
+  // side that has a terminal to complain to -- `designActiveTtlMs` returns
+  // undefined for absent, unparseable and out-of-range alike, so compare
+  // against the raw literal to tell a real rejection from a file that
+  // simply doesn't set it. A rejected value is reported and then seeded as
+  // "no override": silently keeping whatever the coordinator already has
+  // would leave the admin believing the number they just wrote.
+  const dormantAfterRaw = manifest.settings.designDormantAfter;
+  const designTtlMs = designActiveTtlMs(manifest);
+  if (dormantAfterRaw !== undefined && designTtlMs === undefined) {
+    console.log(
+      `twing init: ignoring settings.designDormantAfter: ${dormantAfterRaw} -- expected a duration like "7d", "36h" or "90m", ` +
+        "between 5m and 90d (falling back to this coordinator's default dormancy window)",
+    );
+  }
+
+  // A `settings:` block counts as something to say, same as a constraint --
+  // otherwise a repo whose manifest holds nothing else (no constraints, no
+  // GitHub remote, authed coordinator) would silently never seed it. The
+  // converse, a repo that *deletes* its whole manifest down to nothing,
+  // still skips this call and so keeps its last seeded override: clearing
+  // needs the call to happen, and firing one for every genuinely empty
+  // manifest is what this guard exists to avoid.
+  if (manifest.constraints.length === 0 && reviewRules.length === 0 && dormantAfterRaw === undefined && !github && !noAuth) return;
 
   const projectId = computeProjectId(repoRoot);
   try {
@@ -500,6 +524,11 @@ async function seedConstraints(
             ...manifest.constraints.map((c) => ({ statement: c.text, scope: [c.scope], type: "constraint" as const })),
             ...reviewRules.map((r) => ({ statement: r.reason, scope: [(r.path ?? r.symbol)!], type: "constraint" as const })),
           ],
+          // Always sent, even empty -- the server treats a present
+          // `settings` as authoritative, so this is what lets deleting the
+          // block from the committed file actually clear the override
+          // rather than leaving the last seeded value in force forever.
+          settings: { designActiveTtlMs: designTtlMs },
         }),
       },
       authToken,
@@ -513,6 +542,9 @@ async function seedConstraints(
           ? "twing init: registered this repo with the coordinator (no constraints to seed yet) (§17)"
           : `twing init: seeded ${seeded} constraint(s) into the coordinator (§17)`,
       );
+      if (designTtlMs !== undefined) {
+        console.log(`twing init: designs in this project go dormant after ${dormantAfterRaw} of inactivity (settings.designDormantAfter)`);
+      }
     } else {
       // Found live, 2026-08-18: this used to always guess "older server, or
       // /v1/designs/* not deployed yet" -- actively misleading for the real

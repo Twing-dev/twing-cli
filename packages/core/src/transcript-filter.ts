@@ -33,12 +33,23 @@
  * this exists to route around.
  */
 
+import * as path from "node:path";
+
 /** One captured line. `turn` records carry conversation; `paths` records
  * carry the file paths a stretch of the session touched, batched rather
  * than one record per tool call. */
 export type CapturedRecord =
   | { type: "turn"; role: "user" | "assistant"; ts?: string; text: string }
-  | { type: "paths"; ts?: string; paths: string[] };
+  /** `projects` carries the twing `projectId` of every *opted-in* repo
+   * these paths landed in. It is recorded here because it cannot be
+   * recovered later: a projectId is derived from a repo's git remote, so
+   * only the machine holding the checkout can compute one. A server
+   * receiving this capture sees absolute paths it has no way to attribute.
+   *
+   * Scoped to opted-in repos on purpose. A repo that never consented gets
+   * no identity minted for it here, which also keeps `computeProjectId`
+   * from touching a checkout the developer never onboarded. */
+  | { type: "paths"; ts?: string; paths: string[]; projects?: string[] };
 
 export interface FilteredEntry {
   /** The conversation turn this entry contributed, if any. */
@@ -154,4 +165,54 @@ function collectPaths(input: unknown, out: string[]): void {
     if (PATH_KEYS.has(key) && typeof value === "string" && value.length > 0) out.push(value);
     else if (value && typeof value === "object") collectPaths(value, out);
   }
+}
+
+/**
+ * Resolves a filesystem path to the root of the repository containing it,
+ * or `undefined` when it is not inside one.
+ *
+ * Injected rather than imported so this module keeps the no-I/O contract in
+ * its header: finding a repo root means walking the filesystem, and the
+ * daemon owns that along with the memoization it needs (a long session
+ * names the same few directories tens of thousands of times).
+ *
+ * `undefined` is load-bearing, and deliberately not `findRepoRoot`'s
+ * fall-back-to-the-path-itself: a file outside every repo -- Claude Code's
+ * own `~/.claude/plans/...`, a temp file -- has to read as "no repo", never
+ * as a repo of its own. Capture consent keys on repos, so inventing one
+ * would let an unrelated scratch file act like a project that never opted
+ * in. See `reposForEntry`.
+ */
+export type RepoResolver = (absPath: string) => string | undefined;
+
+/**
+ * Which repositories one filtered entry actually touched.
+ *
+ * The entry's own `cwd` is excluded on purpose, even though
+ * `filterTranscriptEntry` puts it in `paths` (it is a real path the session
+ * named). Every entry in a session carries the same cwd: in the 42,117-line
+ * transcript this was built against, all of them named `twing-cli` while
+ * the tool calls spanned three separate repos. Attributing on cwd would
+ * report one repo for an entire session and erase the cross-repo signal
+ * that capture consent depends on. The session's cwd repo is a separate
+ * input, applied once by the caller rather than per entry.
+ *
+ * Relative paths resolve against the entry's cwd. With no cwd there is
+ * nothing to resolve them against, so they are skipped rather than guessed
+ * at -- a wrong guess here misattributes a touch, which is the one error
+ * this function must not make.
+ */
+export function reposForEntry(entry: FilteredEntry, resolve: RepoResolver): string[] {
+  const repos: string[] = [];
+  for (const candidate of entry.paths) {
+    if (candidate === entry.cwd) continue;
+    let absPath = candidate;
+    if (!path.isAbsolute(absPath)) {
+      if (!entry.cwd) continue;
+      absPath = path.resolve(entry.cwd, absPath);
+    }
+    const root = resolve(absPath);
+    if (root !== undefined && !repos.includes(root)) repos.push(root);
+  }
+  return repos;
 }

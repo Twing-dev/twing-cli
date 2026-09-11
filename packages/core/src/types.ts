@@ -86,13 +86,39 @@ export interface Finding {
  * stale-sibling notice for the fast/precise "session visibly moved on"
  * case, which fires immediately instead of waiting out any inactivity
  * window. A starting knob, not a load-bearing constant (same spirit as
- * `DEFAULT_CLAIM_TTL_MS` above never having needed elaborate justification).
+ * `DEFAULT_CLAIM_TTL_MS` above never having needed elaborate justification)
+ * -- and as of 2026-09-11 an admin-tweakable one: a project's own
+ * `.twing/twing.yml` can override it per project via `settings:
+ * designDormantAfter` (`manifest.ts`'s `designActiveTtlMs`, seeded to the
+ * coordinator by `init` and applied as the registration default in
+ * `app.ts`). This constant is what a project that says nothing gets.
+ * Raised 12h -> 7d the same day: 12 hours was under a single working day,
+ * so a design registered before an overnight break or a weekend was
+ * routinely dormant by the time the same session came back to it, and the
+ * fast/precise "session visibly moved on" signal (the registration-time
+ * stale-sibling notice in `app.ts`) was already carrying the case this
+ * window was nominally for.
  * Named `DEFAULT_DESIGN_TTL_MS` prior to the lifecycle work. */
-export const DEFAULT_DESIGN_ACTIVE_TTL_MS = 12 * 60 * 60 * 1000;
+export const DEFAULT_DESIGN_ACTIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** How long a `dormant` design can sit with no activity before it's
- * terminally `"expired"` -- server-wide only, no per-design override (§17
- * design lifecycle, 2026-08). Generous on purpose: dormant designs are
+/** Bounds on a project's `settings: designDormantAfter` override
+ * (2026-09-11). Not a safety property -- a design lingering too long is
+ * advisory noise, not a breach -- just a guard against a typo'd unit
+ * ("7" minutes meant as days, "365d" meant as "never") silently becoming
+ * this project's real dormancy policy. Both the parse side
+ * (`manifest.ts`'s `designActiveTtlMs`) and the server's seed route check
+ * against these, so a value out of range is refused rather than clamped:
+ * quietly substituting a different number is how an admin ends up
+ * believing a policy that isn't running. */
+export const MIN_DESIGN_ACTIVE_TTL_MS = 5 * 60 * 1000;
+export const MAX_DESIGN_ACTIVE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** How long a `dormant` design can sit before it's terminally `"expired"`
+ * -- server-wide only, no per-design and no per-project override (§17
+ * design lifecycle, 2026-08). Counted from the moment it went dormant, not
+ * from its last activity (`sweepExpired`, 2026-09-11: see that method's own
+ * comment -- sharing the basis with the active window made one window's
+ * length quietly shorten the other's). Generous on purpose: dormant designs are
  * cheap (excluded from `openDesigns()`'s pairwise-comparison set) and
  * fully resumable via `DesignRegistry.resume()`, so there's little cost to
  * giving a paused project a real chance to come back. */

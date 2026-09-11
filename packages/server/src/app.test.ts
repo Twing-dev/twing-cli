@@ -5,12 +5,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import type { Claim } from "@twing/core";
+import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS } from "@twing/core";
 import { createApp } from "./app.js";
 import { createDb } from "./db/client.js";
 import { IdentityStore } from "./identity-store.js";
 import { Store } from "./store.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
 import { AlignmentThreadStore } from "./alignment-store.js";
+import { CaptureStore } from "./capture-store.js";
 
 function sha256Hex(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -63,6 +65,12 @@ function freshApp(options: { corsOrigins?: string[]; version?: string; publicPro
   const designs = new DesignRegistry(db);
   const constraints = new ConstraintStore(db);
   const alignmentThreads = new AlignmentThreadStore(db);
+  // Injected with a temp blob directory: `CaptureStore`'s default is the
+  // real `~/.twing/serve-data/captures`, and `createApp` only overrides it
+  // when handed a dataDir (which this harness deliberately doesn't pass, to
+  // keep the DB in memory). Without this every route test would append to
+  // the developer's actual server data.
+  const captures = new CaptureStore(db, { capturesDir: path.join(dataDir, "captures") });
   const app = createApp({
     db,
     identities,
@@ -70,11 +78,12 @@ function freshApp(options: { corsOrigins?: string[]; version?: string; publicPro
     designs,
     constraints,
     alignmentThreads,
+    captures,
     corsOrigins: options.corsOrigins,
     version: options.version,
     publicProjectIds: options.publicProjectIds,
   });
-  return { app, dataDir, identities, store, designs, constraints, alignmentThreads };
+  return { app, dataDir, identities, store, designs, constraints, alignmentThreads, captures };
 }
 
 function bootstrapToken(dataDir: string): string {
@@ -996,6 +1005,162 @@ test("POST /v1/constraints/seed: an already-founded project's constraint change 
     body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "use pkg/retry", scope: ["**"] }] }),
   });
   assert.equal(allowedRes.status, 200, await allowedRes.text());
+});
+
+// --- settings: designActiveTtlMs ----------------------------------------------
+
+test("POST /v1/constraints/seed: a project's seeded settings.designActiveTtlMs becomes the ttlMs of designs registered after it", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const before = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s0", summary: "before the setting", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const beforeBody = (await before.json()) as { designId: string };
+  assert.equal(designs.get(beforeBody.designId)?.ttlMs, DEFAULT_DESIGN_ACTIVE_TTL_MS, "no setting seeded yet -- the built-in default applies");
+
+  const seedRes = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [], settings: { designActiveTtlMs: 36 * 60 * 60 * 1000 } }),
+  });
+  assert.equal(seedRes.status, 200, await seedRes.text());
+
+  const after = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "after the setting", creates: ["b.ts"], touches: [], dependsOn: [] }),
+  });
+  const afterBody = (await after.json()) as { designId: string };
+  assert.equal(designs.get(afterBody.designId)?.ttlMs, 36 * 60 * 60 * 1000);
+  // Changed 2026-09-11 from "an already-registered design keeps the window
+  // it was created with": freezing `ttlMs` at registration meant a
+  // *tightening* took the length of the old window to start working, so a
+  // seed now re-times the project's live designs too
+  // (`retimeActiveDesigns`). The two halves -- re-time on seed, resolve on
+  // registration -- cover the whole population between them.
+  assert.equal(designs.get(beforeBody.designId)?.ttlMs, 36 * 60 * 60 * 1000, "a design that was already open moves onto the new window as well");
+});
+
+test("POST /v1/constraints/seed: seeding a new window re-times the project's already-live designs", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const DAY = 24 * 60 * 60 * 1000;
+  const seedTtl = (designActiveTtlMs?: number) =>
+    app.request("/v1/constraints/seed", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ projectId: "proj-1", constraints: [], settings: { designActiveTtlMs } }),
+    });
+
+  await seedTtl(5 * DAY);
+  const res = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "in flight", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const { designId } = (await res.json()) as { designId: string };
+  assert.equal(designs.get(designId)?.ttlMs, 5 * DAY);
+
+  // Tightening has to reach the design that's already open, not just the
+  // ones registered from here on -- otherwise an admin shortening the
+  // window because stale designs are already a problem waits out the old
+  // window before the fix starts working.
+  await seedTtl(3 * DAY);
+  assert.equal(designs.get(designId)?.ttlMs, 3 * DAY);
+
+  // ...and clearing it is symmetric: back to the built-in default.
+  await seedTtl(undefined);
+  assert.equal(designs.get(designId)?.ttlMs, DEFAULT_DESIGN_ACTIVE_TTL_MS);
+});
+
+test("POST /v1/constraints/seed: a rejected settings value re-times nothing -- the whole request fails before any write", async () => {
+  const { app, dataDir, designs, constraints } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [], settings: { designActiveTtlMs: 36 * 60 * 60 * 1000 } }),
+  });
+  const res = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "in flight", creates: ["a.ts"], touches: [], dependsOn: [] }),
+  });
+  const { designId } = (await res.json()) as { designId: string };
+
+  const bad = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      projectId: "proj-1",
+      constraints: [{ statement: "should not land", scope: ["**"] }],
+      settings: { designActiveTtlMs: MAX_DESIGN_ACTIVE_TTL_MS + 1 },
+    }),
+  });
+  assert.equal(bad.status, 400);
+  assert.equal(designs.get(designId)?.ttlMs, 36 * 60 * 60 * 1000, "the live design keeps its window");
+  assert.ok(
+    !constraints.forProject("proj-1").some((c) => c.statement === "should not land"),
+    "validation runs before any write, so a bad settings value rejects the constraints in the same request too",
+  );
+});
+
+test("POST /v1/constraints/seed: a present-but-empty settings clears the override, an absent one leaves it alone", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const seed = (body: Record<string, unknown>) =>
+    app.request("/v1/constraints/seed", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ projectId: "proj-1", constraints: [], ...body }),
+    });
+
+  await seed({ settings: { designActiveTtlMs: 36 * 60 * 60 * 1000 } });
+  assert.equal(identities.getProjectRecord("proj-1")?.designActiveTtlMs, 36 * 60 * 60 * 1000);
+
+  // An older CLI that predates settings omits the key entirely -- it must
+  // not silently wipe what an admin on a current CLI seeded.
+  await seed({});
+  assert.equal(identities.getProjectRecord("proj-1")?.designActiveTtlMs, 36 * 60 * 60 * 1000, "an absent settings key means 'I have nothing to say', not 'clear it'");
+
+  // Deleting the settings block from the committed file has to actually
+  // take effect, the same way deleting a constraint from it does.
+  await seed({ settings: {} });
+  assert.equal(identities.getProjectRecord("proj-1")?.designActiveTtlMs, undefined);
+});
+
+test("POST /v1/constraints/seed: an out-of-range designActiveTtlMs is a 400, never clamped or stored", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const res = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [], settings: { designActiveTtlMs: MAX_DESIGN_ACTIVE_TTL_MS + 1 } }),
+  });
+  assert.equal(res.status, 400);
+  assert.equal(identities.getProjectRecord("proj-1")?.designActiveTtlMs, undefined);
+});
+
+test("POST /v1/constraints/seed: changing a settings value on an already-founded project requires admin, same as a constraint", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [] }),
+  });
+  const memberPat = await addProjectMember(app, admin.token, "proj-1");
+
+  const denied = await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(memberPat) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [], settings: { designActiveTtlMs: 60 * 60 * 1000 } }),
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(identities.getProjectRecord("proj-1")?.designActiveTtlMs, undefined, "a plain member must not be able to re-time the whole project's designs");
 });
 
 // --- DELETE /v1/constraints/:id -----------------------------------------------
@@ -5012,6 +5177,109 @@ test("GET /v1/designs: an unauthenticated request 401s exactly as before when pu
 
   const res = await app.request("/v1/designs?projectId=proj-1");
   assert.equal(res.status, 401);
+});
+
+// ---------------------------------------------------------------------------
+// POST /v1/captures -- session capture ingest (write-only)
+// ---------------------------------------------------------------------------
+
+test("POST /v1/captures stores a batch under the authenticated developer", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/captures", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      sessionId: "sess-1",
+      records: [{ type: "turn", role: "user", text: "why does the gate fail closed?" }],
+      projectIds: ["proj-a"],
+    }),
+  });
+
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { developerId: string; recordCount: number; projectIds: string[] };
+  assert.equal(body.developerId, admin.developerId, "attribution comes from the token, never the request body");
+  assert.equal(body.recordCount, 1);
+  assert.deepEqual(body.projectIds, ["proj-a"]);
+});
+
+// §17.10: developerId is resolved from the bearer token on every write. A
+// client claiming to be someone else must not be able to write into their
+// captures.
+test("POST /v1/captures ignores a client-supplied developerId", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/captures", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ sessionId: "sess-2", developerId: "somebody-else", records: [{ n: 1 }] }),
+  });
+
+  const body = (await res.json()) as { developerId: string };
+  assert.equal(body.developerId, admin.developerId);
+});
+
+test("POST /v1/captures requires authentication", async () => {
+  const { app } = freshApp();
+
+  const res = await app.request("/v1/captures", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: "sess-3", records: [{ n: 1 }] }),
+  });
+
+  assert.equal(res.status, 401);
+});
+
+test("POST /v1/captures rejects a malformed body", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  for (const body of [{}, { sessionId: "" , records: [] }, { sessionId: "s", records: "not an array" }]) {
+    const res = await app.request("/v1/captures", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify(body),
+    });
+    assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(body)}`);
+  }
+});
+
+test("POST /v1/captures caps how much arrives in one request", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const res = await app.request("/v1/captures", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ sessionId: "sess-4", records: Array.from({ length: 5001 }, (_, n) => ({ n })) }),
+  });
+
+  assert.equal(res.status, 413);
+});
+
+// The store is a sink until distillation is designed: no route reads it back
+// and none deletes from it. This asserts that absence, so adding one becomes
+// a deliberate act rather than a drift.
+test("there is no route to read or delete a capture", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await app.request("/v1/captures", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ sessionId: "sess-5", records: [{ n: 1 }] }),
+  });
+
+  for (const [method, path] of [
+    ["GET", "/v1/captures"],
+    ["GET", "/v1/captures/sess-5"],
+    ["DELETE", "/v1/captures/sess-5"],
+  ] as const) {
+    const res = await app.request(path, { method, headers: bearer(admin.token) });
+    assert.equal(res.status, 404, `${method} ${path} should not exist`);
+  }
 });
 
 // --- GitHub sign-in for the dashboard ---------------------------------------

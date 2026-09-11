@@ -452,6 +452,85 @@ test("runInit: --no-auth with an empty manifest still calls /v1/constraints/seed
   });
 });
 
+/** Same shape as `headerCapturingFetch` but keeps the seed call's parsed
+ * body, for the `settings:` assertions below. */
+function bodyCapturingFetch(): { fetch: typeof fetch; seedBodies: Record<string, unknown>[] } {
+  const seedBodies: Record<string, unknown>[] = [];
+  const impl = (async (url: string | URL, init?: RequestInit) => {
+    const u = String(url);
+    if (/\/$/.test(u)) return textResponse("twing serve");
+    if (/\/v1\/constraints\/seed$/.test(u)) {
+      seedBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return jsonResponse({ seeded: 0 });
+    }
+    throw new Error(`bodyCapturingFetch: no route for ${u}`);
+  }) as typeof fetch;
+  return { fetch: impl, seedBodies };
+}
+
+function writeManifest(repo: string, yaml: string): void {
+  fs.mkdirSync(path.join(repo, ".twing"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".twing", "twing.yml"), yaml);
+}
+
+test("runInit: seeds the repo's settings.designDormantAfter to the coordinator as milliseconds", async () => {
+  const { fetch, seedBodies } = bodyCapturingFetch();
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo();
+    writeManifest(repo, `coordinator:\n  serverUrl: ${SERVER_URL}\nsettings:\n  designDormantAfter: 36h\n`);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, noAuth: true }, deps)));
+
+    assert.deepEqual(seedBodies[0]?.settings, { designActiveTtlMs: 36 * 60 * 60 * 1000 });
+    assert.ok(logs.some((l) => l.includes("dormant after 36h")), `expected init to report the window it seeded, got: ${logs.join(" | ")}`);
+  });
+});
+
+test("runInit: a manifest with no settings block seeds an empty settings, so deleting the block clears the override", async () => {
+  const { fetch, seedBodies } = bodyCapturingFetch();
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo(SERVER_URL); // coordinator only, no settings block
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, noAuth: true }, deps)));
+    // `JSON.stringify` drops the undefined value, so this lands on the wire
+    // as a present-but-empty `settings` object -- exactly the shape the
+    // server reads as "clear it", as opposed to the key being absent.
+    assert.deepEqual(seedBodies[0]?.settings, {}, "present-but-empty, which the server reads as 'clear it'");
+    assert.ok("settings" in seedBodies[0]!, "the key itself must be present -- an absent one means 'leave it alone'");
+  });
+});
+
+test("runInit: a settings-only manifest still seeds -- the empty-manifest shortcut must not skip it", async () => {
+  const { fetch, seedBodies } = bodyCapturingFetch();
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    // No constraints, no require_human_review, no GitHub remote, and a real
+    // (non-no-auth) coordinator -- every other reason to make this call is
+    // absent, so only the settings block can be what triggers it.
+    const repo = tmpRepo();
+    writeManifest(repo, `coordinator:\n  serverUrl: ${SERVER_URL}\nsettings:\n  designDormantAfter: 36h\n`);
+    cacheToken(SERVER_URL, "a-pat");
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    assert.deepEqual(seedBodies[0]?.settings, { designActiveTtlMs: 36 * 60 * 60 * 1000 });
+  });
+});
+
+test("runInit: an unparseable settings.designDormantAfter is reported and seeded as no override, not silently dropped", async () => {
+  const { fetch, seedBodies } = bodyCapturingFetch();
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo();
+    writeManifest(repo, `coordinator:\n  serverUrl: ${SERVER_URL}\nsettings:\n  designDormantAfter: 7\n`);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, noAuth: true }, deps)));
+
+    assert.ok(
+      logs.some((l) => l.includes("ignoring settings.designDormantAfter")),
+      `an admin who typo'd the unit has to hear about it, got: ${logs.join(" | ")}`,
+    );
+    assert.deepEqual(seedBodies[0]?.settings, {});
+  });
+});
+
 test("runInit: a second plain `twing init` against an already-cached no-auth server still fires the registration call", async () => {
   const { fetch, calls } = headerCapturingFetch();
   const { deps } = fakeDeps();

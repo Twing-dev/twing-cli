@@ -10,7 +10,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { and, eq, lt, isNull, isNotNull, sql } from "drizzle-orm";
+import { and, eq, ne, lt, isNull, isNotNull, sql } from "drizzle-orm";
 import {
   DEFAULT_DESIGN_ACTIVE_TTL_MS,
   DEFAULT_DESIGN_DORMANT_TTL_MS,
@@ -1108,6 +1108,56 @@ export class DesignRegistry {
     return this.getReview(id);
   }
 
+  /**
+   * Re-times every live design in a project to `ttlMs` -- the in-flight
+   * half of a `settings: designDormantAfter` change (2026-09-11). Called
+   * by `/v1/constraints/seed` right after the new value is stored; designs
+   * registered *after* that point pick the setting up at registration
+   * instead (`app.ts`), so between the two there's no window a design can
+   * be created in and miss it.
+   *
+   * Exists because freezing `ttlMs` at registration makes a *tightening*
+   * take as long as the old window to bite: an admin who drops 5d -> 3d
+   * because stale designs are already a problem would wait five more days
+   * for the fix to start working, which is the opposite of what they asked
+   * for. Clearing the setting re-times to `DEFAULT_DESIGN_ACTIVE_TTL_MS`,
+   * symmetrically -- the caller resolves that, this method just takes the
+   * number.
+   *
+   * Three deliberate limits:
+   *
+   * - **`open`/`flagged` only.** A `dormant` design is already past its
+   *   active window, and since expiry is `lastActivityAt + ttlMs +
+   *   DEFAULT_DESIGN_DORMANT_TTL_MS`, re-timing one would move its *expiry*
+   *   -- so tightening the dormancy window would retroactively kill designs
+   *   that already went dormant under the old one. "How long until dormant"
+   *   shouldn't quietly mean "how long until deleted."
+   * - **`lastActivityAt` is not touched.** Every window is measured from
+   *   it, so counting a re-time as activity would make tightening *extend*
+   *   a design's life instead of shortening it. This updates exactly one
+   *   column.
+   * - **Rows already on `ttlMs` are skipped** (the `ne` below), so the
+   *   common case -- `twing init` re-run with an unchanged manifest --
+   *   writes nothing and logs nothing. Returns the number of designs
+   *   actually re-timed, which is 0 far more often than not.
+   */
+  retimeActiveDesigns(projectId: string, ttlMs: number): number {
+    const result = this.db
+      .update(designsTable)
+      .set({ ttlMs })
+      .where(and(eq(designsTable.projectId, projectId), sql`${designsTable.status} IN ('open', 'flagged')`, ne(designsTable.ttlMs, ttlMs)))
+      .run();
+    const designCount = result.changes;
+    if (designCount === 0) return 0;
+    this.activityLog.append({
+      projectId,
+      kind: "design_retimed",
+      ts: Date.now(),
+      payload: { ttlMs, designCount },
+    });
+    return designCount;
+  }
+
   /** Two-stage sweep (§17 design lifecycle, 2026-08 -- previously a single
    * open/flagged-straight-to-expired pass keyed off `createdAt`):
    *
@@ -1115,8 +1165,25 @@ export class DesignRegistry {
    *    `"dormant"` -- not closed, still fully addressable
    *    (`resolve`/`amend`/`resume`), just excluded from `openDesigns()`'s
    *    pairwise-comparison set. This is the actual n² fix.
-   * 2. `"dormant"` designs with no activity for
-   *    `DEFAULT_DESIGN_DORMANT_TTL_MS` terminally expire, same as before.
+   * 2. `"dormant"` designs terminally expire `DEFAULT_DESIGN_DORMANT_TTL_MS`
+   *    after they went dormant -- i.e. at `lastActivityAt + ttlMs +
+   *    DEFAULT_DESIGN_DORMANT_TTL_MS`. No stored went-dormant timestamp is
+   *    needed for that, since stage 1 fires at exactly `lastActivityAt +
+   *    ttlMs` by construction.
+   *
+   *    Was `lastActivityAt + DEFAULT_DESIGN_DORMANT_TTL_MS` until
+   *    2026-09-11, which measured both stages from the same instant and so
+   *    made the dormant grace period `DORMANT_TTL - ttlMs` rather than
+   *    `DORMANT_TTL`. That was invisible while `ttlMs` was 12h against a
+   *    7d dormant TTL (a ~6.5d grace period, near enough), but it isn't a
+   *    rounding difference: raising the active window to the same 7d
+   *    collapses the grace period to zero, expiring a design in the very
+   *    sweep pass that made it dormant and taking `resume()` -- the entire
+   *    reason dormancy is a distinct state from closed -- with it. A
+   *    project setting a longer window than the default (`settings:
+   *    designDormantAfter`, up to `MAX_DESIGN_ACTIVE_TTL_MS`) would have
+   *    inverted the two stages outright. The two windows compose now, so
+   *    neither one's value can silently eat the other.
    *
    * Both stages key off `lastActivityAt`, not `createdAt` -- genuinely
    * active work never dies just for being old.
@@ -1148,7 +1215,12 @@ export class DesignRegistry {
     const expiring = this.db
       .select()
       .from(designsTable)
-      .where(and(eq(designsTable.status, "dormant"), sql`${designsTable.lastActivityAt} + ${DEFAULT_DESIGN_DORMANT_TTL_MS} <= ${now}`))
+      .where(
+        and(
+          eq(designsTable.status, "dormant"),
+          sql`${designsTable.lastActivityAt} + ${designsTable.ttlMs} + ${DEFAULT_DESIGN_DORMANT_TTL_MS} <= ${now}`,
+        ),
+      )
       .all() as DesignRow[];
     for (const row of expiring) {
       this.db.update(designsTable).set({ status: "expired", closedAt: now }).where(eq(designsTable.id, row.id)).run();
