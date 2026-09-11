@@ -158,6 +158,36 @@ second-admin-approves-first staged flow. That's a real gap (an admin could
 narrow away a rule nobody else agreed to loosen) tracked as separate
 follow-up work, not yet built.
 
+### Project settings
+
+`.twing/twing.yml` also carries a `settings:` block for the knobs a
+project's admins may want to tune. It reaches the coordinator the same way
+`constraints:` does -- pushed by `twing init`, which requires project
+`admin` role on an already-founded project -- so an edit only takes effect
+once someone with admin runs `init` on it:
+
+```yaml
+settings:
+  # How long a design can sit with no activity before the coordinator
+  # demotes it to `dormant` (excluded from conflict checks, still resumable
+  # with `twing design resume`). Default 7d; between 5m and 90d.
+  designDormantAfter: 7d
+```
+
+Durations are an integer plus `s`/`m`/`h`/`d` -- `7d`, `36h`, `90m`. A
+value that's unparseable or out of range is reported by `init` and ignored
+rather than rounded into range, and dropping the block entirely puts the
+project back on the default.
+
+Changing the window takes effect immediately, including for designs that
+are already open -- seeding re-times the project's live designs as well as
+setting the default for new ones, so shortening it doesn't wait out the old
+window before it starts working. Designs that have already gone dormant are
+left alone: their expiry is measured from the active window, so re-timing
+them would retroactively delete work that went quiet under the old policy.
+Once a design does go dormant it stays resumable for a further week before
+expiring for good, independently of this setting.
+
 ## Install enforcement
 
 Separate from the design-conflict gate above, and a lot simpler: whoever

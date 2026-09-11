@@ -78,6 +78,25 @@ export const projectRecords = sqliteTable("project_records", {
   // afterward.
   githubOwner: text("github_owner"),
   githubRepo: text("github_repo"),
+  // Project-level override for DEFAULT_DESIGN_ACTIVE_TTL_MS (2026-09-11),
+  // seeded from the repo's committed `.twing/twing.yml` `settings:` block
+  // by `twing init` (POST /v1/constraints/seed, the same admin-gated call
+  // that seeds constraints) and read once, at design-registration time, in
+  // app.ts. Nullable with no default, per this schema's usual convention:
+  // absent means "this project never set one," which is what every project
+  // founded before this shipped has, and leaves the built-in default in
+  // force. Lives on project_records rather than in a settings table of its
+  // own because there is exactly one setting -- a table can be introduced
+  // later if a second one appears, and this column migrated into it then.
+  //
+  // Stored per project, not per design. Changing it applies immediately in
+  // both directions: designs registered afterward pick it up at
+  // registration (app.ts), and designs already open are re-timed in place
+  // by DesignRegistry.retimeActiveDesigns. Designs that already went
+  // dormant keep their old designs.ttl_ms -- expiry is measured from the
+  // active window, so re-timing those would retroactively expire work that
+  // went quiet under the previous policy.
+  designActiveTtlMs: integer("design_active_ttl_ms"),
 });
 
 export const projectMemberships = sqliteTable(

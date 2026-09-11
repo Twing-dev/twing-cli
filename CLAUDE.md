@@ -150,7 +150,16 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     `design *` and by the Go hook to know where to send everything else.
     `upsertCoordinatorServerUrl` (comment-preserving, `yaml.parseDocument`)
     is what `init` uses to bootstrap/update that field without disturbing
-    the rest of the file. `capture.enabled` (2026-09) is the session-capture
+    the rest of the file. `settings` (2026-09-11) is a third kind again:
+    uploaded by `init`'s seed like `constraints`, but then acted on *only*
+    server-side, never locally -- one key so far,
+    `settings.designDormantAfter` (`designActiveTtlMs`, a duration string
+    range-checked against `MIN`/`MAX_DESIGN_ACTIVE_TTL_MS`), which
+    overrides `DEFAULT_DESIGN_ACTIVE_TTL_MS` per project. Seeding rather
+    than sending it per-registration is what keeps the Go hook -- which
+    registers most designs via `ExitPlanMode` -- reading nothing and
+    deciding nothing (§4), and makes "admin can tweak it" enforceable,
+    since the seed route requires project `admin` role. `capture.enabled` (2026-09) is the session-capture
     opt-in, and `captureEnabled()` reads it strictly — only a literal `true`
     counts, so a missing file, a missing block, or an unreadable manifest
     all mean off. Consent has to come from a committed file somebody
@@ -360,7 +369,22 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     `resolveSemanticCheckModel` read `TWING_<PROVIDER>_EXTRACT_MODEL` /
     `TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL` with a provider-appropriate
     default. Missing/misconfigured credentials fail soft to "clean", never
-    deny over it). `/v1/constraints/match` is
+    deny over it). `/v1/constraints/seed` also carries the repo's `settings:`
+    block (2026-09-11) -- same committed-file-pushed-by-`init` nature as
+    constraints, same admin gate, so it rides that call rather than a route
+    of its own; it lands on `project_records.design_active_ttl_ms` and
+    `app.ts` resolves it as the registration-time default for
+    `DesignStatement.ttlMs` -- paired with
+    `DesignRegistry.retimeActiveDesigns`, which moves the project's
+    already-open designs onto the new window in the same request (dormant
+    ones deliberately excluded: their expiry is measured from the active
+    window, so re-timing them would retroactively expire them). The two
+    together are what make a settings change take effect immediately
+    instead of after the old window runs out.
+    A present-but-empty `settings` clears the
+    override (deleting the block from the file has to take effect); an
+    *absent* one leaves it alone (an older CLI that predates settings must
+    not wipe it). `/v1/constraints/match` is
     the §17.9 ground-truth backstop: checks the literal file path against the
     Constraint Store directly, independent of what the session's registered
     design claims to touch (closes a bypass where a session registers an

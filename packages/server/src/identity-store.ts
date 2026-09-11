@@ -74,6 +74,12 @@ export interface ProjectRecord {
    * on the underlying columns). */
   githubOwner?: string;
   githubRepo?: string;
+  /** This project's own dormancy window for designs, in ms (2026-09-11) --
+   * seeded from its committed `.twing/twing.yml` `settings:` block. Absent
+   * means the project never set one and `DEFAULT_DESIGN_ACTIVE_TTL_MS`
+   * applies; see `setDesignActiveTtlMs` below and schema.ts's column
+   * comment. */
+  designActiveTtlMs?: number;
 }
 
 export interface ProjectMembership {
@@ -485,7 +491,29 @@ export class IdentityStore {
   getProjectRecord(projectId: string): ProjectRecord | undefined {
     const row = this.db.select().from(projectRecordsTable).where(eq(projectRecordsTable.projectId, projectId)).get();
     if (!row) return undefined;
-    return { ...row, orgId: row.orgId ?? undefined, githubOwner: row.githubOwner ?? undefined, githubRepo: row.githubRepo ?? undefined };
+    return toProjectRecord(row);
+  }
+
+  /**
+   * Sets (or clears, with `undefined`) this project's design-dormancy
+   * override -- the seed route's half of `.twing/twing.yml`'s `settings:`
+   * block, 2026-09-11. Clearing on an absent setting is the point, not an
+   * afterthought: deleting the block from the committed file and re-running
+   * `twing init` has to actually put the project back on the built-in
+   * default, the same way `/v1/constraints/seed` is what makes the
+   * committed constraint list authoritative.
+   *
+   * No-op for a project that was never founded -- `null` for a row that
+   * doesn't exist is already what `getProjectRecord` reports, and the seed
+   * route founds before it gets here anyway. Range-checking belongs to the
+   * caller (`app.ts`, which can answer with a 400); this just stores.
+   */
+  setDesignActiveTtlMs(projectId: string, ttlMs: number | undefined): void {
+    this.db
+      .update(projectRecordsTable)
+      .set({ designActiveTtlMs: ttlMs ?? null })
+      .where(eq(projectRecordsTable.projectId, projectId))
+      .run();
   }
 
   /** Every project record on this coordinator, unscoped. Only for the §17
@@ -498,7 +526,7 @@ export class IdentityStore {
       .select()
       .from(projectRecordsTable)
       .all()
-      .map((row) => ({ ...row, orgId: row.orgId ?? undefined, githubOwner: row.githubOwner ?? undefined, githubRepo: row.githubRepo ?? undefined }));
+      .map(toProjectRecord);
   }
 
   /** §boundary-1: the first PAT-holding developer to touch a never-seen
@@ -677,4 +705,18 @@ export class IdentityStore {
       .all()
       .map((m) => ({ projectId: m.projectId, developerId: m.developerId, role: m.role as Role }));
   }
+}
+
+/** The one row -> `ProjectRecord` mapping, shared by `getProjectRecord` and
+ * `listAllProjectRecords` -- they had drifted apart once already when
+ * `githubOwner`/`githubRepo` landed, and every nullable column added here
+ * has to be normalized to `undefined` in both. */
+function toProjectRecord(row: typeof projectRecordsTable.$inferSelect): ProjectRecord {
+  return {
+    ...row,
+    orgId: row.orgId ?? undefined,
+    githubOwner: row.githubOwner ?? undefined,
+    githubRepo: row.githubRepo ?? undefined,
+    designActiveTtlMs: row.designActiveTtlMs ?? undefined,
+  };
 }

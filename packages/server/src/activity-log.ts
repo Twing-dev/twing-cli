@@ -99,7 +99,20 @@ export type ActivityEventKind =
    * method's own doc comment). Logged under the *new* project; the
    * design's earlier `design_registered`/`design_checked` rows correctly
    * stay under the old one, per this table's insert-only convention. */
-  | "design_reassigned";
+  | "design_reassigned"
+  /** A project's `settings: designDormantAfter` changed and every one of
+   * its live (open/flagged) designs was re-timed to the new window
+   * (2026-09-11, `DesignRegistry.retimeActiveDesigns`). Deliberately **one
+   * row per re-timing, not per design** -- the only break from this
+   * table's usual one-row-per-entity convention. A re-time is a single
+   * administrative act on the project, `twing init` re-runs it every time
+   * it's invoked, and a project with fifty open designs would otherwise
+   * emit fifty identical rows per run and drown the feed it's meant to
+   * make readable. `relatedId` is therefore absent (no single entity to
+   * point at) and the payload carries `{ttlMs, designCount}` instead.
+   * Only ever appended when something actually changed -- re-seeding an
+   * unchanged value logs nothing at all. */
+  | "design_retimed";
 
 export interface ActivityEvent {
   id: string;

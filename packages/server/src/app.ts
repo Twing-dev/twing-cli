@@ -12,6 +12,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Claim, CallEdge, DesignStatement, DesignConstraintType, Finding, PendingReview } from "@twing/core";
+import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
 import { findClaimConflicts, type ClaimFindingMatch } from "./checks.js";
@@ -122,6 +123,14 @@ interface SeedRequestBody {
    * never updated on a re-seed of an already-founded project. */
   githubOwner?: string;
   githubRepo?: string;
+  /** The repo's committed `settings:` block (2026-09-11), already parsed
+   * and range-checked client-side by `init.ts` (`designActiveTtlMs`,
+   * @twing/core's manifest.ts) -- re-checked here anyway, since a client
+   * is not a trust boundary. Distinguish absent from `{}`: an old CLI that
+   * doesn't know about settings omits the key entirely and must leave a
+   * project's stored setting alone, whereas a current CLI whose manifest
+   * has no `settings:` block sends `{}` and means "clear it." */
+  settings?: { designActiveTtlMs?: number };
 }
 
 interface JoinViaGithubRequestBody {
@@ -1300,7 +1309,18 @@ export function createApp(options: CreateAppOptions = {}) {
       // No truncation (dropped 2026-08-18, was capped at 2000 chars) -- see
       // DesignStatement.rawPlanExcerpt's doc comment in @twing/core for why.
       rawPlanExcerpt: body.rawPlanText,
-      ttlMs: body.ttlMs,
+      // An explicit per-registration `ttlMs` still wins (nothing sends one
+      // today); otherwise this project's own seeded `settings:` value, and
+      // only then DesignRegistry's built-in default. Resolved here rather
+      // than inside `register()` so the store keeps taking a plain number
+      // and stays unaware of the identity tables.
+      //
+      // This is one of the two halves that make a settings change complete:
+      // designs registered from here on get the value at registration, and
+      // designs already open get re-timed when it's seeded
+      // (`retimeActiveDesigns`, called from /v1/constraints/seed). Neither
+      // alone covers the whole population.
+      ttlMs: body.ttlMs ?? identities.getProjectRecord(body.projectId)?.designActiveTtlMs,
       groupId: body.groupId,
     });
 
@@ -2243,7 +2263,38 @@ export function createApp(options: CreateAppOptions = {}) {
     // compatibility (old CLI builds still send it) but no longer branches
     // on anything -- `DesignConstraintType` collapsed to the single value
     // "constraint" (see DesignVerdict's doc comment in core/types.ts).
+    // `settings:` (2026-09-11) rides on this call rather than a route of
+    // its own because it's the same thing constraints are -- a committed
+    // file's contents, pushed by the admin-gated `twing init` -- and
+    // splitting it out would mean a second round trip with an identical
+    // authorization check. Validated *before* anything is written, so a
+    // bad value rejects the whole request rather than half-applying it as
+    // "constraints seeded, settings 400."
+    const ttlMs = body.settings?.designActiveTtlMs;
+    if (ttlMs !== undefined && (!Number.isSafeInteger(ttlMs) || ttlMs < MIN_DESIGN_ACTIVE_TTL_MS || ttlMs > MAX_DESIGN_ACTIVE_TTL_MS)) {
+      return c.json({ error: `settings.designActiveTtlMs must be between ${MIN_DESIGN_ACTIVE_TTL_MS} and ${MAX_DESIGN_ACTIVE_TTL_MS} ms -- got ${ttlMs}` }, 400);
+    }
+
     const added = body.constraints.map((entry) => constraintStore.add(projectId, entry.statement, entry.scope, "constraint", "seeded"));
+    // Only an omitted `settings` key leaves the stored value alone (an old
+    // CLI that predates this); a present one is authoritative, so deleting
+    // the block from the committed file and re-running `init` clears the
+    // override rather than leaving the last seeded value in force forever.
+    if (body.settings !== undefined) {
+      identities.setDesignActiveTtlMs(projectId, ttlMs);
+      // ...and the project's already-live designs move with it, rather than
+      // running out the window they happened to be registered under (see
+      // `retimeActiveDesigns`). `?? DEFAULT` is what makes *clearing* the
+      // setting symmetric with setting it: both are a real re-time, not
+      // just a stored-value change. Designs registered after this point get
+      // the same number at registration, so the two halves cover the whole
+      // population between them.
+      const retimed = designs.retimeActiveDesigns(projectId, ttlMs ?? DEFAULT_DESIGN_ACTIVE_TTL_MS);
+      if (retimed > 0) {
+        console.log(`twing serve: re-timed ${retimed} live design(s) in project ${projectId.slice(0, 12)} to ttlMs=${ttlMs ?? DEFAULT_DESIGN_ACTIVE_TTL_MS}`);
+      }
+    }
+
     return c.json({ seeded: added.length });
   });
 
