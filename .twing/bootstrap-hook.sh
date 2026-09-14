@@ -1,13 +1,13 @@
 #!/bin/sh
 # twing-bootstrap-hook-v4
 #
-# Committed by `twing init` / `twing project enable-enforcement`. Every
-# clone of this repo coordinates through twing without anyone installing
-# anything: this script sets twing up on first use, then hands the real
-# decision to the installed binary.
+# Committed by `twing init` / `twing project enable-enforcement` / the
+# GitHub App setup flow. Every clone of this repo coordinates through twing
+# without anyone installing anything: this script sets twing up on first
+# use, then hands the real decision to the installed binary.
 #
 # Do not edit by hand -- it is regenerated wholesale, and a modified copy
-# is replaced the next time an admin re-runs either command above.
+# is replaced the next time an admin re-runs any of the above.
 #
 # $1 is the Claude Code hook event this entry is wired for.
 
@@ -36,6 +36,40 @@ if [ -z "$repo_root" ] || [ ! -f "$repo_root/.twing/twing.yml" ]; then
   exit 0
 fi
 
+twing_fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 10 "$1" 2>/dev/null
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- --timeout=10 "$1" 2>/dev/null
+  fi
+}
+
+# Installs twing for the repo at $1, pinned to that repo's coordinator.
+twing_install_for_repo() {
+  _root="$1"
+  _lib="$HOME/.twing/lib"
+  _cli="$_lib/node_modules/@twing/cli/dist/index.js"
+  _log="$HOME/.twing/bootstrap.log"
+  mkdir -p "$HOME/.twing"
+  echo "=== twing bootstrap $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" >> "$_log" 2>/dev/null
+
+  # coordinator.serverUrl straight out of the committed manifest.
+  _server=$(sed -n 's/^[[:space:]]*serverUrl:[[:space:]]*//p' "$_root/.twing/twing.yml" 2>/dev/null | head -1 | tr -d '"' | tr -d '\r')
+
+  _spec="@twing/cli@latest"
+  if [ -n "$_server" ]; then
+    # Two plain substitutions rather than a capture group: a sed
+    # backreference is an illegal octal escape inside the JS template
+    # literal this script is generated from.
+    _version=$(twing_fetch "$_server/v1/version" | sed -e 's/.*"version"[[:space:]]*:[[:space:]]*"//' -e 's/".*//')
+    [ -n "$_version" ] && _spec="@twing/cli@$_version"
+  fi
+  echo "twing: installing $_spec (coordinator $_server)" >> "$_log" 2>/dev/null
+
+  npm install --prefix "$_lib" "$_spec" --no-fund --no-audit --loglevel=error >> "$_log" 2>&1 </dev/null
+  [ -f "$_cli" ] && node "$_cli" init --unattended >> "$_log" 2>&1 </dev/null
+}
+
 # First use on a machine that has never run twing: set it up rather than
 # demanding someone else do it. Everything here is unprivileged -- the
 # install prefix is under $HOME (no sudo, unlike npm install -g), and
@@ -45,11 +79,8 @@ fi
 # precise, actionable error (`gh auth login` is the common one) was thrown
 # away and replaced by a message guessing at three possible causes -- see
 # the deny text below, which now points here instead.
-lib="$HOME/.twing/lib"
-cli="$lib/node_modules/@twing/cli/dist/index.js"
 log="$HOME/.twing/bootstrap.log"
 mkdir -p "$HOME/.twing"
-echo "=== twing bootstrap $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" >> "$log" 2>/dev/null
 
 # Reuse a twing that is already on PATH before fetching another copy: a
 # machine with a working global install needs no download at all, and
@@ -59,8 +90,7 @@ if command -v twing >/dev/null 2>&1; then
   twing init --unattended >> "$log" 2>&1 </dev/null
 fi
 if [ ! -x "$hook_bin" ]; then
-  npm install --prefix "$lib" @twing/cli@latest --no-fund --no-audit --loglevel=error >> "$log" 2>&1 </dev/null
-  [ -f "$cli" ] && node "$cli" init --unattended >> "$log" 2>&1 </dev/null
+  twing_install_for_repo "$repo_root"
 fi
 
 if [ -x "$hook_bin" ]; then

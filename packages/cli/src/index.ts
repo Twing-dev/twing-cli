@@ -2,6 +2,7 @@
 import { startDaemon } from "./daemon/server.js";
 import { defaultSocketPath, authFetch, computeDeveloperId, readConfig } from "@twing/core";
 import { runInit } from "./init.js";
+import { runGhUser } from "./ghuser.js";
 import { installTwingHintResolution } from "./twing-command.js";
 import { runUninstall } from "./uninstall.js";
 import { getCliVersion } from "./version.js";
@@ -77,6 +78,7 @@ function printUsage(): void {
       "Usage:",
       "  twing --version | -v",
       "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]",
+      "  twing init --ghuser                       (once per machine: work from any directory)",
       "  twing uninstall [--dry-run]",
       "  twing login [--server <url>] [--token <pat>]",
       "  twing keygen --invite <code> [--server <url>] [--label <email>]",
@@ -400,6 +402,14 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "init":
+      // Machine-scoped, where the rest of `init` is repo-scoped: it wires
+      // twing into ~/.claude/settings.json so sessions started outside a repo
+      // root are covered too. Short-circuits before runInit, which resolves a
+      // coordinator immediately and has nothing to resolve here.
+      if (flags.ghuser === "true") {
+        runGhUser();
+        return;
+      }
       await runInit({
         server: flags.server,
         invite: flags.invite,

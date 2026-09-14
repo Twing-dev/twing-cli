@@ -15,7 +15,7 @@ import { readClaudeSettings, writeClaudeSettings, type ClaudeSettings, type Hook
 import { isBootstrapHook } from "./enforce-hooks.js";
 import { wireOpenCodePlugin, unwireOpenCodePlugin } from "./opencode-plugin.js";
 
-function globalSettingsPath(): string {
+export function globalSettingsPath(): string {
   return path.join(os.homedir(), ".claude", "settings.json");
 }
 

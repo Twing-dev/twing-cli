@@ -2,39 +2,24 @@
 
 twing helps multiple coding agents on a developer team coordinate with
 each other instead of quietly stepping on the same work. It's a CLI +
-hook for Claude Code and OpenCode (with other agents planned) plus a
+hook for your coding agent (Claude Code today, others planned) plus a
 small server every agent's client talks to.
 
 Full design: `docs/orchestrator-and-verification-design-doc_v1.md`.
 
 ## Getting started
 
-### 1. Install once per machine
-
-The installer puts Twing under `~/.twing`, wires Claude Code and OpenCode
-in their home-directory configuration, and starts the shared daemon:
+### 1. Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/install.sh | sh
+npm install -g @twing/cli
 ```
 
-If you prefer a global npm installation:
+Needs Node.js >= 20. No Go toolchain, no clone -- `twing-hook` (the
+client's Go-side hook binary) is fetched automatically the first time
+`twing init` needs one.
 
-```sh
-npm install -g @twing/cli --allow-scripts=@twing/cli,tree-sitter-javascript,tree-sitter-typescript
-```
-
-The `--allow-scripts` list is required by npm 12, which blocks dependency
-install scripts by default. It keeps installation one command while
-authorizing only Twing and its parser dependencies.
-
-Needs Node.js >= 20. No Go toolchain or Twing source checkout is needed --
-`twing-hook` is fetched automatically. The machine-global integrations
-fire even when an agent starts in a parent workspace containing several
-repositories; each file operation is routed through the target file's own
-Git repository and `.twing/twing.yml`.
-
-### 2. Enroll the repository once
+### 2. Point it at a coordinator
 
 ```sh
 cd ~/path/to/some-repo
@@ -45,9 +30,8 @@ twing init --server https://coordination-server.twing.dev
 to use, no invite needed for a GitHub-hosted repo (`init` authenticates
 you via GitHub itself, see step 2 of the walkthrough below). Once one
 person's run this, the server URL is committed to `.twing/twing.yml`, so
-everyone else needs no repository setup. The Twing GitHub App can perform
-this enrollment without a local command. Prefer to run your own instead?
-See "Self-hosting your own coordinator" below.
+everyone else afterward just runs plain `twing init`. Prefer to run your
+own instead? See "Self-hosting your own coordinator" below.
 
 `init` does three things:
 
@@ -64,11 +48,10 @@ See "Self-hosting your own coordinator" below.
    below. If this makes you the project's admin -- founding it, or later
    re-running `init` as one -- it also commits a bootstrap hook into this
    repo's own `.claude/settings.json`, so every future teammate gets twing
-   set up automatically on their first edit; see "Repository bootstrap fallback"
+   set up automatically on their first edit; see "Zero-touch onboarding"
    below.
-3. **Refreshes the local pieces** -- installs `twing-hook`, wires Claude
-   Code and OpenCode globally, and starts a background daemon. Package
-   installation already performs this once; `init` safely converges it.
+3. **Sets up the local pieces** -- installs `twing-hook`, wires it into
+   Claude Code's hooks (once per machine), and starts a background daemon.
    The daemon exists because each hook invocation is a fresh, stateless
    process; the daemon is the long-running piece that actually watches
    your edits and syncs them to the server in the background.
@@ -79,7 +62,7 @@ than duplicating anything.
 ### 3. Using it day to day
 
 Once `twing init` has run once on this machine, just work normally in
-Claude Code or OpenCode in any repo whose `.twing/twing.yml` declares a coordinator --
+Claude Code in any repo whose `.twing/twing.yml` declares a coordinator --
 hooks capture claims automatically in the background (divergence findings
 surface reactively, via a session-start notice or an alignment thread --
 `twing align` is there if you want to look yourself, but it's not something
@@ -206,30 +189,36 @@ them would retroactively delete work that went quiet under the old policy.
 Once a design does go dormant it stays resumable for a further week before
 expiring for good, independently of this setting.
 
-## Repository bootstrap fallback
+## Zero-touch onboarding
 
-The supported onboarding model is one installation per developer machine
-and zero setup per repository. Home-directory integrations are required
-because Claude Code and OpenCode do not load a child repository's local
-hooks when the agent starts in a parent workspace.
-
-The older repository bootstrap remains as a fallback for sessions launched
-inside an enrolled repository. It cannot provide complete coverage for a
-session launched above that repository.
+Separate from the design-conflict gate above, and aimed at a different
+problem: getting twing *onto* a teammate's machine without them having to do
+anything.
 
 Whoever founds a project (or already holds admin/maintain on it) has `init`
 commit two git-tracked files: `.twing/bootstrap-hook.sh`, a small POSIX
 shell script, and the `.claude/settings.json` entries that point Claude Code
-at it. Every checkout opened inside the repo carries both, and the script
-runs on every hook event -- the same set the machine-global wiring covers, so a machine
+at it. Every clone of the repo carries both, and the script runs on every
+hook event -- the same set the machine-global wiring covers, so a machine
 driven only by the committed files still gets the whole product rather than
 just the gate. On a machine that has never run twing, it **installs twing
-itself**:
+itself** -- at the version this repo's coordinator declares, never
+`@latest`:
 
 ```sh
-npm install --prefix ~/.twing/lib @twing/cli@latest
+curl -fsS "$serverUrl/v1/version"                      # -> {"version":"0.2.25"}
+npm install --prefix ~/.twing/lib @twing/cli@0.2.25
 node ~/.twing/lib/node_modules/@twing/cli/dist/index.js init --unattended
 ```
+
+Pinning to the coordinator rather than to `@latest` matters because version
+matching is exact, in both directions. A machine that installed `@latest`
+while its coordinator sat one release behind would be denied by its own gate
+on the first edit and then *downgraded* by version recovery -- two installs,
+and a daemon running a version nobody asked for in between. `/v1/version`
+needs no auth, so this costs one unauthenticated request at the only moment
+it matters; if neither `curl` nor `wget` is on the machine the script falls
+back to `@latest`.
 
 Nothing to type, no sudo, no browser -- the prefix is under your own home
 directory, unlike `npm install -g`, and `--unattended` skips the one
@@ -269,17 +258,75 @@ sudo on a system-Node box, and there is no `twing` on `PATH` at all). If the
 update genuinely can't happen, you get an operational report pointing at
 `~/.twing/design-coordinator.log`, not a command list.
 
-**The machine installer is the primary path.** Installing the npm package
-writes machine-global Claude and OpenCode wiring, and the committed
+**Installing twing yourself keeps working.** `npm install -g @twing/cli`
+followed by `twing init` writes machine-global wiring, and the committed
 script stands down the moment it sees `~/.claude/settings.json` already
 referencing the binary -- Claude Code merges hooks from every settings scope
 and runs all of them, so without that guard both would fire on every tool
 call. Your copy is yours: twing won't replace a package you installed
 deliberately, and version-mismatch and sign-in messages keep naming the
 commands that genuinely work on your machine. Global wiring also covers the
-one case the committed files can't -- a session started in a directory
-*containing* twing repos rather than inside one, where there is no
-repo-local settings file to load.
+one case the committed files can't, described next.
+
+### Sessions that don't start at a repo root
+
+Claude Code reads a project's `.claude/settings.json` from the session's
+**primary working directory** only -- no upward traversal, and no scanning of
+subdirectories. So a repo's committed hook fires when you start Claude
+exactly at the repo root, and not otherwise:
+
+```sh
+cd ~/work && claude              # a parent of several repos: nothing fires
+cd repo/packages/api && claude   # a subdirectory misses it too
+```
+
+In those sessions a machine that never ran twing by hand is completely
+unguarded: edits ungated, nothing captured, no notices, no daemon revived,
+and no signal to the admin who committed the hook. Nothing inside a repo can
+fix it, because settings discovery happens before any hook runs.
+
+So: two commands, once per machine, run by a human at a terminal.
+
+```sh
+gh auth login
+npx --yes @twing/cli@latest init --ghuser
+```
+
+That writes `~/.twing/bin/twing-resolve` and points the **user-level**
+`~/.claude/settings.json` at it for the same six events -- and that file is
+read wherever a session starts.
+
+**It installs nothing.** No CLI, no daemon, no hook binary. The coordinator
+decides which version to install and none is known yet, so the install waits
+for the first session that opens a repo using twing, exactly as the committed
+script does. A machine that never opens one downloads nothing at all.
+
+**Why `npx` rather than `npm install -g`.** A global install makes the
+machine ineligible for automatic version recovery -- twing won't replace a
+package you installed deliberately -- so installing twing to get better
+coverage would buy worse version handling. Run through `npx` nothing is left
+behind, and the machine stays managed and self-updating.
+
+**Exactly one hook does the work, in every combination.** At a repo root the
+committed hook runs and the resolver stands down; anywhere else the resolver
+hands the event to the binary. Claude Code runs every matching hook from
+every settings scope **in parallel**, with no ordering between scopes, so
+neither stand-down can rely on running first: each reads static file state
+(does the other settings file mention the other's script) and is
+order-independent by construction. Both processes do start -- invocation
+can't be prevented, only made a no-op -- so the overlap costs one wasted `sh`
+(~2 ms) and never a second gate check.
+
+**If a global `@twing/cli` was already installed** and couldn't be removed --
+a root-owned prefix needs `sudo`, which a setup command shouldn't demand --
+`--ghuser` leaves it alone, records `~/.twing/auto-managed` so the managed
+copy under `~/.twing` stays authoritative anyway, and prints the cleanup
+command that's correct for your machine. Until you run it, typing `twing`
+yourself still gets the leftover copy, and the CLI sends no version header,
+so that skew is silent.
+
+`--ghuser` signs in with `gh auth token`, so it needs GitHub. Machines
+without it use `npm install -g @twing/cli` and `twing init`, unchanged.
 
 **Turning it on and off** -- both are plain local file edits, no server call
 and no auth, since the real authorization is your own branch protection / PR
@@ -312,7 +359,8 @@ meaning for it. That is a rare path, not the default one.
 
 | Command                                               | What it does                                                                                                                         |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `twing init [--server <url>]`                         | Admin repository enrollment: configure the coordinator and authenticate/found the project. Safe to re-run.                          |
+| `twing init [--server <url>]`                         | One-time setup per machine: discover/confirm the coordinator, authenticate, install/wire the hook, start the daemon. Safe to re-run. |
+| `twing init --ghuser`                                 | Once per machine, after `gh auth login`: makes twing work from any directory, not just a repo root. Installs nothing -- see "Sessions that don't start at a repo root". |
 | `twing align`                                         | Cross-session divergence findings (advisory, never blocks).                                                                          |
 | `twing design register --summary "..." --touches a,b` | Register a design before your first edit/write (or let plan mode do it automatically).                                               |
 | `twing design amend --id <designId> --touches c,d`    | Expand an already-registered design to cover more files.                                                                             |
@@ -575,8 +623,9 @@ via TypeScript project references. `npm link` in `packages/cli` gives you a
 
 | Command                                                                                            | What it does                                                                                                                                                                                                                                                                                                                                                                                                           |
 | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]`           | Repository enrollment/admin flow: discovers/bootstraps the coordinator, authenticates (GitHub-verified join/found by default for a GitHub-hosted repo; `--invite` to redeem one instead; `--no-github` to skip straight to the old "no cached PAT" error; `--no-auth` to declare this coordinator has no identity verification at all), hook install, hook wiring (including the design gate), daemon start. `--unattended` is what the committed bootstrap hook runs: never prompts, never opens a browser, and skips global wiring -- see "Repository bootstrap fallback". Safe to re-run. |
-| `twing uninstall [--dry-run]`                                                                      | Undoes package machine setup: stops the daemon, removes any launchd/systemd definition left by an older init, unwires Claude and OpenCode globally, and deletes `~/.twing`. Run it *before* `npm uninstall -g @twing/cli` -- on its own, that leaves agent configuration behind. Never touches a repo's committed `.claude/settings.json`; that's `twing project disable-enforcement`.                                                                          |
+| `twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]`           | One-time setup per machine: discovers/bootstraps the coordinator, authenticates (GitHub-verified join/found by default for a GitHub-hosted repo; `--invite` to redeem one instead; `--no-github` to skip straight to the old "no cached PAT" error; `--no-auth` to declare this coordinator has no identity verification at all), hook install, hook wiring (including the design gate), daemon start. `--unattended` is what the committed bootstrap hook runs: never prompts, never opens a browser, and skips the OS-service install and global wiring -- see "Zero-touch onboarding". Safe to re-run. |
+| `twing init --ghuser`                                                                              | A different command that happens to share `init`'s name, and machine-scoped where `init` is repo-scoped: wires `~/.twing/bin/twing-resolve` into the user-level `~/.claude/settings.json` so twing is active however deep or shallow a session starts, not only at a repo root. Requires `gh auth login`. Installs nothing -- the coordinator picks the version, and none is known until a session opens a repo that uses twing. Run it via `npx --yes @twing/cli@latest`, not a global install: a global install opts the machine out of automatic version recovery. Safe to re-run. |
+| `twing uninstall [--dry-run]`                                                                      | Undoes what `init` set up on this machine: stops the daemon, removes any launchd/systemd definition left by an older init, unwires twing's hooks from `~/.claude/settings.json`, and deletes `~/.twing`. Run it *before* `npm uninstall -g @twing/cli` -- on its own, that leaves the daemon running and the hooks pointing at a deleted binary. Never touches a repo's committed `.claude/settings.json`; that's `twing project disable-enforcement`.                                     |
 | `twing login [--server <url>] [--token <pat>]`                                                     | Just cache an already-generated PAT for a server -- no hook install, no settings wiring, no daemon start. For a second machine, or a stale local config.                                                                                                                                                                                                                                                               |
 | `twing join --github [--server <url>]`                                                             | Just the GitHub-verified authentication step `init` does by default -- generates/reuses a PAT and (re-)checks your GitHub role on this repo, without the rest of `init`.                                                                                                                                                                                                                                               |
 | `twing keygen --invite <code> [--server <url>]`                                                    | Just the authentication part of redeeming an invite -- generates a PAT locally (or reuses an existing one for this server) without the rest of `init`.                                                                                                                                                                                                                                                                 |
@@ -584,7 +633,7 @@ via TypeScript project references. `npm link` in `packages/cli` gives you a
 | `twing admin bootstrap --token <bootstrap-token>`                                                  | Break-glass: claims the server's one-time bootstrap token, creating the first org and its admin.                                                                                                                                                                                                                                                                                                                       |
 | `twing admin invite` / `list-invites` / `revoke-invite` / `revoke-developer` / `list-developers`   | Org-scoped admin actions (§17.10).                                                                                                                                                                                                                                                                                                                                                                                     |
 | `twing project invite` / `list-invites` / `revoke-invite` / `remove-developer` / `list-developers` | Project-scoped admin actions -- a project's own admins, not just org admins, can run these.                                                                                                                                                                                                                                                                                                                            |
-| `twing project enable-enforcement` / `disable-enforcement`                                        | Writes/removes the fallback bootstrap hook in this repo's `.claude/settings.json` -- see "Repository bootstrap fallback" above. Local file edit only, no server call; commit and push it yourself.                                                                                                                                                                                                           |
+| `twing project enable-enforcement` / `disable-enforcement`                                        | Writes/removes the zero-touch bootstrap hook in this repo's `.claude/settings.json` -- see "Zero-touch onboarding" above. Local file edit only, no server call; commit and push it yourself.                                                                                                                                                                                                                   |
 | `twing align`                                                                                      | Local constraint checks plus a server round-trip for cross-session divergence findings.                                                                                                                                                                                                                                                                                                                                |
 | `twing daemon`                                                                                     | Runs the daemon in the foreground (rarely needed manually -- `init` starts it detached, and the hook restarts it on demand; it exits on its own once idle).                                                                                                                                                                                                                                                            |
 | `twing design register/resolve/amend/resume/close/list/reviews`                                    | Design-conflict gate commands, see above.                                                                                                                                                                                                                                                                                                                                                                              |

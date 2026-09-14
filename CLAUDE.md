@@ -501,17 +501,22 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `install-hook.ts` installs `twing-hook` (prebuilt-fetch-first,
   build-from-source fallback, see the pre-release note above) and
   `wire-hooks.ts` merges (never overwrites) its hook entries into the
-  **user-level** `~/.claude/settings.json` and installs the global OpenCode
-  loader under `~/.config/opencode/plugins/twing.js`, so wiring only ever
-  needs to happen once per machine; npm's guarded `postinstall.cjs` invokes
-  that setup during package installation, while `init` also strips any
+  **user-level** `~/.claude/settings.json` — global, not per-repo, so
+  wiring only ever needs to happen once per machine; `init` also strips any
   legacy repo-local entries a pre-this-change `init` run left behind, so a
-  repo doesn't end up double-wired.
+  repo doesn't end up double-wired. `ghuser.ts` (`twing init --ghuser`) and
+  `resolve-hook.ts` are the third wiring path described under "Working in
+  this repo" — machine-scoped where `init` is repo-scoped, sharing only the
+  name: it needs a `gh auth token`, installs nothing, and writes the
+  `twing-resolve` pointer rather than a binary path. `init --unattended`
+  refreshes that wiring whenever `isResolverWired`, so a change to
+  `WIRED_EVENTS` reaches resolver machines through version recovery instead
+  of needing every developer to re-run a command; everywhere else the
+  refresh is a strict no-op.
 
 ### `hook/` (Go, separate module)
 
-`twing-hook` is spawned fresh per Claude Code hook event, or by the OpenCode
-adapter for its equivalent plugin event, does one trivial
+`twing-hook` is spawned fresh per Claude Code hook event, does one trivial
 thing, and always exits 0 — a panic recovers silently rather than surfacing
 as a failure or looking like a block. Two independent handlers dispatched by
 `hook_event_name`, per `main.go`'s header comment:
@@ -566,6 +571,30 @@ separately-reasoned rules for the two files that deliberately *do* carry
 real decision logic on purpose: `hook/design_gate.go` (the gate's own
 verdict/deny logic, §17) and `hook/daemon_launch.go` (the liveness-check
 self-heal exception noted above).
+
+Two files on the gate's side carry decision logic worth knowing about before
+touching either. `plan_paths.go` answers *which coordinator governs an
+`ExitPlanMode`*: it regexes path-like tokens out of the plan text, resolves
+each against cwd, and walks **up** for the nearest `.twing/twing.yml` —
+replacing a scan of cwd's immediate children, which found nothing at all
+unless the session happened to be rooted in the exact parent of the repos
+(so a session started one level too deep or too shallow registered the
+design nowhere, silently, on a fully installed machine). A plan naming no
+resolvable path is allowed through silently — an `ExitPlanMode` deny blocks
+planning, when nothing has been changed yet, and the first `Edit` is the
+real backstop. A plan spanning **two coordinators** is refused outright
+rather than degraded: one machine has one `twing-hook` at one version, and
+version matching is exact, so two coordinators on different versions can
+never both be satisfied. `version_recovery.go` is the other: it updates a
+*managed* install in place and replays the same event through the new
+binary, so the edit just proceeds. `managedInstall()` is the guard on that —
+a `twing` on `PATH` means someone installed it deliberately and it is not a
+background process's to replace, unless `~/.twing/auto-managed` (written by
+`init --ghuser` when it couldn't remove a leftover global copy) says this
+machine opted in. Four call sites have to agree on that marker
+(`managedInstall`, `twingCLIPath`, `pruneRedundantBootstrapCopy`,
+`ensureCliShim`) or the two copies fight: recovery installs into
+`~/.twing/lib` and a global `init` deletes it again.
 
 ### Data flow, end to end
 
@@ -634,19 +663,32 @@ Claude Code session transcript (Claude Code writes it; twing only reads)
 ## Working in this repo
 
 This repo dogfoods its own design-conflict gate against a remote coordinator
-(see `.twing/twing.yml`). Hook wiring comes from **two** places, and exactly
-one is authoritative on any given machine. Machine-global Claude settings
-and the OpenCode plugin (`wire-hooks.ts`) are what npm package installation writes:
+(see `.twing/twing.yml`). Hook wiring comes from **three** places, and
+exactly one does the work on any given machine and session. Machine-global
+`~/.claude/settings.json` (`wire-hooks.ts`) is what a `twing init` writes:
 it bakes in an absolute `$HOME`-specific path, so it can only ever be
 machine-local, and it covers every repo rather than just this one. The
 repo's own committed `.claude/settings.json` plus `.twing/bootstrap-hook.sh`
 (`enforce-hooks.ts`) is the admin-committed counterpart, portable because
 `$HOME` stays a literal shell variable in it; it installs twing on a machine
 that has never run it, and stands down as soon as it sees global wiring, so
-the two never double-fire. Both cover the same six event/matcher pairs on
-purpose — whichever is authoritative has to deliver the whole product, and a
-subset is what left one developer with the gate but no daemon and no
-capture. Expect `Edit`/`Write` gate checks to fire in this repo's own
+the two never double-fire. The third is `~/.twing/bin/twing-resolve`
+(`resolve-hook.ts`), wired into the user-level settings file by `twing init
+--ghuser` (`ghuser.ts`) — the answer to the fact that Claude Code reads a
+project's `.claude/settings.json` from the session's **primary working
+directory** only, so a committed hook fires at a repo root and nowhere else,
+leaving a subdirectory or parent session entirely unguarded. The resolver
+stands down when the project settings file names a committed hook, and
+otherwise `exec`s the binary; like the committed script it installs nothing
+until a repo identifies a coordinator, then installs exactly the version
+that coordinator declares (`/v1/version`) rather than `@latest` — a
+mismatch in *either* direction blocks, so `@latest` means install then
+downgrade. All three cover the same six event/matcher pairs on purpose
+(`WIRED_EVENTS`) — whichever is authoritative has to deliver the whole
+product, and a subset is what left one developer with the gate but no daemon
+and no capture. None of the stand-downs can rely on ordering: Claude Code
+runs every matching hook from every settings scope in parallel, so each one
+decides from static file state instead. Expect `Edit`/`Write` gate checks to fire in this repo's own
 sessions; if one denies with "no design registered", run `twing design
 register --summary "..." --touches <paths>` (or enter plan mode, which registers one
 automatically via `ExitPlanMode`) before retrying. A gate denial naming a

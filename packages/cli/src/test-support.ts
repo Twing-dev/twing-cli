@@ -162,3 +162,21 @@ export function captureFetchSequence(responses: Response[]): { fetch: typeof fet
   }) as typeof fetch;
   return { fetch: impl, calls };
 }
+
+/**
+ * A `PATH` whose `gh auth token` deterministically succeeds (printing
+ * `token`) or fails (`null`).
+ *
+ * Needed because `runJoinGithub` prefers a `gh` token over the device flow,
+ * so any test that asserts on *which* path was taken silently depends on
+ * whether the developer running it happens to be logged into `gh`. That is
+ * exactly what happened: a suite that was green all morning started failing
+ * the moment `gh auth login` was run on this machine, and it would behave
+ * differently again in CI.
+ */
+export function ghAuthOnPath(token: string | null): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-gh-stub-"));
+  const body = token === null ? "#!/bin/sh\necho 'gh: not logged in' >&2\nexit 1\n" : `#!/bin/sh\nprintf '%s' '${token}'\n`;
+  fs.writeFileSync(path.join(dir, "gh"), body, { mode: 0o755 });
+  return `${dir}:${process.env.PATH ?? ""}`;
+}
