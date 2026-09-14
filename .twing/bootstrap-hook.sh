@@ -1,13 +1,13 @@
 #!/bin/sh
 # twing-bootstrap-hook-v4
 #
-# Committed by `twing init` / `twing project enable-enforcement`. Every
-# clone of this repo coordinates through twing without anyone installing
-# anything: this script sets twing up on first use, then hands the real
-# decision to the installed binary.
+# Committed by `twing init` / `twing project enable-enforcement` / the
+# GitHub App setup flow. Every clone of this repo coordinates through twing
+# without anyone installing anything: this script sets twing up on first
+# use, then hands the real decision to the installed binary.
 #
 # Do not edit by hand -- it is regenerated wholesale, and a modified copy
-# is replaced the next time an admin re-runs either command above.
+# is replaced the next time an admin re-runs any of the above.
 #
 # $1 is the Claude Code hook event this entry is wired for.
 
@@ -35,7 +35,6 @@ repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 if [ -z "$repo_root" ] || [ ! -f "$repo_root/.twing/twing.yml" ]; then
   exit 0
 fi
-
 
 twing_fetch() {
   if command -v curl >/dev/null 2>&1; then
