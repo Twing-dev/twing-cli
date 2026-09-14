@@ -69,6 +69,7 @@ interface DesignRow {
   creates: string;
   touches: string;
   dependsOn: string;
+  changes: string | null;
   rawPlanExcerpt: string | null;
   ttlMs: number;
   scopeVersion: number;
@@ -96,6 +97,11 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     creates: JSON.parse(row.creates),
     touches: JSON.parse(row.touches),
     dependsOn: JSON.parse(row.dependsOn),
+    // Stays `undefined` for a design not registered from a template --
+    // absent and empty are different answers to "what did this declare",
+    // and the monitor renders them differently (fallback vs "declares
+    // nothing").
+    changes: row.changes ? JSON.parse(row.changes) : undefined,
     rawPlanExcerpt: row.rawPlanExcerpt ?? undefined,
     ttlMs: row.ttlMs,
     scopeVersion: row.scopeVersion,
@@ -224,6 +230,7 @@ export class DesignRegistry {
         creates: JSON.stringify(design.creates),
         touches: JSON.stringify(design.touches),
         dependsOn: JSON.stringify(design.dependsOn),
+        changes: design.changes ? JSON.stringify(design.changes) : null,
         rawPlanExcerpt: design.rawPlanExcerpt ?? null,
         ttlMs: design.ttlMs,
         scopeVersion: design.scopeVersion,

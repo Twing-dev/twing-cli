@@ -1,0 +1,210 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Readable designs: what has to change, and where</title>
+<style>
+:root{
+  --bg:#F4F6F9; --card:#FFFFFF; --card2:#FAFBFD; --line:#E3E7EE; --line2:#CFD6E2;
+  --ink:#141822; --dim:#5C6579; --dimmer:#8B94A8;
+  --brand:#3B5BDB; --brand-bg:#EDF1FE;
+  --amber:#96650B; --amber-bg:#FDF3D7;
+  --green:#166B3C; --green-bg:#DDF3E4;
+  --red:#A5252B; --red-bg:#FCE4E4;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,sans-serif;
+}
+*{box-sizing:border-box} html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:15.5px/1.7 var(--sans);-webkit-font-smoothing:antialiased}
+code,pre{font-family:var(--mono)}
+
+.top{background:var(--card);border-bottom:1px solid var(--line);padding:0 28px}
+.top-in{max-width:840px;margin:0 auto;padding:22px 0}
+.brand{font-weight:750;letter-spacing:-.025em;font-size:16px}
+.brand em{color:var(--brand);font-style:normal}
+.sub{color:var(--dim);font-size:13.5px;margin-top:4px}
+
+.wrap{max-width:840px;margin:0 auto;padding:32px 28px 90px}
+
+h2{font-size:12px;font-family:var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--dimmer);
+   margin:46px 0 16px;font-weight:600;display:flex;align-items:center;gap:10px}
+h2:first-child{margin-top:0}
+h2::after{content:"";flex:1;height:1px;background:var(--line)}
+p{margin:0 0 14px}
+ul{margin:0 0 14px;padding-left:22px}
+li{margin:7px 0}
+
+.answer{background:var(--card);border:1px solid var(--line2);border-left:4px solid var(--brand);
+        border-radius:10px;padding:22px 26px;margin:0 0 16px}
+.answer .q{font-size:13px;color:var(--dimmer);font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}
+.answer .a{font-size:19px;line-height:1.5;letter-spacing:-.015em;font-weight:600}
+.answer .a b{color:var(--brand)}
+
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 16px}
+@media(max-width:720px){.two{grid-template-columns:1fr}}
+.box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px}
+.box h3{margin:0 0 4px;font-size:16px;letter-spacing:-.015em}
+.box .role{font-size:12px;font-family:var(--mono);color:var(--brand);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px}
+.box ul{margin:0;padding-left:20px;font-size:14.5px}
+.box li{margin:9px 0}
+.box li b{display:block}
+.box li span{color:var(--dim);font-size:13.5px}
+
+.compare{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:0 0 16px}
+.crow{display:grid;grid-template-columns:96px 1fr;border-bottom:1px solid var(--line)}
+.crow:last-child{border-bottom:0}
+.clabel{background:var(--card2);padding:16px 18px;font-family:var(--mono);font-size:11px;text-transform:uppercase;
+        letter-spacing:.08em;color:var(--dimmer);font-weight:600;border-right:1px solid var(--line)}
+.cbody{padding:16px 20px;font-size:14px}
+.cbody .bad{color:var(--dim)}
+.cbody code{background:var(--bg);padding:1px 6px;border-radius:4px;font-size:12.5px}
+.line{display:flex;gap:10px;align-items:baseline;padding:3px 0}
+.verb{font-family:var(--mono);font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+      padding:2px 7px;border-radius:5px;flex:none}
+.verb.a{background:var(--green-bg);color:var(--green)}
+.verb.m{background:var(--amber-bg);color:var(--amber)}
+.verb.r{background:var(--brand-bg);color:var(--brand)}
+.why{color:var(--dim);font-size:13px}
+
+.note{border-left:3px solid var(--brand);background:var(--brand-bg);padding:14px 18px;border-radius:0 8px 8px 0;margin:0 0 16px}
+.note.warn{border-left-color:var(--amber);background:var(--amber-bg)}
+.note.good{border-left-color:var(--green);background:var(--green-bg)}
+.note b{font-weight:700}
+
+.status{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:6px 22px;margin:0 0 16px}
+.srow{display:flex;gap:14px;align-items:center;padding:13px 0;border-bottom:1px solid var(--line);font-size:14px}
+.srow:last-child{border-bottom:0}
+.srow .t{flex:1}
+.srow .t b{display:block}
+.srow .t span{color:var(--dim);font-size:13px}
+.pill{font-family:var(--mono);font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+      padding:3px 10px;border-radius:20px;flex:none}
+.pill.done{background:var(--green-bg);color:var(--green)}
+.pill.part{background:var(--amber-bg);color:var(--amber)}
+.pill.no{background:var(--red-bg);color:var(--red)}
+
+footer{max-width:840px;margin:0 auto;padding:0 28px 60px;color:var(--dimmer);font-size:12.5px}
+</style>
+
+<div class="top"><div class="top-in">
+  <div class="brand"><em>twing</em> — making a design readable</div>
+  <div class="sub">What has to change, and why · 2026-09-14 · <strong>implemented</strong> on <code>feat/structured-design-rendering</code> (twing-cli) and <code>feat/render-structured-designs</code> (twing-monitor)</div>
+</div></div>
+
+<div class="wrap">
+
+<div class="answer">
+  <div class="q">The question</div>
+  <div class="a">Do both twing-CLI and twing-monitor need to change?</div>
+</div>
+
+<div class="answer" style="border-left-color:var(--green)">
+  <div class="q">The answer</div>
+  <div class="a"><b>Yes — both.</b> The CLI has to start <b>recording</b> information it never captured. The monitor has to start <b>showing</b> information it never received.</div>
+</div>
+
+<p>Neither one alone fixes anything. The monitor cannot display a distinction the CLI never wrote down, and the CLI recording richer data changes nothing if the monitor keeps rendering the old fields.</p>
+
+<h2>What's wrong today</h2>
+
+<p>A design records <b>where</b> work will happen. It has never recorded <b>what will happen there</b>.</p>
+
+<div class="compare">
+  <div class="crow">
+    <div class="clabel">Today</div>
+    <div class="cbody bad">
+      <p style="margin:0 0 6px">A paragraph of prose, plus three bags of strings:</p>
+      <code>creates: ["RetryPolicy"]</code><br>
+      <code>touches: ["src/net/retry.ts", "drizzle/0014.sql", ".twing/twing.yml"]</code>
+      <p style="margin:10px 0 0;font-size:13px">A source file, a database migration and a config file sit in one list, indistinguishable. Renaming something and rewriting it look identical. The card shows you <i>"3 created, 7 touched"</i>.</p>
+    </div>
+  </div>
+  <div class="crow">
+    <div class="clabel">Needed</div>
+    <div class="cbody">
+      <div class="line"><span class="verb m">modify</span><span><code>RetryPolicy.backoff</code></span></div>
+      <div class="why" style="padding-left:62px">exponential growth, capped at 30s</div>
+      <div class="line" style="margin-top:6px"><span class="verb a">add</span><span><code>RetryPolicy.jitter</code></span></div>
+      <div class="why" style="padding-left:62px">full jitter so retries desynchronise</div>
+      <div class="line" style="margin-top:6px"><span class="verb r">rename</span><span><code>RetryPolicy.reset</code> ← <code>clear</code></span></div>
+      <div class="why" style="padding-left:62px">name matches the other lifecycle methods</div>
+      <p style="margin:12px 0 0;font-size:13px;color:var(--dim)">A verb, a target, and a reason. Now it can be grouped into Code / Schema / API sections, and a manager can read it.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Why each side changes</h2>
+
+<div class="two">
+  <div class="box">
+    <h3>twing-CLI</h3>
+    <div class="role">Produces &amp; stores the record</div>
+    <ul>
+      <li><b>Capture a verb</b><span>Today a design says a file is involved. It must say whether that file is being added, modified, rewritten, removed or renamed — those are different claims.</span></li>
+      <li><b>Capture a kind</b><span>It must record that something is a migration rather than a source file. This is the only reason "schema changes" can ever become a section.</span></li>
+      <li><b>Persist and serve it</b><span>The structured record needs a column and an API field, or the monitor has nothing to fetch.</span></li>
+    </ul>
+  </div>
+
+  <div class="box">
+    <h3>twing-monitor</h3>
+    <div class="role">Presents the record</div>
+    <ul>
+      <li><b>Render the new shape</b><span>Today it reads only the old string bags and draws them as chips. It would ignore the structured data entirely — new rendering code is required.</span></li>
+      <li><b>Group into sections</b><span>Code, Schema, API, Tests — the fixed layout a manager learns once, with a one-line blast-radius summary at the top.</span></li>
+      <li><b>Compare declared vs actual</b><span>The monitor already fetches what a session really edited. Showing it beside what was declared is nearly free, and it is the most valuable thing on the card.</span></li>
+    </ul>
+  </div>
+</div>
+
+<div class="note">
+<b>The split in one sentence.</b> The CLI decides <i>what is worth knowing about a design</i>; the monitor decides <i>how a human reads it</i>. The first is a data problem, the second is a presentation problem, and they have to be solved in that order.
+</div>
+
+<h2>How much already exists</h2>
+
+<div class="status">
+  <div class="srow">
+    <div class="t"><b>Structured design format</b><span>A design can be authored with verbs and targets — <code>twing design register --from design.yml</code></span></div>
+    <span class="pill done">built</span>
+  </div>
+  <div class="srow">
+    <div class="t"><b>Validation</b><span>Refuses a design the vocabulary can't express; keeps the old <code>creates</code>/<code>touches</code> working so the edit gate is unaffected</span></div>
+    <span class="pill done">built</span>
+  </div>
+  <div class="srow">
+    <div class="t"><b>Kind (code / database / config / API / test / docs)</b><span><code>config</code> was promoted from the spec's reserved list: the monitor states each kind's absence explicitly, and "no configuration changes" is only true if an author could have said otherwise</span></div>
+    <span class="pill done">built</span>
+  </div>
+  <div class="srow">
+    <div class="t"><b>Storing and serving the structured record</b><span><code>designs.changes</code>, a nullable JSON column (migration <code>0016</code>), returned by <code>GET /v1/designs</code></span></div>
+    <span class="pill done">built</span>
+  </div>
+  <div class="srow">
+    <div class="t"><b>Monitor rendering</b><span>Every kind shown whether or not it has changes, collapsed by default, expandable to the file list; plus declared-vs-actually-edited</span></div>
+    <span class="pill done">built</span>
+  </div>
+</div>
+
+<div class="note warn">
+<b>Caveat worth knowing.</b> The structured format is used when someone authors a design deliberately. Most designs today are registered automatically at the end of plan mode, and those still produce the old shape. So the improved card will be the exception until plan mode emits a structured design too — a decision worth making early, because it determines whether this is the normal view or a rare one.
+</div>
+
+<h2>Order of work</h2>
+
+<ul>
+  <li><s>1 · Merge the structured-design branch.</s> Still unmerged — <code>feat/structured-design-rendering</code> is cut from it, so that branch has to land first.</li>
+  <li><s>2 · Add the kind field.</s> Done, six values.</li>
+  <li><s>3 · Store and serve the record.</s> Done, migration <code>0016</code>.</li>
+  <li><s>4 · Build the monitor card.</s> Done.</li>
+  <li><b>5 · Resolve the <code>packages/cli/src/design.ts</code> collision.</b> The OpenCode install-reconciliation work edits the same file; the gate raised a real <code>symbol_conflict</code> during this build.</li>
+  <li><b>6 · Plan-mode designs still produce the old shape.</b> Until <code>ExitPlanMode</code> emits a template, the new card is the exception rather than the norm.</li>
+</ul>
+
+<div class="note good">
+<b>Nothing here risks the edit gate.</b> The old fields keep being filled in automatically from the new ones, so the part of twing that actually blocks work carries on reading exactly what it reads today. Designs that predate the change keep rendering the way they do now.
+</div>
+
+</div>
+
+<footer>
+<code>twing-cli/docs/design-template-and-monitor-rendering.html</code> · implemented 2026-09-14; nothing here is enabled by default for a design that carries no template
+</footer>

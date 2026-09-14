@@ -347,6 +347,14 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
         creates,
         touches,
         dependsOn: splitList(options.dependsOn),
+        // The declaration itself, for a coordinator that has somewhere to
+        // put it. Sent alongside the derived `creates`/`touches` above
+        // rather than instead of them -- those stay the only thing the gate
+        // reads, and the server deliberately doesn't re-derive them from
+        // this (see the register route's own `changes:` note). An older
+        // coordinator ignores the field and keeps falling back to
+        // `rawPlanText` below, which is why both are still sent.
+        ...(template ? { changes: template.changes } : {}),
         // Sent alongside the structured fields, never instead of them. The
         // server skips its own extraction whenever structured fields are
         // present (app.ts's `hasStructured` check), so this changes no

@@ -29,7 +29,7 @@
  */
 
 import { parse as parseYaml } from "yaml";
-import type { DesignChange, DesignChangeAction } from "./types.js";
+import type { DesignChange, DesignChangeAction, DesignChangeKind } from "./types.js";
 
 /** The six actions, as a runtime value -- `DesignChangeAction` is compile-time
  * only, and validation needs something to check against at runtime. Kept
@@ -48,6 +48,18 @@ export const DESIGN_CHANGE_ACTIONS: readonly DesignChangeAction[] = [
  * one -- a `from` on a `modify` is meaningless and almost certainly a
  * mistake worth surfacing rather than ignoring. */
 const ACTIONS_REQUIRING_FROM: readonly DesignChangeAction[] = ["rename", "move"] as const;
+
+/** The kinds, as a runtime value -- same compile-time/runtime split as
+ * `DESIGN_CHANGE_ACTIONS` above, and kept adjacent to it for the same
+ * reason. See `DesignChangeKind` (types.ts) for why the spec's remaining
+ * two reserved names are absent rather than listed-and-ignored. */
+export const DESIGN_CHANGE_KINDS: readonly DesignChangeKind[] = ["code", "api", "schema", "test", "docs", "config"] as const;
+
+/** The kind a change is actually treated as. One place, so a reader never
+ * has to repeat the `?? "code"` and no caller can pick a different default. */
+export function kindOf(change: DesignChange): DesignChangeKind {
+  return change.kind ?? "code";
+}
 
 export interface DesignTemplate {
   /** One sentence: what changes for the user or the system. Becomes the
@@ -138,8 +150,19 @@ export function parseDesignTemplate(yamlText: string): DesignTemplate {
       target: asTrimmedString(raw.target),
       intent: asTrimmedString(raw.intent),
     };
+    // Both optional fields follow the same rule: carried only when the
+    // document actually said something, so an absent `kind` stays absent
+    // (meaning "code") rather than becoming an explicit default nobody
+    // wrote. An unknown value is preserved verbatim for validateTemplate
+    // to report by name -- silently coercing it to "code" would hide the
+    // typo the author needs to see.
+    const kind = asTrimmedString(raw.kind);
     const from = asTrimmedString(raw.from);
-    return from ? { ...change, from } : change;
+    return {
+      ...change,
+      ...(kind ? { kind: kind as DesignChangeKind } : {}),
+      ...(from ? { from } : {}),
+    };
   });
 
   return { goal: asTrimmedString(document.goal), changes };
@@ -180,6 +203,16 @@ export function validateTemplate(template: DesignTemplate): TemplateProblem[] {
       problems.push({
         changeId: at,
         message: `unknown action "${change.action}" -- valid: ${DESIGN_CHANGE_ACTIONS.join(" · ")}`,
+      });
+    }
+
+    // Only an explicitly-written unknown value is a problem. Absent is the
+    // documented default, never an error -- most changes are `code` and
+    // requiring everyone to say so would be noise.
+    if (change.kind !== undefined && !DESIGN_CHANGE_KINDS.includes(change.kind)) {
+      problems.push({
+        changeId: at,
+        message: `unknown kind "${change.kind}" -- valid: ${DESIGN_CHANGE_KINDS.join(" · ")}`,
       });
     }
 
