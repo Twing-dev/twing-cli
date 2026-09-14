@@ -1751,3 +1751,53 @@ func TestAuthRequiredReason_ManagedInstallOffersInviteAndSavedPAT(t *testing.T) 
 		}
 	}
 }
+
+// --- the scope flags are comprehensive, and the messages must say so --------
+//
+// `--touches` replaces the declared list rather than appending, which is the
+// right semantics: an append-only scope could never have a file removed from
+// it. But the deny that suggests it was labelled "Add it to your plan" and
+// carried a single path, so following it replaced a design's whole declared
+// scope with that one file. Seen twice in a day -- once by a real Claude
+// session in an end-to-end test -- reducing a design from eighteen declared
+// files to one, silently.
+
+func TestOutOfScopeReason_SaysTouchesReplacesRatherThanAdds(t *testing.T) {
+	msg := flattenMessage(outOfScopeReason("d1", "packages/cli/src/new.ts",
+		[]designSummary{{ID: "d1", Summary: "the work in progress"}}))
+
+	if !strings.Contains(msg, "replaces the declared list") {
+		t.Errorf("must state that the flag replaces rather than adds: %s", msg)
+	}
+	if !strings.Contains(msg, "Pass every file this plan covers") {
+		t.Errorf("must tell the reader to pass the full list: %s", msg)
+	}
+	if !strings.Contains(msg, "twing design list --mine") {
+		t.Errorf("must say where to get the current list: %s", msg)
+	}
+	// The old label read as append and is what made the command destructive.
+	if strings.Contains(msg, "Add it to") {
+		t.Errorf("must not describe a replacing flag as adding: %s", msg)
+	}
+}
+
+func TestOutOfScopeReason_SuggestedCommandDoesNotLookLikeASingleFileAppend(t *testing.T) {
+	// A command reading `--touches one/path.ts` invites exactly the mistake.
+	msg := flattenMessage(outOfScopeReason("d1", "packages/cli/src/new.ts", []designSummary{{ID: "d1"}}))
+	if strings.Contains(msg, "--touches packages/cli/src/new.ts") {
+		t.Errorf("the command must not read as a one-file append: %s", msg)
+	}
+	if !strings.Contains(msg, "every file, including packages/cli/src/new.ts") {
+		t.Errorf("the command should show the shape of a full list: %s", msg)
+	}
+}
+
+func TestNoDesignReason_DoesNotClaimTouchesWidens(t *testing.T) {
+	msg := flattenMessage(noDesignReason())
+	if strings.Contains(msg, "just widen it") {
+		t.Errorf("--touches does not widen, it replaces: %s", msg)
+	}
+	if !strings.Contains(msg, "comprehensive") {
+		t.Errorf("must say the scope flags are comprehensive: %s", msg)
+	}
+}
