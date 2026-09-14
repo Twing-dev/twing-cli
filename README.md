@@ -128,7 +128,8 @@ Implications of the split:
 
 ```sh
 twing design register --summary "adds a retry wrapper" --touches src/net/retry.ts
-twing design amend --id <designId> --touches src/net/retry-config.ts
+# --touches replaces the declared list, so restate every file, not just the new one
+twing design amend --id <designId> --touches src/net/retry.ts,src/net/retry-config.ts
 twing design close --id <designId>
 ```
 
@@ -202,12 +203,23 @@ at it. Every clone of the repo carries both, and the script runs on every
 hook event -- the same set the machine-global wiring covers, so a machine
 driven only by the committed files still gets the whole product rather than
 just the gate. On a machine that has never run twing, it **installs twing
-itself**:
+itself** -- at the version this repo's coordinator declares, never
+`@latest`:
 
 ```sh
-npm install --prefix ~/.twing/lib @twing/cli@latest
+curl -fsS "$serverUrl/v1/version"                      # -> {"version":"0.2.25"}
+npm install --prefix ~/.twing/lib @twing/cli@0.2.25
 node ~/.twing/lib/node_modules/@twing/cli/dist/index.js init --unattended
 ```
+
+Pinning to the coordinator rather than to `@latest` matters because version
+matching is exact, in both directions. A machine that installed `@latest`
+while its coordinator sat one release behind would be denied by its own gate
+on the first edit and then *downgraded* by version recovery -- two installs,
+and a daemon running a version nobody asked for in between. `/v1/version`
+needs no auth, so this costs one unauthenticated request at the only moment
+it matters; if neither `curl` nor `wget` is on the machine the script falls
+back to `@latest`.
 
 Nothing to type, no sudo, no browser -- the prefix is under your own home
 directory, unlike `npm install -g`, and `--unattended` skips the one
@@ -255,9 +267,67 @@ and runs all of them, so without that guard both would fire on every tool
 call. Your copy is yours: twing won't replace a package you installed
 deliberately, and version-mismatch and sign-in messages keep naming the
 commands that genuinely work on your machine. Global wiring also covers the
-one case the committed files can't -- a session started in a directory
-*containing* twing repos rather than inside one, where there is no
-repo-local settings file to load.
+one case the committed files can't, described next.
+
+### Sessions that don't start at a repo root
+
+Claude Code reads a project's `.claude/settings.json` from the session's
+**primary working directory** only -- no upward traversal, and no scanning of
+subdirectories. So a repo's committed hook fires when you start Claude
+exactly at the repo root, and not otherwise:
+
+```sh
+cd ~/work && claude              # a parent of several repos: nothing fires
+cd repo/packages/api && claude   # a subdirectory misses it too
+```
+
+In those sessions a machine that never ran twing by hand is completely
+unguarded: edits ungated, nothing captured, no notices, no daemon revived,
+and no signal to the admin who committed the hook. Nothing inside a repo can
+fix it, because settings discovery happens before any hook runs.
+
+So: two commands, once per machine, run by a human at a terminal.
+
+```sh
+gh auth login
+npx --yes @twing/cli@latest init --ghuser
+```
+
+That writes `~/.twing/bin/twing-resolve` and points the **user-level**
+`~/.claude/settings.json` at it for the same six events -- and that file is
+read wherever a session starts.
+
+**It installs nothing.** No CLI, no daemon, no hook binary. The coordinator
+decides which version to install and none is known yet, so the install waits
+for the first session that opens a repo using twing, exactly as the committed
+script does. A machine that never opens one downloads nothing at all.
+
+**Why `npx` rather than `npm install -g`.** A global install makes the
+machine ineligible for automatic version recovery -- twing won't replace a
+package you installed deliberately -- so installing twing to get better
+coverage would buy worse version handling. Run through `npx` nothing is left
+behind, and the machine stays managed and self-updating.
+
+**Exactly one hook does the work, in every combination.** At a repo root the
+committed hook runs and the resolver stands down; anywhere else the resolver
+hands the event to the binary. Claude Code runs every matching hook from
+every settings scope **in parallel**, with no ordering between scopes, so
+neither stand-down can rely on running first: each reads static file state
+(does the other settings file mention the other's script) and is
+order-independent by construction. Both processes do start -- invocation
+can't be prevented, only made a no-op -- so the overlap costs one wasted `sh`
+(~2 ms) and never a second gate check.
+
+**If a global `@twing/cli` was already installed** and couldn't be removed --
+a root-owned prefix needs `sudo`, which a setup command shouldn't demand --
+`--ghuser` leaves it alone, records `~/.twing/auto-managed` so the managed
+copy under `~/.twing` stays authoritative anyway, and prints the cleanup
+command that's correct for your machine. Until you run it, typing `twing`
+yourself still gets the leftover copy, and the CLI sends no version header,
+so that skew is silent.
+
+`--ghuser` signs in with `gh auth token`, so it needs GitHub. Machines
+without it use `npm install -g @twing/cli` and `twing init`, unchanged.
 
 **Turning it on and off** -- both are plain local file edits, no server call
 and no auth, since the real authorization is your own branch protection / PR
@@ -291,9 +361,10 @@ meaning for it. That is a rare path, not the default one.
 | Command                                               | What it does                                                                                                                         |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `twing init [--server <url>]`                         | One-time setup per machine: discover/confirm the coordinator, authenticate, install/wire the hook, start the daemon. Safe to re-run. |
+| `twing init --ghuser`                                 | Once per machine, after `gh auth login`: makes twing work from any directory, not just a repo root. Installs nothing -- see "Sessions that don't start at a repo root". |
 | `twing align`                                         | Cross-session divergence findings (advisory, never blocks).                                                                          |
 | `twing design register --summary "..." --touches a,b` | Register a design before your first edit/write (or let plan mode do it automatically).                                               |
-| `twing design amend --id <designId> --touches c,d`    | Expand an already-registered design to cover more files.                                                                             |
+| `twing design amend --id <designId> --touches c,d`    | Restate which files a registered design touches. The list **replaces** the old one, so pass every file, not just the new ones.       |
 | `twing design close --id <designId>`                  | Close a design once its work is done -- see below.                                                                                   |
 
 The full command list, including self-hosting/admin commands, is in
@@ -554,6 +625,7 @@ via TypeScript project references. `npm link` in `packages/cli` gives you a
 | Command                                                                                            | What it does                                                                                                                                                                                                                                                                                                                                                                                                           |
 | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]`           | One-time setup per machine: discovers/bootstraps the coordinator, authenticates (GitHub-verified join/found by default for a GitHub-hosted repo; `--invite` to redeem one instead; `--no-github` to skip straight to the old "no cached PAT" error; `--no-auth` to declare this coordinator has no identity verification at all), hook install, hook wiring (including the design gate), daemon start. `--unattended` is what the committed bootstrap hook runs: never prompts, never opens a browser, and skips the OS-service install and global wiring -- see "Zero-touch onboarding". Safe to re-run. |
+| `twing init --ghuser`                                                                              | A different command that happens to share `init`'s name, and machine-scoped where `init` is repo-scoped: wires `~/.twing/bin/twing-resolve` into the user-level `~/.claude/settings.json` so twing is active however deep or shallow a session starts, not only at a repo root. Requires `gh auth login`. Installs nothing -- the coordinator picks the version, and none is known until a session opens a repo that uses twing. Run it via `npx --yes @twing/cli@latest`, not a global install: a global install opts the machine out of automatic version recovery. Safe to re-run. |
 | `twing uninstall [--dry-run]`                                                                      | Undoes what `init` set up on this machine: stops the daemon, removes any launchd/systemd definition left by an older init, unwires twing's hooks from `~/.claude/settings.json`, and deletes `~/.twing`. Run it *before* `npm uninstall -g @twing/cli` -- on its own, that leaves the daemon running and the hooks pointing at a deleted binary. Never touches a repo's committed `.claude/settings.json`; that's `twing project disable-enforcement`.                                     |
 | `twing login [--server <url>] [--token <pat>]`                                                     | Just cache an already-generated PAT for a server -- no hook install, no settings wiring, no daemon start. For a second machine, or a stale local config.                                                                                                                                                                                                                                                               |
 | `twing join --github [--server <url>]`                                                             | Just the GitHub-verified authentication step `init` does by default -- generates/reuses a PAT and (re-)checks your GitHub role on this repo, without the rest of `init`.                                                                                                                                                                                                                                               |
