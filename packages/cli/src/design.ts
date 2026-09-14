@@ -8,9 +8,26 @@
  * this one.
  */
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { readConfig, getServerAuth, findRepoRoot, loadManifestFromFile, twingConfigPath, computeProjectId, computeDeveloperId, authFetch, isGateDisabled, setGateDisabled } from "@twing/core";
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+import {
+  readConfig,
+  getServerAuth,
+  findRepoRoot,
+  loadManifestFromFile,
+  twingConfigPath,
+  computeProjectId,
+  computeDeveloperId,
+  authFetch,
+  isGateDisabled,
+  setGateDisabled,
+  parseDesignTemplate,
+  validateTemplate,
+  deriveScope,
+  pathOfTarget,
+  suggestAction,
+  type DesignChange,
+} from "@twing/core";
 
 interface RequiredConfig {
   serverUrl: string;
@@ -164,6 +181,91 @@ export interface RegisterOptions {
    * design (typically in another repo) sharing the same unit of work --
    * pass the `groupId` printed by that design's own registration. */
   group?: string;
+  /** Structured design template (2026-09): a YAML file declaring `goal:` and
+   * a list of `changes:`, each with `action`/`target`/`intent` -- see
+   * docs/structured-design-schema.md.
+   *
+   * An *alternative* to `--summary`/`--creates`/`--touches`, not a
+   * replacement: the flag form stays exactly as it was, since it is what
+   * an agent reaches for when unblocking itself from a gate deny, and that
+   * path must not get harder. */
+  from?: string;
+}
+
+/**
+ * Reads and validates a structured template, returning the fields a
+ * registration needs.
+ *
+ * Two things are deliberate here.
+ *
+ * **Validation failures refuse; unresolvable targets only warn.** An invalid
+ * `action` means the file says something the vocabulary cannot express, so
+ * registering would persist a design nobody can check -- refuse. A target
+ * that doesn't exist on disk is far more often a path written relative to a
+ * subdirectory than a real mistake, so it warns and proceeds, exactly as
+ * `warnIfTouchesMissing` already does for `--touches`.
+ *
+ * **The raw text travels too.** `rawPlanText` is sent verbatim alongside the
+ * derived fields so a coordinator with no column for `changes` (every
+ * version up to and including 0.2.25) still stores the structured
+ * declaration in `rawPlanExcerpt` and can display it. The server skips its
+ * own LLM extraction whenever structured fields are present, so sending both
+ * costs nothing and changes no verdict.
+ */
+function loadTemplate(
+  repoRoot: string,
+  filePath: string,
+): { goal: string; changes: DesignChange[]; creates: string[]; touches: string[]; raw: string } {
+  const resolved = isAbsolute(filePath) ? filePath : join(process.cwd(), filePath);
+  let raw: string;
+  try {
+    raw = readFileSync(resolved, "utf8");
+  } catch {
+    throw new Error(`twing design register: couldn't read ${filePath}`);
+  }
+
+  const template = parseDesignTemplate(raw);
+  const problems = validateTemplate(template);
+  if (problems.length > 0) {
+    const lines = problems.map((p) => {
+      const where = p.changeId ? `  ✗ ${p.changeId}  ` : "  ✗ ";
+      const suggestion = /^unknown action "(.+)"/.exec(p.message);
+      const hint = suggestion ? suggestAction(suggestion[1]) : undefined;
+      return where + p.message + (hint ? `\n        did you mean \`${hint}\`?` : "");
+    });
+    throw new Error(`twing design register: ${filePath} isn't a valid design template.\n\n${lines.join("\n")}\n\nNothing was registered.`);
+  }
+
+  const { creates, touches } = deriveScope(template.changes);
+
+  // Advisory only, same threshold and same reasoning as
+  // `warnIfTouchesMissing` below: a target that exists nowhere under this
+  // repo usually means the template is about a different repo, which is
+  // worth seeing immediately rather than discovering later.
+  const unresolved = template.changes.filter(
+    (c) => c.action !== "add" && !existsSync(join(repoRoot, pathOfTarget(c.target))),
+  );
+  for (const change of unresolved) {
+    console.warn(`  ! ${change.id}  ${pathOfTarget(change.target)} doesn't exist under ${repoRoot}`);
+  }
+  if (unresolved.length > 0) {
+    console.warn(
+      `  ! ${unresolved.length} target(s) unresolved. Registering anyway -- if this template is about a ` +
+        `different repo, run it from there instead.`,
+    );
+  }
+
+  return { goal: template.goal, changes: template.changes, creates, touches, raw };
+}
+
+/** The per-change lines printed after a successful `--from` registration --
+ * a receipt, so it's obvious what was actually declared rather than just
+ * that *something* was. */
+function printDeclaredChanges(changes: DesignChange[]): void {
+  for (const change of changes) {
+    const from = change.from ? `  (from ${change.from})` : "";
+    console.log(`  ${change.id.padEnd(4)}${change.action.padEnd(8)}${change.target}${from}`);
+  }
 }
 
 /**
@@ -203,19 +305,33 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
   // other session and human reviewer sees when work overlaps theirs, not
   // free-form scratch text, so a generic "field required" message invites
   // a generic filler value instead of a real answer.
-  if (!options.summary) {
+  // `--from` supplies goal + scope from a structured template, so the
+  // required-summary check below doesn't apply to it. Everything after this
+  // point is shared: one request shape, one verdict printer.
+  const template = options.from ? loadTemplate(repoRoot, options.from) : undefined;
+
+  if (!template && !options.summary) {
     throw new Error(
       'twing design register: --summary "..." is required -- describe the concrete thing you are trying to ' +
         "achieve in this session (not a placeholder or restatement of the command). This is what shows up to " +
         "other sessions and human reviewers when your work overlaps theirs, so it needs to actually say what " +
         'you\'re building: e.g. --summary "Add exponential backoff with jitter to RetryPolicy so outbound HTTP ' +
-        'calls survive transient failures" rather than --summary "make changes" or --summary "fix bug".',
+        'calls survive transient failures" rather than --summary "make changes" or --summary "fix bug". ' +
+        "Or declare the work structurally instead: twing design register --from design.yml",
     );
   }
 
   const projectId = computeProjectId(repoRoot);
-  const touches = splitList(options.touches);
-  warnIfTouchesMissing(repoRoot, touches);
+  const creates = template ? template.creates : splitList(options.creates);
+  const touches = template ? template.touches : splitList(options.touches);
+  if (!template) warnIfTouchesMissing(repoRoot, touches);
+
+  if (template) {
+    console.log(`  ✓ ${template.changes.length} change(s) declared`);
+    console.log(`    derived  creates = ${creates.join(", ") || "(none)"}`);
+    console.log(`             touches = ${touches.join(", ") || "(none)"}`);
+    console.log("");
+  }
 
   const res = await authFetch(
     `${serverUrl}/v1/designs/check`,
@@ -227,17 +343,30 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
         developerId,
         sessionId: session,
         agentLabel: options.label,
-        summary: options.summary ?? "",
-        creates: splitList(options.creates),
+        summary: template ? template.goal : (options.summary ?? ""),
+        creates,
         touches,
         dependsOn: splitList(options.dependsOn),
+        // Sent alongside the structured fields, never instead of them. The
+        // server skips its own extraction whenever structured fields are
+        // present (app.ts's `hasStructured` check), so this changes no
+        // verdict -- it exists purely so a coordinator with no column for
+        // `changes` still persists the declaration, verbatim, in
+        // `rawPlanExcerpt`, where twing-monitor can show it.
+        ...(template ? { rawPlanText: template.raw } : {}),
         ...(options.group ? { groupId: options.group } : {}),
       }),
     },
     authToken,
     developerId,
   );
-  printDesignVerdict(await parseJsonOrUnauthorized<DesignCheckResponseJSON>(res));
+  const result = await parseJsonOrUnauthorized<DesignCheckResponseJSON>(res);
+  printDesignVerdict(result);
+  if (template && !("error" in result && result.error)) {
+    console.log("");
+    console.log("  declared");
+    printDeclaredChanges(template.changes);
+  }
 }
 
 export interface ResolveOptions {

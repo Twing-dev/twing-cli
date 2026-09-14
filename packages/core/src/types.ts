@@ -124,6 +124,51 @@ export const MAX_DESIGN_ACTIVE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
  * giving a paused project a real chance to come back. */
 export const DEFAULT_DESIGN_DORMANT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** The six things that can happen to a target (structured design template,
+ * 2026-09). Closed, and split on one question: **is behaviour supposed to
+ * change?**
+ *
+ *  - `add`/`modify`/`rewrite`/`remove` -- yes. A checker proves the stated
+ *    change actually happened. `rewrite` is distinct from `modify` because
+ *    it changes what gets checked: a `modify` is judged on its delta, a
+ *    `rewrite` on the whole resulting symbol.
+ *  - `rename`/`move` -- no. These assert the body is *identical* and only
+ *    the name (or the path) differs, which makes them the most valuable
+ *    entries here: "I only renamed it" is a claim an AST comparison can
+ *    check outright, and a body that changed too is a silent behaviour
+ *    change hiding inside a refactor.
+ *
+ * `extract`/`inline` were considered and deliberately left out rather than
+ * shipped inert -- their body-partition check is non-trivial and nobody has
+ * built it. See docs/structured-design-schema.md for why a value that
+ * changes no behaviour gets deleted in this codebase (the
+ * `DesignConstraintType` collapse below is the precedent). */
+export type DesignChangeAction = "add" | "modify" | "rewrite" | "remove" | "rename" | "move";
+
+/**
+ * One declared change inside a design (structured design template, 2026-09).
+ *
+ * `target` deliberately uses the **same `path::Symbol.method` format
+ * `Claim.symbolId` uses** (`computeSymbolId`, symbol-id.ts). That shared
+ * namespace is the entire reason this type exists: with it, checking a
+ * design against the code it produced is a set difference over targets and
+ * claims, needing no LLM at all. A second spelling for `target` would
+ * silently destroy that, so there must never be one.
+ */
+export interface DesignChange {
+  /** Stable within this design -- a finding points at it, so it needs to
+   * survive being written down in a review. */
+  id: string;
+  action: DesignChangeAction;
+  /** `src/net/retry.ts`, or `src/net/retry.ts::RetryPolicy.backoff`. */
+  target: string;
+  /** One sentence: what this achieves, not what it does mechanically. */
+  intent: string;
+  /** The previous name (`rename`) or previous path (`move`). Required by
+   * exactly those two actions and meaningless on the other four. */
+  from?: string;
+}
+
 export interface DesignStatement {
   id: string;
   /** §17 design linking (2026-08): cross-project label -- self-assigned to
@@ -210,6 +255,24 @@ export interface DesignStatement {
    * call (CLI always sends structured fields, never `rawPlanText`) -- this
    * is the one reliable signal a design row came from `ExitPlanMode`. */
   rawPlanExcerpt?: string;
+  /** The structured declaration this design was registered from, when it was
+   * registered from one (`twing design register --from <file>`).
+   *
+   * Optional and **never backfilled**: every design created before this
+   * shipped has none, and every reader must treat absence as "not stated"
+   * rather than "declares no changes" -- the usual convention in this
+   * schema, and the thing that makes a richer shape safe on partial input.
+   *
+   * `creates`/`touches` stay authoritative for the Edit/Write gate and are
+   * *derived* from this when present (`deriveScope`, design-scope.ts), which
+   * is what lets `pathInDesignScope`, `hook/design_gate.go` and
+   * twing-monitor all keep reading exactly what they read today. This is
+   * additive on top of them, never a replacement.
+   *
+   * Not yet persisted server-side (no column as of 0.2.25) -- the CLI sends
+   * the template verbatim as `rawPlanText` so an unmodified coordinator
+   * stores it in `rawPlanExcerpt` and can display it. */
+  changes?: DesignChange[];
   /** Active-inactivity threshold (§17 design lifecycle, 2026-08): how long
    * this design can go with no activity before going dormant. Refreshed on
    * activity, not counted from `createdAt` -- see `DesignRegistry.touch()`.

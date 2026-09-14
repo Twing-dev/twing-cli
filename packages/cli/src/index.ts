@@ -105,6 +105,7 @@ function printUsage(): void {
       "  twing project enable-enforcement",
       "  twing project disable-enforcement",
       "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f [--group <groupId>]",
+      "  twing design register --from <file.yml>   (structured template: goal + changes[action/target/intent])",
       "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
       "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f] [--summary \"...\"] [--group <groupId>]",
       "  twing design amend --id <designId> --reassign-project   (run from the correct repo -- moves an open, unencumbered design there)",
@@ -148,6 +149,7 @@ async function runDesignCommand(rest: string[]): Promise<void> {
         touches: flags.touches,
         dependsOn: flags["depends-on"],
         group: flags.group,
+        from: flags.from,
       });
       return;
     case "resolve":
