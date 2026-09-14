@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runtime journeys — twing docs</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+  <marker id="ahno" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-no" d="M0,0 L10,5 L0,10 z"/></marker>
+</defs></svg>
+
+<header class="topbar"><div class="inner">
+  <a class="brand" href="index.html"><span class="dot"></span>twing <small>docs</small></a>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="journeys.html">Journeys</a>
+    <a href="reference.html">Reference</a>
+    <a href="onboarding.html">Onboarding</a>
+    <a href="findings.html">Findings</a>
+    <a href="review-flow.html">Review ✦</a>
+    <a href="implementation-plan.html">Build ⚒</a>
+  </nav>
+  <span class="spacer"></span>
+  <div class="tb-tools">
+    <div class="searchbox"><input id="q" type="search" placeholder="Filter page…" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+    <span class="iconbtn" id="themeBtn" role="button" tabindex="0">◐ auto</span>
+  </div>
+</div></header>
+
+<div class="page">
+
+  <div class="hero">
+    <div class="eyebrow">Page 3</div>
+    <h1>Runtime journeys</h1>
+    <p class="lede">
+      Three end-to-end traces: a session that goes right, a session that gets blocked, and two
+      developers colliding — which is the whole point of the system.
+    </p>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar"><div class="t">On this page</div><div class="links"></div></aside>
+
+    <main>
+      <div class="nores">No matches on this page.</div>
+
+      <section id="right">
+        <h2><span class="num">01</span> A session that goes right</h2>
+        <p data-s>
+          The agent uses plan mode. Registration is free and invisible, and nothing ever blocks.
+        </p>
+
+        <ol class="seq" data-s>
+          <li class="phase">Plan mode</li>
+          <li class="hl"><div class="hop"><span class="who">Claude Code</span><span class="to">→</span><span class="who s">hook</span></div>
+              <div class="msg"><code>PreToolUse · ExitPlanMode</code></div></li>
+          <li><div class="hop"><span class="who s">hook</span><span class="to">→</span><span class="who">coordinator</span></div>
+              <div class="msg"><code>POST /v1/designs/check { rawPlanText }</code></div>
+              <div class="aside">60 s budget here, not 15 — this leg can run a real LLM call</div></li>
+          <li><div class="hop"><span class="who">coordinator</span></div>
+              <div class="msg">LLM extracts <code>creates</code> / <code>touches</code> / <code>dependsOn</code> / <code>summary</code>, then runs the checks against every other open design and the project’s constraints</div></li>
+          <li class="good"><div class="hop"><span class="who">coordinator</span><span class="to">→</span><span class="who s">hook</span><span class="to">→</span><span class="who">Claude Code</span></div>
+              <div class="msg"><span class="tag ok">allow</span> verdict <code>clean</code> — “registered design &lt;id&gt;”</div></li>
+
+          <li class="phase">Every edit, from here on</li>
+          <li class="hl"><div class="hop"><span class="who">Claude Code</span><span class="to">→</span><span class="who s">hook</span></div>
+              <div class="msg"><code>PreToolUse · Edit</code></div></li>
+          <li><div class="hop"><span class="who s">hook</span><span class="to">→</span><span class="who">coordinator</span></div>
+              <div class="msg"><code>GET /v1/constraints/match?path=…</code> → no match</div>
+              <div class="aside">Ground truth: the literal file vs. project rules, independent of what any design claims</div></li>
+          <li><div class="hop"><span class="who s">hook</span><span class="to">→</span><span class="who">coordinator</span></div>
+              <div class="msg"><code>GET /v1/designs/scope-match?path=…</code> → <code>in_scope</code></div>
+              <div class="aside">Also refreshes <code>lastActivityAt</code> — the one place real per-design activity is recorded</div></li>
+          <li class="good"><div class="hop"><span class="who s">hook</span><span class="to">→</span><span class="who">Claude Code</span></div>
+              <div class="msg"><span class="tag ok">allow</span></div></li>
+
+          <li class="phase">After the edit — invisible, unblocking</li>
+          <li><div class="hop"><span class="who">Claude Code</span><span class="to">→</span><span class="who s">hook</span><span class="to">→</span><span class="who">daemon</span></div>
+              <div class="msg"><code>PostToolUse</code> → one <code>enqueue</code> frame, fire-and-forget; the hook exits with empty stdout</div></li>
+          <li><div class="hop"><span class="who">daemon</span></div>
+              <div class="msg">Tree-sitter → <code>symbolId</code>, signature diff, call-graph edges</div></li>
+          <li><div class="hop"><span class="who">daemon</span><span class="to">→</span><span class="who">coordinator</span></div>
+              <div class="msg"><code>POST /v1/claims</code>, batched on a ~7 s debounce → findings (none)</div></li>
+
+          <li class="phase">Session end</li>
+          <li><div class="hop"><span class="who s">hook</span><span class="to">→</span><span class="who">coordinator</span></div>
+              <div class="msg">Best-effort close of every open design for this session</div>
+              <div class="aside">Opportunistic tidying, not load-bearing — the TTL sweep is the backstop</div></li>
+        </ol>
+
+        <div class="grid g2">
+          <div class="card c2" data-s>
+            <h5><code>ExitPlanMode</code> is the happy path</h5>
+            <p>Plan mode already produces exactly the artifact the gate needs. If the agent uses
+               it, registration costs the developer nothing.</p>
+          </div>
+          <div class="card c2" data-s>
+            <h5>Two independent checks, in this order</h5>
+            <p><code>constraints/match</code> then <code>designs/scope-match</code>. The first
+               exists specifically so a session can’t sidestep a project rule by registering an
+               unrelated design first.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="blocked">
+        <h2><span class="num">02</span> A session that gets blocked</h2>
+        <p data-s>
+          If the agent skips plan mode, its first <code>Edit</code> reaches
+          <code>scope-match</code> with nothing registered. The full pipeline, in order:
+        </p>
+
+        <figure data-s>
+          <div class="fig">
+            <svg viewBox="0 0 700 450" role="img" aria-label="Edit and Write gate decision pipeline">
+              <rect class="bx-a2" x="60" y="20" width="240" height="44" rx="8"/>
+              <text class="lbl" x="180" y="47" text-anchor="middle">PreToolUse · Edit | Write</text>
+
+              <rect class="bx" x="60" y="100" width="240" height="58" rx="8"/>
+              <text class="lbl" x="180" y="124" text-anchor="middle">Do we have jurisdiction?</text>
+              <text class="sub" x="180" y="142" text-anchor="middle">gate on · coordinator set · file in repo</text>
+
+              <rect class="bx" x="60" y="194" width="240" height="58" rx="8"/>
+              <text class="lbl" x="180" y="218" text-anchor="middle">/v1/constraints/match</text>
+              <text class="sub" x="180" y="236" text-anchor="middle">the literal file vs. project rules</text>
+
+              <rect class="bx" x="60" y="288" width="240" height="58" rx="8"/>
+              <text class="lbl" x="180" y="312" text-anchor="middle">/v1/designs/scope-match</text>
+              <text class="sub" x="180" y="330" text-anchor="middle">the literal file vs. this session</text>
+
+              <rect class="bx-ok" x="60" y="382" width="240" height="46" rx="8"/>
+              <text class="lbl" x="180" y="410" text-anchor="middle">ALLOW</text>
+
+              <rect class="bx-ok" x="430" y="104" width="240" height="50" rx="8"/>
+              <text class="lbl" x="550" y="126" text-anchor="middle">silent allow</text>
+              <text class="sub" x="550" y="143" text-anchor="middle">no jurisdiction — not a failure</text>
+
+              <rect class="bx-no" x="430" y="198" width="240" height="50" rx="8"/>
+              <text class="lbl" x="550" y="220" text-anchor="middle">DENY</text>
+              <text class="sub" x="550" y="237" text-anchor="middle">protected file, or fail-closed</text>
+
+              <rect class="bx-no" x="430" y="292" width="240" height="50" rx="8"/>
+              <text class="lbl" x="550" y="314" text-anchor="middle">DENY</text>
+              <text class="sub" x="550" y="331" text-anchor="middle">4 other states — see table</text>
+
+              <path class="edge" d="M180,64 L180,96" marker-end="url(#ah)"/>
+              <path class="edge" d="M180,158 L180,190" marker-end="url(#ah)"/>
+              <text class="el" x="192" y="180">yes</text>
+              <path class="edge" d="M180,252 L180,284" marker-end="url(#ah)"/>
+              <text class="el" x="192" y="274">clear</text>
+              <path class="edge" d="M180,346 L180,378" marker-end="url(#ah)"/>
+              <text class="el" x="192" y="368">in_scope</text>
+              <path class="edge" d="M300,129 L426,129" marker-end="url(#ah)"/>
+              <text class="el" x="363" y="122" text-anchor="middle">no</text>
+              <path class="edge-no" d="M300,223 L426,223" marker-end="url(#ahno)"/>
+              <text class="el" x="363" y="216" text-anchor="middle">matched / error</text>
+              <path class="edge-no" d="M300,317 L426,317" marker-end="url(#ahno)"/>
+              <text class="el" x="363" y="310" text-anchor="middle">not in scope</text>
+            </svg>
+          </div>
+        </figure>
+
+        <h3 id="states">The five <code>scope-match</code> states</h3>
+        <div class="tw" data-s><table>
+          <thead><tr><th>State</th><th>Means</th><th>Outcome</th></tr></thead>
+          <tbody>
+            <tr><td><code>in_scope</code></td><td>an open design covers this file</td><td><span class="tag ok">allow</span></td></tr>
+            <tr><td><code>no_design</code></td><td>nothing registered for this session at all</td><td><span class="tag no">deny</span> → register a design</td></tr>
+            <tr><td><code>out_of_scope</code></td><td>an open design exists, but none cover this file</td><td><span class="tag no">deny</span> → amend to add the file</td></tr>
+            <tr><td><code>flagged</code></td><td>something’s registered, but its own verdict wasn’t clean</td><td><span class="tag no">deny</span> → resolve the conflict</td></tr>
+            <tr><td><code>dormant</code></td><td>only a paused design covers this file</td><td><span class="tag no">deny</span> → explicitly resume it</td></tr>
+          </tbody>
+        </table></div>
+        <div class="note" data-s>
+          <p><span class="h">Why <code>flagged</code> is checked before <code>dormant</code></span>
+          A flagged design is an <em>active block</em>, possibly admin-gated, on work this session
+          actually registered. A dormant design is just idle, parked work. Ranking “idle” above
+          “actively blocked” meant a session carrying any dormant design could never learn about a
+          real blocker sitting right next to it — it always got told to resume the dormant one,
+          silently reactivating unrelated stale work while hiding the actual problem.</p>
+        </div>
+
+        <h3 id="denies">The shape of a deny</h3>
+        <p data-s>
+          Every deny follows one three-layer grammar (<code>denyMessage</code>): a
+          <strong>headline</strong> — one plain sentence, no identifiers, the only line most
+          readers will read; <strong>why + details</strong>, indented, for whoever wants it; and
+          <strong>“What now”</strong> with the exact commands.
+        </p>
+        <div class="note key" data-s>
+          <p><span class="h">Formatting constraints are real, not stylistic</span>
+          This string is JSON handed to Claude Code <em>and</em> read by the model. No ANSI colour
+          (it would arrive as literal escape bytes and pollute the model’s context), no emoji, no
+          box-drawing. Structure is the only formatting available — which is why prose is
+          hard-wrapped in code rather than left to the terminal.</p>
+        </div>
+        <p data-s>Every deny also carries a suffix addressed to the agent, telling it not to route
+           around the gate silently and to say so explicitly if it resolves the block itself.</p>
+
+        <h3 id="failclasses">Five failure classes, each named</h3>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Class</th><th>Says</th><th>Fix</th></tr></thead>
+          <tbody>
+            <tr><td>No cached token</td><td>“this machine isn’t signed in”</td><td><code>twing login</code> / <code>twing init</code></td></tr>
+            <tr><td><strong>401</strong></td><td>“your sign-in was rejected”</td><td>Credentials expired or revoked → re-auth</td></tr>
+            <tr><td><strong>403</strong></td><td>“you don’t have access to this project”</td><td><code>twing join --github</code> — a different problem entirely</td></tr>
+            <tr><td>Unreachable</td><td>“can’t reach the coordinator”</td><td>Check connection, retry</td></tr>
+            <tr><td><strong>426</strong></td><td>“this machine’s twing-cli is out of date”</td><td><code>npm i -g @twing/cli@latest &amp;&amp; twing init &amp;&amp; twing daemon restart</code></td></tr>
+          </tbody>
+        </table></div>
+        <div class="note bad" data-s>
+          <p><span class="h">Why 401 and 403 are split</span>
+          Collapsing them cost a real user five days. The message said “your cached token is stale
+          — run <code>twing login</code>”, but the actual cause was a 403: the developer simply
+          wasn’t a member of that project yet, which <code>twing login</code> cannot fix.</p>
+        </div>
+        <div class="note" data-s>
+          <p><span class="h">One deny deliberately omits the escape hatch</span>
+          Four of the five offer <code>TWING_DESIGN_GATE=off</code>. The version-mismatch deny does
+          not. A fresh Claude Code session, offered “update” and “disable the safety gate” as
+          equally-weighted options, correctly refused to pick either and stopped to ask a human —
+          a sign the option shouldn’t have been offered as a peer to the real fix. A version
+          mismatch always has exactly one right answer: update.</p>
+        </div>
+      </section>
+
+      <section id="collision">
+        <h2><span class="num">03</span> Two developers colliding</h2>
+        <p data-s>
+          Four mechanisms detect collision. Together they form the model everything else in the
+          system is a projection of.
+        </p>
+
+        <div class="grid g2">
+          <div class="card cwa" data-s>
+            <div class="k">Declared intent · before any code</div>
+            <h5><code>file_overlap</code></h5>
+            <p>Two plans name the same file. Cheap string intersection of self-reported
+               <code>creates</code>/<code>touches</code>.</p>
+            <dl><dt>Blocks</dt><dd><span class="tag ok">never</span></dd>
+                <dt>Approval</dt><dd>n/a — advisory only</dd>
+                <dt>Lives in</dt><dd><code>design-checks.ts</code></dd></dl>
+            <p><em>Naming the same file isn’t evidence either will actually collide — a design can
+               decline to write to a path it named.</em></p>
+          </div>
+          <div class="card cno" data-s>
+            <div class="k">Project rule</div>
+            <h5><code>constraint_violation</code></h5>
+            <p>One design’s paths vs. a fixed rule the team registered in
+               <code>.twing/twing.yml</code>.</p>
+            <dl><dt>Blocks</dt><dd><span class="tag no">always</span></dd>
+                <dt>Approval</dt><dd><strong>project admin</strong></dd>
+                <dt>Lives in</dt><dd><code>design-checks.ts</code></dd></dl>
+            <p><em>The only bucket where a third party approves the override — it’s someone else’s
+               rule, not yours to waive alone.</em></p>
+          </div>
+          <div class="card cno" data-s>
+            <div class="k">Real edits · code exists</div>
+            <h5><code>symbol_conflict</code></h5>
+            <p>Sourced from real Tree-sitter Claims, not self-reported scope. Three feeders:
+               <code>textual_overlap</code>, <code>contract_divergence</code>,
+               <code>design_divergence</code>.</p>
+            <dl><dt>Blocks</dt><dd><span class="tag no">always</span></dd>
+                <dt>Approval</dt><dd>self</dd>
+                <dt>Lives in</dt><dd><code>checks.ts</code>, <code>design-divergence.ts</code></dd></dl>
+            <p><em>Flags whichever side(s) have an open design at the time.</em></p>
+          </div>
+          <div class="card cno" data-s>
+            <div class="k">Stated intent</div>
+            <h5><code>llm_divergence</code></h5>
+            <p>An LLM comparator judging whether two plans conflict <em>in what they do</em>, even
+               with zero file overlap.</p>
+            <dl><dt>Blocks</dt><dd><span class="tag no">always</span></dd>
+                <dt>Approval</dt><dd>self</dd>
+                <dt>Lives in</dt><dd><code>design-semantic-check.ts</code></dd></dl>
+            <p><em>Runs <strong>asynchronously</strong>, after the response is sent — so it flags
+               the design rather than denying the registration.</em></p>
+          </div>
+        </div>
+
+        <div class="note key" data-s>
+          <p><span class="h">The organising principle</span>
+          <strong>Approval belongs to whoever’s authority you’d be overriding.</strong> That single
+          sentence is why three buckets block but only one needs an admin: a peer collision is
+          yours to justify; someone else’s rule is not.</p>
+        </div>
+
+        <details class="acc" data-s>
+          <summary>The three feeders of <code>symbol_conflict</code></summary>
+          <div class="body">
+            <div class="tw"><table>
+              <thead><tr><th>Finding</th><th>Fires when</th></tr></thead>
+              <tbody>
+                <tr><td><code>textual_overlap</code></td><td>Another active write claim on the same symbol, from a different session <em>and</em> a different developer</td></tr>
+                <tr><td><code>contract_divergence</code></td><td>A signature changed, and a caller of that symbol has an active claim from someone else. Checked in <strong>both directions</strong>, so the finding doesn’t depend on submission order.</td></tr>
+                <tr><td><code>design_divergence</code></td><td>A real edit landed inside another session’s <em>declared</em> scope — no code on their side yet. The first place a Claim is checked against a DesignStatement.</td></tr>
+              </tbody>
+            </table></div>
+            <p>
+              All three originally included a single developer’s own two concurrent sessions.
+              Reversed 2026-08-22 after live data: 14 of 14 self-pair alignment threads on this
+              project sat open, unreplied, never acted on. A dedicated
+              same-developer-multi-agent-drift feature is deferred, not rebuilt as a quieter
+              variant.
+            </p>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary>Why the semantic comparator exists at all</summary>
+          <div class="body">
+            <p>
+              Two designs describing a real, non-obvious conflict in unrelated-sounding words sail
+              through the syntactic tiers as <code>clean</code> — those only compare literal path
+              intersections. This asks the question they structurally can’t.
+            </p>
+            <p>
+              The prompt is empirically tuned, not guessed: validated against a 25-case labeled
+              eval set plus four hand-authored full-scale plans with a deliberately hidden
+              conflict. Three criteria (duplication, contradictory assumptions, tension), plus one
+              explicit line countering the model’s persistent “different files ⇒ not a conflict”
+              bias — banning the literal word “file” wasn’t enough, models reached for synonyms
+              like “different layers” to preserve the same wrong heuristic.
+            </p>
+            <p>
+              It <strong>fails soft</strong>: one retry, then any error or unparseable response
+              returns “no conflict”. Never invent a conflict because the model was unreachable.
+            </p>
+          </div>
+        </details>
+
+        <h3 id="collide-seq">What actually happens</h3>
+        <ol class="seq" data-s>
+          <li><div class="hop"><span class="who">Dev B</span><span class="to">→</span><span class="who">coordinator</span></div>
+              <div class="msg">Registers a design: “add retry to HttpClient”</div></li>
+          <li><div class="hop"><span class="who">Dev A</span><span class="to">→</span><span class="who">coordinator</span></div>
+              <div class="msg"><code>POST /v1/claims</code> — A just edited <code>HttpClient.request</code></div></li>
+          <li class="stop"><div class="hop"><span class="who">coordinator</span></div>
+              <div class="msg">A’s real edit falls inside B’s <em>declared</em> scope → <code>symbol_conflict</code></div>
+              <div class="aside">Flags <strong>both</strong> designs, and opens <strong>one shared</strong> alignment thread</div></li>
+          <li class="stop"><div class="hop"><span class="who">coordinator</span><span class="to">→</span><span class="who">Dev A</span><span class="to">+</span><span class="who">Dev B</span></div>
+              <div class="msg">Notice to each; the next edit on either side is <span class="tag no">denied</span></div></li>
+          <li><div class="hop"><span class="who">Dev A</span><span class="to">→</span><span class="who">thread</span></div>
+              <div class="msg"><code>twing align respond --finding &lt;id&gt; "I’ll take the client, you take the queue"</code></div></li>
+          <li class="good"><div class="hop"><span class="who">Dev A</span><span class="to">→</span><span class="who">coordinator</span></div>
+              <div class="msg"><code>twing design resolve --justify "…"</code> — self-approved instantly, no admin</div></li>
+          <li class="good"><div class="hop"><span class="who">coordinator</span></div>
+              <div class="msg">Waiver recorded — this exact pair never re-flags</div></li>
+        </ol>
+      </section>
+
+      <section id="threads">
+        <h2><span class="num">04</span> Alignment threads</h2>
+        <p data-s>
+          A small, async, mailbox-style conversation between the two developers a finding names.
+          A thread is a tiny current-state row; every message in it — including the auto-generated
+          seed note — is an <code>activity_events</code> row, so history is genuinely append-only.
+        </p>
+
+        <div class="grid g2">
+          <div class="card c1" data-s>
+            <h5>It is advisory, always</h5>
+            <p>Closing a thread is <strong>unilateral</strong> — neither party needs the other’s
+               agreement — and closing it does <em>not</em> by itself unblock anything. The block
+               clears via <code>twing design resolve --justify</code>.</p>
+          </div>
+          <div class="card c1" data-s>
+            <h5>Who can see vs. who can act</h5>
+            <p>Read: a party <em>or</em> a project admin. Reply/close: parties only. An admin can
+               see every reconciliation in their project but can’t act inside one they’re not
+               named on.</p>
+          </div>
+        </div>
+
+        <details class="acc" data-s>
+          <summary>Why admins gained read access (2026-08-24)</summary>
+          <div class="body">
+            <p>
+              Found live: a project admin whose dashboard login identity (from
+              <code>join-via-github</code>, e.g.
+              <code>206395444+someuser@users.noreply.github.com</code>) differs from the
+              developerId their own CLI sessions author claims under (a git-email-derived address)
+              saw <strong>zero</strong> alignment threads in the dashboard — despite being the real
+              party on several, from that exact PAT identity.
+            </p>
+            <p>
+              Not a bug in the party check, which is correctly symmetric. It was simply that the
+              channel had no admin visibility at all once login identity and authoring identity
+              diverge — which turns out to be the common case for anyone using both the CLI and the
+              dashboard.
+            </p>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary>The fan-out bug class, fixed three times</summary>
+          <div class="body">
+            <p>Thread deduplication has been wrong on three separate axes, each found live:</p>
+            <ol>
+              <li><strong>By symbol (2026-08-23).</strong> The dedup key included
+                  <code>symbolId</code>, so every new overlapping symbol between the same two
+                  developers forked <em>another</em> thread. One design pair accumulated
+                  <strong>14 simultaneous open threads</strong>.</li>
+              <li><strong>By direction (2026-08-26).</strong> The semantic comparator is
+                  one-directional by construction, so A-checked-against-B and
+                  B-checked-against-A produced two threads for one disagreement. Fixed by also
+                  matching the reverse shape — requiring <em>both</em> design-id links, so two
+                  genuinely different conflicts sharing one side can’t merge.</li>
+              <li><strong>By status (2026-08-28).</strong> A closed or dormant thread was invisible
+                  to the match, so a new finding forked another one instead of reopening the
+                  existing conversation. Now it reopens — but only when at least one of the two
+                  designs behind it is still live.</li>
+            </ol>
+            <div class="note">
+              <p>Same lesson three times: a dedup key that includes too much forks; one that
+              includes too little merges unrelated things. Both are visible only in production.</p>
+            </div>
+          </div>
+        </details>
+
+        <h3 id="thread-life">Thread lifecycle</h3>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Transition</th><th>Trigger</th><th>By whom</th></tr></thead>
+          <tbody>
+            <tr><td>opened</td><td>a finding with no existing thread for this pair</td><td>coordinator</td></tr>
+            <tr><td>amended</td><td>a repeat finding for the same pair</td><td>coordinator (merges symbols, posts a follow-up only if something new is being said)</td></tr>
+            <tr><td>closed</td><td>either party decides they’re done</td><td>a party — unilateral</td></tr>
+            <tr><td>auto-closed</td><td><strong>both</strong> sides resolved or closed their design</td><td>coordinator, author-less</td></tr>
+            <tr><td>dormant</td><td>both sides’ designs have gone quiet</td><td>coordinator, on the dormancy sweep</td></tr>
+            <tr><td>woken</td><td><code>twing design resume</code> on either design</td><td>coordinator, unconditional</td></tr>
+            <tr><td>reopened</td><td>a genuinely new finding, while one side is still live</td><td>coordinator</td></tr>
+          </tbody>
+        </table></div>
+        <div class="note" data-s>
+          <p><span class="h">A reject is not a resolution</span>
+          When an admin rejects a review, the design closes terminally and nothing is appended to
+          any justified-waiver list. The thread note says exactly that, rather than the old shared
+          template which rendered “Resolved: X’s design was rejectd” — wrong grammar and wrong
+          semantics at once.</p>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="foot">
+    <span>← <a href="architecture.html">Architecture</a></span>
+    <span><a href="reference.html">Reference</a> →</span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How a review runs — twing docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  /* page-local: the stat row and the stage badges */
+  .stats { display:grid; gap:14px; grid-template-columns:1fr; margin:22px 0; }
+  @media (min-width:700px) { .stats { grid-template-columns:repeat(3,1fr); } }
+  .stat { border:1px solid var(--line); border-radius:var(--r); background:var(--card); padding:18px 20px; text-align:center; }
+  .stat .big { display:block; font:680 30px/1.1 var(--sans); letter-spacing:-.02em; margin-bottom:4px; }
+  .stat .lb { font:600 11px/1.4 var(--mono); letter-spacing:.07em; text-transform:uppercase; color:var(--muted); }
+  .stat.s1 .big { color:var(--ok); }
+  .stat.s2 .big { color:var(--a2); }
+  .stat.s3 .big { color:var(--a1); }
+  .rule { display:flex; gap:16px; align-items:flex-start; border:1px solid var(--line); border-radius:var(--r);
+          background:var(--card); padding:18px 20px; margin:12px 0; }
+  .rule .n { flex:none; width:34px; height:34px; border-radius:9px; display:grid; place-items:center;
+             font:680 15px/1 var(--mono); background:var(--a2-bg); color:var(--a2); border:1px solid var(--a2); }
+  .rule .b b { display:block; font-size:16px; font-weight:660; margin-bottom:5px; }
+  .rule .b p { margin:0; font-size:14.5px; color:var(--fg-soft); max-width:none; }
+  svg .badge { fill:var(--bg); stroke:var(--line); stroke-width:1; }
+  svg .badge-no { fill:var(--ok-bg); stroke:var(--ok); stroke-width:1; }
+  svg .badge-llm { fill:var(--a2-bg); stroke:var(--a2); stroke-width:1; }
+  svg .btxt { fill:var(--fg-soft); font:600 11px var(--mono); }
+  svg .stage { fill:var(--fg); font:680 14px var(--sans); }
+  svg .kill { fill:var(--no); font:600 12px var(--sans); }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+  <marker id="ahno" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-no" d="M0,0 L10,5 L0,10 z"/></marker>
+</defs></svg>
+
+<header class="topbar"><div class="inner">
+  <a class="brand" href="index.html"><span class="dot"></span>twing <small>docs</small></a>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="journeys.html">Journeys</a>
+    <a href="reference.html">Reference</a>
+    <a href="onboarding.html">Onboarding</a>
+    <a href="findings.html">Findings</a>
+    <a href="review-flow.html">Review ✦</a>
+    <a href="implementation-plan.html">Build ⚒</a>
+  </nav>
+  <span class="spacer"></span>
+  <div class="tb-tools">
+    <div class="searchbox"><input id="q" type="search" placeholder="Filter page…" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+    <span class="iconbtn" id="themeBtn" role="button" tabindex="0">◐ auto</span>
+  </div>
+</div></header>
+
+<div class="page">
+
+  <div class="hero">
+    <div class="eyebrow">Review system · proposal</div>
+    <h1>How a review runs</h1>
+    <p class="lede">
+      Four stages. One of them needs no LLM at all, and it decides what the others are allowed to
+      look at. The rest is about keeping the machines honest.
+    </p>
+    <div class="chips">
+      <span class="chip"><span class="tag wa">not built yet</span></span>
+      <span class="chip"><a href="review-system.html" style="text-decoration:none">full detail →</a></span>
+    </div>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar"><div class="t">On this page</div><div class="links"></div></aside>
+
+    <main>
+      <div class="nores">No matches on this page.</div>
+
+      <section id="pipeline">
+        <h2><span class="num">01</span> The pipeline</h2>
+
+        <figure data-s>
+          <div class="fig">
+            <svg viewBox="0 0 880 800" role="img" aria-label="The four stages of a review, and where LLMs are used">
+
+              <rect class="bx-a2" x="350" y="10" width="180" height="42" rx="8"/>
+              <text class="lbl" x="440" y="37" text-anchor="middle">twing review</text>
+              <path class="edge" d="M440,52 L440,86" marker-end="url(#ah)"/>
+
+              <!-- STAGE 1 -->
+              <rect class="bx" x="100" y="90" width="680" height="112" rx="10"/>
+              <text class="stage" x="122" y="120">STAGE 1 · your own machine</text>
+              <rect class="badge-no" x="606" y="102" width="158" height="26" rx="13"/>
+              <text class="btxt" x="685" y="119" text-anchor="middle">NO LLM · free · &lt;1s</text>
+              <text class="sub" x="122" y="147">reads the diff, the design, and the tests</text>
+              <text class="sub" x="122" y="167">catches the checkable things — untested symbol, fake assertion, undeclared file</text>
+              <text class="sub" x="122" y="187">…and decides what is worth paying an LLM to look at</text>
+              <path class="edge" d="M440,202 L440,236" marker-end="url(#ah)"/>
+
+              <!-- STAGE 2 -->
+              <rect class="bx" x="100" y="240" width="680" height="164" rx="10"/>
+              <text class="stage" x="122" y="270">STAGE 2 · the specialists</text>
+              <rect class="badge-llm" x="606" y="252" width="158" height="26" rx="13"/>
+              <text class="btxt" x="685" y="269" text-anchor="middle">4 LLMs · in parallel</text>
+
+              <rect class="bx-a2" x="130" y="292" width="146" height="62" rx="8"/>
+              <text class="lbl" x="203" y="316" text-anchor="middle">conformance</text>
+              <text class="sub" x="203" y="334" text-anchor="middle">did you build</text>
+              <text class="sub" x="203" y="347" text-anchor="middle">what you said?</text>
+
+              <rect class="bx-a2" x="288" y="292" width="146" height="62" rx="8"/>
+              <text class="lbl" x="361" y="316" text-anchor="middle">tests</text>
+              <text class="sub" x="361" y="334" text-anchor="middle">are the tests</text>
+              <text class="sub" x="361" y="347" text-anchor="middle">actually real?</text>
+
+              <rect class="bx-a2" x="446" y="292" width="146" height="62" rx="8"/>
+              <text class="lbl" x="519" y="316" text-anchor="middle">bugs</text>
+              <text class="sub" x="519" y="334" text-anchor="middle">ordinary</text>
+              <text class="sub" x="519" y="347" text-anchor="middle">defects</text>
+
+              <rect class="bx-a2" x="604" y="292" width="146" height="62" rx="8"/>
+              <text class="lbl" x="677" y="316" text-anchor="middle">precedent</text>
+              <text class="sub" x="677" y="334" text-anchor="middle">contradicts what</text>
+              <text class="sub" x="677" y="347" text-anchor="middle">we already decided?</text>
+
+              <text class="sub" x="440" y="382" text-anchor="middle">each one sees a narrow slice · none sees the whole change · they never talk to each other</text>
+              <path class="edge" d="M440,404 L440,438" marker-end="url(#ah)"/>
+              <text class="el" x="452" y="426">candidate findings</text>
+
+              <!-- STAGE 3 -->
+              <rect class="bx" x="100" y="442" width="680" height="112" rx="10"/>
+              <text class="stage" x="122" y="472">STAGE 3 · the fact-checker</text>
+              <rect class="badge-llm" x="606" y="454" width="158" height="26" rx="13"/>
+              <text class="btxt" x="685" y="471" text-anchor="middle">1 LLM · per finding</text>
+              <text class="sub" x="122" y="499">takes one claim and only the code it points at, and asks: does this actually hold?</text>
+              <text class="kill" x="122" y="524">✗  anything it cannot confirm is DELETED — not softened to “possible issue”</text>
+              <path class="edge" d="M440,554 L440,588" marker-end="url(#ah)"/>
+              <text class="el" x="452" y="576">survivors only</text>
+
+              <!-- STAGE 4 -->
+              <rect class="bx" x="100" y="592" width="680" height="86" rx="10"/>
+              <text class="stage" x="122" y="622">STAGE 4 · the editor</text>
+              <rect class="badge-llm" x="606" y="604" width="158" height="26" rx="13"/>
+              <text class="btxt" x="685" y="621" text-anchor="middle">1 LLM</text>
+              <text class="sub" x="122" y="650">merges duplicates, ranks by what matters, cuts to a list a human will actually read</text>
+
+              <path class="edge" d="M440,678 L440,706"/>
+              <path class="edge" d="M440,706 L282,706 L282,730" marker-end="url(#ah)"/>
+              <path class="edge" d="M440,706 L598,706 L598,730" marker-end="url(#ah)"/>
+
+              <rect class="bx-ok" x="152" y="734" width="260" height="52" rx="8"/>
+              <text class="lbl" x="282" y="758" text-anchor="middle">the agent fixes them</text>
+              <text class="sub" x="282" y="775" text-anchor="middle">while it still has the context</text>
+
+              <rect class="bx-a1" x="468" y="734" width="260" height="52" rx="8"/>
+              <text class="lbl" x="598" y="758" text-anchor="middle">twing-monitor</text>
+              <text class="sub" x="598" y="775" text-anchor="middle">you and the team see them</text>
+            </svg>
+          </div>
+        </figure>
+      </section>
+
+      <section id="rules">
+        <h2><span class="num">02</span> The three rules that make it work</h2>
+
+        <div class="rule" data-s>
+          <div class="n">1</div>
+          <div class="b">
+            <b>Nothing reaches an LLM until stage 1 has narrowed it</b>
+            <p>The free pass runs first and does double duty — it finds real problems on its own,
+               and it tells the LLMs where to look. Roughly ten of the seventeen checks never need
+               a model at all.</p>
+          </div>
+        </div>
+
+        <div class="rule" data-s>
+          <div class="n">2</div>
+          <div class="b">
+            <b>No LLM ever sees the whole change</b>
+            <p>Each specialist gets one slice and one question. They run independently, with no
+               shared context — so they can’t agree with each other simply because they saw each
+               other’s answers.</p>
+          </div>
+        </div>
+
+        <div class="rule" data-s>
+          <div class="n">3</div>
+          <div class="b">
+            <b>Nothing reaches you unverified</b>
+            <p>Every claim gets challenged by a separate call that sees only that claim and the
+               code it names. Unconfirmed findings are deleted. This is the difference between a
+               tool people trust and a bot people mute.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="slices">
+        <h2><span class="num">03</span> What each LLM is allowed to see</h2>
+        <p data-s>
+          The change as a whole is big and noisy. Each specialist gets a deliberately small window
+          onto it — enough to answer its one question, and nothing more.
+        </p>
+
+        <figure data-s>
+          <div class="fig">
+            <svg viewBox="0 0 860 300" role="img" aria-label="Evidence slicing: each specialist sees only part of the change">
+              <rect class="bx" x="60" y="40" width="230" height="210" rx="10"/>
+              <text class="lbl" x="175" y="70" text-anchor="middle">everything we know</text>
+              <text class="sub" x="175" y="98" text-anchor="middle">the diff</text>
+              <text class="sub" x="175" y="118" text-anchor="middle">the declared design</text>
+              <text class="sub" x="175" y="138" text-anchor="middle">the tests</text>
+              <text class="sub" x="175" y="158" text-anchor="middle">who edited what, when</text>
+              <text class="sub" x="175" y="178" text-anchor="middle">the call graph</text>
+              <text class="sub" x="175" y="198" text-anchor="middle">past decisions</text>
+              <text class="sub" x="175" y="218" text-anchor="middle">project rules</text>
+
+              <rect class="bx-a2" x="470" y="40" width="330" height="44" rx="8"/>
+              <text class="lbl" x="490" y="60">conformance</text>
+              <text class="sub" x="490" y="76">the design + which files changed</text>
+
+              <rect class="bx-a2" x="470" y="96" width="330" height="44" rx="8"/>
+              <text class="lbl" x="490" y="116">tests</text>
+              <text class="sub" x="490" y="132">one changed symbol + the tests touching it</text>
+
+              <rect class="bx-a2" x="470" y="152" width="330" height="44" rx="8"/>
+              <text class="lbl" x="490" y="172">bugs</text>
+              <text class="sub" x="490" y="188">one symbol before/after + its callers</text>
+
+              <rect class="bx-a2" x="470" y="208" width="330" height="44" rx="8"/>
+              <text class="lbl" x="490" y="228">precedent</text>
+              <text class="sub" x="490" y="244">the design + rules + past decisions</text>
+
+              <path class="edge" d="M290,110 C360,110 400,64 466,62" marker-end="url(#ah)"/>
+              <path class="edge" d="M290,130 C360,130 400,120 466,118" marker-end="url(#ah)"/>
+              <path class="edge" d="M290,160 C360,160 400,175 466,174" marker-end="url(#ah)"/>
+              <path class="edge" d="M290,185 C360,185 400,228 466,230" marker-end="url(#ah)"/>
+              <text class="el" x="378" y="98" text-anchor="middle">sliced</text>
+            </svg>
+          </div>
+        </figure>
+      </section>
+
+      <section id="why">
+        <h2><span class="num">04</span> Why not just one LLM reading the diff?</h2>
+        <div data-s>
+          <p>
+            That is what everyone else does, and it is why people stop reading their output. One
+            prompt over a large change produces a long list of confident-sounding findings — some
+            real, most not.
+          </p>
+          <div class="note bad">
+            <p>Once a reviewer hits two or three false ones, they start skimming the rest. The tool
+               is dead from that moment, even though it is still running and still producing
+               output.</p>
+          </div>
+          <p>
+            Splitting the work into narrow specialists and then challenging everything they say is
+            the entire difference between something a team keeps switched on and something they
+            quietly mute.
+          </p>
+        </div>
+      </section>
+
+      <section id="cost">
+        <h2><span class="num">05</span> Cost and speed</h2>
+        <div class="stats">
+          <div class="stat s1" data-s>
+            <span class="big">&lt; 1s</span>
+            <span class="lb">stage 1 · always</span>
+            <p style="margin:8px 0 0;font-size:13.5px;color:var(--muted)">Runs even with no LLM configured, and offline.</p>
+          </div>
+          <div class="stat s2" data-s>
+            <span class="big">20–40s</span>
+            <span class="lb">stages 2–4</span>
+            <p style="margin:8px 0 0;font-size:13.5px;color:var(--muted)">In the background, on the coordinator.</p>
+          </div>
+          <div class="stat s3" data-s>
+            <span class="big">0</span>
+            <span class="lb">keys you configure</span>
+            <p style="margin:8px 0 0;font-size:13.5px;color:var(--muted)">The coordinator already holds the model credentials.</p>
+          </div>
+        </div>
+
+        <div class="note good" data-s>
+          <p><span class="h">You are never left staring at a blank screen</span>
+          Stage 1 prints immediately. The LLM findings arrive underneath it as they land.</p>
+        </div>
+      </section>
+
+      <section id="more">
+        <h2><span class="num">06</span> Going deeper</h2>
+        <div class="grid g2">
+          <a class="card c2" href="review-system.html" data-s>
+            <div class="k">Full proposal</div>
+            <h5>The review system in detail</h5>
+            <p>The trigger and UX flow, package split, data model and routes, the full catalogue of
+               seventeen checks, failure modes, and the build order.</p>
+            <span class="go">Read →</span>
+          </a>
+          <a class="card c2" href="index.html" data-s>
+            <div class="k">Context</div>
+            <h5>How twing works today</h5>
+            <p>The coordination system this is built on — the design gate, claims, and the
+               declared intent that makes review-time checking possible at all.</p>
+            <span class="go">Read →</span>
+          </a>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="foot">
+    <span>Design proposal · nothing here is implemented</span>
+    <span><a href="review-system.html">Full detail →</a></span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>
