@@ -31,7 +31,8 @@ import * as path from "node:path";
 import { defaultSocketPath } from "@twing/core";
 import { requestDaemonShutdown, queryDaemonIdentity } from "./daemon-client.js";
 import { hookBinaryPath } from "./install-hook.js";
-import { unwireHooks } from "./wire-hooks.js";
+import { unwireHooks, globalSettingsPath } from "./wire-hooks.js";
+import { removeResolverWiring } from "./resolve-hook.js";
 import { uninstallDaemonService } from "./daemon-service.js";
 
 export interface UninstallOptions {
@@ -127,7 +128,14 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
       : "twing uninstall: no running daemon to stop",
   );
 
+  // Both wirings: the binary-path entries `twing init` writes, and the
+  // resolver entries `--ghuser` writes. Leaving the resolver behind would
+  // point Claude Code at a script this command is about to delete -- harmless
+  // thanks to its existence guard, but it would also keep reinstalling twing
+  // on the next session in any repo that uses it, which is the same way an
+  // earlier uninstall defeated itself while reporting success.
   result.hooksUnwired = unwireHooks(hookPath);
+  result.hooksUnwired = removeResolverWiring(globalSettingsPath()) || result.hooksUnwired;
   console.log(
     result.hooksUnwired
       ? "twing uninstall: removed twing's hook entries from ~/.claude/settings.json"

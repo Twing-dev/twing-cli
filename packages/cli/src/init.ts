@@ -29,7 +29,9 @@ import {
   type Manifest,
 } from "@twing/core";
 import { ensureHookInstalled, ensureCliShim } from "./install-hook.js";
-import { wireHooks, stripLegacyRepoLocalHooks } from "./wire-hooks.js";
+import { wireHooks, stripLegacyRepoLocalHooks, globalSettingsPath } from "./wire-hooks.js";
+import { isResolverWired, writeResolverWiring } from "./resolve-hook.js";
+import { autoManagedMarkerPath } from "./ghuser.js";
 import { enableInstallEnforcement } from "./enforce-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
 import { twingLibDir } from "./daemon-service.js";
@@ -227,6 +229,18 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // -- duplicate claims, two gate checks per Edit. The committed hook
   // stands down on its own once global wiring exists (a deliberate `twing
   // init` later), so exactly one source stays authoritative either way.
+  // A session rooted outside a repo never runs that repo's committed script,
+  // so it cannot pick up changes that way. The machine-wide entries therefore
+  // have to be refreshed by something that *does* run on every update -- and
+  // version recovery runs exactly this, `init --unattended`. Without it, a
+  // change to the wired event set would reach every repo-root session and no
+  // parent-rooted one, with no way for twing to know who was stale.
+  //
+  // Strictly a no-op on a machine that never ran `--ghuser`.
+  if (isResolverWired(globalSettingsPath()) && writeResolverWiring(globalSettingsPath())) {
+    console.log("twing init: refreshed twing's machine-wide wiring in ~/.claude/settings.json");
+  }
+
   if (!options.unattended) {
     const wired = deps.wireHooks(hookPath);
     console.log(wired ? "twing init: wired hooks into ~/.claude/settings.json (all repos on this machine)" : "twing init: hooks already wired in ~/.claude/settings.json");
@@ -433,6 +447,11 @@ function pruneRedundantBootstrapCopy(): void {
   const lib = twingLibDir();
   try {
     if (!fs.existsSync(lib)) return;
+    // `twing init --ghuser` declared this copy authoritative even though a
+    // global install exists. Deleting it here would take the daemon's launch
+    // script with it, and version recovery would recreate it on the next
+    // mismatch -- the two copies fighting, one creating and one deleting.
+    if (fs.existsSync(autoManagedMarkerPath())) return;
     // Resolve both sides: a symlinked/realpath-differing checkout must not
     // fool this into deleting the tree it is running from.
     const selfDir = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));

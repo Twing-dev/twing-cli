@@ -17,6 +17,16 @@ import * as os from "node:os";
 import { fileURLToPath } from "node:url";
 import { getCliVersion } from "./version.js";
 
+/** Read directly rather than imported from ghuser.ts, which imports this
+ * module -- a cycle for one path string is not worth it. */
+function isAutoManaged(): boolean {
+  return fs.existsSync(path.join(os.homedir(), ".twing", "auto-managed"));
+}
+
+function twingLibDir(): string {
+  return path.join(os.homedir(), ".twing", "lib");
+}
+
 export function hookBinaryPath(): string {
   const ext = process.platform === "win32" ? ".exe" : "";
   return path.join(os.homedir(), ".twing", "bin", `twing-hook${ext}`);
@@ -60,6 +70,11 @@ export function ensureCliShim(): string | null {
   // whichever copy is running.
   const cliEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.js");
   const shim = cliShimPath();
+  // Under `--ghuser` the managed copy is authoritative. A global `twing init`
+  // would otherwise repoint this shim at itself -- and the shim is what
+  // version recovery invokes, so the machine would quietly start updating the
+  // wrong copy.
+  if (isAutoManaged() && !cliEntry.startsWith(twingLibDir())) return shim;
   try {
     if (!fs.existsSync(cliEntry)) return null;
     fs.mkdirSync(path.dirname(shim), { recursive: true });

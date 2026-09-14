@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { readClaudeSettings, writeClaudeSettings, type ClaudeSettings, type HookCommand, type HookMatcherEntry } from "@twing/core";
 import { isBootstrapHook } from "./enforce-hooks.js";
 
-function globalSettingsPath(): string {
+export function globalSettingsPath(): string {
   return path.join(os.homedir(), ".claude", "settings.json");
 }
 

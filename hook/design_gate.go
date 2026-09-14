@@ -403,6 +403,13 @@ type denyDetail struct{ Label, Value string }
 // which works without touching PATH or any shell rc -- neither of which
 // could help the already-running session anyway.
 func twingCLIPath() string {
+	// Under --ghuser the managed copy is authoritative, so prefer its shim
+	// over whatever PATH resolves. Otherwise auth recovery would invoke the
+	// leftover global copy, whose `init` prunes ~/.twing/lib -- deleting the
+	// very copy version recovery installs, on a loop.
+	if shim, ok := managedInstall(); ok && autoManaged() {
+		return shim
+	}
 	if _, err := exec.LookPath("twing"); err == nil {
 		return "twing"
 	}

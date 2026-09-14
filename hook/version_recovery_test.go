@@ -201,3 +201,85 @@ func TestRerunUpdatedHook_ForwardsThePayloadAndReturnsTheVerdict(t *testing.T) {
 		t.Errorf("the new binary must receive this event's payload verbatim: got %q", out)
 	}
 }
+
+// --- the auto-managed marker ------------------------------------------------
+//
+// `twing init --ghuser` writes it when it could not remove a global install
+// (a root-owned prefix needs sudo, which a setup command should not demand).
+// It declares the managed copy under ~/.twing authoritative, and four places
+// have to agree -- without all four, the two copies fight: version recovery
+// installs into ~/.twing/lib and a global `init` deletes it again.
+
+func writeAutoManaged(t *testing.T, home string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, ".twing"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".twing", "auto-managed"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedInstall_GlobalTwingOnPath_NotManagedWithoutTheMarker(t *testing.T) {
+	// The default, and the one that must not change: a twing someone
+	// installed is theirs, and replacing it is not a background process's
+	// call.
+	managedHome(t)
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "twing"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	if _, ok := managedInstall(); ok {
+		t.Error("a self-installed twing must not be treated as ours to replace")
+	}
+}
+
+func TestManagedInstall_GlobalTwingOnPath_ManagedWhenTheMarkerSaysSo(t *testing.T) {
+	// --ghuser asked twing to manage itself here. Without this the leftover
+	// global copy silently opts the machine out of version recovery, which is
+	// the regression that command exists to avoid.
+	home := managedHome(t)
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "twing"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+	writeAutoManaged(t, home)
+
+	if _, ok := managedInstall(); !ok {
+		t.Error("the marker must keep the machine auto-updating despite a global install")
+	}
+}
+
+func TestTwingCLIPath_PrefersTheManagedShimUnderTheMarker(t *testing.T) {
+	// Otherwise auth recovery invokes the global copy, whose `init` prunes
+	// ~/.twing/lib -- deleting the copy version recovery just installed, on a
+	// loop.
+	home := managedHome(t)
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "twing"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+	writeAutoManaged(t, home)
+
+	want := filepath.Join(home, ".twing", "bin", "twing")
+	if got := twingCLIPath(); got != want {
+		t.Errorf("twingCLIPath() = %q, want the managed shim %q", got, want)
+	}
+}
+
+func TestTwingCLIPath_UsesPathWhenThereIsNoMarker(t *testing.T) {
+	managedHome(t)
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "twing"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	if got := twingCLIPath(); got != "twing" {
+		t.Errorf("twingCLIPath() = %q, want the PATH copy unchanged", got)
+	}
+}

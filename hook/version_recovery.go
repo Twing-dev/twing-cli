@@ -83,7 +83,15 @@ func managedInstall() (shim string, cliPresent bool) {
 	}
 	if p, err := exec.LookPath("twing"); err == nil {
 		if resolved, err := filepath.EvalSymlinks(p); err != nil || !strings.HasPrefix(resolved, twingHome) {
-			return "", false // self-installed: not ours to replace
+			// A `twing` on PATH usually means someone installed it and it is
+			// theirs to manage -- unless they ran `twing init --ghuser`, which
+			// is an explicit request for twing to manage itself here. Without
+			// this the leftover global copy would silently opt the machine out
+			// of version recovery, which is the regression --ghuser exists to
+			// avoid.
+			if !autoManaged() {
+				return "", false
+			}
 		}
 	}
 	// The shim bakes in an absolute node path and the managed entrypoint
@@ -107,6 +115,19 @@ func managedInstall() (shim string, cliPresent bool) {
 var isManagedInstall = func() bool {
 	_, ok := managedInstall()
 	return ok
+}
+
+// autoManaged reports whether `twing init --ghuser` declared the managed copy
+// under ~/.twing authoritative on this machine, even with a global install
+// present. Written by that command when it could not remove the global copy
+// (a root-owned prefix needs sudo, which a setup command should not demand).
+func autoManaged() bool {
+	twingHome, ok := twingHomeDir()
+	if !ok {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(twingHome, "auto-managed"))
+	return err == nil
 }
 
 func versionRecoveryMarkerPath() (string, bool) {
