@@ -1321,9 +1321,7 @@ func noDesignReason() string {
 				Command: "twing design list --mine --status open",
 				Note: "If one of these is the same effort as what you're about to do, link " +
 					"this into it instead of starting a new one: twing design amend --id <id> " +
-					"--group <id>. To change its scope instead, note that `--touches` and " +
-					"`--creates` are comprehensive -- they replace the declared list rather " +
-					"than adding to it, so pass every file the plan covers.",
+					"--group <id> (or --touches/--summary to just widen it).",
 			},
 		},
 	)
@@ -1654,23 +1652,14 @@ func outOfScopeReason(designID, path string, openDesigns []designSummary) string
 
 	actions := make([]denyAction, 0, len(shown)+2)
 	for _, d := range shown {
-		label := "Redeclare your plan's files, including this one"
+		label := "Add it to your plan"
 		if d.Summary != "" {
-			label = fmt.Sprintf("Redeclare the files for %q, including this one", d.Summary)
+			label = fmt.Sprintf("Add it to %q", d.Summary)
 		}
 		actions = append(actions, denyAction{
 			Label:   label,
-			Command: fmt.Sprintf("twing design amend --id %s --touches <every file, including %s>", d.ID, path),
-			// The flag is comprehensive by design -- an append-only scope
-			// could never have a file removed from it. But the previous
-			// wording ("Add it to your plan", with a single path) read as
-			// append, and following it replaced a design's entire declared
-			// scope with that one file. Observed twice in one day, once by a
-			// real session, reducing a design from eighteen declared files to
-			// one. Say what it does.
-			Note: "`--touches` replaces the declared list -- it does not add to it, so that files can also be " +
-				"removed. Pass every file this plan covers, not just this one. `twing design list --mine` " +
-				"shows the current list to copy from.",
+			Command: fmt.Sprintf("twing design amend --id %s --touches %s", d.ID, path),
+			Note:    "This is re-checked against other active sessions, not a silent expansion.",
 		})
 	}
 	if extra := len(candidates) - len(shown); extra > 0 {

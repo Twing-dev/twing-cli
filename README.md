@@ -128,8 +128,7 @@ Implications of the split:
 
 ```sh
 twing design register --summary "adds a retry wrapper" --touches src/net/retry.ts
-# --touches replaces the declared list, so restate every file, not just the new one
-twing design amend --id <designId> --touches src/net/retry.ts,src/net/retry-config.ts
+twing design amend --id <designId> --touches src/net/retry-config.ts
 twing design close --id <designId>
 ```
 
@@ -364,7 +363,7 @@ meaning for it. That is a rare path, not the default one.
 | `twing init --ghuser`                                 | Once per machine, after `gh auth login`: makes twing work from any directory, not just a repo root. Installs nothing -- see "Sessions that don't start at a repo root". |
 | `twing align`                                         | Cross-session divergence findings (advisory, never blocks).                                                                          |
 | `twing design register --summary "..." --touches a,b` | Register a design before your first edit/write (or let plan mode do it automatically).                                               |
-| `twing design amend --id <designId> --touches c,d`    | Restate which files a registered design touches. The list **replaces** the old one, so pass every file, not just the new ones.       |
+| `twing design amend --id <designId> --touches c,d`    | Expand an already-registered design to cover more files.                                                                             |
 | `twing design close --id <designId>`                  | Close a design once its work is done -- see below.                                                                                   |
 
 The full command list, including self-hosting/admin commands, is in
