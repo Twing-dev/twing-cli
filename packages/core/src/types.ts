@@ -145,6 +145,31 @@ export const DEFAULT_DESIGN_DORMANT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * `DesignConstraintType` collapse below is the precedent). */
 export type DesignChangeAction = "add" | "modify" | "rewrite" | "remove" | "rename" | "move";
 
+/** What *sort of thing* is being changed, as opposed to what happens to it
+ * (`DesignChangeAction` above). Two independent axes: adding a column and
+ * adding a function are both `add`, and they are not the same kind of event
+ * to anyone reading the design. This is the axis that lets a reader ask
+ * "does this touch the database?" without reading every target path.
+ *
+ * `config` is promoted from the spec's reserved list (2026-09) even though
+ * no *check* reads it yet, because a reader now does: twing-monitor states
+ * each kind's presence or absence explicitly ("no configuration changes"),
+ * and that sentence is only true if an author had the vocabulary to say
+ * otherwise. A kind nobody can declare makes its own absence
+ * unfalsifiable, which is worse than not showing the row at all. That
+ * still satisfies the spec's rule -- a value earns its place by changing
+ * what the system *does* -- just on the display axis rather than the
+ * checking one.
+ *
+ * `dependency` and `build` stay out: nothing reads them, and no display
+ * asserts their absence. Promoting each later is a one-line change; see
+ * `DesignConstraintType`'s three-to-one collapse below for what shipping
+ * inert vocabulary costs.
+ *
+ * Optional on `DesignChange`, defaulting to `"code"`, so every template
+ * written before this existed stays valid. */
+export type DesignChangeKind = "code" | "api" | "schema" | "test" | "docs" | "config";
+
 /**
  * One declared change inside a design (structured design template, 2026-09).
  *
@@ -160,6 +185,11 @@ export interface DesignChange {
    * survive being written down in a review. */
   id: string;
   action: DesignChangeAction;
+  /** Absent on a template written before this field existed, and on one
+   * that simply doesn't say -- both mean `"code"`, which is what
+   * `kindOf()` (design-scope.ts) resolves them to. Optional rather than
+   * required so the overwhelmingly common case stays unwritten. */
+  kind?: DesignChangeKind;
   /** `src/net/retry.ts`, or `src/net/retry.ts::RetryPolicy.backoff`. */
   target: string;
   /** One sentence: what this achieves, not what it does mechanically. */
@@ -269,9 +299,17 @@ export interface DesignStatement {
    * twing-monitor all keep reading exactly what they read today. This is
    * additive on top of them, never a replacement.
    *
-   * Not yet persisted server-side (no column as of 0.2.25) -- the CLI sends
-   * the template verbatim as `rawPlanText` so an unmodified coordinator
-   * stores it in `rawPlanExcerpt` and can display it. */
+   * Persisted server-side since 2026-09 (`designs.changes`, a nullable JSON
+   * column) and returned by `GET /v1/designs`. The CLI still *also* sends
+   * the template verbatim as `rawPlanText`, so a coordinator predating that
+   * column keeps storing it in `rawPlanExcerpt` and can display it.
+   *
+   * Absent -- not `[]` -- for every design registered any other way
+   * (`ExitPlanMode` extraction, plain `--summary`/`--touches` flags). That
+   * distinction is load-bearing for a reader: absent means "never declared
+   * changes", which falls back to the legacy creates/touches rendering,
+   * and is a different answer from "declares no changes". Never
+   * backfilled, per this schema's usual convention. */
   changes?: DesignChange[];
   /** Active-inactivity threshold (§17 design lifecycle, 2026-08): how long
    * this design can go with no activity before going dormant. Refreshed on
