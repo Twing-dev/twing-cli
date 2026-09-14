@@ -127,7 +127,7 @@ func resolveServerConfig(cwd string) twingConfig {
 // configForServerURL is the auth-lookup half of resolveServerConfig,
 // factored out so resolveConfigForCandidate (multi-repo ExitPlanMode
 // fallback, design_gate.go) can reuse it once it already has a
-// coordinator URL + repo root in hand from discoverChildCoordinators
+// coordinator URL + repo root in hand from discoverPlanCoordinators
 // instead of resolving them itself.
 func configForServerURL(serverURL, repoRoot string) twingConfig {
 	normalized := normalizeServerURL(serverURL)
@@ -163,7 +163,7 @@ func resolveServerConfigForFile(cwd, filePath string) twingConfig {
 }
 
 // resolveConfigForCandidate resolves auth for one candidate found by
-// discoverChildCoordinators (manifest.go) -- the multi-repo ExitPlanMode
+// discoverPlanCoordinators (plan_paths.go) -- the multi-repo ExitPlanMode
 // fallback's counterpart to resolveServerConfig, for when the coordinator
 // URL + repo root are already known rather than needing to be looked up
 // from cwd.

@@ -934,7 +934,7 @@ func handlePreToolUse(payload hookPayload) {
 // handleExitPlanMode dispatches on whether cwd resolves to a single repo
 // (the common case, unchanged logic) or not. The multi-candidate fallback
 // (fix, 2026-08-18) is for cwd being a shared parent of several
-// independently onboarded repos -- see discoverChildCoordinators's doc
+// independently onboarded repos -- see discoverPlanCoordinators's doc
 // comment (manifest.go).
 func handleExitPlanMode(payload hookPayload) {
 	if config := resolveServerConfig(payload.Cwd); config.ServerURL != "" {
@@ -1025,17 +1025,35 @@ func handleExitPlanModeSingle(payload hookPayload, config twingConfig) {
 // structured, pre-extracted path only in the candidate(s) that actually
 // match. A plan matching two candidates registers in both.
 func handleExitPlanModeMultiCandidate(payload hookPayload) {
-	candidates := discoverChildCoordinators(payload.Cwd)
-	if len(candidates) == 0 {
-		// Genuinely nothing configured anywhere reachable from cwd -- same
-		// "not wired up here" allow as the single-repo case.
-		return
-	}
-
 	var input struct {
 		Plan string `json:"plan"`
 	}
 	if err := json.Unmarshal(payload.ToolInput, &input); err != nil || input.Plan == "" {
+		return
+	}
+
+	// Candidates come from the paths the plan itself names, walked upward to
+	// the repo containing each -- not from whatever happens to sit one level
+	// below cwd. See plan_paths.go for why the old child scan could not work
+	// from a session rooted outside a twing repo.
+	candidates := discoverPlanCoordinators(payload.Cwd, input.Plan)
+	if len(candidates) == 0 {
+		// The plan names nothing resolvable inside a twing repo. Allowed
+		// through silently and deliberately: an ExitPlanMode deny blocks
+		// *planning*, when nothing has been changed yet, so it carries no
+		// protective value. The gate still holds where it matters -- the
+		// first Edit denies with "no design registered", which the agent
+		// clears by running `twing design register`.
+		return
+	}
+
+	// One plan, one coordinator. A machine has a single twing-hook with a
+	// single stamped version and matching is exact, so two coordinators on
+	// different versions can never both be satisfied -- refusing here removes
+	// that by construction rather than half-registering a design and leaving
+	// one repo permanently blocked.
+	if servers := distinctServers(candidates); len(servers) > 1 {
+		writeJSON(denyOutput("PreToolUse", multiCoordinatorReason(candidates)))
 		return
 	}
 
@@ -1094,9 +1112,8 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 			if isGateDisabled(projectID) {
 				continue
 			}
-			prefix := cand.DirName + "/"
-			creates := filterAndStripPrefix(extracted.Creates, prefix)
-			touches := filterAndStripPrefix(extracted.Touches, prefix)
+			creates := pathsForRepo(payload.Cwd, cand.RepoRoot, extracted.Creates)
+			touches := pathsForRepo(payload.Cwd, cand.RepoRoot, extracted.Touches)
 			if len(creates) == 0 && len(touches) == 0 {
 				continue // this plan doesn't touch this candidate at all
 			}
@@ -1145,11 +1162,12 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 	}
 
 	if !matchedAny {
-		// The plan mentions no concrete path inside any onboarded candidate
-		// -- deliberately not a guess-and-register-everywhere: this gate
-		// doesn't fail open, and registering in every candidate unfiltered
-		// would be exactly that.
-		writeJSON(denyOutput("PreToolUse", ambiguousMultiRepoReason(candidates)))
+		// The server's extraction resolved to no path inside any candidate,
+		// even though the plan's own text named one. Same call as the
+		// zero-candidate case above: allow, and let the first Edit demand a
+		// design. Registering in every candidate unfiltered would be a guess,
+		// and denying a plan protects nothing.
+		logDesignGate("ExitPlanMode multi-candidate: extraction matched no candidate repo; allowing, the Edit gate will require a design")
 		return
 	}
 	if len(denyReasons) > 0 {
@@ -1157,6 +1175,40 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 		return
 	}
 	writeJSON(allowOutputWithContext("PreToolUse", "twing: "+strings.Join(registeredContexts, "\n")))
+}
+
+// multiCoordinatorReason is the deny for a plan spanning repos on different
+// coordinators.
+//
+// Unsupported rather than unimplemented. A machine runs one twing-hook with
+// one stamped version, and the coordinator's version check is exact -- "any
+// drift, older or newer, blocks" -- so two coordinators on different versions
+// cannot both be satisfied, ever. Registering in both would leave whichever
+// repo lost the version race permanently denied, with a message proposing an
+// update that cannot converge.
+//
+// Refusing the *plan* is the cheap moment to say so: nothing has been changed
+// yet, and the fix is to work in one coordinator's repos at a time. Editing
+// across two coordinators that agree on version is untouched -- tokens are
+// per-server and claims are per-project; it is only the single hook version
+// that cannot be in two places.
+func multiCoordinatorReason(candidates []childCoordinator) string {
+	details := make([]denyDetail, 0, len(candidates))
+	for _, c := range candidates {
+		details = append(details, denyDetail{c.DirName, c.ServerURL})
+	}
+	return denyMessage(
+		"twing can't coordinate one plan across two coordination servers.",
+		"This plan touches repos registered with different coordinators. twing runs one hook "+
+			"version per machine and each coordinator pins its own, so there is no version that "+
+			"satisfies both -- one of these repos would end up permanently blocked. This is a "+
+			"limitation to work around, not a conflict to resolve.",
+		details,
+		[]denyAction{
+			{Label: "Plan one coordinator's repos at a time", Note: "Split this into separate plans and the gate works normally for each."},
+			gateOffAction,
+		},
+	)
 }
 
 // postDesignCheck posts to /v1/designs/check (structured or rawPlanText,
@@ -1234,49 +1286,6 @@ func postDesignExtract(serverURL, authToken, developerID, planText string) (desi
 		return designExtractResponse{}, coordinatorErrorReason("malformed response")
 	}
 	return result, ""
-}
-
-// filterAndStripPrefix keeps only entries beginning with prefix, stripped
-// of that prefix -- e.g. "TwingMail/packages/api/mailbox.ts" with prefix
-// "TwingMail/" becomes "packages/api/mailbox.ts", matching what that
-// repo's own designs/constraints declare (repo-relative, never prefixed
-// with the repo's own directory name).
-func filterAndStripPrefix(paths []string, prefix string) []string {
-	var out []string
-	for _, p := range paths {
-		if strings.HasPrefix(p, prefix) {
-			out = append(out, strings.TrimPrefix(p, prefix))
-		}
-	}
-	return out
-}
-
-// ambiguousMultiRepoReason is handleExitPlanModeMultiCandidate's deny
-// message for the residual case: a plan that mentions no concrete file
-// path inside any onboarded candidate repo, so there's nothing to
-// partition on. Deliberately a deny, not a guess.
-func ambiguousMultiRepoReason(candidates []childCoordinator) string {
-	names := make([]string, len(candidates))
-	for i, c := range candidates {
-		names[i] = c.DirName
-	}
-	return denyMessage(
-		"twing can't tell which project this work belongs to.",
-		"This folder isn't a git repo itself, and it contains several repos that use "+
-			"twing. Your plan doesn't mention a file inside any of them, so there's "+
-			"nothing to match on.",
-		[]denyDetail{{"Repos here", strings.Join(names, ", ")}},
-		[]denyAction{
-			{
-				Label: "Mention a real file path in your plan",
-				Note:  fmt.Sprintf("For example: %s/path/to/file.ts", names[0]),
-			},
-			{
-				Label: "Or plan from inside the repo this work belongs to",
-				Note:  "Start a session there and twing will know which project you mean.",
-			},
-		},
-	)
 }
 
 // noDesignReason was an inline string at its single call site until

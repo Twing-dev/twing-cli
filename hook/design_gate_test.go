@@ -137,12 +137,29 @@ func editPayload(cwd, sessionID string) hookPayload {
 	}
 }
 
+// planPayload carries plan text that names files in both fixture repos.
+//
+// Candidate repos are resolved from the paths the plan itself mentions
+// (plan_paths.go), so a plan naming nothing resolves to nothing -- which is
+// correct behaviour, and also what a real plan never looks like. The
+// multi-repo tests below need a plan that reads like one.
 func planPayload(cwd, sessionID string) hookPayload {
+	return planPayloadWith(cwd, sessionID,
+		"do the thing, touching TwingMail/packages/api/mailbox.ts and twinmail-ui/src/app.ts")
+}
+
+// planPayloadWith is planPayload with the plan text spelled out, for tests
+// about which repos a given plan resolves to.
+func planPayloadWith(cwd, sessionID, plan string) hookPayload {
+	body, err := json.Marshal(map[string]string{"plan": plan})
+	if err != nil {
+		panic(err)
+	}
 	return hookPayload{
 		SessionID: sessionID,
 		Cwd:       cwd,
 		ToolName:  "ExitPlanMode",
-		ToolInput: json.RawMessage(`{"plan":"do the thing"}`),
+		ToolInput: body,
 	}
 }
 
@@ -1084,7 +1101,11 @@ func TestHandleExitPlanMode_MultiCandidate_MintsAFreshGroupIDPerInvocation(t *te
 
 // The residual ambiguous case: the plan mentions no concrete path inside
 // either candidate. Must deny, not guess-and-register-everywhere.
-func TestHandleExitPlanMode_MultiCandidate_NoPathMatchesAnyCandidate_DeniesAmbiguous(t *testing.T) {
+// An ExitPlanMode deny blocks *planning*, when nothing has been changed yet,
+// so it protects nothing. These three cases all allow, and rely on the Edit
+// gate -- which denies with "no design registered" -- to be the real backstop.
+
+func TestHandleExitPlanMode_MultiCandidate_ExtractionMatchesNothing_AllowsAndLetsTheEditGateDemandADesign(t *testing.T) {
 	var checkCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -1101,15 +1122,108 @@ func TestHandleExitPlanMode_MultiCandidate_NoPathMatchesAnyCandidate_DeniesAmbig
 	setCachedToken(t, server.URL, "some-token")
 
 	stdout := captureStdout(t, func() { handleExitPlanMode(planPayload(parent, "sess1")) })
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want silence -- denying a plan protects nothing", stdout)
+	}
+	if checkCalls != 0 {
+		t.Errorf("check calls = %d, want 0 -- registering in every candidate unfiltered would be a guess", checkCalls)
+	}
+}
+
+func TestHandleExitPlanMode_PlanNamesNoResolvablePath_AllowsSilently(t *testing.T) {
+	// The case that used to be invisible: a session rooted outside any twing
+	// repo, with a plan naming nothing. Previously the child scan found no
+	// candidates and returned silently; now the *plan* resolves to none. Same
+	// outcome, reached honestly.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("no coordinator should be contacted when the plan resolves to no repo")
+		w.WriteHeader(500)
+	}))
+	defer server.Close()
+
+	parent, _, _ := setupMultiRepoCwd(t, server.URL)
+	setCachedToken(t, server.URL, "some-token")
+
+	stdout := captureStdout(t, func() {
+		handleExitPlanMode(planPayloadWith(parent, "sess1", "rework the mailbox parsing, carefully"))
+	})
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want silence", stdout)
+	}
+}
+
+func TestHandleExitPlanMode_PlanFindsRepoAtDepth_WhichTheOldChildScanCouldNot(t *testing.T) {
+	// discoverChildCoordinators scanned exactly one level, so a repo nested
+	// any deeper was invisible. Resolving upward from the plan's own paths
+	// finds it at any depth.
+	var checked bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/designs/extract":
+			_, _ = w.Write([]byte(`{"creates":[],"touches":["team/nested/auth/src/login.ts"],"dependsOn":[],"summary":"s"}`))
+		case "/v1/designs/check":
+			checked = true
+			var body designCheckRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if len(body.Touches) != 1 || body.Touches[0] != "src/login.ts" {
+				t.Errorf("touches = %v, want [src/login.ts] made repo-relative", body.Touches)
+			}
+			_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	parent := t.TempDir()
+	deep := filepath.Join(parent, "team", "nested", "auth")
+	if err := os.MkdirAll(filepath.Join(deep, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initTempGitRepoAt(t, deep)
+	writeTwingYAML(t, deep, fmt.Sprintf("coordinator:\n  serverUrl: %s\n", server.URL))
+	setCachedToken(t, server.URL, "some-token")
+
+	captureStdout(t, func() {
+		handleExitPlanMode(planPayloadWith(parent, "sess1", "edit team/nested/auth/src/login.ts"))
+	})
+	if !checked {
+		t.Error("a repo three levels down must be found -- this is what the one-level child scan missed")
+	}
+}
+
+func TestHandleExitPlanMode_PlanSpansTwoCoordinators_Denies(t *testing.T) {
+	// One machine, one hook binary, one stamped version, and exact version
+	// matching -- so two coordinators can never both be satisfied. Refuse the
+	// plan rather than half-register and leave a repo permanently blocked.
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(500) }))
+	defer serverA.Close()
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(500) }))
+	defer serverB.Close()
+
+	parent := t.TempDir()
+	for dir, url := range map[string]string{"auth": serverA.URL, "billing": serverB.URL} {
+		repo := filepath.Join(parent, dir)
+		if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTempGitRepoAt(t, repo)
+		writeTwingYAML(t, repo, fmt.Sprintf("coordinator:\n  serverUrl: %s\n", url))
+		setCachedToken(t, url, "some-token")
+	}
+
+	stdout := captureStdout(t, func() {
+		handleExitPlanMode(planPayloadWith(parent, "sess1", "touch auth/src/a.ts and billing/src/b.ts"))
+	})
 	decision, reason := decisionOf(t, stdout)
 	if decision != "deny" {
 		t.Fatalf("decision = %q, want deny", decision)
 	}
-	if !strings.Contains(reason, "TwingMail") || !strings.Contains(reason, "twinmail-ui") {
-		t.Errorf("reason = %q, want it to name both candidates", reason)
+	flat := strings.Join(strings.Fields(reason), " ")
+	if !strings.Contains(flat, "across two coordination servers") {
+		t.Errorf("reason should say plainly that this isn't supported: %s", flat)
 	}
-	if checkCalls != 0 {
-		t.Errorf("check calls = %d, want 0 -- nothing should register when nothing matched", checkCalls)
+	if !strings.Contains(reason, serverA.URL) || !strings.Contains(reason, serverB.URL) {
+		t.Errorf("reason must name both coordinators: %s", reason)
 	}
 }
 
@@ -1249,16 +1363,15 @@ func allDenyMessages(t *testing.T) map[string]string {
 			{ID: "11111111-2222-3333-4444-555555555555", Summary: "add retry with backoff"},
 			{ID: "66666666-7777-8888-9999-000000000000", Summary: "unrelated debounce helper"},
 		}),
-		"dormant":            dormantDesignReason("11111111-2222-3333-4444-555555555555", "adds retry", 7200000),
-		"overlap":            overlapReason(overlap),
-		"constraint":         constraintReason(constraint),
-		"authRequired":       authRequiredReason("https://coordination-server.twing.dev"),
-		"authRejected401":    authRejectedReason(http.StatusUnauthorized, "https://coordination-server.twing.dev"),
-		"authRejected403":    authRejectedReason(http.StatusForbidden, "https://coordination-server.twing.dev"),
-		"unreachable":        unreachableReason(fmt.Errorf("connection refused")),
-		"coordinatorError":   coordinatorErrorReason("unexpected status 500"),
-		"pathConstraint":     pathConstraintReason("hook/design_gate.go", []designConstraintInfo{{Statement: "the gate's own verdict/deny logic", Type: "review_required"}}),
-		"ambiguousMultiRepo": ambiguousMultiRepoReason([]childCoordinator{{DirName: "api"}, {DirName: "web"}}),
+		"dormant":          dormantDesignReason("11111111-2222-3333-4444-555555555555", "adds retry", 7200000),
+		"overlap":          overlapReason(overlap),
+		"constraint":       constraintReason(constraint),
+		"authRequired":     authRequiredReason("https://coordination-server.twing.dev"),
+		"authRejected401":  authRejectedReason(http.StatusUnauthorized, "https://coordination-server.twing.dev"),
+		"authRejected403":  authRejectedReason(http.StatusForbidden, "https://coordination-server.twing.dev"),
+		"unreachable":      unreachableReason(fmt.Errorf("connection refused")),
+		"coordinatorError": coordinatorErrorReason("unexpected status 500"),
+		"pathConstraint":   pathConstraintReason("hook/design_gate.go", []designConstraintInfo{{Statement: "the gate's own verdict/deny logic", Type: "review_required"}}),
 	}
 }
 
