@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import { withHome } from "./test-support.js";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -521,5 +521,107 @@ test("wired entry: with the script present it still runs, and gets its event", (
     const { stdout, status } = runWiredEntry(hook, repoRoot, fakeHome(false, false));
     assert.equal(status, 0);
     assert.equal(stdout, `RAN:${event}`, "the script must receive the event this entry was wired for");
+  }
+});
+
+
+// --- installs the coordinator's version, never @latest -----------------------
+//
+// Every automatic update already pins to what the coordinator declares, so an
+// update can't swap one mismatch for another. The *first* install used
+// `@latest`, so a coordinator sitting behind npm (a staged rollout, a pinned
+// deployment) got an install followed immediately by a version-recovery
+// downgrade -- two installs, and a daemon running a version nobody asked for
+// in between.
+
+/**
+ * A coordinator that answers `/v1/version`, in a **separate process**.
+ *
+ * It cannot live in this one: `runScript` uses `execFileSync`, which blocks
+ * the event loop, so an in-process server would never accept the connection
+ * and the script's `curl` would sit there until its 10s timeout.
+ */
+async function fakeCoordinator(version: string): Promise<{ url: string; close: () => Promise<void> }> {
+  const source = `
+    const http = require("http");
+    const s = http.createServer((_q, r) => {
+      r.writeHead(200, { "content-type": "application/json" });
+      r.end(JSON.stringify({ version: ${JSON.stringify(version)} }));
+    });
+    s.listen(0, "127.0.0.1", () => console.log(s.address().port));
+  `;
+  const child = spawn(process.execPath, ["-e", source], { stdio: ["ignore", "pipe", "ignore"] });
+  const port = await new Promise<number>((resolve, reject) => {
+    child.stdout.once("data", (d: Buffer) => resolve(Number(String(d).trim())));
+    child.once("error", reject);
+  });
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: async () => {
+      child.kill();
+    },
+  };
+}
+
+/** A PATH whose `npm`/`node` only record what they were asked to do, so the
+ * test observes the install without performing one. */
+function recordingNpm(): { path: string; calls: () => string[] } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-npm-spy-"));
+  const record = path.join(dir, "record.txt");
+  for (const tool of ["npm", "node"]) {
+    fs.writeFileSync(path.join(dir, tool), `#!/bin/sh\necho "${tool} $*" >> ${JSON.stringify(record)}\n`, { mode: 0o755 });
+  }
+  return {
+    path: `${dir}:${process.env.PATH ?? ""}`,
+    calls: () => (fs.existsSync(record) ? fs.readFileSync(record, "utf8").trim().split("\n").filter(Boolean) : []),
+  };
+}
+
+function twingRepoFor(serverUrl: string): string {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "twing-ver-repo-"));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  fs.mkdirSync(path.join(repo, ".twing"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".twing", "twing.yml"), `coordinator:\n  serverUrl: ${serverUrl}\n`);
+  return repo;
+}
+
+test("bootstrapHookScript: installs the version the coordinator declares, not @latest", async () => {
+  const coordinator = await fakeCoordinator("0.2.20");
+  try {
+    const npm = recordingNpm();
+    runScript(twingRepoFor(coordinator.url), fakeHome(false, false), "PreToolUse", npm.path);
+
+    const install = npm.calls().find((c) => c.startsWith("npm install"));
+    assert.ok(install, `expected an npm install, got: ${JSON.stringify(npm.calls())}`);
+    assert.match(install, /@twing\/cli@0\.2\.20/, "must pin to the coordinator's version");
+    assert.ok(!install.includes("@latest"), "must not install @latest and let recovery downgrade it afterwards");
+  } finally {
+    await coordinator.close();
+  }
+});
+
+test("bootstrapHookScript: falls back to @latest when the coordinator can't be reached", async () => {
+  // No worse than the previous behaviour, which was always @latest. A
+  // coordinator that is down must not stop a machine bootstrapping at all.
+  const npm = recordingNpm();
+  // Port 1 refuses instantly, so this doesn't sit on a timeout.
+  runScript(twingRepoFor("http://127.0.0.1:1"), fakeHome(false, false), "PreToolUse", npm.path);
+
+  const install = npm.calls().find((c) => c.startsWith("npm install"));
+  assert.ok(install, `expected an npm install, got: ${JSON.stringify(npm.calls())}`);
+  assert.match(install, /@twing\/cli@latest/);
+});
+
+test("bootstrapHookScript: records which version it chose, and from where", async () => {
+  // The deny text tells the reader to go read this log rather than guess.
+  const coordinator = await fakeCoordinator("0.2.20");
+  try {
+    const home = fakeHome(false, false);
+    runScript(twingRepoFor(coordinator.url), home, "PreToolUse", recordingNpm().path);
+    const log = fs.readFileSync(path.join(home, ".twing", "bootstrap.log"), "utf8");
+    assert.match(log, /installing @twing\/cli@0\.2\.20/);
+    assert.ok(log.includes(coordinator.url), "must name the coordinator it asked");
+  } finally {
+    await coordinator.close();
   }
 });

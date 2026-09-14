@@ -53,6 +53,67 @@ export const WIRED_HOOK_EVENTS: { event: string; matcher?: string }[] = [
   { event: "SessionEnd" },
 ];
 
+/**
+ * The shell that installs twing for one repo, pinned to that repo's own
+ * coordinator.
+ *
+ * Shared verbatim by the two scripts that can face a machine with no twing
+ * on it: the committed bootstrap hook below, and `twing-resolve`
+ * (`packages/cli/src/resolve-hook.ts`) for sessions that never load a
+ * repo's committed file.
+ *
+ * **Why it asks the coordinator instead of installing `@latest`.** Version
+ * matching is exact and blocks in *both* directions. A coordinator sitting
+ * one release behind npm -- a staged rollout, a pinned deployment -- would
+ * therefore deny the very first gate call from a machine that just
+ * installed `@latest`, and version recovery would immediately *downgrade*
+ * it: two installs, and a daemon running a version nobody asked for in
+ * between. `GET /v1/version` is unauthenticated (it is in the auth
+ * middleware's exempt list, so it answers on a `--no-auth` coordinator
+ * too), so this costs one request at the only moment it matters.
+ *
+ * Shell rather than a twing command, because it runs before any twing
+ * binary exists. With neither `curl` nor `wget` present it falls back to
+ * `@latest` -- no worse than what it replaced.
+ */
+export function coordinatorInstallShell(): string {
+  return `
+twing_fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 10 "\$1" 2>/dev/null
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- --timeout=10 "\$1" 2>/dev/null
+  fi
+}
+
+# Installs twing for the repo at \$1, pinned to that repo's coordinator.
+twing_install_for_repo() {
+  _root="\$1"
+  _lib="\$HOME/.twing/lib"
+  _cli="\$_lib/node_modules/@twing/cli/dist/index.js"
+  _log="\$HOME/.twing/bootstrap.log"
+  mkdir -p "\$HOME/.twing"
+  echo "=== twing bootstrap \$(date -u +%Y-%m-%dT%H:%M:%SZ) ===" >> "\$_log" 2>/dev/null
+
+  # coordinator.serverUrl straight out of the committed manifest.
+  _server=\$(sed -n 's/^[[:space:]]*serverUrl:[[:space:]]*//p' "\$_root/.twing/twing.yml" 2>/dev/null | head -1 | tr -d '"' | tr -d '\\r')
+
+  _spec="@twing/cli@latest"
+  if [ -n "\$_server" ]; then
+    # Two plain substitutions rather than a capture group: a sed
+    # backreference is an illegal octal escape inside the JS template
+    # literal this script is generated from.
+    _version=\$(twing_fetch "\$_server/v1/version" | sed -e 's/.*"version"[[:space:]]*:[[:space:]]*"//' -e 's/".*//')
+    [ -n "\$_version" ] && _spec="@twing/cli@\$_version"
+  fi
+  echo "twing: installing \$_spec (coordinator \$_server)" >> "\$_log" 2>/dev/null
+
+  npm install --prefix "\$_lib" "\$_spec" --no-fund --no-audit --loglevel=error >> "\$_log" 2>&1 </dev/null
+  [ -f "\$_cli" ] && node "\$_cli" init --unattended >> "\$_log" 2>&1 </dev/null
+}
+`;
+}
+
 /** The committed script's exact contents. See `enforce-hooks.ts`'s original
  * header comment for the full design rationale (bootstraps rather than
  * blocks, a script file rather than an inlined string, etc.) -- unchanged by
@@ -95,7 +156,7 @@ repo_root=\$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 if [ -z "\$repo_root" ] || [ ! -f "\$repo_root/.twing/twing.yml" ]; then
   exit 0
 fi
-
+${coordinatorInstallShell()}
 # First use on a machine that has never run twing: set it up rather than
 # demanding someone else do it. Everything here is unprivileged -- the
 # install prefix is under \$HOME (no sudo, unlike npm install -g), and
@@ -105,11 +166,8 @@ fi
 # precise, actionable error (\`gh auth login\` is the common one) was thrown
 # away and replaced by a message guessing at three possible causes -- see
 # the deny text below, which now points here instead.
-lib="\$HOME/.twing/lib"
-cli="\$lib/node_modules/@twing/cli/dist/index.js"
 log="\$HOME/.twing/bootstrap.log"
 mkdir -p "\$HOME/.twing"
-echo "=== twing bootstrap \$(date -u +%Y-%m-%dT%H:%M:%SZ) ===" >> "\$log" 2>/dev/null
 
 # Reuse a twing that is already on PATH before fetching another copy: a
 # machine with a working global install needs no download at all, and
@@ -119,8 +177,7 @@ if command -v twing >/dev/null 2>&1; then
   twing init --unattended >> "\$log" 2>&1 </dev/null
 fi
 if [ ! -x "\$hook_bin" ]; then
-  npm install --prefix "\$lib" @twing/cli@latest --no-fund --no-audit --loglevel=error >> "\$log" 2>&1 </dev/null
-  [ -f "\$cli" ] && node "\$cli" init --unattended >> "\$log" 2>&1 </dev/null
+  twing_install_for_repo "\$repo_root"
 fi
 
 if [ -x "\$hook_bin" ]; then

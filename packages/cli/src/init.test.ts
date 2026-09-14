@@ -16,19 +16,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { computeProjectId } from "@twing/core";
 import { runInit, resolveGithubMembership, type InitDeps } from "./init.js";
-import {
-  tmpRepo,
-  withHome,
-  cacheToken,
-  cacheNoAuth,
-  addGithubRemote,
-  withMockFetch,
-  captureConsole,
-  jsonResponse,
-  textResponse,
-  captureFetch,
-  captureFetchSequence,
-} from "./test-support.js";
+import { tmpRepo, withHome, cacheToken, cacheNoAuth, addGithubRemote, withMockFetch, captureConsole, jsonResponse, textResponse, captureFetch, captureFetchSequence, withEnv, ghAuthOnPath } from "./test-support.js";
 
 const SERVER_URL = "http://localhost:9999";
 
@@ -359,7 +347,11 @@ test("runInit: cached token + NOT yet a project member on a GitHub-hosted repo -
   const { deps, calls: depCalls } = fakeDeps();
   await withHome(async () => {
     cacheToken(SERVER_URL, "already-cached-pat");
-    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
+    // Pin `gh` to logged-out: this test is about the *device flow* being
+    // reached, and a real `gh` token bypasses it entirely.
+    const { logs } = await withEnv({ PATH: ghAuthOnPath(null) }, () =>
+      captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps))),
+    );
     assert.ok(calls.some((c) => /\/v1\/auth\/whoami$/.test(c)), "membership check must run");
     assert.ok(calls.some((c) => c.includes("github.com/login/device/code")), "not a member -- must attempt a GitHub join for this project");
     assert.ok(logs.some((l) => l.includes("automatic GitHub-verified join didn't work")));
