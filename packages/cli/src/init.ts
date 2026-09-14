@@ -229,7 +229,7 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // init` later), so exactly one source stays authoritative either way.
   if (!options.unattended) {
     const wired = deps.wireHooks(hookPath);
-    console.log(wired ? "twing init: wired hooks into ~/.claude/settings.json (all repos on this machine)" : "twing init: hooks already wired in ~/.claude/settings.json");
+    console.log(wired ? "twing init: wired hooks into Claude and OpenCode globally (all repos on this machine)" : "twing init: hooks already wired in Claude and OpenCode global configuration");
   }
 
   // Upgrade migration: a repo `init`'d before wiring went global may still

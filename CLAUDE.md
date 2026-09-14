@@ -501,14 +501,17 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `install-hook.ts` installs `twing-hook` (prebuilt-fetch-first,
   build-from-source fallback, see the pre-release note above) and
   `wire-hooks.ts` merges (never overwrites) its hook entries into the
-  **user-level** `~/.claude/settings.json` — global, not per-repo, so
-  wiring only ever needs to happen once per machine; `init` also strips any
+  **user-level** `~/.claude/settings.json` and installs the global OpenCode
+  loader under `~/.config/opencode/plugins/twing.js`, so wiring only ever
+  needs to happen once per machine; npm's guarded `postinstall.cjs` invokes
+  that setup during package installation, while `init` also strips any
   legacy repo-local entries a pre-this-change `init` run left behind, so a
   repo doesn't end up double-wired.
 
 ### `hook/` (Go, separate module)
 
-`twing-hook` is spawned fresh per Claude Code hook event, does one trivial
+`twing-hook` is spawned fresh per Claude Code hook event, or by the OpenCode
+adapter for its equivalent plugin event, does one trivial
 thing, and always exits 0 — a panic recovers silently rather than surfacing
 as a failure or looking like a block. Two independent handlers dispatched by
 `hook_event_name`, per `main.go`'s header comment:
@@ -632,8 +635,8 @@ Claude Code session transcript (Claude Code writes it; twing only reads)
 
 This repo dogfoods its own design-conflict gate against a remote coordinator
 (see `.twing/twing.yml`). Hook wiring comes from **two** places, and exactly
-one is authoritative on any given machine. Machine-global
-`~/.claude/settings.json` (`wire-hooks.ts`) is what a `twing init` writes:
+one is authoritative on any given machine. Machine-global Claude settings
+and the OpenCode plugin (`wire-hooks.ts`) are what npm package installation writes:
 it bakes in an absolute `$HOME`-specific path, so it can only ever be
 machine-local, and it covers every repo rather than just this one. The
 repo's own committed `.claude/settings.json` plus `.twing/bootstrap-hook.sh`

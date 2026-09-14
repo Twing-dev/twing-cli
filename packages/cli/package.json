@@ -15,6 +15,7 @@
   },
   "files": [
     "dist",
+    "postinstall.cjs",
     "!dist/**/*.test.js",
     "!dist/**/*.test.js.map",
     "!dist/**/*.test.d.ts",
@@ -22,6 +23,7 @@
   ],
   "scripts": {
     "build": "tsc -b",
+    "postinstall": "node postinstall.cjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test dist/*.test.js dist/*/*.test.js"
   },
