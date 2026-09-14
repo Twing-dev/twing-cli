@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>twing — documentation</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+  <marker id="ahno" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-no" d="M0,0 L10,5 L0,10 z"/></marker>
+</defs></svg>
+
+<header class="topbar"><div class="inner">
+  <a class="brand" href="index.html"><span class="dot"></span>twing <small>docs</small></a>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="journeys.html">Journeys</a>
+    <a href="reference.html">Reference</a>
+    <a href="onboarding.html">Onboarding</a>
+    <a href="findings.html">Findings</a>
+    <a href="review-flow.html">Review ✦</a>
+    <a href="implementation-plan.html">Build ⚒</a>
+  </nav>
+  <span class="spacer"></span>
+  <div class="tb-tools">
+    <div class="searchbox"><input id="q" type="search" placeholder="Filter page…" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+    <span class="iconbtn" id="themeBtn" role="button" tabindex="0">◐ auto</span>
+  </div>
+</div></header>
+
+<div class="page">
+
+  <div class="hero">
+    <div class="eyebrow">twing-cli · documentation</div>
+    <h1>Task-time coordination for multi-agent codebases</h1>
+    <p class="lede">
+      How the system fits together, from the moment someone runs <code>npm install</code> to two
+      developers colliding on the same symbol — plus what to learn before contributing.
+      Everything here is offline and self-contained.
+    </p>
+    <div class="chips">
+      <span class="chip">@twing/cli 0.2.15+</span>
+      <span class="chip">6 pages · no network</span>
+      <span class="chip">press <b style="margin-left:2px">/</b> to filter</span>
+    </div>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="t">On this page</div>
+      <div class="links"></div>
+    </aside>
+
+    <main>
+      <div class="nores">No matches on this page. Try another page from the top nav, or clear the filter.</div>
+
+      <!-- ───────────────────────────────── -->
+      <section id="problem">
+        <h2><span class="num">01</span> The problem</h2>
+        <div data-s>
+          <p>
+            Several people — and several AI agents per person — work in the same codebase at the
+            same time. Nothing tells them they’re about to collide until the collision is already
+            in the diff, at which point it’s a merge conflict, or worse, two working
+            implementations of the same thing that don’t conflict textually at all.
+          </p>
+          <p>
+            Git catches overlapping <em>lines</em>. It cannot catch “you both independently built a
+            retry helper,” or “your signature change silently broke their caller,” or “you’re
+            editing a file someone else’s plan already claims.”
+          </p>
+          <div class="note key">
+            <p><strong>twing sits at the moment of edit, not the moment of merge.</strong></p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ───────────────────────────────── -->
+      <section id="idea">
+        <h2><span class="num">02</span> The one structural idea</h2>
+        <p data-s>
+          Everything in this codebase follows from a single split. There are <strong>two code
+          paths</strong> that share a data model but never share logic. Almost every “why is this
+          written this way” question resolves to one of them.
+        </p>
+
+        <div class="grid g2">
+          <div class="card c1" data-s>
+            <div class="k">Path 1</div>
+            <h5>Capture / advisory <span class="tag n">§4 §11 §12</span></h5>
+            <p>“Who touched what, and did anyone collide?”</p>
+            <dl>
+              <dt>Trigger</dt><dd><code>PostToolUse</code>, <code>SessionStart</code>, <code>UserPromptSubmit</code></dd>
+              <dt>Transport</dt><dd>Unix socket → daemon → HTTP (batched)</dd>
+              <dt>Budget</dt><dd>50 ms fire-and-forget</dd>
+              <dt>On failure</dt><dd><span class="tag ok">silent no-op</span> fails open</dd>
+              <dt>Surface</dt><dd><code>twing align</code>, injected notices</dd>
+              <dt>Entry</dt><dd><code>hook/main.go</code></dd>
+            </dl>
+          </div>
+          <div class="card c2" data-s>
+            <div class="k">Path 2</div>
+            <h5>Design gate <span class="tag n">§17</span></h5>
+            <p>“Is this agent allowed to edit right now?”</p>
+            <dl>
+              <dt>Trigger</dt><dd><code>PreToolUse</code>, <code>SessionEnd</code></dd>
+              <dt>Transport</dt><dd>HTTP, direct, synchronous</dd>
+              <dt>Budget</dt><dd>15 s lookup / 60 s LLM extraction</dd>
+              <dt>On failure</dt><dd><span class="tag no">deny</span> fails closed</dd>
+              <dt>Surface</dt><dd>allow / deny on the tool call</dd>
+              <dt>Entry</dt><dd><code>hook/design_gate.go</code></dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="note key" data-s>
+          <p>
+            If you only remember one thing: <strong>the capture path is a dumb pipe that must never
+            block, and the gate is the only thing in the system permitted to say no.</strong>
+          </p>
+        </div>
+      </section>
+
+      <!-- ───────────────────────────────── -->
+      <section id="map">
+        <h2><span class="num">03</span> Component map</h2>
+        <p data-s>Click any box to see what it owns and why it exists.</p>
+
+        <div class="mapwrap">
+          <div class="fig">
+            <svg viewBox="0 0 860 580" role="img" aria-label="Interactive component map">
+              <rect class="grp" x="108" y="214" width="274" height="248" rx="10"/>
+              <text class="mono" x="122" y="234">packages/cli · @twing/cli</text>
+
+              <g class="hot" data-node="cc" aria-label="Claude Code">
+                <rect class="bx" x="340" y="16" width="220" height="46" rx="8"/>
+                <text class="lbl" x="450" y="44" text-anchor="middle">Claude Code</text>
+              </g>
+
+              <g class="hot" data-node="hook" aria-label="twing-hook">
+                <rect class="bx-a2" x="310" y="106" width="280" height="64" rx="8"/>
+                <text class="lbl" x="450" y="132" text-anchor="middle">twing-hook  (Go)</text>
+                <text class="sub" x="450" y="150" text-anchor="middle">spawned per event · always exits 0</text>
+              </g>
+
+              <g class="hot" data-node="daemon" aria-label="daemon">
+                <rect class="bx" x="130" y="250" width="230" height="62" rx="8"/>
+                <text class="lbl" x="245" y="276" text-anchor="middle">daemon</text>
+                <text class="sub" x="245" y="294" text-anchor="middle">one process per machine</text>
+              </g>
+
+              <g class="hot" data-node="cli" aria-label="twing command">
+                <rect class="bx" x="130" y="376" width="230" height="62" rx="8"/>
+                <text class="lbl" x="245" y="402" text-anchor="middle">twing &lt;command&gt;</text>
+                <text class="sub" x="245" y="420" text-anchor="middle">init · align · design · admin</text>
+              </g>
+
+              <g class="hot" data-node="server" aria-label="twing serve">
+                <rect class="bx-a1" x="540" y="300" width="270" height="80" rx="8"/>
+                <text class="lbl" x="675" y="330" text-anchor="middle">twing serve</text>
+                <text class="sub" x="675" y="348" text-anchor="middle">Hono · Drizzle / SQLite</text>
+                <text class="sub" x="675" y="364" text-anchor="middle">all shared state &amp; verdict logic</text>
+              </g>
+
+              <g class="hot" data-node="core" aria-label="twing core">
+                <rect class="bx" x="130" y="492" width="680" height="64" rx="8"/>
+                <text class="lbl" x="470" y="518" text-anchor="middle">packages/core · @twing/core</text>
+                <text class="sub" x="470" y="536" text-anchor="middle">wire protocol · types · identity · tree-sitter · manifest · config</text>
+              </g>
+
+              <path class="edge" d="M450,62 L450,102" marker-end="url(#ah)"/>
+              <text class="el" x="462" y="88">stdin JSON, per hook event</text>
+              <path class="edge" d="M352,170 C312,200 288,222 266,246" marker-end="url(#ah)"/>
+              <text class="el" x="296" y="194" text-anchor="end">unix socket</text>
+              <text class="el" x="296" y="207" text-anchor="end">fire-and-forget</text>
+              <path class="edge" d="M548,170 C612,202 642,254 662,296" marker-end="url(#ah)"/>
+              <text class="el" x="566" y="212">HTTPS · synchronous</text>
+              <text class="el" x="566" y="225">(the gate)</text>
+              <path class="edge" d="M360,278 C442,278 472,300 536,318" marker-end="url(#ah)"/>
+              <text class="el" x="374" y="266">HTTPS · batched claims</text>
+              <path class="edge" d="M360,398 C442,398 482,378 536,362" marker-end="url(#ah)"/>
+              <text class="el" x="374" y="406">HTTPS · commands</text>
+              <path class="edge-d" d="M245,492 L245,466" marker-end="url(#ah)"/>
+              <text class="el" x="254" y="482">imported</text>
+              <path class="edge-d" d="M675,492 L675,386" marker-end="url(#ah)"/>
+              <text class="el" x="686" y="444">imported</text>
+              <path class="edge-d" d="M130,524 L36,524 L36,138 L304,138" marker-end="url(#ah)"/>
+              <text class="el" x="52" y="130">mirrored, not imported</text>
+            </svg>
+          </div>
+
+          <div class="nodepanel" id="nodePanel" data-default="hook"></div>
+        </div>
+      </section>
+
+      <!-- ───────────────────────────────── -->
+      <section id="next">
+        <h2><span class="num">04</span> Where to go next</h2>
+        <div class="grid g2">
+          <a class="card c2" href="architecture.html" data-s>
+            <div class="k">Page 2</div>
+            <h5>Architecture</h5>
+            <p>Each component in depth, why the Go hook mirrors instead of imports, and the full
+               install &amp; onboarding flow including the auth ladder and on-disk layout.</p>
+            <span class="go">Read →</span>
+          </a>
+          <a class="card c2" href="journeys.html" data-s>
+            <div class="k">Page 3</div>
+            <h5>Runtime journeys</h5>
+            <p>A session that goes right, a session that gets blocked, and two developers
+               colliding — including the four-bucket conflict model.</p>
+            <span class="go">Read →</span>
+          </a>
+          <a class="card c2" href="reference.html" data-s>
+            <div class="k">Page 4</div>
+            <h5>Reference</h5>
+            <p>Identifiers, the cross-language invariant, durability rules, the design lifecycle,
+               routes, manifest and env-var reference, and the eight system invariants.</p>
+            <span class="go">Read →</span>
+          </a>
+          <a class="card c2" href="onboarding.html" data-s>
+            <div class="k">Page 5</div>
+            <h5>Onboarding</h5>
+            <p>An interactive prerequisites checklist that remembers your progress, the four
+               design stances, what you can safely skip, and a first-week ramp plan.</p>
+            <span class="go">Start →</span>
+          </a>
+          <a class="card cwa" href="findings.html" data-s>
+            <div class="k">Page 6</div>
+            <h5>Findings &amp; open questions</h5>
+            <p>Observations from a full read of the source: a real ordering gap in the verdict
+               logic, version-skew evidence, and loose ends worth closing.</p>
+            <span class="go">Review →</span>
+          </a>
+        </div>
+      </section>
+
+      <!-- ───────────────────────────────── -->
+      <section id="glance">
+        <h2><span class="num">05</span> At a glance</h2>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Fact</th><th>Value</th><th>Why it matters</th></tr></thead>
+          <tbody>
+            <tr><td>Source size</td><td>~14 k lines (non-test)</td><td>Small enough to read whole. Do that.</td></tr>
+            <tr><td>Languages</td><td>TypeScript + Go</td><td>Go only in <code>hook/</code>, ~1 700 lines, no concurrency</td></tr>
+            <tr><td>Packages</td><td><code>core</code>, <code>cli</code>, <code>server</code></td><td>Plus a standalone Go module and a simulator</td></tr>
+            <tr><td>Licenses</td><td>MIT/Apache-2.0, except <strong>server = AGPL-3.0</strong></td><td>Check each <code>package.json</code> before assuming</td></tr>
+            <tr><td>Daemon</td><td>One per <em>machine</em>, all repos</td><td>Not per project — surprises people</td></tr>
+            <tr><td>Hook wiring</td><td><code>~/.claude/settings.json</code>, global</td><td>Wired once, covers every repo thereafter</td></tr>
+            <tr><td>Claims storage</td><td>In-memory only</td><td>Deliberate — daemons re-report after a restart</td></tr>
+            <tr><td>Designs storage</td><td>Durable SQLite table</td><td>Can’t be reconstructed, so it’s persisted</td></tr>
+            <tr><td>Deployables</td><td>3, updated independently</td><td>Version skew is the normal state — see Findings</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <section id="convention">
+        <h2><span class="num">06</span> How to read the source</h2>
+        <div data-s>
+          <p>
+            The comments in this codebase are unusually dense and unusually specific: most cite a
+            date, a live incident, and what was tried and rejected. They are not decoration —
+            several are the <em>only</em> record of why an obvious-looking simplification is wrong.
+          </p>
+          <p>
+            Source comments also cite section numbers (<code>§4</code>, <code>§17</code>,
+            <code>§17.9</code>) constantly, referring to
+            <code>docs/orchestrator-and-verification-design-doc_v1.md</code>. Those are
+            <em>design-time</em> documents that argue for decisions; this site describes what was
+            actually built.
+          </p>
+          <div class="note">
+            <p><span class="h">Rule of thumb</span>
+            Read the comment before changing the code it sits on. When you add code, follow the
+            convention: say what it does, and say what would break if someone “simplified” it.</p>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="foot">
+    <span>twing documentation · self-contained, offline</span>
+    <span>Source of truth is the code — this describes it, it does not define it.</span>
+  </footer>
+
+  <!-- node detail store (outside main so it never affects page filtering) -->
+  <div hidden>
+    <div data-nodeinfo="cc">
+      <div class="k">Host</div>
+      <h4>Claude Code</h4>
+      <p>Not part of twing. It’s the agent runtime whose <strong>hooks API</strong> the entire
+         system is built on — every twing behaviour is triggered by a Claude Code hook event.</p>
+      <ul>
+        <li>Sends a JSON payload on <strong>stdin</strong> per event</li>
+        <li>Reads <code>hookSpecificOutput</code> from stdout for allow/deny</li>
+        <li>Merges hooks from user-level and repo-level settings — <em>both</em> fire</li>
+      </ul>
+    </div>
+
+    <div data-nodeinfo="hook">
+      <div class="k">hook/ · Go, separate module</div>
+      <h4>twing-hook</h4>
+      <p>One small binary, spawned fresh per hook event, doing one trivial thing, and
+         <strong>always exiting 0</strong> — a panic recovers silently, because a non-zero exit
+         could look like a block.</p>
+      <ul>
+        <li><strong>Why Go:</strong> startup cost. It runs on every tool call; a Node process
+            start would blow the 50 ms budget on its own.</li>
+        <li><strong>Capture handler</strong> forwards raw fields to the daemon and returns — it
+            never parses <code>toolInput</code>.</li>
+        <li><strong>Gate handler</strong> (<code>design_gate.go</code>) talks to the coordinator
+            directly over HTTP, because that path needs an answer.</li>
+        <li><strong>Mirrors</strong> <code>@twing/core</code> by hand rather than importing it —
+            managed by duplicated fixture tables in the Go tests.</li>
+      </ul>
+    </div>
+
+    <div data-nodeinfo="daemon">
+      <div class="k">packages/cli/src/daemon/</div>
+      <h4>The daemon</h4>
+      <p>One long-lived process per <strong>machine</strong>, shared across every repo. Listens on
+         <code>~/.twing/daemon.sock</code>, acks immediately, and does the real work afterwards.</p>
+      <ul>
+        <li>Exists so Tree-sitter parsing, signature diffing, call-graph maintenance and network
+            sync never block a tool call</li>
+        <li>Batches claims to the coordinator on a ~7 s debounce; polls notices every 5 s</li>
+        <li>Survives restarts via a launchd / systemd user service, with a detached-spawn fallback
+            and a hook-driven self-heal on <code>SessionStart</code></li>
+        <li>Was once its own npm package; folded in when it turned out to have one consumer. Still
+            a separate OS process.</li>
+      </ul>
+    </div>
+
+    <div data-nodeinfo="cli">
+      <div class="k">packages/cli</div>
+      <h4>The <code>twing</code> command</h4>
+      <p>Thin server wrappers plus all the onboarding logic. The only piece a normal user
+         interacts with directly.</p>
+      <ul>
+        <li><code>init</code> — the single onboarding step; safe to re-run</li>
+        <li><code>login</code> / <code>keygen</code> / <code>join</code> — three ways to get an identity</li>
+        <li><code>align</code> — the advisory report; falls back to computing claims from
+            <code>git diff</code> when there’s no daemon at all</li>
+        <li><code>design</code> / <code>admin</code> / <code>project</code> / <code>constraints</code> — gate and access-control surface</li>
+      </ul>
+    </div>
+
+    <div data-nodeinfo="server">
+      <div class="k">packages/server · AGPL-3.0-only</div>
+      <h4><code>twing serve</code> — the coordinator</h4>
+      <p>Hono over Drizzle/SQLite. Owns all shared state and <strong>all verdict logic</strong>.
+         One instance serves many projects and many developers.</p>
+      <ul>
+        <li><code>/v1/claims</code>, <code>/v1/notices</code> — the advisory path</li>
+        <li><code>/v1/designs/*</code>, <code>/v1/reviews/*</code>, <code>/v1/constraints/*</code> — the gate</li>
+        <li><code>/v1/alignment-threads/*</code> — the async reply channel between colliding developers</li>
+        <li><code>/v1/admin/*</code>, <code>/v1/projects/*</code> — identity and access control</li>
+        <li>Current-state tables paired with an append-only <code>activity_events</code> log</li>
+      </ul>
+    </div>
+
+    <div data-nodeinfo="core">
+      <div class="k">packages/core</div>
+      <h4><code>@twing/core</code> — the shared vocabulary</h4>
+      <p>Types and pure functions everything else builds on. No I/O beyond reading config files.</p>
+      <ul>
+        <li><code>types.ts</code> — the whole data model. Read <code>DesignVerdict</code>’s doc
+            comment twice; it <em>is</em> the model.</li>
+        <li><code>protocol.ts</code> + <code>framing.ts</code> — daemon messages, and the one and
+            only wire format (4-byte big-endian length prefix + UTF-8 JSON)</li>
+        <li><code>identity.ts</code> — carries the hard cross-language invariant</li>
+        <li><code>symbol-id.ts</code> — turns an edit into
+            <code>src/net/retry.ts::RetryPolicy.backoff</code></li>
+        <li><code>manifest.ts</code>, <code>config.ts</code>, <code>gate-overrides.ts</code> — committed vs. machine-local state</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

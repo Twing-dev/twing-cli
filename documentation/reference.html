@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference — twing docs</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+</defs></svg>
+
+<header class="topbar"><div class="inner">
+  <a class="brand" href="index.html"><span class="dot"></span>twing <small>docs</small></a>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="journeys.html">Journeys</a>
+    <a href="reference.html">Reference</a>
+    <a href="onboarding.html">Onboarding</a>
+    <a href="findings.html">Findings</a>
+    <a href="review-flow.html">Review ✦</a>
+    <a href="implementation-plan.html">Build ⚒</a>
+  </nav>
+  <span class="spacer"></span>
+  <div class="tb-tools">
+    <div class="searchbox"><input id="q" type="search" placeholder="Filter page…" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+    <span class="iconbtn" id="themeBtn" role="button" tabindex="0">◐ auto</span>
+  </div>
+</div></header>
+
+<div class="page">
+
+  <div class="hero">
+    <div class="eyebrow">Page 4</div>
+    <h1>Reference</h1>
+    <p class="lede">
+      The lookup material: identifiers, durability rules, lifecycles, routes, config files,
+      environment variables, and the invariants that explain why the code looks the way it does.
+    </p>
+    <div class="chips"><span class="chip">press <b style="margin-left:2px">/</b> to jump to anything</span></div>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar"><div class="t">On this page</div><div class="links"></div></aside>
+
+    <main>
+      <div class="nores">No matches on this page.</div>
+
+      <section id="ids">
+        <h2><span class="num">01</span> Identifiers</h2>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Id</th><th>Derived from</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>projectId</code></td><td><code>sha256(canonicalized git remote origin)</code></td><td><strong>Not</strong> a path — identical across clones and worktrees. No remote → a random id persisted under <code>.git/</code>.</td></tr>
+            <tr><td><code>developerId</code></td><td>Server-issued; resolved from the PAT on every request</td><td>Never a client-supplied field. The <em>label</em> it’s minted from is chosen once, client-side.</td></tr>
+            <tr><td><code>sessionId</code></td><td>Claude Code’s real session id</td><td><code>CLAUDE_CODE_SESSION_ID</code>; <code>ExitPlanMode</code> supplies it automatically.</td></tr>
+            <tr><td><code>serverUrl</code></td><td><code>--server</code> &gt; <code>TWING_SERVER</code> &gt; the repo’s committed manifest</td><td>Deliberately <strong>no</strong> fallback to “whatever was last cached globally.”</td></tr>
+            <tr><td><code>symbolId</code></td><td><code>&lt;relPath&gt;::&lt;scopePath&gt;</code>, from the AST</td><td>Falls back to a bare path for a whole-file write or an unparseable file.</td></tr>
+            <tr><td><code>groupId</code></td><td>Self-assigned to the design’s own id, or caller-supplied</td><td>Cross-project label linking sibling designs. Never validated against a real row.</td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="note bad" data-s>
+          <p><span class="h">The one hard cross-language invariant</span>
+          <code>canonicalizeRemoteUrl</code> (<code>core/identity.ts</code>) and
+          <code>canonicalizeRemoteURL</code> (<code>hook/identity.go</code>) must reduce every
+          remote-URL form to the same string. If they drift, <code>projectId</code> silently
+          diverges between the hook and the daemon/CLI. This broke in production once — SSH and
+          HTTPS clones of the same repo never saw each other. The fixture table is duplicated
+          verbatim in <code>hook/identity_test.go</code>.</p>
+        </div>
+
+        <details class="acc" data-s>
+          <summary>What canonicalization actually does</summary>
+          <div class="body">
+            <ol>
+              <li>SCP-like SSH syntax <code>git@host:org/repo</code> → <code>host/org/repo</code></li>
+              <li>Otherwise strip <code>scheme://[user@]</code></li>
+              <li>Strip a trailing <code>.git</code></li>
+              <li>Strip trailing slashes</li>
+              <li>Lowercase the whole thing</li>
+            </ol>
+            <p>Lowercasing is deliberate: hosts are case-insensitive and GitHub-style paths route
+               case-insensitively, so a false negative (a missed cross-session match) is worse than
+               over-normalizing.</p>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary>The identity split you will run into</summary>
+          <div class="body">
+            <p>
+              The daemon computes <code>developerId</code> locally from
+              <code>git config user.email</code>. The server resolves it from the authenticated
+              PAT. <strong>These routinely differ</strong> — a GitHub-login identity like
+              <code>206395444+user@users.noreply.github.com</code> vs. a git-email one.
+            </p>
+            <p>
+              That divergence is why alignment threads gained admin read visibility, and it’s the
+              first thing to suspect when someone says “the dashboard shows me nothing.”
+            </p>
+          </div>
+        </details>
+      </section>
+
+      <section id="durable">
+        <h2><span class="num">02</span> What’s durable, what isn’t</h2>
+
+        <div class="grid g2">
+          <div class="card cok" data-s>
+            <h5>Durable — real tables</h5>
+            <p><code>designs</code>, <code>pending_reviews</code>, <code>constraints</code>,
+               <code>alignment_threads</code>, and the identity tables
+               (<code>organizations</code>, <code>org_memberships</code>,
+               <code>project_records</code>, <code>project_memberships</code>,
+               <code>developers</code>, <code>invites</code>).</p>
+            <p><em>Because they can’t be reconstructed from anywhere else.</em></p>
+          </div>
+          <div class="card cwa" data-s>
+            <h5>In-memory only</h5>
+            <p><code>Claim</code>s, <code>CallEdge</code>s, and undelivered notices — held in
+               <code>Store</code>’s Maps, durable only as <code>activity_events</code> rows.</p>
+            <p><em>Because every daemon keeps its own local history and re-reports on the next
+               flush, so the shared view rebuilds itself within seconds of a restart.</em></p>
+          </div>
+        </div>
+
+        <div class="note key" data-s>
+          <p><span class="h">The append-only log</span>
+          <code>activity_events</code> gets one row per state transition, written in the same call
+          that makes the transition — there is no separate replay or projection step. It is
+          insert-only <em>by convention</em>: no store method in the codebase issues UPDATE or
+          DELETE against it, and none should be added. It spans both the §4 and §17 families, and
+          is the one place the “share a data model but never share logic” rule is deliberately
+          crossed.</p>
+        </div>
+
+        <details class="acc" data-s>
+          <summary>Portability discipline in the schema</summary>
+          <div class="body">
+            <p>
+              Every column is <code>text</code> or <code>integer</code> only — JSON fields are
+              text-serialized, timestamps are epoch-ms integers, booleans are 0/1. No SQLite-only
+              column type is load-bearing and nothing uses a SQLite-specific pragma or expression,
+              so a parallel Postgres schema can reuse the same names and shapes later.
+            </p>
+            <p>
+              <code>TWING_DB_DRIVER=postgres</code> is a documented seam that <strong>throws</strong>
+              rather than silently falling back to SQLite — a misconfiguration should be loud, not
+              a silent downgrade.
+            </p>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary>Never backfill</summary>
+          <div class="body">
+            <p>
+              When a table gains a column, pre-existing rows are left without it and readers handle
+              its absence. You’ll see this everywhere: <code>category</code>/<code>subKind</code>
+              on threads, <code>blockedReason</code> on designs, <code>symbolIds</code> falling back
+              to a legacy singular <code>symbolId</code>.
+            </p>
+            <p>
+              This isn’t laziness — it’s what makes version skew survivable across three
+              independently-updated deployables. See <a href="findings.html#skew">Findings</a>.
+            </p>
+          </div>
+        </details>
+      </section>
+
+      <section id="lifecycle">
+        <h2><span class="num">03</span> Design lifecycle</h2>
+        <figure data-s>
+          <div class="fig">
+            <svg viewBox="0 0 640 420" role="img" aria-label="Design lifecycle state machine">
+              <circle class="bx" cx="140" cy="34" r="7"/>
+              <path class="edge" d="M140,44 L140,82" marker-end="url(#ah)"/>
+              <text class="el" x="152" y="68">register</text>
+
+              <rect class="bx-ok" x="70" y="86" width="140" height="54" rx="8"/>
+              <text class="lbl" x="140" y="118" text-anchor="middle">open</text>
+              <rect class="bx-no" x="380" y="86" width="140" height="54" rx="8"/>
+              <text class="lbl" x="450" y="118" text-anchor="middle">flagged</text>
+              <rect class="bx" x="70" y="228" width="140" height="54" rx="8"/>
+              <text class="lbl" x="140" y="260" text-anchor="middle">dormant</text>
+              <rect class="bx" x="380" y="228" width="140" height="54" rx="8"/>
+              <text class="lbl" x="450" y="260" text-anchor="middle">closed</text>
+              <rect class="bx" x="70" y="344" width="140" height="54" rx="8"/>
+              <text class="lbl" x="140" y="376" text-anchor="middle">expired</text>
+
+              <path class="edge" d="M210,102 L376,102" marker-end="url(#ah)"/>
+              <text class="el" x="293" y="94" text-anchor="middle">non-clean verdict</text>
+              <path class="edge" d="M380,124 L214,124" marker-end="url(#ah)"/>
+              <text class="el" x="297" y="140" text-anchor="middle">review approved</text>
+              <path class="edge" d="M160,140 L160,224" marker-end="url(#ah)"/>
+              <text class="el" x="172" y="178">no activity (12 h)</text>
+              <path class="edge" d="M118,228 L118,144" marker-end="url(#ah)"/>
+              <text class="el" x="106" y="186" text-anchor="end">explicit resume</text>
+              <path class="edge" d="M450,140 L450,224" marker-end="url(#ah)"/>
+              <text class="el" x="462" y="186">review rejected</text>
+              <path class="edge" d="M210,255 L376,255" marker-end="url(#ah)"/>
+              <text class="el" x="293" y="247" text-anchor="middle">close</text>
+              <path class="edge" d="M210,113 C280,150 320,196 376,236" marker-end="url(#ah)"/>
+              <text class="el" x="300" y="188" text-anchor="middle">design close / SessionEnd</text>
+              <path class="edge" d="M140,282 L140,340" marker-end="url(#ah)"/>
+              <text class="el" x="152" y="316">7 d dormant</text>
+            </svg>
+          </div>
+        </figure>
+
+        <div class="tw" data-s><table>
+          <thead><tr><th>State</th><th>Counts as “usable” for the gate?</th><th>Still addressable?</th></tr></thead>
+          <tbody>
+            <tr><td><code>open</code></td><td><span class="tag ok">yes</span></td><td>yes</td></tr>
+            <tr><td><code>flagged</code></td><td><span class="tag no">no</span> — blocks edits</td><td>yes — resolve / amend</td></tr>
+            <tr><td><code>dormant</code></td><td><span class="tag no">no</span></td><td>yes — resume / resolve / amend</td></tr>
+            <tr><td><code>superseded</code></td><td><span class="tag no">no</span></td><td>terminal (adopted another design)</td></tr>
+            <tr><td><code>closed</code></td><td><span class="tag no">no</span></td><td>terminal</td></tr>
+            <tr><td><code>expired</code></td><td><span class="tag no">no</span></td><td>terminal</td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="note key" data-s>
+          <p><span class="h">Dormancy is not cosmetic</span>
+          It is the fix for unbounded O(n²) pairwise comparison growth.
+          <code>openDesigns()</code> excludes dormant designs, and that exclusion is the entire
+          reason the state exists. A dormant design is never woken silently: a file matching its
+          scope produces a <em>deny</em> pointing at <code>twing design resume</code>, because a
+          file match isn’t proof of intent to resume — a long-lived session can register design A,
+          abandon it, and later touch a file A happens to cover for unrelated reasons.</p>
+        </div>
+
+        <details class="acc" data-s>
+          <summary>Approval memory — four separate lists, deliberately not merged</summary>
+          <div class="body">
+            <p>
+              <code>runDesignChecks</code> re-evaluates a design’s <em>entire merged scope</em> on
+              every amend — not just the new delta. Without approval memory, anything once
+              approved would re-flag forever.
+            </p>
+            <div class="tw"><table>
+              <thead><tr><th>Field</th><th>Key shape</th><th>Waives</th></tr></thead>
+              <tbody>
+                <tr><td><code>justifiedConstraintIds</code></td><td>bare constraint id</td><td><code>constraint_violation</code></td></tr>
+                <tr><td><code>justifiedOverlaps</code></td><td><code>designId::path</code></td><td><code>file_overlap</code></td></tr>
+                <tr><td><code>justifiedConflicts</code></td><td>bare designId</td><td><code>llm_divergence</code> — no path to key on</td></tr>
+                <tr><td><code>justifiedSymbolConflicts</code></td><td><code>designId::symbolId</code></td><td><code>symbol_conflict</code></td></tr>
+              </tbody>
+            </table></div>
+            <p>
+              The last two share a key shape but stay separate on principle: a row-2 advisory
+              waiver’s history must never be conflated with a row-3 block’s. All four are appended
+              to on <strong>approve only</strong> — a reject settles nothing.
+            </p>
+            <p>
+              Overlap waivers are keyed <em>per specific path</em>, not per design pair: waiving
+              one file’s collision must not silently swallow a different file added later between
+              the same two designs.
+            </p>
+          </div>
+        </details>
+      </section>
+
+      <section id="routes">
+        <h2><span class="num">04</span> Server routes</h2>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Route</th><th>Purpose</th><th>Auth</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET /</code></td><td>Health — returns the literal text <code>twing serve</code></td><td>none</td></tr>
+            <tr><td><code>GET /v1/version</code></td><td>Version, for the mismatch check</td><td>none — a fresh install must learn it’s stale before hitting a 401</td></tr>
+            <tr><td><code>POST /v1/admin/bootstrap</code></td><td>Break-glass: first org + admin</td><td>the one-time bootstrap token</td></tr>
+            <tr><td><code>POST /v1/invites/:code/redeem</code></td><td>Redeem an invite</td><td>optional — works authed or not</td></tr>
+            <tr><td><code>POST /v1/projects/:id/join-via-github</code></td><td>Join <em>or found</em> via verified GitHub permissions</td><td>optional — GitHub token is the proof</td></tr>
+            <tr><td><code>POST /v1/claims</code></td><td>Ingest claims, run checks, return findings</td><td>PAT</td></tr>
+            <tr><td><code>GET /v1/notices</code></td><td>Findings since the caller’s last poll</td><td>PAT — scoped to the authed identity</td></tr>
+            <tr><td><code>POST /v1/designs/check</code></td><td>Register + verdict, in one round trip</td><td>PAT</td></tr>
+            <tr><td><code>POST /v1/designs/extract</code></td><td>Extraction only, no registration (multi-repo fallback)</td><td>PAT</td></tr>
+            <tr><td><code>GET /v1/designs/scope-match</code></td><td>The Edit/Write gate’s own check</td><td>PAT</td></tr>
+            <tr><td><code>POST /v1/designs/:id/resolve</code></td><td>Adopt, or justify a divergence</td><td>PAT, project member</td></tr>
+            <tr><td><code>POST /v1/designs/:id/amend</code> · <code>/resume</code></td><td>Expand scope / reactivate a dormant design</td><td>PAT, project member</td></tr>
+            <tr><td><code>PATCH /v1/designs/:id/close</code></td><td>Close one design</td><td>PAT, project member</td></tr>
+            <tr><td><code>GET /v1/constraints/match</code></td><td><strong>§17.9 ground truth</strong> — a literal path vs. the rules</td><td>PAT</td></tr>
+            <tr><td><code>POST /v1/constraints/seed</code></td><td>Seed rules; doubles as the founding trigger</td><td>PAT — admin required past first founding</td></tr>
+            <tr><td><code>POST /v1/reviews/:id/decide</code></td><td>Approve or reject</td><td>PAT + <strong>project admin</strong></td></tr>
+            <tr><td><code>GET/POST/PATCH /v1/alignment-threads/*</code></td><td>The reconciliation channel</td><td>PAT — party (or admin, read only)</td></tr>
+            <tr><td><code>GET /v1/auth/whoami</code></td><td>Identity + memberships</td><td>PAT</td></tr>
+          </tbody>
+        </table></div>
+        <div class="note" data-s>
+          <p><span class="h">Registration order matters</span>
+          <code>/v1/designs/:id</code> must be registered <em>after</em> every literal
+          <code>/v1/designs/&lt;word&gt;</code> route — Hono matches in registration order, and a
+          bare <code>:id</code> segment would otherwise swallow <code>scope-match</code> before it
+          reached its real handler. Found live via a full test regression.</p>
+        </div>
+      </section>
+
+      <section id="manifest">
+        <h2><span class="num">05</span> <code>.twing/twing.yml</code></h2>
+        <p data-s>The one committed, team-shared config file. Every key is optional.</p>
+
+<pre><code>coordinator:
+  serverUrl: https://coordination-server.twing.dev   # read locally, never uploaded
+
+constraints:                                          # uploaded (seeded) verbatim
+  - text: "All retries go through RetryPolicy"
+    scope: "src/net/**"
+
+require_human_review:                                 # also uploaded, same mechanism
+  - path: "packages/server/src/identity-store.ts"
+    reason: "auth/identity resolution — a bug here is an access-control hole."
+
+capture:                                              # read locally, never uploaded
+  enabled: true                                       # opt-in; absent means off</code></pre>
+
+        <div class="tw" data-s><table>
+          <thead><tr><th>Key</th><th>Uploaded?</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>coordinator.serverUrl</code></td><td><span class="tag n">no</span></td><td>Where everything else is sent. Read by the CLI <em>and</em> the Go hook.</td></tr>
+            <tr><td><code>constraints[]</code></td><td><span class="tag ok">yes</span></td><td>Seeded to the Constraint Store → <code>constraint_violation</code> on match</td></tr>
+            <tr><td><code>require_human_review[]</code></td><td><span class="tag ok">yes</span></td><td>Same mechanism, different name — both seed as type <code>"constraint"</code></td></tr>
+            <tr><td><code>capture.enabled</code></td><td><span class="tag n">no</span></td><td>Turns on local conversation capture. <strong>Opt-in; absent = off.</strong></td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="note key" data-s>
+          <p><span class="h">A constraint is expensive — spend it carefully</span>
+          Every entry blocks the edit and needs a <em>project admin</em> to approve the override.
+          It also cannot check what it claims to check: the gate matches a path and denies, it
+          never reads the diff. So a rule buys exactly one thing — “stop, and make an admin look” —
+          worth paying for only where the path is edited <strong>rarely</strong> and a bad change
+          would be <strong>silent</strong>. This repo pruned six rules on 2026-09-06 for failing
+          that test: they named real invariants, but ones already covered by tests, on files edited
+          20–39 times, where a per-edit admin round trip degrades into a rubber stamp.</p>
+        </div>
+        <div class="note bad" data-s>
+          <p><span class="h">Editing a <code>reason:</code> string does not update the rule</span>
+          <code>ConstraintStore.add</code> upserts on the exact statement text. Changing it creates
+          a <em>second</em> constraint alongside the old one. Put explanatory notes in YAML
+          comments, not in <code>reason:</code>.</p>
+        </div>
+      </section>
+
+      <section id="env">
+        <h2><span class="num">06</span> Environment variables</h2>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Variable</th><th>Read by</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>TWING_DESIGN_GATE=off</code></td><td>hook</td><td>Short-circuits the gate with zero network calls</td></tr>
+            <tr><td><code>TWING_SERVER</code></td><td>CLI</td><td>Overrides the repo’s coordinator</td></tr>
+            <tr><td><code>TWING_SOCK</code></td><td>hook, daemon, CLI</td><td>Overrides the daemon socket path</td></tr>
+            <tr><td><code>CLAUDE_CODE_SESSION_ID</code></td><td>CLI</td><td>Default <code>--session</code> for <code>design register</code>/<code>resume</code></td></tr>
+            <tr><td><code>TWING_DAEMON_SUPERVISED=1</code></td><td>daemon</td><td>Set only by launchd/systemd. Grants the right to evict a socket squatter.</td></tr>
+            <tr><td><code>PORT</code>, <code>TWING_HOST</code></td><td>server</td><td>Bind address. <code>--no-auth</code> defaults to loopback.</td></tr>
+            <tr><td><code>TWING_AUTH_MODE=no_auth</code></td><td>server</td><td>No identity verification; every request needs <code>X-Twing-Developer-Id</code></td></tr>
+            <tr><td><code>TWING_SERVE_DATA_DIR</code></td><td>server</td><td>Where <code>twing.db</code> and the bootstrap token live</td></tr>
+            <tr><td><code>TWING_DB_DRIVER</code></td><td>server</td><td><code>sqlite</code> only; anything else throws</td></tr>
+            <tr><td><code>TWING_SERVE_CORS_ORIGINS</code></td><td>server</td><td>Comma-separated browser allowlist. Never <code>*</code>.</td></tr>
+            <tr><td><code>TWING_PUBLIC_PROJECT_IDS</code></td><td>server</td><td>Projects an unauthenticated <strong>GET</strong> may read</td></tr>
+            <tr><td><code>AWS_BEARER_TOKEN_BEDROCK</code></td><td>server</td><td>LLM provider — 1st in precedence</td></tr>
+            <tr><td><code>GOOGLE_APPLICATION_CREDENTIALS</code></td><td>server</td><td>LLM provider — 2nd (Vertex)</td></tr>
+            <tr><td><code>OPENROUTER_API_KEY</code></td><td>server</td><td>LLM provider — 3rd</td></tr>
+            <tr><td><code>TWING_BIFROST_BASE_URL</code></td><td>server</td><td>LLM provider — 4th</td></tr>
+            <tr><td><code>TWING_&lt;PROVIDER&gt;_EXTRACT_MODEL</code></td><td>server</td><td>Per-provider model override; same for <code>_SEMANTIC_CHECK_MODEL</code></td></tr>
+          </tbody>
+        </table></div>
+        <div class="note" data-s>
+          <p>
+            Provider selection is <strong>ambient</strong> — there is no
+            <code>TWING_LLM_PROVIDER</code>. The first credential present wins, in the order above,
+            and <code>selectProvider</code> <em>throws</em> when none is set. That throw reaches a
+            caller that fails soft, so a server with no LLM configured still runs; it just never
+            blocks on a plan-text check.
+          </p>
+        </div>
+      </section>
+
+      <section id="invariants">
+        <h2><span class="num">07</span> The eight invariants</h2>
+        <p data-s>When something looks odd, it is usually one of these.</p>
+        <div class="grid g2">
+          <div class="card cno" data-s><div class="k">01</div><h5>The capture hook never denies</h5><p>And it always exits 0. A panic recovers silently — a non-zero exit could look like a block. Enforced as a constraint in the repo’s own manifest.</p></div>
+          <div class="card cno" data-s><div class="k">02</div><h5>The capture hook has no decision logic</h5><p>It forwards <code>toolInput</code> verbatim and never parses it. One sanctioned exception: <code>daemon_launch.go</code>’s self-heal.</p></div>
+          <div class="card cno" data-s><div class="k">03</div><h5>The gate fails closed</h5><p>Against a <em>configured</em> coordinator. A silent allow on auth failure is indistinguishable from someone deleting their own token to bypass it. “No coordinator” and “file outside the repo” are <em>not</em> failures — those are silent allows.</p></div>
+          <div class="card cno" data-s><div class="k">04</div><h5>Exactly one wire format</h5><p>Nothing invents a second.</p></div>
+          <div class="card cno" data-s><div class="k">05</div><h5><code>developerId</code> is always the authenticated identity</h5><p>On every write. Never a client-supplied field — whatever a client sends is ignored, not merely validated.</p></div>
+          <div class="card cno" data-s><div class="k">06</div><h5>Approval belongs to whoever’s authority you’d override</h5><p>Peer collisions are self-approvable. Project rules need an admin.</p></div>
+          <div class="card cno" data-s><div class="k">07</div><h5>Append-only; never backfill</h5><p>New columns leave old rows alone; readers handle absence. This is what makes version skew survivable.</p></div>
+          <div class="card cno" data-s><div class="k">08</div><h5>Anything that blocks says why, and what to do next</h5><p>A deny message is a product surface, not an error string.</p></div>
+        </div>
+      </section>
+
+      <section id="gotchas">
+        <h2><span class="num">08</span> Operational quick reference</h2>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Symptom</th><th>Look at</th></tr></thead>
+          <tbody>
+            <tr><td>An edit was denied and you don’t know why</td><td><code>~/.twing/design-coordinator.log</code> — every gate decision is logged</td></tr>
+            <tr><td>Daemon seems stale or wedged</td><td><code>lsof ~/.twing/daemon.sock</code>, then <code>twing daemon restart</code></td></tr>
+            <tr><td>Daemon won’t start</td><td><code>~/.twing/daemon.log</code> — usually a squatter on the socket</td></tr>
+            <tr><td>“Not a member of this project” (403)</td><td><code>twing whoami</code>, then <code>twing join --github</code></td></tr>
+            <tr><td>Nothing appears in the dashboard</td><td>Identity split — your CLI id and login id may differ. Check <code>whoami</code>.</td></tr>
+            <tr><td>Constraint edits have no effect</td><td>You changed the <code>reason:</code> text — it upserts on that string</td></tr>
+            <tr><td>Tests fail on code you just changed</td><td>You didn’t rebuild. Tests run against <code>dist/</code>.</td></tr>
+            <tr><td>Want the gate off, temporarily</td><td><code>TWING_DESIGN_GATE=off</code>, or <code>twing design disable-gate</code> per project</td></tr>
+          </tbody>
+        </table></div>
+
+<pre><code># build everything (required before tests)
+npm install &amp;&amp; npm run build
+
+# run the whole suite
+npm run test
+
+# one package, one file
+node --test packages/core/dist/identity.test.js
+
+# the Go hook
+cd hook &amp;&amp; go build -o twing-hook . &amp;&amp; go test ./...
+
+# a throwaway local coordinator
+npm run start --workspace packages/server</code></pre>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="foot">
+    <span>← <a href="journeys.html">Journeys</a></span>
+    <span><a href="onboarding.html">Onboarding</a> →</span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

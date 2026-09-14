@@ -13,7 +13,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
-import type { Claim, CallEdge, DesignStatement, DesignConstraintType, Finding, PendingReview, ClaudeSettings } from "@twing/core";
+import type { Claim, CallEdge, DesignChange, DesignStatement, DesignConstraintType, Finding, PendingReview, ClaudeSettings } from "@twing/core";
 import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS } from "@twing/core";
 import { computeProjectIdForGithubRepo, renderManifestWithCoordinator, bootstrapHookScript, mergeBootstrapHookEntries } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
@@ -73,6 +73,13 @@ interface DesignCheckRequestBody {
   creates?: string[];
   touches?: string[];
   dependsOn?: string[];
+  /** Structured design templates (2026-09): the declaration a `--from`
+   * registration was built from. Client-supplied like `creates`/`touches`
+   * (and equally advisory -- nothing here is consulted by any blocking
+   * path), and validated client-side by `validateTemplate` before it's
+   * ever sent. Stored as-is; see the `changes:` note at the register call
+   * for why this isn't re-derived server-side. */
+  changes?: DesignChange[];
   summary?: string;
   ttlMs?: number;
   // §17 design linking (2026-08): unlike developerId (resolved from the
@@ -1612,6 +1619,13 @@ export function createApp(options: CreateAppOptions = {}) {
       creates,
       touches,
       dependsOn,
+      // Stored verbatim as declared, never derived here: `creates`/
+      // `touches` above are what the CLI already computed from it
+      // (`deriveScope`), and recomputing server-side would be a second
+      // implementation of the same rule, free to disagree with the one the
+      // caller was shown. Left `undefined` -- not `[]` -- for every
+      // registration that sent no template.
+      changes: body.changes,
       // No truncation (dropped 2026-08-18, was capped at 2000 chars) -- see
       // DesignStatement.rawPlanExcerpt's doc comment in @twing/core for why.
       rawPlanExcerpt: body.rawPlanText,

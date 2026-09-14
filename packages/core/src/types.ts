@@ -124,6 +124,81 @@ export const MAX_DESIGN_ACTIVE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
  * giving a paused project a real chance to come back. */
 export const DEFAULT_DESIGN_DORMANT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** The six things that can happen to a target (structured design template,
+ * 2026-09). Closed, and split on one question: **is behaviour supposed to
+ * change?**
+ *
+ *  - `add`/`modify`/`rewrite`/`remove` -- yes. A checker proves the stated
+ *    change actually happened. `rewrite` is distinct from `modify` because
+ *    it changes what gets checked: a `modify` is judged on its delta, a
+ *    `rewrite` on the whole resulting symbol.
+ *  - `rename`/`move` -- no. These assert the body is *identical* and only
+ *    the name (or the path) differs, which makes them the most valuable
+ *    entries here: "I only renamed it" is a claim an AST comparison can
+ *    check outright, and a body that changed too is a silent behaviour
+ *    change hiding inside a refactor.
+ *
+ * `extract`/`inline` were considered and deliberately left out rather than
+ * shipped inert -- their body-partition check is non-trivial and nobody has
+ * built it. See docs/structured-design-schema.md for why a value that
+ * changes no behaviour gets deleted in this codebase (the
+ * `DesignConstraintType` collapse below is the precedent). */
+export type DesignChangeAction = "add" | "modify" | "rewrite" | "remove" | "rename" | "move";
+
+/** What *sort of thing* is being changed, as opposed to what happens to it
+ * (`DesignChangeAction` above). Two independent axes: adding a column and
+ * adding a function are both `add`, and they are not the same kind of event
+ * to anyone reading the design. This is the axis that lets a reader ask
+ * "does this touch the database?" without reading every target path.
+ *
+ * `config` is promoted from the spec's reserved list (2026-09) even though
+ * no *check* reads it yet, because a reader now does: twing-monitor states
+ * each kind's presence or absence explicitly ("no configuration changes"),
+ * and that sentence is only true if an author had the vocabulary to say
+ * otherwise. A kind nobody can declare makes its own absence
+ * unfalsifiable, which is worse than not showing the row at all. That
+ * still satisfies the spec's rule -- a value earns its place by changing
+ * what the system *does* -- just on the display axis rather than the
+ * checking one.
+ *
+ * `dependency` and `build` stay out: nothing reads them, and no display
+ * asserts their absence. Promoting each later is a one-line change; see
+ * `DesignConstraintType`'s three-to-one collapse below for what shipping
+ * inert vocabulary costs.
+ *
+ * Optional on `DesignChange`, defaulting to `"code"`, so every template
+ * written before this existed stays valid. */
+export type DesignChangeKind = "code" | "api" | "schema" | "test" | "docs" | "config";
+
+/**
+ * One declared change inside a design (structured design template, 2026-09).
+ *
+ * `target` deliberately uses the **same `path::Symbol.method` format
+ * `Claim.symbolId` uses** (`computeSymbolId`, symbol-id.ts). That shared
+ * namespace is the entire reason this type exists: with it, checking a
+ * design against the code it produced is a set difference over targets and
+ * claims, needing no LLM at all. A second spelling for `target` would
+ * silently destroy that, so there must never be one.
+ */
+export interface DesignChange {
+  /** Stable within this design -- a finding points at it, so it needs to
+   * survive being written down in a review. */
+  id: string;
+  action: DesignChangeAction;
+  /** Absent on a template written before this field existed, and on one
+   * that simply doesn't say -- both mean `"code"`, which is what
+   * `kindOf()` (design-scope.ts) resolves them to. Optional rather than
+   * required so the overwhelmingly common case stays unwritten. */
+  kind?: DesignChangeKind;
+  /** `src/net/retry.ts`, or `src/net/retry.ts::RetryPolicy.backoff`. */
+  target: string;
+  /** One sentence: what this achieves, not what it does mechanically. */
+  intent: string;
+  /** The previous name (`rename`) or previous path (`move`). Required by
+   * exactly those two actions and meaningless on the other four. */
+  from?: string;
+}
+
 export interface DesignStatement {
   id: string;
   /** §17 design linking (2026-08): cross-project label -- self-assigned to
@@ -210,6 +285,32 @@ export interface DesignStatement {
    * call (CLI always sends structured fields, never `rawPlanText`) -- this
    * is the one reliable signal a design row came from `ExitPlanMode`. */
   rawPlanExcerpt?: string;
+  /** The structured declaration this design was registered from, when it was
+   * registered from one (`twing design register --from <file>`).
+   *
+   * Optional and **never backfilled**: every design created before this
+   * shipped has none, and every reader must treat absence as "not stated"
+   * rather than "declares no changes" -- the usual convention in this
+   * schema, and the thing that makes a richer shape safe on partial input.
+   *
+   * `creates`/`touches` stay authoritative for the Edit/Write gate and are
+   * *derived* from this when present (`deriveScope`, design-scope.ts), which
+   * is what lets `pathInDesignScope`, `hook/design_gate.go` and
+   * twing-monitor all keep reading exactly what they read today. This is
+   * additive on top of them, never a replacement.
+   *
+   * Persisted server-side since 2026-09 (`designs.changes`, a nullable JSON
+   * column) and returned by `GET /v1/designs`. The CLI still *also* sends
+   * the template verbatim as `rawPlanText`, so a coordinator predating that
+   * column keeps storing it in `rawPlanExcerpt` and can display it.
+   *
+   * Absent -- not `[]` -- for every design registered any other way
+   * (`ExitPlanMode` extraction, plain `--summary`/`--touches` flags). That
+   * distinction is load-bearing for a reader: absent means "never declared
+   * changes", which falls back to the legacy creates/touches rendering,
+   * and is a different answer from "declares no changes". Never
+   * backfilled, per this schema's usual convention. */
+  changes?: DesignChange[];
   /** Active-inactivity threshold (§17 design lifecycle, 2026-08): how long
    * this design can go with no activity before going dormant. Refreshed on
    * activity, not counted from `createdAt` -- see `DesignRegistry.touch()`.

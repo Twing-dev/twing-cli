@@ -105,6 +105,8 @@ function printUsage(): void {
       "  twing project enable-enforcement",
       "  twing project disable-enforcement",
       "  twing design register --session <id> --summary \"...\" --creates a,b --touches c,d --depends-on e,f [--group <groupId>]",
+      "  twing design register --from <file.yml|->   (structured template: goal + changes[action/target/intent]; - reads stdin)",
+      "  twing design amend --id <designId> --from <file.yml|->   (append change items to an existing design)",
       "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
       "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f] [--summary \"...\"] [--group <groupId>]",
       "  twing design amend --id <designId> --reassign-project   (run from the correct repo -- moves an open, unencumbered design there)",
@@ -141,6 +143,7 @@ async function runDesignCommand(rest: string[]): Promise<void> {
     case "register":
       await runDesignRegister({
         cwd,
+        server: flags.server,
         session: flags.session,
         label: flags.label,
         summary: flags.summary,
@@ -148,14 +151,16 @@ async function runDesignCommand(rest: string[]): Promise<void> {
         touches: flags.touches,
         dependsOn: flags["depends-on"],
         group: flags.group,
+        from: flags.from,
       });
       return;
     case "resolve":
-      await runDesignResolve({ cwd, id: flags.id, adopt: flags.adopt, justify: flags.justify });
+      await runDesignResolve({ cwd, server: flags.server, id: flags.id, adopt: flags.adopt, justify: flags.justify });
       return;
     case "amend":
       await runDesignAmend({
         cwd,
+        server: flags.server,
         id: flags.id,
         touches: flags.touches,
         creates: flags.creates,
@@ -163,19 +168,20 @@ async function runDesignCommand(rest: string[]): Promise<void> {
         summary: flags.summary,
         group: flags.group,
         reassignProject: flags["reassign-project"] === "true",
+        from: flags.from,
       });
       return;
     case "resume":
-      await runDesignResume({ cwd, id: flags.id, session: flags.session, touches: flags.touches, creates: flags.creates, dependsOn: flags["depends-on"] });
+      await runDesignResume({ cwd, server: flags.server, id: flags.id, session: flags.session, touches: flags.touches, creates: flags.creates, dependsOn: flags["depends-on"] });
       return;
     case "close":
-      await runDesignClose({ cwd, id: flags.id });
+      await runDesignClose({ cwd, server: flags.server, id: flags.id });
       return;
     case "list":
-      await runDesignList({ cwd, status: flags.status, mine: flags.mine === "true" });
+      await runDesignList({ cwd, server: flags.server, status: flags.status, mine: flags.mine === "true" });
       return;
     case "reviews":
-      await runDesignReviews({ cwd, decide: flags.decide, decision: flags.decision === "approve" || flags.decision === "reject" ? flags.decision : undefined });
+      await runDesignReviews({ cwd, server: flags.server, decide: flags.decide, decision: flags.decision === "approve" || flags.decision === "reject" ? flags.decision : undefined });
       return;
     case "enable-gate":
       runDesignEnableGate({ cwd });

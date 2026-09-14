@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture — twing docs</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+</defs></svg>
+
+<header class="topbar"><div class="inner">
+  <a class="brand" href="index.html"><span class="dot"></span>twing <small>docs</small></a>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="journeys.html">Journeys</a>
+    <a href="reference.html">Reference</a>
+    <a href="onboarding.html">Onboarding</a>
+    <a href="findings.html">Findings</a>
+    <a href="review-flow.html">Review ✦</a>
+    <a href="implementation-plan.html">Build ⚒</a>
+  </nav>
+  <span class="spacer"></span>
+  <div class="tb-tools">
+    <div class="searchbox"><input id="q" type="search" placeholder="Filter page…" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+    <span class="iconbtn" id="themeBtn" role="button" tabindex="0">◐ auto</span>
+  </div>
+</div></header>
+
+<div class="page">
+
+  <div class="hero">
+    <div class="eyebrow">Page 2</div>
+    <h1>Architecture</h1>
+    <p class="lede">
+      Each component in depth — what it owns, what it deliberately doesn’t, and why the
+      boundaries fall where they do. Then the full install and onboarding flow.
+    </p>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar"><div class="t">On this page</div><div class="links"></div></aside>
+
+    <main>
+      <div class="nores">No matches on this page.</div>
+
+      <section id="core">
+        <h2><span class="num">01</span> <code>packages/core</code> — the shared vocabulary</h2>
+        <p data-s>
+          Types and pure functions everything else builds on. No I/O beyond reading config files.
+          Imported by <code>cli</code> and <code>server</code>; <strong>mirrored by hand</strong> in
+          the Go hook.
+        </p>
+
+        <details class="acc" data-s open>
+          <summary><code>types.ts</code> — the data model</summary>
+          <div class="body">
+            <p>Two families in one file, because they share TTL/id conventions and nothing else:</p>
+            <ul>
+              <li><strong>Path 1:</strong> <code>Claim</code>, <code>CallEdge</code>, <code>Finding</code>, <code>Notice</code></li>
+              <li><strong>Path 2:</strong> <code>DesignStatement</code>, <code>DesignConstraint</code>,
+                  <code>DesignVerdict</code>, <code>DesignConflict</code>, <code>PendingReview</code></li>
+            </ul>
+            <div class="note">
+              <p><span class="h">Read this one twice</span>
+              <code>DesignVerdict</code>’s doc comment is the single densest explanation of the
+              system’s conflict model anywhere in the repo. It documents not just the four buckets
+              but the values that were <em>removed</em> and why.</p>
+            </div>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary><code>protocol.ts</code> + <code>framing.ts</code> — the wire</summary>
+          <div class="body">
+            <p>
+              Daemon socket messages and their encoding: a <strong>4-byte big-endian uint32 byte
+              length, then that many bytes of UTF-8 JSON</strong>. Needed because stream sockets
+              coalesce and split writes; a length prefix is the simplest way to recover message
+              boundaries. Frames are capped at 10 MB to guard against a corrupt prefix.
+            </p>
+            <p><code>framing.ts</code> is 45 lines and is the entire lesson on message framing.</p>
+            <div class="note key">
+              <p>There is exactly <strong>one</strong> wire format in this system. Nothing may
+              invent a second — it’s enforced as a constraint in the repo’s own
+              <code>.twing/twing.yml</code>.</p>
+            </div>
+            <p>Message types: <code>enqueue</code>, <code>get_notices</code>,
+               <code>session_end</code> (hook → daemon); <code>get_claims</code>,
+               <code>get_identity</code>, <code>shutdown</code> (CLI → daemon).</p>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary><code>identity.ts</code> — projectId, developerId</summary>
+          <div class="body">
+            <p>
+              <code>computeProjectId</code> = <code>sha256</code> of the canonicalized
+              <code>git remote get-url origin</code>. Not a path — so the same project resolves
+              identically across clones and worktrees. A repo with no remote falls back to a
+              random id persisted in <code>.git/twing-project-id</code>, on the reasoning that no
+              remote means no way to clone, so no cross-developer coordination need by
+              construction.
+            </p>
+            <div class="note bad">
+              <p><span class="h">The one hard cross-language invariant</span>
+              <code>canonicalizeRemoteUrl</code> here and <code>canonicalizeRemoteURL</code> in
+              <code>hook/identity.go</code> must reduce every remote-URL form to the same string,
+              byte for byte. This broke in production once — SSH and HTTPS clones of the same repo
+              produced different <code>projectId</code>s and never saw each other’s work at all.
+              The fixture table is duplicated verbatim in <code>hook/identity_test.go</code> for
+              exactly this reason.</p>
+            </div>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary><code>tree-sitter.ts</code> + <code>symbol-id.ts</code> — symbol identity</summary>
+          <div class="body">
+            <p>
+              Turns a file edit into a stable id like
+              <code>src/net/retry.ts::RetryPolicy.backoff</code>. Parse with Tree-sitter, walk up
+              from the edited range to the nearest named function / method / class declaration,
+              and build <code>&lt;path&gt;::&lt;scope-path&gt;</code>.
+            </p>
+            <p>
+              <strong>Why it’s derived from tree structure and not line numbers:</strong> a
+              symbolId built from AST ancestry survives line drift by construction. Someone adding
+              an import at the top of the file doesn’t invalidate every claim below it.
+            </p>
+            <p>
+              Uses <code>web-tree-sitter</code> (WASM) rather than native bindings — no
+              per-platform compile step across developer machines, at a parse-latency cost that
+              doesn’t matter because parsing happens off the hot hook path.
+            </p>
+            <p><strong>v0 scope:</strong> TypeScript and JavaScript only. A full-file
+               <code>Write</code> (vs. a localized <code>Edit</code>) falls back to a file-level
+               claim with no symbol name — a known, deliberate gap.</p>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary><code>manifest.ts</code> / <code>config.ts</code> / <code>gate-overrides.ts</code> — state boundaries</summary>
+          <div class="body">
+            <p>Three files, three different scopes — worth keeping straight:</p>
+            <div class="tw"><table>
+              <thead><tr><th>File</th><th>Lives at</th><th>Scope</th></tr></thead>
+              <tbody>
+                <tr><td><code>manifest.ts</code></td><td><code>&lt;repo&gt;/.twing/twing.yml</code></td><td><strong>Committed.</strong> Shared with the team.</td></tr>
+                <tr><td><code>config.ts</code></td><td><code>~/.twing/config.json</code></td><td>Machine-local. A <em>map</em> of serverUrl → auth, not one slot.</td></tr>
+                <tr><td><code>gate-overrides.ts</code></td><td><code>~/.twing/gate-overrides.json</code></td><td>Machine-local, keyed by projectId.</td></tr>
+              </tbody>
+            </table></div>
+            <p>
+              Within the manifest, <code>constraints</code> and <code>require_human_review</code>
+              <em>are</em> uploaded (seeded to the coordinator), while
+              <code>coordinator.serverUrl</code> and <code>capture</code> are read purely locally
+              and never transit. That distinction catches people out.
+            </p>
+          </div>
+        </details>
+      </section>
+
+      <section id="hook">
+        <h2><span class="num">02</span> <code>hook/</code> — twing-hook (Go)</h2>
+        <p data-s>
+          A separate Go module producing one small binary. Spawned fresh per Claude Code hook
+          event, does one trivial thing, and <strong>always exits 0</strong> — a panic recovers
+          silently, because a non-zero exit could look like a block.
+        </p>
+
+        <div class="grid g2">
+          <div class="card c2" data-s>
+            <h5>Why Go, not TypeScript</h5>
+            <p><strong>Startup cost.</strong> It runs on every single tool call. A Node process
+               start would blow the 50 ms budget on its own, before doing any work at all.</p>
+          </div>
+          <div class="card c2" data-s>
+            <h5>Why it mirrors instead of imports</h5>
+            <p>No shared build, no cross-language toolchain — at the cost of a drift risk, managed
+               by duplicating the fixture tables in the Go tests.</p>
+          </div>
+        </div>
+
+        <h3 id="hook-files">The file set</h3>
+        <div class="tw" data-s><table>
+          <thead><tr><th>File</th><th>Role</th><th>Mirrors</th></tr></thead>
+          <tbody>
+            <tr><td><code>main.go</code></td><td>Dispatch on <code>hook_event_name</code>. ~130 lines. <strong>Start here.</strong></td><td>—</td></tr>
+            <tr><td><code>socket.go</code></td><td>The dumb pipe: dial, write one frame, exit</td><td>—</td></tr>
+            <tr><td><code>protocol.go</code></td><td>Frame codec + message structs</td><td><code>protocol.ts</code>, <code>framing.ts</code></td></tr>
+            <tr><td><code>identity.go</code></td><td>projectId / developerId</td><td><code>identity.ts</code> ⚠ byte-exact</td></tr>
+            <tr><td><code>config.go</code></td><td>Reads <code>~/.twing/config.json</code></td><td><code>config.ts</code></td></tr>
+            <tr><td><code>manifest.go</code></td><td>Reads the repo’s coordinator URL</td><td><code>manifest.ts</code> (partial)</td></tr>
+            <tr><td><code>gate_overrides.go</code></td><td>Read-only mirror of the disable-gate map</td><td><code>gate-overrides.ts</code></td></tr>
+            <tr><td><code>design_gate.go</code></td><td><strong>The blocking path.</strong> ~1 700 lines, all the deny logic</td><td>—</td></tr>
+            <tr><td><code>daemon_launch.go</code></td><td>SessionStart self-heal — the one sanctioned exception to “no decision logic”</td><td>—</td></tr>
+            <tr><td><code>version.go</code></td><td>Build-stamped version for the compatibility check</td><td>—</td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="note key" data-s>
+          <p><span class="h">The constraint on this package</span>
+          <code>main.go</code>, <code>socket.go</code> and <code>protocol.go</code> are flagged
+          <code>require_human_review</code> in the repo’s own manifest: together they are the
+          capture edge, which must stay a trivial socket client with no decision logic. Two files
+          deliberately carry real logic and are separately reasoned about —
+          <code>design_gate.go</code> (verdicts) and <code>daemon_launch.go</code> (liveness).</p>
+        </div>
+      </section>
+
+      <section id="cli">
+        <h2><span class="num">03</span> <code>packages/cli</code> — command + daemon</h2>
+        <p data-s>Two things in one package: the user-facing command, and a background process.</p>
+
+        <h3 id="cli-cmd">The command surface</h3>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Command</th><th>Does</th></tr></thead>
+          <tbody>
+            <tr><td><code>twing init</code></td><td>The single onboarding step. Idempotent — safe to re-run.</td></tr>
+            <tr><td><code>twing login --token</code></td><td>Cache an already-obtained PAT. The cheap, repeatable subset of <code>init</code>.</td></tr>
+            <tr><td><code>twing keygen --invite</code></td><td>Generate a PAT locally and redeem an invite. Server only ever sees the hash.</td></tr>
+            <tr><td><code>twing join --github</code></td><td>OAuth device flow → GitHub-permission-verified join or founding.</td></tr>
+            <tr><td><code>twing align</code></td><td>The advisory report. Falls back to <code>git diff</code> when no daemon exists.</td></tr>
+            <tr><td><code>twing align threads/respond/close</code></td><td>The reconciliation conversation.</td></tr>
+            <tr><td><code>twing design register/amend/resolve/close/list</code></td><td>The gate’s manual surface.</td></tr>
+            <tr><td><code>twing design reviews --decide</code></td><td>The one human-facing approval command.</td></tr>
+            <tr><td><code>twing admin</code> / <code>project</code> / <code>constraints</code></td><td>Access control and project rules.</td></tr>
+            <tr><td><code>twing daemon</code> / <code>daemon restart</code></td><td>Foreground run; lifecycle management.</td></tr>
+          </tbody>
+        </table></div>
+
+        <h3 id="cli-daemon">The daemon</h3>
+        <p data-s>
+          One long-lived process per <strong>machine</strong>, shared across every repo — not one
+          per project. It listens on <code>~/.twing/daemon.sock</code>, <strong>acks
+          immediately</strong>, and does the real work after the reply, so the accept loop is never
+          blocked on parsing.
+        </p>
+
+        <details class="acc" data-s>
+          <summary>What it does per <code>enqueue</code></summary>
+          <div class="body">
+            <ol>
+              <li>Resolve repo root, projectId, developerId (cached per repo)</li>
+              <li>Read the file, parse with Tree-sitter</li>
+              <li>Locate the edit point (<code>Edit</code> → find <code>new_string</code>;
+                  <code>Write</code> → whole file, no single point)</li>
+              <li>Walk up to the enclosing symbol → <code>symbolId</code></li>
+              <li>Diff the signature against the daemon’s last-known parse of that file</li>
+              <li>Update the repo-wide name index and the call graph</li>
+              <li>Match the path against the manifest’s constraint globs</li>
+              <li>Hand the Claim to the <code>Syncer</code> for batched upload</li>
+            </ol>
+            <div class="note">
+              <p>As of 2026-08-22 <code>Read</code>/<code>Grep</code>/<code>Glob</code> produce
+              <strong>no Claim at all</strong> — they were pure noise downstream. State priming
+              (steps 1–6) still runs for a read, which is what gives the <em>next</em> real edit an
+              accurate signature diff.</p>
+            </div>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary>Lifecycle: why so much machinery</summary>
+          <div class="body">
+            <p>Three things can start a daemon, and only one may evict a squatter:</p>
+            <ul>
+              <li><strong>An OS service</strong> (launchd LaunchAgent / systemd <code>--user</code>) —
+                  the primary path, installed by <code>init</code>, no elevation needed</li>
+              <li><strong>A detached spawn</strong> — the fallback, and the only path on Windows</li>
+              <li><strong>The hook’s self-heal</strong> on <code>SessionStart</code>, driven by
+                  <code>~/.twing/daemon-launch.json</code></li>
+            </ul>
+            <p>
+              Only the <em>supervised</em> instance may evict a process holding the socket. If any
+              of the three could evict, they could evict each other in a loop — and launchd’s
+              <code>KeepAlive</code> would happily feed that loop.
+            </p>
+            <div class="note bad">
+              <p><span class="h">The bug all of this exists to prevent</span>
+              Every liveness check used to be a bare socket-connect probe, answering “is anything
+              listening?” rather than “is it the process I just started?”. A daemon from a local
+              checkout held the socket for <strong>8+ days</strong> reporting a stale version while
+              <code>twing daemon restart</code> printed success without touching it. Hence
+              <code>get_identity</code>, the pidfile, and “success = a <em>different</em> pid holds
+              the socket.”</p>
+            </div>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary>Session capture (opt-in, local only)</summary>
+          <div class="body">
+            <p>
+              When a repo sets <code>capture: {enabled: true}</code>, the daemon incrementally
+              reads Claude Code’s own session transcript, keeps only human turns, assistant prose
+              and touched file paths, redacts the result, and appends it to
+              <code>~/.twing/sessions/&lt;id&gt;.jsonl</code>. Nothing leaves the machine.
+            </p>
+            <ul>
+              <li><strong>Watermark-based</strong>, not end-of-session — the session this was built
+                  against ran 11 days across three repos and produced zero commits</li>
+              <li><strong>Opt-in by construction:</strong> absent means off. Installing an npm
+                  package must never start capturing on someone’s machine.</li>
+              <li>Four-layer redaction runs before anything is written: provider token prefixes,
+                  credentialed URIs, key=value secrets, then entropy scoring with a safe list for
+                  git SHAs and UUIDs</li>
+            </ul>
+          </div>
+        </details>
+      </section>
+
+      <section id="server">
+        <h2><span class="num">04</span> <code>packages/server</code> — the coordinator</h2>
+        <p data-s>
+          Hono over Drizzle/SQLite. Owns all shared state and all verdict logic. One instance
+          serves many projects and many developers.
+          <strong>AGPL-3.0-only</strong>, unlike the other packages.
+        </p>
+
+        <div class="tw" data-s><table>
+          <thead><tr><th>Module</th><th>Owns</th></tr></thead>
+          <tbody>
+            <tr><td><code>app.ts</code></td><td>Every route, all middleware, and the async comparator driver. ~2 350 lines.</td></tr>
+            <tr><td><code>checks.ts</code></td><td>Claim-vs-claim divergence — the simplest detector. Read this first.</td></tr>
+            <tr><td><code>design-checks.ts</code></td><td>The synchronous verdict logic (overlap, constraints) — all pure functions.</td></tr>
+            <tr><td><code>design-divergence.ts</code></td><td>Real Claim vs. another session’s <em>declared</em> scope.</td></tr>
+            <tr><td><code>design-semantic-check.ts</code></td><td>The LLM comparator. Prompt empirically tuned against a 25-case eval.</td></tr>
+            <tr><td><code>design-store.ts</code></td><td><code>DesignRegistry</code> + <code>ConstraintStore</code>.</td></tr>
+            <tr><td><code>identity-store.ts</code></td><td>Auth, orgs, projects, invites, PATs. Flagged <code>require_human_review</code>.</td></tr>
+            <tr><td><code>alignment-store.ts</code></td><td>The reconciliation threads.</td></tr>
+            <tr><td><code>activity-log.ts</code></td><td>The append-only event log spanning both families.</td></tr>
+            <tr><td><code>llm-client.ts</code></td><td>Four providers, one OpenAI-shaped request. Ambient provider selection.</td></tr>
+            <tr><td><code>db/schema.ts</code> · <code>db/client.ts</code></td><td>Tables, and the single place a driver is chosen.</td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="note" data-s>
+          <p><span class="h">Middleware order is load-bearing</span>
+          Hono runs middleware in <em>source registration order</em>. CORS is mounted before auth
+          so a browser preflight (which carries no <code>Authorization</code> header) doesn’t hit
+          the 401 path; the version check is mounted before auth so a stale hook gets a specific
+          426 rather than a confusing “unauthorized”. Route matching is registration-ordered too —
+          which is why <code>/v1/designs/:id</code> must be registered <em>after</em>
+          <code>/v1/designs/scope-match</code>, or the bare <code>:id</code> segment swallows it.</p>
+        </div>
+      </section>
+
+      <section id="install">
+        <h2><span class="num">05</span> Install &amp; onboarding</h2>
+        <p data-s>
+          The design goal: <code>twing init</code> is the <em>only</em> command anyone needs,
+          whether they’re the first person to touch this project or the hundredth.
+        </p>
+
+<pre><code>npm install -g @twing/cli
+cd my-repo
+twing init</code></pre>
+
+        <ol class="seq" data-s>
+          <li><div class="hop"><span class="who s">init</span></div>
+              <div class="msg">Find the repo root, read <code>.twing/twing.yml</code></div></li>
+          <li><div class="hop"><span class="who s">init</span><span class="to">→</span><span class="who">you</span></div>
+              <div class="msg">No coordinator configured? Prompt for one</div>
+              <div class="aside">Defaults to the hosted server; a bare Enter accepts it</div></li>
+          <li><div class="hop"><span class="who s">init</span><span class="to">→</span><span class="who">coordinator</span></div>
+              <div class="msg">Reachability check (<code>GET /</code>) before writing anything shared</div>
+              <div class="aside">A typo here lands in a file every teammate inherits</div></li>
+          <li><div class="hop"><span class="who s">init</span><span class="to">→</span><span class="who">disk</span></div>
+              <div class="msg">Write <code>coordinator.serverUrl</code> into <code>.twing/twing.yml</code></div>
+              <div class="aside">Comment-preserving upsert; refuses to clobber a different committed value</div></li>
+
+          <li class="phase">Authenticate — the ladder</li>
+          <li class="hl"><div class="hop"><span class="who s">init</span><span class="to">→</span><span class="who">GitHub</span></div>
+              <div class="msg">OAuth <strong>device flow</strong>: “go here, enter code <code>ABCD-1234</code>”</div>
+              <div class="aside">The GitHub token is used exactly once, then discarded — never cached</div></li>
+          <li class="hl"><div class="hop"><span class="who">coordinator</span><span class="to">→</span><span class="who">GitHub</span></div>
+              <div class="msg"><code>GET /repos/{owner}/{repo}</code> — what can this person actually do?</div>
+              <div class="aside">Verified server-side; never trusted as a client-supplied claim</div></li>
+          <li class="hl"><div class="hop"><span class="who">coordinator</span><span class="to">→</span><span class="who s">init</span></div>
+              <div class="msg"><code>developerId</code> + role — and if nobody has touched this project before, it is <strong>founded</strong> here</div></li>
+          <li><div class="hop"><span class="who s">init</span><span class="to">→</span><span class="who">disk</span></div>
+              <div class="msg">Cache the minted PAT in <code>~/.twing/config.json</code></div></li>
+
+          <li class="phase">Install the machinery</li>
+          <li><div class="hop"><span class="who s">init</span></div>
+              <div class="msg">Install the <code>twing-hook</code> binary</div>
+              <div class="aside">Local Go source wins first (a contributor may have uncommitted hook changes), then a prebuilt release fetch, then reuse whatever’s installed</div></li>
+          <li><div class="hop"><span class="who s">init</span></div>
+              <div class="msg">Wire hooks into <code>~/.claude/settings.json</code> — <strong>machine-global</strong>, once</div></li>
+          <li><div class="hop"><span class="who s">init</span></div>
+              <div class="msg">If admin: write the install-enforcement hook into the repo’s <em>committed</em> <code>.claude/settings.json</code></div></li>
+          <li><div class="hop"><span class="who s">init</span></div>
+              <div class="msg">Install a launchd / systemd service, <em>then</em> start the daemon</div>
+              <div class="aside">Service first — the reverse order raced two daemons for the same socket, and the systemd instance crash-looped forever under a reported “installed”</div></li>
+          <li class="good"><div class="hop"><span class="who s">init</span><span class="to">→</span><span class="who">coordinator</span></div>
+              <div class="msg"><code>POST /v1/constraints/seed</code> — forwards this repo’s rules, and doubles as the founding trigger</div></li>
+        </ol>
+
+        <h3 id="ladder">The auth ladder, in precedence order</h3>
+        <div class="tw" data-s><table>
+          <thead><tr><th>#</th><th>Condition</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td><code>--no-auth</code> cached for this server</td><td>Nothing to do — no identity exists on that coordinator</td></tr>
+            <tr><td>2</td><td>A token is already cached</td><td>Authenticated to the <em>server</em> — but check <code>whoami</code> for membership in <em>this project</em>, and GitHub-join if absent, reusing the same token</td></tr>
+            <tr><td>3</td><td><code>--invite &lt;code&gt;</code></td><td>Redeem it. Fully supported, no longer advertised.</td></tr>
+            <tr><td>4</td><td><code>--no-github</code></td><td>Skip to the “no cached PAT” error</td></tr>
+            <tr><td>5</td><td><em>default</em></td><td>GitHub device flow — but only if the repo is GitHub-hosted (cheap local check, no network)</td></tr>
+          </tbody>
+        </table></div>
+        <div class="note" data-s>
+          <p><span class="h">Why step 2 isn’t just “return the cached token”</span>
+          Found live: <code>init</code> in a second, never-founded repo on an already-onboarded
+          coordinator returned the cached token immediately and skipped GitHub founding entirely.
+          The org-based fallback then failed for anyone with no org membership — which is the
+          default for anyone onboarded via GitHub founding in the first place.</p>
+        </div>
+
+        <h3 id="roles">Founding and roles</h3>
+        <p data-s>
+          Role comes from real GitHub permissions, checked server-side against the caller’s own
+          token — never a client-supplied claim, which would let someone with admin on an
+          unrelated repo phish a role here.
+        </p>
+        <div class="grid g3">
+          <div class="card cok" data-s><h5><code>maintain</code> / <code>admin</code></h5><p>→ twing <strong>admin</strong>. Can found a new project, invite, decide reviews, edit constraints.</p></div>
+          <div class="card c1" data-s><h5><code>push</code> / <code>triage</code> / <code>pull</code></h5><p>→ twing <strong>member</strong>. Can join an already-founded project, but cannot found one.</p></div>
+          <div class="card cno" data-s><h5>no access</h5><p>403. The GitHub token doesn’t prove access to this repo.</p></div>
+        </div>
+        <p data-s>
+          A GitHub-founded project has <strong>no organization at all</strong> —
+          <code>orgId</code> is null and access control is purely per-project, mirroring GitHub’s
+          own model. Orgs still exist for the invite/bootstrap path.
+        </p>
+      </section>
+
+      <section id="disk">
+        <h2><span class="num">06</span> What ends up on disk</h2>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Path</th><th>Committed?</th><th>Written by</th><th>Holds</th></tr></thead>
+          <tbody>
+            <tr><td><code>&lt;repo&gt;/.twing/twing.yml</code></td><td><span class="tag ok">yes</span></td><td><code>init</code> (upsert)</td><td>coordinator URL, constraints, <code>require_human_review</code>, capture switch</td></tr>
+            <tr><td><code>&lt;repo&gt;/.claude/settings.json</code></td><td><span class="tag ok">yes</span></td><td><code>init</code>, admins only</td><td>the install-enforcement bootstrap hook</td></tr>
+            <tr><td><code>~/.claude/settings.json</code></td><td><span class="tag n">no</span></td><td><code>wireHooks</code></td><td>twing’s real hook entries — <strong>machine-global</strong></td></tr>
+            <tr><td><code>~/.twing/bin/twing-hook</code></td><td><span class="tag n">no</span></td><td><code>install-hook.ts</code></td><td>the binary</td></tr>
+            <tr><td><code>~/.twing/config.json</code></td><td><span class="tag n">no</span></td><td><code>login</code>/<code>keygen</code>/<code>join</code></td><td>serverUrl → PAT map (multi-server)</td></tr>
+            <tr><td><code>~/.twing/gate-overrides.json</code></td><td><span class="tag n">no</span></td><td><code>design disable-gate</code></td><td>projectId → <code>"disabled"</code></td></tr>
+            <tr><td><code>~/.twing/daemon.sock</code> / <code>.pid</code></td><td><span class="tag n">no</span></td><td>daemon</td><td>IPC + liveness</td></tr>
+            <tr><td><code>~/.twing/daemon-launch.json</code></td><td><span class="tag n">no</span></td><td><code>init</code></td><td><code>{node, script}</code> for the hook’s self-heal</td></tr>
+            <tr><td><code>~/.twing/design-coordinator.log</code></td><td><span class="tag n">no</span></td><td>the gate</td><td>every gate decision — <strong>first place to look</strong></td></tr>
+            <tr><td><code>~/.twing/sessions/*.jsonl</code></td><td><span class="tag n">no</span></td><td>daemon</td><td>captured conversation (opt-in)</td></tr>
+            <tr><td><code>~/.twing/serve-data/twing.db</code></td><td><span class="tag n">no</span></td><td><code>twing serve</code></td><td>everything shared</td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="grid g2">
+          <div class="card cwa" data-s>
+            <h5>Hook wiring is machine-global</h5>
+            <p>Wired once into <code>~/.claude/settings.json</code>, covering every repo from then
+               on. This is <em>why</em> “gate off for this project” is a local override file rather
+               than unwiring a hook — unwiring the global entry would disable the gate everywhere.</p>
+          </div>
+          <div class="card cwa" data-s>
+            <h5>Nothing machine-local touches a working tree</h5>
+            <p>Every runtime artifact lives under <code>~/.twing/</code> or the platform’s service
+               directories. No <code>.gitignore</code> entry was ever needed, and no capture can be
+               committed by accident.</p>
+          </div>
+        </div>
+
+        <h3 id="enforce">Why a repo gets two hook mechanisms</h3>
+        <p data-s>
+          A teammate who clones the repo and never runs <code>twing init</code> has <em>zero</em>
+          hooks configured — twing would be entirely absent for them. So when an <strong>admin</strong>
+          runs <code>init</code>, it also writes a small POSIX-<code>sh</code> hook into the repo’s
+          <em>committed</em> <code>.claude/settings.json</code>.
+        </p>
+        <ul data-s>
+          <li>Its only job is “is twing installed at all” — if yes it allows and gets out of the
+              way; if no it denies with install instructions</li>
+          <li>Uses only <code>git</code>, <code>test</code>, <code>grep</code>, <code>printf</code> —
+              no <code>jq</code>, <code>node</code> or <code>npx</code> on the steady-state path</li>
+          <li><code>$HOME</code> stays a literal shell variable in the committed text, expanded on
+              each developer’s own machine — unlike <code>wireHooks</code>’ baked-in absolute path</li>
+          <li>Deduped by a <strong>version-stamped marker prefix</strong>, so a future revision
+              upgrades in place instead of duplicating</li>
+          <li>It must be committed and pushed <strong>by a human</strong> — twing cannot push on
+              anyone’s behalf</li>
+        </ul>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="foot">
+    <span>← <a href="index.html">Overview</a></span>
+    <span><a href="journeys.html">Runtime journeys</a> →</span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>
