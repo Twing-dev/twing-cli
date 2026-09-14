@@ -208,3 +208,27 @@ test("suggestAction returns undefined when nothing is close", () => {
   assert.equal(suggestAction("refactor"), undefined);
   assert.equal(suggestAction(""), undefined);
 });
+
+// `goal` is required when registering (a design with no stated goal says
+// nothing) but must NOT be when amending -- the design already has one, and
+// demanding it again would either be ignored or overwrite what is there.
+// This is what lets the out-of-scope deny hand back a changes-only block.
+test("validateTemplate requires a goal by default", () => {
+  const problems = validateTemplate({ goal: "", changes: [change()] });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0].message, /goal/);
+});
+
+test("validateTemplate accepts a goal-less template when appending", () => {
+  const problems = validateTemplate({ goal: "", changes: [change()] }, { requireGoal: false });
+  assert.deepEqual(problems, []);
+});
+
+test("requireGoal: false still enforces every per-change rule", () => {
+  const problems = validateTemplate(
+    { goal: "", changes: [change({ action: "refactor" as never })] },
+    { requireGoal: false },
+  );
+  assert.equal(problems.length, 1);
+  assert.match(problems[0].message, /unknown action/);
+});

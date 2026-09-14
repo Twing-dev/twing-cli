@@ -10,6 +10,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { resolveServerUrl } from "./auth.js";
 import {
   readConfig,
   getServerAuth,
@@ -40,13 +41,21 @@ interface RequiredConfig {
   developerId: string;
 }
 
-/** Resolves the coordinator for `repoRoot`'s own committed `.twing/twing.yml`
- * -- not a single global slot -- then looks up this machine's cached token
- * for that specific server (multi-server: a repo's coordinator and this
- * machine's auth for it are two separate lookups). */
-function requireConfig(repoRoot: string): RequiredConfig {
-  const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
-  const serverUrl = manifest.coordinator.serverUrl;
+/** Resolves the coordinator the same way every other command does
+ * (`resolveServerUrl`: `--server` > `TWING_SERVER` > the repo's own committed
+ * `.twing/twing.yml` -- not a single global slot), then looks up this
+ * machine's cached token for that specific server (multi-server: a repo's
+ * coordinator and this machine's auth for it are two separate lookups).
+ *
+ * The first two precedence steps were missing here until 2026-09-14: `design
+ * *` read the manifest directly, so `--server` on a `design register` was
+ * accepted by the arg parser and then silently ignored, sending the design to
+ * the repo's committed coordinator instead. Silently, because the register
+ * prints the verdict either way -- the only symptom is the design landing on
+ * a server nobody meant to write to, which is exactly what happened while
+ * trying to test a change against a local coordinator. */
+function requireConfig(repoRoot: string, explicitServer?: string): RequiredConfig {
+  const serverUrl = resolveServerUrl(repoRoot, explicitServer);
   if (!serverUrl) {
     throw new Error("twing design: no coordinator configured for this repo -- run `twing init --server <url>` once to set it up");
   }
@@ -171,6 +180,10 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
 
 export interface RegisterOptions {
   cwd: string;
+  /** Coordinator override, `--server`. Same precedence every other
+   * command uses (`resolveServerUrl`): flag, then `TWING_SERVER`, then
+   * the repo's committed `.twing/twing.yml`. */
+  server?: string;
   session?: string;
   label?: string;
   summary?: string;
@@ -215,7 +228,24 @@ export interface RegisterOptions {
 function loadTemplate(
   repoRoot: string,
   filePath: string,
+  options: { requireGoal?: boolean } = {},
 ): { goal: string; changes: DesignChange[]; creates: string[]; touches: string[]; raw: string } {
+  // `-` reads stdin, so a heredoc works with no file on disk. That is what
+  // the gate's own deny messages hand back (hook/design_gate.go's
+  // noDesignReason / outOfScopeReason): an agent blocked mid-edit should be
+  // able to declare its work in **one** command, without first authoring a
+  // file it will never look at again. Requiring a real path there would add
+  // a step at exactly the moment the caller is least inclined to take care
+  // over it.
+  if (filePath === "-") {
+    let raw: string;
+    try {
+      raw = readFileSync(0, "utf8");
+    } catch {
+      throw new Error("twing design register: --from - expects a template on stdin");
+    }
+    return buildTemplate(repoRoot, raw, "stdin", options);
+  }
   const resolved = isAbsolute(filePath) ? filePath : join(process.cwd(), filePath);
   let raw: string;
   try {
@@ -223,9 +253,20 @@ function loadTemplate(
   } catch {
     throw new Error(`twing design register: couldn't read ${filePath}`);
   }
+  return buildTemplate(repoRoot, raw, filePath, options);
+}
 
+/** Parse, validate and derive -- shared by the file and stdin paths above so
+ * neither can drift in what it accepts. `label` only ever appears in the
+ * error text, naming where the bad template came from. */
+function buildTemplate(
+  repoRoot: string,
+  raw: string,
+  label: string,
+  options: { requireGoal?: boolean },
+): { goal: string; changes: DesignChange[]; creates: string[]; touches: string[]; raw: string } {
   const template = parseDesignTemplate(raw);
-  const problems = validateTemplate(template);
+  const problems = validateTemplate(template, { requireGoal: options.requireGoal });
   if (problems.length > 0) {
     const lines = problems.map((p) => {
       const where = p.changeId ? `  ✗ ${p.changeId}  ` : "  ✗ ";
@@ -233,7 +274,7 @@ function loadTemplate(
       const hint = suggestion ? suggestAction(suggestion[1]) : undefined;
       return where + p.message + (hint ? `\n        did you mean \`${hint}\`?` : "");
     });
-    throw new Error(`twing design register: ${filePath} isn't a valid design template.\n\n${lines.join("\n")}\n\nNothing was registered.`);
+    throw new Error(`twing design: ${label} isn't a valid design template.\n\n${lines.join("\n")}\n\nNothing was registered.`);
   }
 
   const { creates, touches } = deriveScope(template.changes);
@@ -280,7 +321,7 @@ function printDeclaredChanges(changes: DesignChange[]): void {
  */
 export async function runDesignRegister(options: RegisterOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   const session = options.session ?? process.env.CLAUDE_CODE_SESSION_ID;
   if (!session) {
     throw new Error(
@@ -379,6 +420,10 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
 
 export interface ResolveOptions {
   cwd: string;
+  /** Coordinator override, `--server`. Same precedence every other
+   * command uses (`resolveServerUrl`): flag, then `TWING_SERVER`, then
+   * the repo's committed `.twing/twing.yml`. */
+  server?: string;
   id?: string;
   adopt?: string;
   justify?: string;
@@ -386,7 +431,7 @@ export interface ResolveOptions {
 
 export async function runDesignResolve(options: ResolveOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   if (!options.id) {
     throw new Error("twing design resolve: --id <designId> is required");
   }
@@ -427,6 +472,10 @@ export async function runDesignResolve(options: ResolveOptions): Promise<void> {
 
 export interface CloseOptions {
   cwd: string;
+  /** Coordinator override, `--server`. Same precedence every other
+   * command uses (`resolveServerUrl`): flag, then `TWING_SERVER`, then
+   * the repo's committed `.twing/twing.yml`. */
+  server?: string;
   id?: string;
 }
 
@@ -445,7 +494,7 @@ export interface CloseOptions {
  */
 export async function runDesignClose(options: CloseOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   if (!options.id) {
     throw new Error("twing design close: --id <designId> is required");
   }
@@ -456,6 +505,10 @@ export async function runDesignClose(options: CloseOptions): Promise<void> {
 
 export interface AmendOptions {
   cwd: string;
+  /** Coordinator override, `--server`. Same precedence every other
+   * command uses (`resolveServerUrl`): flag, then `TWING_SERVER`, then
+   * the repo's committed `.twing/twing.yml`. */
+  server?: string;
   id?: string;
   touches?: string;
   creates?: string;
@@ -481,6 +534,19 @@ export interface AmendOptions {
    * type -- it's a distinct action (`reassignProjectId` server-side), not
    * a scope amend, and is checked first in `runDesignAmend` below. */
   reassignProject?: boolean;
+  /** Structured design template (2026-09): append change items to an
+   * existing design, rather than widening it with a bare path list.
+   *
+   * `-` reads stdin, which is what the Edit/Write gate's own `out_of_scope`
+   * deny hands back (`outOfScopeReason`, hook/design_gate.go) with the
+   * denied file already filled in -- so an agent adds a file to its plan by
+   * saying *what it is doing to that file*, in one command, instead of
+   * appending a bare path and losing the reason.
+   *
+   * `goal:` is not required here, unlike `register --from`: the design
+   * already has one, and restating it would either be ignored or overwrite
+   * what is there. */
+  from?: string;
 }
 
 /**
@@ -498,7 +564,7 @@ export interface AmendOptions {
  */
 export async function runDesignAmend(options: AmendOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   if (!options.id) {
     throw new Error("twing design amend: --id <designId> is required");
   }
@@ -524,11 +590,36 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
     return;
   }
 
-  if (!options.touches && !options.creates && !options.dependsOn && !options.summary && !options.group) {
-    throw new Error("twing design amend: pass at least one of --touches, --creates, --depends-on, --summary, --group, --reassign-project");
+  // `--from` supplies the scope delta structurally, so it satisfies the
+  // "pass at least one of" check on its own. `goal:` is not required -- the
+  // design already has one (see AmendOptions.from).
+  const appended = options.from ? loadTemplate(repoRoot, options.from, { requireGoal: false }) : undefined;
+
+  if (!appended && !options.touches && !options.creates && !options.dependsOn && !options.summary && !options.group) {
+    throw new Error("twing design amend: pass at least one of --from, --touches, --creates, --depends-on, --summary, --group, --reassign-project");
   }
-  const addTouches = splitList(options.touches);
-  warnIfTouchesMissing(repoRoot, addTouches);
+  const addTouches = appended ? appended.touches : splitList(options.touches);
+  const addCreates = appended ? appended.creates : splitList(options.creates);
+  if (!appended) warnIfTouchesMissing(repoRoot, addTouches);
+
+  // The server has no column for `changes` (as of 0.2.26), so an appended
+  // item would otherwise survive only as a bare path -- losing the action
+  // and the reason, which is the whole point of declaring it. Folding the
+  // items into the summary keeps them readable wherever the design is read,
+  // and `appendSummaryUpdate` server-side files it as a dated `Update:`
+  // entry rather than replacing what is there. Swap this for real
+  // `changes[]` persistence once the column exists.
+  const appendedSummary = appended
+    ? appended.changes
+        .map((c) => `${c.id} ${c.action} ${c.target}${c.from ? ` (from ${c.from})` : ""} -- ${c.intent}`)
+        .join("\n")
+    : undefined;
+
+  if (appended) {
+    console.log(`  ✓ appending ${appended.changes.length} change(s)`);
+    printDeclaredChanges(appended.changes);
+    console.log("");
+  }
 
   const res = await authFetch(
     `${serverUrl}/v1/designs/${options.id}/amend`,
@@ -537,9 +628,9 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         addTouches,
-        addCreates: splitList(options.creates),
+        addCreates,
         addDependsOn: splitList(options.dependsOn),
-        ...(options.summary ? { summary: options.summary } : {}),
+        ...(appendedSummary ? { summary: appendedSummary } : options.summary ? { summary: options.summary } : {}),
         ...(options.group ? { groupId: options.group } : {}),
       }),
     },
@@ -551,6 +642,10 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
 
 export interface ResumeOptions {
   cwd: string;
+  /** Coordinator override, `--server`. Same precedence every other
+   * command uses (`resolveServerUrl`): flag, then `TWING_SERVER`, then
+   * the repo's committed `.twing/twing.yml`. */
+  server?: string;
   id?: string;
   session?: string;
   touches?: string;
@@ -570,7 +665,7 @@ export interface ResumeOptions {
  */
 export async function runDesignResume(options: ResumeOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   if (!options.id) {
     throw new Error("twing design resume: --id <designId> is required");
   }
@@ -605,6 +700,10 @@ export async function runDesignResume(options: ResumeOptions): Promise<void> {
 
 export interface ListOptions {
   cwd: string;
+  /** Coordinator override, `--server`. Same precedence every other
+   * command uses (`resolveServerUrl`): flag, then `TWING_SERVER`, then
+   * the repo's committed `.twing/twing.yml`. */
+  server?: string;
   status?: string;
   /** Filters to designs registered under the caller's own `developerId` --
    * purely client-side (the server response already carries `developerId`
@@ -630,7 +729,7 @@ function relativeTime(ms: number): string {
 
 export async function runDesignList(options: ListOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   const projectId = computeProjectId(repoRoot);
 
   const params = new URLSearchParams({ projectId });
@@ -659,6 +758,10 @@ export async function runDesignList(options: ListOptions): Promise<void> {
 
 export interface ReviewsOptions {
   cwd: string;
+  /** Coordinator override, `--server`. Same precedence every other
+   * command uses (`resolveServerUrl`): flag, then `TWING_SERVER`, then
+   * the repo's committed `.twing/twing.yml`. */
+  server?: string;
   decide?: string;
   decision?: "approve" | "reject";
 }
@@ -667,7 +770,7 @@ export interface ReviewsOptions {
  * justified-divergence reviews, or decide one. */
 export async function runDesignReviews(options: ReviewsOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
-  const { serverUrl, authToken, developerId } = requireConfig(repoRoot);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   const projectId = computeProjectId(repoRoot);
 
   if (options.decide) {

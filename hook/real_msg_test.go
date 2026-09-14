@@ -34,7 +34,7 @@ func TestNoDesignDeny_CommandsAreRunnableOnABootstrapMachine(t *testing.T) {
 	}
 	shim := filepath.Join(bin, "twing")
 
-	msg := noDesignReason()
+	msg := noDesignReason("src/net/retry.ts")
 	t.Logf("rendered deny:\n%s", msg)
 
 	// Nothing may instruct a bare `twing ...`: there is none here to run.
@@ -47,7 +47,9 @@ func TestNoDesignDeny_CommandsAreRunnableOnABootstrapMachine(t *testing.T) {
 	// The prominent, copy-pasteable commands are rendered on their own line
 	// and must stay intact.
 	for _, want := range []string{
-		shim + ` design register --summary "<the goal>" --touches <files>`,
+		// The heredoc's opening line is the copy-pasteable command; the
+		// template body after it is literal YAML and carries no `twing`.
+		shim + " design register --from - <<'YAML'",
 		shim + " design list --mine --status open",
 	} {
 		if !strings.Contains(msg, want) {

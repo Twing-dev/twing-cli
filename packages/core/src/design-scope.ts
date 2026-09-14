@@ -178,10 +178,21 @@ export function parseDesignTemplate(yamlText: string): DesignTemplate {
  * reasoning `matchConstraintsForPaths` (design-checks.ts) uses for returning
  * every constraint hit instead of one "best" one.
  */
-export function validateTemplate(template: DesignTemplate): TemplateProblem[] {
+export interface ValidateOptions {
+  /** Whether a `goal:` is required.
+   *
+   * True when **registering** -- a design with no stated goal says nothing.
+   * False when **amending**, where the goal already lives on the design
+   * being appended to; demanding it again would either be ignored or
+   * silently overwrite what is already there. Defaults to true, so the
+   * stricter behaviour is what a caller gets by not thinking about it. */
+  requireGoal?: boolean;
+}
+
+export function validateTemplate(template: DesignTemplate, options: ValidateOptions = {}): TemplateProblem[] {
   const problems: TemplateProblem[] = [];
 
-  if (template.goal.length === 0) {
+  if ((options.requireGoal ?? true) && template.goal.length === 0) {
     problems.push({ message: 'missing `goal:` -- one sentence describing what this achieves' });
   }
   if (template.changes.length === 0) {
