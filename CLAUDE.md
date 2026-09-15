@@ -508,7 +508,16 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `resolve-hook.ts` are the third wiring path described under "Working in
   this repo" — machine-scoped where `init` is repo-scoped, sharing only the
   name: it needs a `gh auth token`, installs nothing, and writes the
-  `twing-resolve` pointer rather than a binary path. `init --unattended`
+  `twing-resolve` pointer rather than a binary path. `machine-setup.ts` is
+  that same wiring minus the GitHub check, run by the one-step install
+  (`postinstall.cjs` on `npm install -g` only, or `install.sh`): resolver
+  entries, the OpenCode plugin (`opencode-plugin.ts`, a loader in
+  `~/.config/opencode/plugins/twing.js` importing an adapter copied to
+  `~/.twing/opencode/adapter.mjs`, which spawns the resolver with
+  `TWING_HARNESS=opencode`) and `~/.twing/auto-managed`, nothing installed.
+  `managed-delegate.ts` makes that outside copy re-exec every command in
+  `~/.twing/lib` once it exists. `unwireHooks` is Claude-only; `twing
+  uninstall` removes the OpenCode plugin itself. `init --unattended`
   refreshes that wiring whenever `isResolverWired`, so a change to
   `WIRED_EVENTS` reaches resolver machines through version recovery instead
   of needing every developer to re-run a command; everywhere else the

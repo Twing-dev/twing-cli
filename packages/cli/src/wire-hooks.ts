@@ -13,7 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { readClaudeSettings, writeClaudeSettings, type ClaudeSettings, type HookCommand, type HookMatcherEntry } from "@twing/core";
 import { isBootstrapHook } from "./enforce-hooks.js";
-import { wireOpenCodePlugin, unwireOpenCodePlugin } from "./opencode-plugin.js";
+import { wireOpenCodePlugin } from "./opencode-plugin.js";
 
 export function globalSettingsPath(): string {
   return path.join(os.homedir(), ".claude", "settings.json");
@@ -45,7 +45,7 @@ function addEntry(settings: ClaudeSettings, eventName: string, hookPath: string,
 
 /** Returns true if the file was changed. */
 export function wireHooks(hookPath: string): boolean {
-  const changedOpenCode = wireOpenCodePlugin(hookPath);
+  const changedOpenCode = wireOpenCodePlugin();
   const settingsPath = globalSettingsPath();
   const settings = readClaudeSettings(settingsPath);
 
@@ -117,10 +117,12 @@ export function stripLegacyRepoLocalHooks(repoRoot: string, hookPath: string): b
  * and stays out of scope (`twing project disable-enforcement`).
  *
  * Another tool's hooks and unrelated settings are untouched either way.
- * Returns true if anything was removed. */
+ * Claude-only: `--ghuser` and machine setup call this to swap binary-path
+ * entries for the resolver, and must keep the OpenCode plugin while doing it
+ * (`twing uninstall` removes that separately). Returns true if anything was
+ * removed. */
 export function unwireHooks(hookPath: string): boolean {
-  const changedOpenCode = unwireOpenCodePlugin();
-  return stripHooksByCommand(globalSettingsPath(), hookPath, { includeBootstrapHooks: true }) || changedOpenCode;
+  return stripHooksByCommand(globalSettingsPath(), hookPath, { includeBootstrapHooks: true });
 }
 
 /** Drops twing's hook entries across every event name, and prunes entries

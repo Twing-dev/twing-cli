@@ -34,6 +34,7 @@ import { requestDaemonShutdown, queryDaemonIdentity } from "./daemon-client.js";
 import { hookBinaryPath } from "./install-hook.js";
 import { unwireHooks, globalSettingsPath } from "./wire-hooks.js";
 import { removeResolverWiring } from "./resolve-hook.js";
+import { unwireOpenCodePlugin } from "./opencode-plugin.js";
 import { uninstallDaemonService } from "./daemon-service.js";
 
 export interface UninstallOptions {
@@ -137,6 +138,7 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
   // earlier uninstall defeated itself while reporting success.
   result.hooksUnwired = unwireHooks(hookPath);
   result.hooksUnwired = removeResolverWiring(globalSettingsPath()) || result.hooksUnwired;
+  result.hooksUnwired = unwireOpenCodePlugin() || result.hooksUnwired;
   console.log(
     result.hooksUnwired
       ? "twing uninstall: removed twing's global Claude/OpenCode integrations"

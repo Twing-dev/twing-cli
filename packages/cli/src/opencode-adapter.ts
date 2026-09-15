@@ -6,9 +6,14 @@
  * process. Keeping the translation here means OpenCode shares the exact Go
  * gate, auth recovery, daemon protocol, and target-file repo resolution
  * Claude already uses instead of growing a second implementation.
+ *
+ * Copied verbatim to `~/.twing/opencode/adapter.mjs` by `opencode-plugin.ts`,
+ * so it must import nothing but Node built-ins.
  */
 
 import { spawn } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 export interface TwingHookPayload {
@@ -35,7 +40,7 @@ export interface OpenCodeToolCall {
   toolInput: Record<string, unknown>;
 }
 
-export type HookRunner = (hookPath: string, payload: TwingHookPayload) => Promise<TwingHookOutput | undefined>;
+export type HookRunner = (payload: TwingHookPayload) => Promise<TwingHookOutput | undefined>;
 
 interface OpenCodePluginContext {
   directory?: string;
@@ -128,16 +133,53 @@ export function openCodeToolCalls(tool: string, args: Record<string, unknown>): 
   }
 }
 
-export function runTwingHook(hookPath: string, payload: TwingHookPayload): Promise<TwingHookOutput | undefined> {
+function twingBinDir(home: string): string {
+  return path.join(home, ".twing", "bin");
+}
+
+/**
+ * What to spawn for an event, mirroring Claude's wiring on the same machine.
+ *
+ * The resolver first: it is what installs the coordinator-pinned version on a
+ * machine that has nothing yet, then execs the binary. The bare binary covers
+ * a machine wired by plain `twing init`. Neither means twing isn't set up
+ * here, and the plugin does nothing -- the same as Claude with no entries.
+ */
+export function resolveHookCommand(event: string, home: string = os.homedir()): { command: string; args: string[] } | undefined {
+  const resolver = path.join(twingBinDir(home), "twing-resolve");
+  if (fs.existsSync(resolver)) return { command: "sh", args: [resolver, event] };
+  const binary = path.join(twingBinDir(home), process.platform === "win32" ? "twing-hook.exe" : "twing-hook");
+  if (fs.existsSync(binary)) return { command: binary, args: [] };
+  return undefined;
+}
+
+/** Claude Code's own budgets: 600s where the resolver may npm install, 30s
+ * elsewhere. A shorter timeout on PreToolUse would kill a first-time install
+ * and fail the edit closed. */
+function hookTimeoutMs(event: TwingHookPayload["hook_event_name"]): number {
+  return event === "PreToolUse" || event === "SessionStart" ? 600_000 : 30_000;
+}
+
+export function runTwingHook(payload: TwingHookPayload, home: string = os.homedir()): Promise<TwingHookOutput | undefined> {
+  const hook = resolveHookCommand(payload.hook_event_name, home);
+  if (!hook) return Promise.resolve(undefined);
+
   return new Promise((resolve, reject) => {
-    const child = spawn(hookPath, [], { stdio: ["pipe", "pipe", "pipe"] });
+    // cwd matters to the resolver, which walks up from it to find the repo
+    // to install for. A directory that is gone would fail the spawn itself.
+    const cwd = fs.existsSync(payload.cwd) ? payload.cwd : undefined;
+    const child = spawn(hook.command, hook.args, {
+      cwd,
+      env: { ...process.env, TWING_HARNESS: "opencode" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     let stdout = "";
     let stderr = "";
     let settled = false;
     const timer = setTimeout(() => {
       child.kill();
       finish(new Error(`twing hook timed out for ${payload.hook_event_name}`));
-    }, 35_000);
+    }, hookTimeoutMs(payload.hook_event_name));
 
     function finish(err?: Error, output?: TwingHookOutput): void {
       if (settled) return;
@@ -172,7 +214,7 @@ function targetPath(call: OpenCodeToolCall): string | undefined {
 }
 
 /** Creates the function exported by the generated global OpenCode plugin. */
-export function createOpenCodePlugin(hookPath: string, runHook: HookRunner = runTwingHook): OpenCodePlugin {
+export function createOpenCodePlugin(runHook: HookRunner = (payload) => runTwingHook(payload)): OpenCodePlugin {
   return async ({ directory, worktree }) => {
     const cwd = worktree || directory || process.cwd();
     const touchedDirectories = new Map<string, Set<string>>();
@@ -195,7 +237,7 @@ export function createOpenCodePlugin(hookPath: string, runHook: HookRunner = run
       sessionID: string,
       eventCwd: string,
       call?: OpenCodeToolCall,
-    ): Promise<TwingHookOutput | undefined> => runHook(hookPath, {
+    ): Promise<TwingHookOutput | undefined> => runHook({
       session_id: sessionID,
       cwd: eventCwd,
       hook_event_name: event,
@@ -205,6 +247,10 @@ export function createOpenCodePlugin(hookPath: string, runHook: HookRunner = run
     return {
       async "shell.env"(input, output) {
         if (input.sessionID) output.env.TWING_SESSION_ID = input.sessionID;
+        // The shim a lazy install leaves at ~/.twing/bin/twing is what the
+        // gate's remediation commands name; put it on the agent's PATH.
+        const inherited = output.env.PATH ?? process.env.PATH;
+        output.env.PATH = [twingBinDir(os.homedir()), inherited].filter(Boolean).join(path.delimiter);
       },
 
       async "tool.execute.before"(input, output) {

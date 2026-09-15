@@ -80,8 +80,12 @@ hook_bin="\$HOME/.twing/bin/twing-hook"
 #
 # Matches older inlined markers too: a repo may still carry a v1-v3 committed
 # hook, which covers this session just as well.
+#
+# Not under OpenCode: it never reads .claude/settings.json, so a committed
+# Claude hook covers nothing there and this entry is the only one running.
 proj="\${CLAUDE_PROJECT_DIR:-\$PWD}"
-if grep -qE 'bootstrap-hook\\.sh|twing-bootstrap-hook|twing-install-enforcement-hook' \\
+if [ "\${TWING_HARNESS:-}" != "opencode" ] && \\
+   grep -qE 'bootstrap-hook\\.sh|twing-bootstrap-hook|twing-install-enforcement-hook' \\
      "\$proj/.claude/settings.json" 2>/dev/null; then
   exit 0
 fi

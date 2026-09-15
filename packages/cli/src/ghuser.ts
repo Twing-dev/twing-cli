@@ -40,22 +40,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { githubTokenFromGhCli } from "./join.js";
-import { hookBinaryPath } from "./install-hook.js";
-import { unwireHooks, globalSettingsPath } from "./wire-hooks.js";
-import { writeResolverWiring } from "./resolve-hook.js";
+import { globalSettingsPath } from "./wire-hooks.js";
+import { wireMachine, markAutoManaged } from "./machine-setup.js";
 
-/**
- * Set when a global install survived, and read by everything that decides
- * which copy of twing is authoritative.
- *
- * Without it, a `twing` on PATH makes `managedInstall()` false and the machine
- * stops auto-updating -- the exact regression this command exists to avoid.
- * With it, `~/.twing/lib` drives the hook, the daemon and both recovery paths,
- * and the leftover global copy is ignored rather than deleted.
- */
-export function autoManagedMarkerPath(): string {
-  return path.join(os.homedir(), ".twing", "auto-managed");
-}
+export { autoManagedMarkerPath } from "./machine-setup.js";
 
 function npmGlobalPrefix(): string | undefined {
   try {
@@ -131,16 +119,14 @@ export function runGhUser(options: GhUserOptions = {}): boolean {
     globalSurvived = !(options.uninstallGlobal ?? uninstallGlobalTwing)();
   }
 
-  // Replace any twing entries this machine already has -- a `twing init` from
-  // before this existed leaves binary-path entries, and leaving those beside
-  // the resolver would fire both for every tool call.
+  // The same wiring the one-step install writes (machine-setup.ts), so the two
+  // can't drift: resolver entries replacing any binary-path ones, and OpenCode.
   const settings = globalSettingsPath();
-  unwireHooks(hookBinaryPath());
-  const changed = writeResolverWiring(settings);
+  const wiring = wireMachine();
+  const changed = wiring.claude || wiring.openCode;
 
   if (globalSurvived) {
-    fs.mkdirSync(path.dirname(autoManagedMarkerPath()), { recursive: true });
-    fs.writeFileSync(autoManagedMarkerPath(), `${new Date().toISOString()}\n`);
+    markAutoManaged();
     console.log(
       `twing init --ghuser: a global @twing/cli is still installed. twing no longer uses it -- but typing ` +
         `\`twing\` yourself will still run that copy, and it won't track the coordinator's version. Clean it ` +

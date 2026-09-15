@@ -14,6 +14,14 @@ try {
   // A published npm package does not have the monorepo root above it.
 }
 
+// Only a deliberate machine install wires the machine: `npm install -g`, or
+// install.sh passing --machine-setup. Every other install of this package is
+// twing installing itself -- the resolver and version recovery `npm install
+// --prefix ~/.twing/lib` -- or a project dependency, and rewriting global
+// agent settings from there would be a side effect nobody asked for.
+const machineInstall = process.env.npm_config_global === "true" || process.argv.includes("--machine-setup");
+if (!machineInstall) process.exit(0);
+
 import("./dist/machine-setup.js")
   .then(({ runMachineSetup }) => runMachineSetup())
   .catch((err) => {
