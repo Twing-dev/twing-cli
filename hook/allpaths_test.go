@@ -26,7 +26,7 @@ func TestEveryDenyMessage_HasNoUnrunnableTwingCommand(t *testing.T) {
 		"authRejected401":  authRejectedReason(401, server),
 		"unreachable":      unreachableReason(errors.New("dial tcp: refused")),
 		"coordinatorError": coordinatorErrorReason("bad json"),
-		"noDesign":         noDesignReason(),
+		"noDesign":         noDesignReason("src/net/retry.ts"),
 	}
 
 	// A line is an *instruction* only when "twing" is followed by a real

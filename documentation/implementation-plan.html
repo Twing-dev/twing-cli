@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Implementation plan — twing docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .filerow { display:grid; gap:2px 14px; grid-template-columns:auto 1fr; align-items:baseline; }
+  .terminal {
+    background:#0e1116; color:#d7dde5; border:1px solid var(--line); border-radius:var(--r);
+    padding:16px 18px; font:400 12.8px/1.65 var(--mono); overflow-x:auto; margin:16px 0;
+  }
+  :root[data-theme="light"] .terminal { background:#12161c; }
+  .terminal .c  { color:#6e7a89; }          /* comment / dim   */
+  .terminal .g  { color:#5cc57f; }          /* green / ok      */
+  .terminal .r  { color:#ff7a6b; }          /* red / fail      */
+  .terminal .y  { color:#e2ac4d; }          /* yellow / warn   */
+  .terminal .b  { color:#9aa1f5; }          /* blue / heading  */
+  .terminal .w  { color:#f2f5f8; font-weight:600; }
+  .legend { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0; }
+  .legend span { font:600 11px/1 var(--mono); padding:5px 9px; border-radius:5px; }
+  .new  { background:var(--ok-bg); color:var(--ok); }
+  .edit { background:var(--a2-bg); color:var(--a2); }
+  .none { background:var(--bg-soft); color:var(--muted); }
+</style>
+</head>
+<body>
+
+<header class="topbar"><div class="inner">
+  <a class="brand" href="index.html"><span class="dot"></span>twing <small>docs</small></a>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="journeys.html">Journeys</a>
+    <a href="reference.html">Reference</a>
+    <a href="onboarding.html">Onboarding</a>
+    <a href="findings.html">Findings</a>
+    <a href="review-flow.html">Review ✦</a>
+    <a href="implementation-plan.html">Build ⚒</a>
+  </nav>
+  <span class="spacer"></span>
+  <div class="tb-tools">
+    <div class="searchbox"><input id="q" type="search" placeholder="Filter page…" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+    <span class="iconbtn" id="themeBtn" role="button" tabindex="0">◐ auto</span>
+  </div>
+</div></header>
+
+<div class="page">
+
+  <div class="hero">
+    <div class="eyebrow">Implementation plan · v1</div>
+    <h1>Structured design template</h1>
+    <p class="lede">
+      Exactly what changes, in which file, and what the user sees afterwards.
+      Three fields, two releases, and the Go hook is never touched.
+    </p>
+    <div class="chips">
+      <span class="chip"><span class="tag wa">not started</span></span>
+      <span class="chip">against v0.2.25</span>
+      <span class="chip"><a href="review-flow.html" style="text-decoration:none">why ←</a></span>
+    </div>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar"><div class="t">On this page</div><div class="links"></div></aside>
+
+    <main>
+      <div class="nores">No matches on this page.</div>
+
+      <section id="what">
+        <h2><span class="num">01</span> What v1 is</h2>
+
+        <p data-s>Today a design says <em>where</em>:</p>
+<pre><code>touches: ["src/net/retry.ts", "drizzle/0014.sql", ".twing/twing.yml"]</code></pre>
+
+        <p data-s>v1 makes it say <em>what</em> — three fields per item, nothing more:</p>
+<pre><code>changes:
+  - id: c1
+    action: modify
+    target: src/net/retry.ts::RetryPolicy.backoff
+    intent: "exponential growth, capped at 30s"</code></pre>
+
+        <div class="note key" data-s>
+          <p><span class="h">The whole trick</span>
+          <code>target</code> uses the <strong>same <code>path::Symbol.method</code> format twing
+          already records real edits in</strong>. So “did you build what you said” becomes a set
+          comparison, not a model call.</p>
+        </div>
+
+        <div class="grid g2">
+          <div class="card cok" data-s>
+            <h5>In v1</h5>
+            <p><code>action</code> · <code>target</code> · <code>intent</code> · <code>id</code>,
+               plus <code>from</code> for rename/move. Six actions. That's it.</p>
+          </div>
+          <div class="card cno" data-s>
+            <h5>Deliberately not in v1</h5>
+            <p><code>kind</code>, <code>verification[]</code>, <code>contracts</code>,
+               <code>decisions</code>, <code>reads</code> — and no review checks yet. Each arrives
+               when something actually reads it.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="files">
+        <h2><span class="num">02</span> Files that change</h2>
+
+        <div class="legend">
+          <span class="new">NEW</span><span class="edit">EDIT</span><span class="none">UNTOUCHED</span>
+        </div>
+
+        <div class="tw" data-s><table>
+          <thead><tr><th>File</th><th></th><th>Change</th></tr></thead>
+          <tbody>
+            <tr><td><code>packages/core/src/types.ts</code></td><td><span class="tag a2">EDIT</span></td><td>Add <code>DesignChange</code>; add optional <code>changes?</code> to <code>DesignStatement</code></td></tr>
+            <tr><td><code>packages/core/src/design-scope.ts</code></td><td><span class="tag ok">NEW</span></td><td><code>deriveScope()</code> — pure, shared by CLI and server</td></tr>
+            <tr><td><code>packages/core/src/index.ts</code></td><td><span class="tag a2">EDIT</span></td><td>One export line</td></tr>
+            <tr><td><code>packages/server/src/db/schema.ts</code></td><td><span class="tag a2">EDIT</span></td><td>One column: <code>changes</code>, JSON text, default <code>"[]"</code></td></tr>
+            <tr><td><code>packages/server/drizzle/0016_design_changes.sql</code></td><td><span class="tag ok">NEW</span></td><td>One <code>ALTER TABLE</code>, generated by drizzle-kit</td></tr>
+            <tr><td><code>packages/server/src/design-store.ts</code></td><td><span class="tag a2">EDIT</span></td><td>Read/write the column in <code>fromDesignRow</code> and <code>register</code></td></tr>
+            <tr><td><code>packages/server/src/app.ts</code></td><td><span class="tag a2">EDIT</span></td><td>Accept <code>changes</code> on <code>/v1/designs/check</code>; derive scope when present</td></tr>
+            <tr><td><code>packages/server/src/design-extract.ts</code></td><td><span class="tag a2">EDIT</span></td><td>Prompt produces <code>changes[]</code>; validate targets against the repo</td></tr>
+            <tr><td><code>packages/cli/src/design.ts</code></td><td><span class="tag a2">EDIT</span></td><td><code>--from &lt;file&gt;</code>; parse, validate, derive, send</td></tr>
+            <tr><td><code>packages/cli/src/index.ts</code></td><td><span class="tag a2">EDIT</span></td><td>One flag in the dispatcher + usage line</td></tr>
+            <tr style="background:var(--no-bg)"><td><code><strong>hook/</strong></code> — every file</td><td><span class="tag no">UNTOUCHED</span></td><td><strong>Zero changes. This is a constraint, not luck.</strong></td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="note bad" data-s>
+          <p><span class="h">Why <code>hook/</code> must stay untouched</span>
+          The hook is the one artifact whose version is <strong>exact-matched</strong> by the gate.
+          Touching it means a Go release, a new 426 surface, and the worst version-skew axis in the
+          system — for a change that needs none of it. It already sends only
+          <code>rawPlanText</code> on the common path and reads back only <code>touches</code>.
+          Keep returning <code>touches</code> and it never notices anything happened.</p>
+          <p>If the implementation ever <em>needs</em> <code>hook/</code> edited — stop and
+          redesign.</p>
+        </div>
+      </section>
+
+      <section id="code">
+        <h2><span class="num">03</span> The code</h2>
+        <p data-s>
+          <span class="iconbtn" data-toggle-all="#code details.acc" role="button" tabindex="0">expand all</span>
+        </p>
+
+        <details class="acc" data-s open>
+          <summary><code>packages/core/src/types.ts</code> — the shape</summary>
+          <div class="body">
+<pre><code>/** One declared change inside a design (2026-09, structured design template).
+ *
+ * `target` deliberately uses the SAME `path::Symbol.method` format
+ * `Claim.symbolId` uses -- that shared namespace is what turns
+ * design-vs-code conformance into a set difference instead of an LLM
+ * judgement. Do not introduce a second spelling here. */
+export interface DesignChange {
+  /** Stable within this design. Findings point at it. */
+  id: string;
+  /** Splits on one question: is behaviour supposed to change?
+   *  add/modify/rewrite/remove  -> yes, prove the stated change happened
+   *  rename/move                -> no,  prove the body is identical */
+  action: "add" | "modify" | "rewrite" | "remove" | "rename" | "move";
+  /** `src/net/retry.ts` or `src/net/retry.ts::RetryPolicy.backoff`. */
+  target: string;
+  /** One sentence: what this achieves, not what it does mechanically. */
+  intent: string;
+  /** The previous name (rename) or path (move). Absent otherwise. */
+  from?: string;
+}</code></pre>
+            <p>And on <code>DesignStatement</code>, one optional field:</p>
+<pre><code>  /** Structured declaration, when the design was registered with one.
+   * Optional and never backfilled: every design row created before this
+   * shipped has none, and readers must treat absence as "not stated"
+   * rather than "no changes". `creates`/`touches` stay authoritative for
+   * the gate and are derived from this when it is present. */
+  changes?: DesignChange[];</code></pre>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary><code>packages/core/src/design-scope.ts</code> — the derivation <span class="tag ok">NEW</span></summary>
+          <div class="body">
+            <p>The single place <code>creates</code>/<code>touches</code> are computed, so the CLI
+               and the server cannot drift:</p>
+<pre><code>import type { DesignChange } from "./types.js";
+
+/** `src/net/retry.ts::RetryPolicy.backoff` -> `src/net/retry.ts` */
+function pathOf(target: string): string {
+  const i = target.indexOf("::");
+  return i === -1 ? target : target.slice(0, i);
+}
+
+/** Derives the legacy scope fields from a structured declaration.
+ *
+ * Exists so `creates`/`touches` keep working untouched for every existing
+ * reader -- `pathInDesignScope` (the Edit/Write gate), `hook/design_gate.go`
+ * and twing-monitor all still read them and need no changes. Deduped,
+ * because several changes routinely target one file. */
+export function deriveScope(changes: DesignChange[]): { creates: string[]; touches: string[] } {
+  const creates = new Set&lt;string&gt;();
+  const touches = new Set&lt;string&gt;();
+  for (const c of changes) {
+    (c.action === "add" ? creates : touches).add(pathOf(c.target));
+  }
+  return { creates: [...creates], touches: [...touches] };
+}</code></pre>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary><code>db/schema.ts</code> + migration 0016 — storage</summary>
+          <div class="body">
+            <p>One column, following the table's existing JSON-as-text convention:</p>
+<pre><code>    /** Structured design declaration (2026-09). JSON DesignChange[],
+     * defaults to "[]" for pre-existing rows via the migration -- never
+     * backfilled, same convention as justifiedOverlaps and friends. */
+    changes: text("changes").notNull().default("[]"),</code></pre>
+            <p>Generated migration:</p>
+<pre><code>-- 0016_design_changes.sql
+ALTER TABLE `designs` ADD `changes` text DEFAULT '[]' NOT NULL;</code></pre>
+            <div class="note good">
+              <p>Runs automatically — <code>createDb()</code> calls <code>migrate()</code> on
+                 startup. <strong>No operator action on deploy.</strong></p>
+            </div>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary><code>app.ts</code> — accepting it, without breaking old clients</summary>
+          <div class="body">
+            <p>On <code>DesignCheckRequestBody</code>:</p>
+<pre><code>  /** Structured declaration (2026-09). When present, `creates`/`touches`
+   * are DERIVED from it and any client-supplied values are ignored -- one
+   * source of truth. When absent, the old flat fields are used exactly as
+   * before, which is what keeps pre-0.2.26 clients working. */
+  changes?: DesignChange[];</code></pre>
+            <p>And in the handler, before registration:</p>
+<pre><code>let changes = body.changes;
+if (changes && changes.length > 0) {
+  const derived = deriveScope(changes);
+  creates = derived.creates;
+  touches = derived.touches;
+}</code></pre>
+            <div class="note">
+              <p><span class="h">Additive, in both directions</span>
+              An <strong>old client</strong> sends no <code>changes</code> → behaves exactly as
+              today. A <strong>new client</strong> against an <strong>old server</strong> → the
+              field is ignored, and the derived <code>creates</code>/<code>touches</code> it also
+              sends keep everything working. Neither combination breaks.</p>
+            </div>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary><code>design-extract.ts</code> — and the hallucination guard</summary>
+          <div class="body">
+            <p>The prompt produces <code>changes[]</code> instead of two string arrays. The
+               important part is what happens <em>after</em>:</p>
+<pre><code>/** Drops any extracted change whose target doesn't exist in the repo and
+ * isn't declared as `action: "add"`.
+ *
+ * A model asked for ten structured fields hallucinates more than one asked
+ * for four string arrays. This is the mitigation, and it is one twing can
+ * do that a diff-only tool cannot: the repository is right there, and
+ * Tree-sitter is already a dependency. Silently dropping is deliberate --
+ * an invented target that reaches the store becomes a permanent false
+ * "declared, never built" finding for the reviewer. */
+function dropUnresolvableTargets(changes: DesignChange[], repoRoot: string): DesignChange[]</code></pre>
+            <p>Acceptance bar, matching the precedent the semantic comparator set with its 25-case
+               labelled eval: <strong>zero hallucinated targets</strong>, measured against real
+               plan text from this repo's own design history.</p>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary><code>cli/src/design.ts</code> — <code>--from &lt;file&gt;</code></summary>
+          <div class="body">
+<pre><code>twing design register --from design.yml</code></pre>
+            <p>Four steps, in order:</p>
+            <ol>
+              <li><strong>Parse</strong> the YAML (the <code>yaml</code> package is already a
+                  <code>@twing/core</code> dependency — no new package)</li>
+              <li><strong>Validate</strong> — every <code>id</code> unique, every
+                  <code>action</code> one of the six, <code>from</code> present iff
+                  rename/move</li>
+              <li><strong>Check targets against the repo</strong> — warn, never block, mirroring
+                  the existing <code>warnIfTouchesMissing</code></li>
+              <li><strong>Derive and send</strong> <code>changes</code> <em>and</em>
+                  <code>creates</code>/<code>touches</code>, so an old server still works</li>
+            </ol>
+            <p>The existing flag form (<code>--summary</code>, <code>--touches</code>) stays
+               exactly as it is. <code>--from</code> is an alternative, not a replacement.</p>
+          </div>
+        </details>
+      </section>
+
+      <section id="sample">
+        <h2><span class="num">04</span> What it looks like</h2>
+
+        <h3 id="s-input">The file a developer writes</h3>
+<pre><code># design.yml
+goal: "Outbound HTTP survives transient failures without thundering herd"
+
+changes:
+  - id: c1
+    action: modify
+    target: src/net/retry.ts::RetryPolicy.backoff
+    intent: "exponential growth, capped at 30s"
+
+  - id: c2
+    action: add
+    target: src/net/retry.ts::RetryPolicy.jitter
+    intent: "full jitter so retries desynchronise"
+
+  - id: c3
+    action: rename
+    target: src/net/retry.ts::RetryPolicy.reset
+    from: RetryPolicy.clear
+    intent: "name matches the other lifecycle methods"</code></pre>
+
+        <h3 id="s-ok">Registering it — the happy path</h3>
+        <div class="terminal" data-s>$ twing design register --from design.yml
+
+<span class="c">  reading design.yml</span>
+  <span class="g">✓</span> 3 changes, 3 targets resolve in this repo
+  <span class="c">  derived  creates = src/net/retry.ts</span>
+  <span class="c">           touches = src/net/retry.ts</span>
+
+<span class="w">verdict: clean</span>  design: a1b2c3d4-e5f6-4789-abcd-0123456789ab
+  group: a1b2c3d4-e5f6-4789-abcd-0123456789ab
+
+<span class="b">  declared</span>
+    c1  modify  RetryPolicy.backoff
+    c2  add     RetryPolicy.jitter
+    c3  rename  RetryPolicy.reset      <span class="c">(from RetryPolicy.clear)</span></div>
+
+        <h3 id="s-warn">A typo — caught before it reaches the coordinator</h3>
+        <div class="terminal" data-s>$ twing design register --from design.yml
+
+<span class="c">  reading design.yml</span>
+  <span class="r">✗</span> <span class="w">c2</span>  target does not exist in this repo
+        <span class="r">src/net/retry.ts::RetryPolicy.jiter</span>
+        <span class="c">no `action: add` declares it — typo, or did you mean `add`?</span>
+
+  <span class="y">!</span>  registering 2 of 3 changes. Fix design.yml and re-run to add c2.
+
+<span class="w">verdict: clean</span>  design: a1b2c3d4-e5f6-4789-abcd-0123456789ab</div>
+        <div class="note" data-s>
+          <p>Warns and proceeds rather than refusing outright — same call
+             <code>warnIfTouchesMissing</code> already makes. A path that's merely relative to a
+             subdirectory shouldn't block a registration a human clearly meant.</p>
+        </div>
+
+        <h3 id="s-invalid">An invalid action — this one does refuse</h3>
+        <div class="terminal" data-s>$ twing design register --from design.yml
+
+  <span class="r">✗</span> <span class="w">c3</span>  unknown action <span class="r">"refactor"</span>
+        <span class="c">valid: add · modify · rewrite · remove · rename · move</span>
+        <span class="c">closest: rewrite  (behaviour may change) or rename/move (it must not)</span>
+
+<span class="r">nothing registered.</span></div>
+
+        <h3 id="s-monitor">What twing-monitor shows</h3>
+        <div class="terminal" data-s><span class="b">Design a1b2c3d4</span>  <span class="g">open</span>   ayush@…   2 minutes ago
+<span class="w">Outbound HTTP survives transient failures without thundering herd</span>
+
+<span class="b">  DECLARED CHANGES</span>                                              <span class="c">3</span>
+    <span class="w">c1</span>  modify   src/net/retry.ts::RetryPolicy.backoff
+              <span class="c">exponential growth, capped at 30s</span>
+    <span class="w">c2</span>  add      src/net/retry.ts::RetryPolicy.jitter
+              <span class="c">full jitter so retries desynchronise</span>
+    <span class="w">c3</span>  rename   src/net/retry.ts::RetryPolicy.reset
+              <span class="c">from RetryPolicy.clear · name matches the other lifecycle methods</span>
+
+<span class="b">  SCOPE</span> <span class="c">(derived)</span>
+    creates   src/net/retry.ts
+    touches   src/net/retry.ts</div>
+
+        <div class="note key" data-s>
+          <p><span class="h">This view is the point</span>
+          Once the review system exists, the <em>same</em> rows grow a status column —
+          <span class="tag ok">matches</span> / <span class="tag no">not built</span> /
+          <span class="tag wa">body also changed</span>. The design view and the review result are
+          one artifact. None of that is in v1, but the shape is already right for it.</p>
+        </div>
+      </section>
+
+      <section id="ship">
+        <h2><span class="num">05</span> Shipping it</h2>
+
+        <div class="grid g2">
+          <div class="card cok" data-s>
+            <div class="k">Release A</div>
+            <h5>Server only · <code>0.2.26</code></h5>
+            <p>Core types, migration 0016, store, <code>app.ts</code> accepts <code>changes</code>.
+               Extraction unchanged.</p>
+            <p><strong>Nothing sends the new shape yet.</strong> A no-op release that makes the
+               server tolerant.</p>
+          </div>
+          <div class="card c2" data-s>
+            <div class="k">Release B</div>
+            <h5>Clients · <code>0.2.27</code></h5>
+            <p>Extraction produces <code>changes[]</code>; <code>--from</code> lands in the CLI.</p>
+            <p>By now every deployed server already understands it.</p>
+          </div>
+        </div>
+
+        <div class="note bad" data-s>
+          <p><span class="h">Why two releases and not one</span>
+          The gate exact-matches <em>hook ↔ server</em>, but there is <strong>no check at all
+          between CLI and server</strong>. During any rollout you will have old CLIs talking to a
+          new server. Splitting this way means there is never a moment where a client sends
+          something the deployed server rejects.</p>
+        </div>
+
+        <p data-s>Both are <strong>patch</strong> bumps — additive, no manifest change, no operator
+           action, migration runs itself.</p>
+
+<pre><code>git checkout -b feat/structured-design-changes     # from main
+# …build, test locally against production…
+git push -u origin feat/structured-design-changes  # PR → review → merge
+
+git checkout main &amp;&amp; git pull
+# bump core + cli + server package.json → 0.2.26  (one commit)
+git tag v0.2.26 &amp;&amp; git push origin v0.2.26
+
+# ⏸  WAIT for release-npm.yml to go GREEN
+cd deploy/docker &amp;&amp; docker compose build &amp;&amp; docker compose up -d</code></pre>
+
+        <div class="note bad" data-s>
+          <p><span class="h">The one thing that must not be rushed</span>
+          Deploy the coordinator before npm has published and every client 426s — and the deny
+          tells them to install a version that isn't there yet. Dead end for everyone until npm
+          catches up. <strong>Tag → green → deploy.</strong> Never the same breath.</p>
+        </div>
+
+        <div class="note good" data-s>
+          <p><span class="h">Nobody has to upgrade by hand</span>
+          Since 0.2.23 the daemon watches the coordinator's declared version and installs
+          <em>that exact version</em> itself — CLI, hook binary and a daemon restart. Deploying the
+          coordinator is what moves everyone.</p>
+        </div>
+      </section>
+
+      <section id="testfirst">
+        <h2><span class="num">06</span> Before writing any of it</h2>
+        <p data-s>
+          The cheapest possible check that the template is worth building, from a throwaway repo,
+          with <strong>zero code changed</strong>:
+        </p>
+        <ol class="path" data-s>
+          <li><span class="f">write design.yml in the new template</span></li>
+          <li><span class="f">send its text as the plan</span> <span class="d">— the server stores it verbatim and fills the file lists by extraction</span></li>
+          <li><span class="f">open twing-monitor</span> <span class="d">— read the template as a human would</span></li>
+        </ol>
+        <p data-s>
+          If it doesn't read well there, no amount of implementation fixes it — and you've spent
+          ten minutes instead of a week.
+        </p>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="foot">
+    <span>Implementation plan · not started</span>
+    <span><a href="review-flow.html">Why this exists →</a></span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

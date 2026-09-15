@@ -204,6 +204,14 @@ export const designs = sqliteTable(
     creates: text("creates").notNull(), // JSON string[]
     touches: text("touches").notNull(), // JSON string[]
     dependsOn: text("depends_on").notNull(), // JSON string[]
+    /** Structured design templates (2026-09): JSON `DesignChange[]`, the
+     * declaration a `--from` registration was built from. Nullable with no
+     * default, per this file's usual convention -- absent means "not
+     * registered from a template" (every ExitPlanMode and `--summary`
+     * registration), which readers distinguish from an empty list. The
+     * derived `creates`/`touches` above stay authoritative for the gate;
+     * this column is never consulted by any blocking path. */
+    changes: text("changes"),
     rawPlanExcerpt: text("raw_plan_excerpt"),
     ttlMs: integer("ttl_ms").notNull(),
     /** §17 scope enforcement (2026-08): bumped on every `amend`, so the async

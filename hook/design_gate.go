@@ -479,6 +479,13 @@ type denyAction struct {
 	Label   string
 	Command string
 	Note    string
+	// Block is a multi-line literal -- a heredoc the reader is meant to
+	// copy whole, rather than prose to be wrapped or a single command.
+	// Rendered line-for-line at the command indent, with no wrapping and no
+	// reflowing: a template whose indentation was "tidied" is no longer
+	// valid YAML, which would turn a helpful deny into a second failure.
+	// Kept separate from Command for exactly that reason.
+	Block []string
 }
 
 // wrapText hard-wraps prose at width, preserving nothing but word breaks --
@@ -539,6 +546,15 @@ func denyMessage(headline, why string, details []denyDetail, actions []denyActio
 			b.WriteString("\n" + denyActionIndent + a.Label)
 			if a.Command != "" {
 				b.WriteString("\n" + denyCommandIndent + withResolvedTwingCLI(a.Command))
+			}
+			for _, line := range a.Block {
+				// A blank line stays blank rather than becoming a row of
+				// trailing spaces.
+				if line == "" {
+					b.WriteString("\n")
+					continue
+				}
+				b.WriteString("\n" + denyCommandIndent + withResolvedTwingCLI(line))
 			}
 			if a.Note != "" {
 				writeWrapped(&b, withResolvedTwingCLI(a.Note), denyCommandIndent)
@@ -1298,7 +1314,37 @@ func postDesignExtract(serverURL, authToken, developerID, planText string) (desi
 // noDesignReason was an inline string at its single call site until
 // 2026-08-24 -- extracted so it can be tested alongside every other deny
 // message, and so it goes through the same formatter rather than drifting.
-func noDesignReason() string {
+// templateTarget is the `target:` line a deny pre-fills. The gate already
+// knows which file it just refused, so making the reader retype it is pure
+// friction -- and a retyped path is a path that can be typo'd. Falls back to
+// a placeholder only when there is genuinely no path to name (an Edit with
+// no file_path, which real payloads never send).
+func templateTarget(relPath string) string {
+	if relPath == "" {
+		return "<path, or path::Symbol.method>"
+	}
+	return relPath
+}
+
+// noDesignReason was an inline string at its single call site until
+// 2026-08-24 -- extracted so it can be tested alongside every other deny
+// message, and so it goes through the same formatter rather than drifting.
+//
+// 2026-09: the "or say it yourself" branch now hands back a fillable
+// template rather than `--summary "<the goal>" --touches <files>`. That old
+// form is the single most-travelled registration path there is -- it is what
+// this very message tells a blocked agent to run -- and it can only ever
+// produce a prose blob plus a bag of paths, which nothing downstream can
+// check a diff against. Handing back the structured shape instead is what
+// makes the common path produce declared changes rather than the shape that
+// exists only because it was the first one built.
+//
+// Deliberately a heredoc rather than "go write a design.yml, then register
+// it": this fires when an agent is blocked mid-edit, which is exactly when
+// an extra step gets done carelessly or not at all. One command, no file
+// left behind, and the shape is visible in the message so it cannot be
+// guessed wrong.
+func noDesignReason(relPath string) string {
 	return denyMessage(
 		"Before your first edit, twing needs to know what you're building.",
 		"Other people -- and other AI sessions -- may be working in this same code "+
@@ -1311,10 +1357,21 @@ func noDesignReason() string {
 				Note:  "Finishing a plan registers this automatically. Nothing else to run.",
 			},
 			{
-				Label:   "Or say it yourself",
-				Command: "twing design register --summary \"<the goal>\" --touches <files>",
-				Note: "The summary is what teammates see if your work overlaps theirs, " +
-					"so describe the real goal rather than a placeholder.",
+				Label: "Or declare it here",
+				Block: []string{
+					"twing design register --from - <<'YAML'",
+					"goal: \"<one sentence: what changes for the user or the system>\"",
+					"changes:",
+					"  - id: c1",
+					"    action: modify        # add|modify|rewrite|remove|rename|move",
+					"    kind: code            # code|api|schema|test|docs|config",
+					"    target: " + templateTarget(relPath),
+					"    intent: \"<what this change achieves>\"",
+					"YAML",
+				},
+				Note: "Fill in goal, action and intent -- the target is the file you just " +
+					"tried to edit. The goal is what teammates see when your work overlaps " +
+					"theirs, so describe the real objective rather than a placeholder.",
 			},
 			{
 				Label:   "Or join what you already have open",
@@ -1626,6 +1683,40 @@ func flaggedLeadAndDetail(verdict string) (lead string, detail string) {
 // pointing at that command instead of one row per design.
 const maxOutOfScopeCandidates = 5
 
+// maxSummaryLabel caps how much of a design's summary appears inside an
+// action label. Past this it stops identifying the design and starts burying
+// the command underneath it.
+const maxSummaryLabel = 64
+
+// summaryLabel reduces a design summary to something that fits on one line
+// inside `Add it to %q`.
+//
+// A summary is not a title: it accumulates. `DesignRegistry.amend` appends a
+// dated `Update:` entry on every amendment rather than replacing (deliberately
+// -- see appendSummaryUpdate), so a design worked on for a day carries several
+// paragraphs. Rendering that through %q turns every newline into a literal
+// \n and produces a single label hundreds of characters wide, with the actual
+// command lost below it. Found live while adding the structured-append deny,
+// which made summaries longer still by folding change items into them.
+//
+// First line only, then truncate: the first line is the original goal, which
+// is exactly the "which of my plans is this?" cue the label exists to give.
+func summaryLabel(summary string) string {
+	line := summary
+	if i := strings.IndexAny(line, "\r\n"); i != -1 {
+		line = line[:i]
+	}
+	line = strings.TrimSpace(line)
+	if len(line) > maxSummaryLabel {
+		// Rune-safe: cutting mid-sequence would emit a replacement char.
+		runes := []rune(line)
+		if len(runes) > maxSummaryLabel {
+			line = string(runes[:maxSummaryLabel]) + "..."
+		}
+	}
+	return line
+}
+
 func outOfScopeReason(designID, path string, openDesigns []designSummary) string {
 	// Backward compatible with a coordinator that doesn't send OpenDesigns
 	// yet (see designScopeMatchResponse's own doc comment) -- falls back to
@@ -1654,12 +1745,28 @@ func outOfScopeReason(designID, path string, openDesigns []designSummary) string
 	for _, d := range shown {
 		label := "Add it to your plan"
 		if d.Summary != "" {
-			label = fmt.Sprintf("Add it to %q", d.Summary)
+			label = fmt.Sprintf("Add it to %q", summaryLabel(d.Summary))
 		}
+		// 2026-09: appends a structured change item rather than a bare path.
+		// `--touches <path>` widened the design but threw away *why* the
+		// file is part of the work -- the one thing a later reviewer needs
+		// and the one thing only the person editing it knows right now.
+		// Same heredoc reasoning as noDesignReason: one command, nothing
+		// left on disk, target pre-filled.
 		actions = append(actions, denyAction{
-			Label:   label,
-			Command: fmt.Sprintf("twing design amend --id %s --touches %s", d.ID, path),
-			Note:    "This is re-checked against other active sessions, not a silent expansion.",
+			Label: label,
+			Block: []string{
+				fmt.Sprintf("twing design amend --id %s --from - <<'YAML'", d.ID),
+				"changes:",
+				"  - id: <unused-id>",
+				"    action: modify        # add|modify|rewrite|remove|rename|move",
+				"    kind: code            # code|api|schema|test|docs|config",
+				"    target: " + templateTarget(path),
+				"    intent: \"<why this file is part of the work>\"",
+				"YAML",
+			},
+			Note: "Re-checked against other active sessions, not a silent expansion. " +
+				"Pick an id no other change in this design already uses.",
 		})
 	}
 	if extra := len(candidates) - len(shown); extra > 0 {
@@ -1954,7 +2061,7 @@ func handleEditWriteGate(payload hookPayload) {
 	case "out_of_scope":
 		writeJSON(denyOutput("PreToolUse", outOfScopeReason(scopeMatch.DesignID, relPath, scopeMatch.OpenDesigns)))
 	case "no_design":
-		writeJSON(denyOutput("PreToolUse", noDesignReason()))
+		writeJSON(denyOutput("PreToolUse", noDesignReason(relPath)))
 	default:
 		logDesignGate("design scope check: unknown state %q (blocking)", scopeMatch.State)
 		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown state %q", scopeMatch.State)))

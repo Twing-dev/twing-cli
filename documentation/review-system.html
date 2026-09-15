@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review system (proposal) — twing docs</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+  <marker id="ahno" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-no" d="M0,0 L10,5 L0,10 z"/></marker>
+</defs></svg>
+
+<header class="topbar"><div class="inner">
+  <a class="brand" href="index.html"><span class="dot"></span>twing <small>docs</small></a>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="journeys.html">Journeys</a>
+    <a href="reference.html">Reference</a>
+    <a href="onboarding.html">Onboarding</a>
+    <a href="findings.html">Findings</a>
+    <a href="review-flow.html">Review ✦</a>
+    <a href="implementation-plan.html">Build ⚒</a>
+  </nav>
+  <span class="spacer"></span>
+  <div class="tb-tools">
+    <div class="searchbox"><input id="q" type="search" placeholder="Filter page…" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+    <span class="iconbtn" id="themeBtn" role="button" tabindex="0">◐ auto</span>
+  </div>
+</div></header>
+
+<div class="page">
+
+  <div class="hero">
+    <div class="eyebrow">Page 7 · design proposal</div>
+    <h1>The review system</h1>
+    <p class="lede">
+      A change-time guardrail layer: once work is finished and committed, check that what was
+      built matches what was declared, that the tests are real, and that the decisions hold up
+      against what this project has already decided.
+    </p>
+    <div class="chips">
+      <span class="chip"><span class="tag wa">proposal</span></span>
+      <span class="chip">nothing here is built yet</span>
+      <span class="chip"><a href="review-flow.html" style="text-decoration:none">← high-level view</a></span>
+    </div>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar"><div class="t">On this page</div><div class="links"></div></aside>
+
+    <main>
+      <div class="nores">No matches on this page.</div>
+
+      <div class="note bad" data-s>
+        <p><span class="h">Read this as a proposal, not documentation</span>
+        The other six pages describe code that exists. <strong>This one does not.</strong> No part
+        of this has been implemented — names, routes and table shapes are proposals and should be
+        expected to change once someone builds it.</p>
+      </div>
+
+      <section id="why">
+        <h2><span class="num">01</span> The problem, and the unfair advantage</h2>
+
+        <p data-s>
+          LLMs write a lot of code, quickly. The bottleneck has moved: the responsibility now sits
+          with whoever reviews it, and reviewing a thousand lines to decide whether everything is
+          right is not a thing humans do well — or honestly, at all, past a certain size.
+        </p>
+
+        <div class="note key" data-s>
+          <p><span class="h">Every other review tool sees only the diff</span>
+          CodeRabbit, Greptile, Copilot review — all of them must <em>infer</em> intent from the
+          code. That is circular: you cannot catch “this implements the wrong thing” when your only
+          evidence for what it should do is the thing itself.</p>
+        </div>
+
+        <p data-s>twing already has what they’re missing — <strong>declared intent, captured
+           before the code existed</strong>, plus the record of everything that happened while it
+           was written:</p>
+
+        <div class="grid g3">
+          <div class="card c2" data-s><h5>DesignStatement</h5><p>Summary, <code>creates</code>/<code>touches</code>/<code>dependsOn</code>, and the full plan text. What they <em>said</em> they’d build.</p></div>
+          <div class="card c2" data-s><h5>Claims</h5><p>Per-symbol records of what was actually edited, by whom, in which session. What they <em>did</em>.</p></div>
+          <div class="card c2" data-s><h5>Activity log</h5><p>Every flag, justification, approval and alignment thread along the way. Why it happened that way.</p></div>
+          <div class="card c1" data-s><h5>Constraints</h5><p>The project’s own ratified rules, already matched against paths.</p></div>
+          <div class="card c1" data-s><h5>Call graph</h5><p>Who calls the changed symbols — blast radius, and which tests reference them.</p></div>
+          <div class="card c1" data-s><h5>Session transcript</h5><p>Where capture is on: the actual conversation that produced the code.</p></div>
+        </div>
+
+        <p data-s>
+          The whole system should be designed around that. <strong>Diff-only is the degraded
+          fallback</strong> — it still works (intent gets extracted from the changes), but the
+          output must say so, because inferred intent is materially weaker evidence than declared
+          intent.
+        </p>
+      </section>
+
+      <section id="ux">
+        <h2><span class="num">02</span> The user experience</h2>
+
+        <p data-s>
+          The hard question was never “what should it check” — it was <strong>when does it
+          fire</strong>. In an agent session there is no natural “I’m done” moment.
+        </p>
+
+        <details class="acc" data-s>
+          <summary>Why the obvious triggers are wrong</summary>
+          <div class="body">
+            <div class="tw"><table>
+              <thead><tr><th>Trigger</th><th>Verdict</th></tr></thead>
+              <tbody>
+                <tr><td><code>SessionEnd</code></td><td><strong>No.</strong> Sessions end because a laptop closed or context ran out. The capture subsystem already concluded this — SessionEnd is “a last drain, never the mechanism,” after a real session ran 11 days and produced zero commits.</td></tr>
+                <tr><td>Git commit</td><td><strong>Weak.</strong> Agents commit constantly; WIP commits are noise. The original spec deferred this trigger for a reason.</td></tr>
+                <tr><td>PR open</td><td><strong>Right audience, wrong moment.</strong> The agent’s context is gone by then. Keep it as a surface, not the trigger.</td></tr>
+                <tr><td>Manual only</td><td><strong>Necessary but insufficient.</strong> Nobody remembers. twing works today because it is ambient.</td></tr>
+              </tbody>
+            </table></div>
+          </div>
+        </details>
+
+        <div class="note good" data-s>
+          <p><span class="h">The signal already exists</span>
+          A design declares which files it will touch. When the diff shows all of them have
+          changes, the work is <em>plausibly</em> complete — a computable signal nobody else has.
+          That prompts the nudge; <code>twing design close</code> remains the explicit
+          “I’m finished.”</p>
+        </div>
+
+        <p data-s>
+          Crucially this <strong>offers, never asserts</strong> — plans routinely over-declare, and
+          work can be genuinely done without touching everything it named.
+        </p>
+
+        <h3 id="moments">The four moments</h3>
+
+        <ol class="seq" data-s>
+          <li class="hl"><div class="hop"><span class="who s">1 · nudge</span><span class="to">→</span><span class="who">the agent, between turns</span></div>
+            <div class="msg">Rides <code>UserPromptSubmit</code> <code>additionalContext</code> — the same channel coordinator notices already use. Fires <strong>once</strong>. Never mid-tool-call.</div>
+          </li>
+        </ol>
+<pre><code>twing: this design looks complete — all 5 declared files have changes.
+
+  Review it       twing review
+  Or just close   twing design close --id 40025938</code></pre>
+
+        <ol class="seq" data-s>
+          <li><div class="hop"><span class="who s">2 · run</span><span class="to">→</span><span class="who">the terminal</span></div>
+            <div class="msg">Local checks are free and instant, so they print immediately. The coordinator’s LLM checks stream in after. Never a blank 30-second stare.</div>
+          </li>
+        </ol>
+<pre><code>twing review · design 40025938 "Add exponential backoff to RetryPolicy"
+  range  a1b2c3d..e4f5g6h  (merge-base with main)
+
+  Local checks                                          0.4s
+    ✓ scope         5 declared, 5 changed, 0 undeclared
+    ✗ tests         RetryPolicy.jitter — no test references it
+    ✗ tests         retry.test.ts:88 — asserts only toBeDefined()
+
+  Coordinator checks                                    running…
+    ✓ conformance   implementation matches declared intent
+    ! precedent     contradicts constraint "all retries via RetryPolicy"
+
+  2 blocking · 1 advisory</code></pre>
+
+        <ol class="seq" data-s>
+          <li class="good"><div class="hop"><span class="who s">3 · fix</span><span class="to">→</span><span class="who">back into the agent’s context</span></div>
+            <div class="msg"><strong>This is the whole product.</strong> Findings return through the same channel as the nudge, while the agent still remembers why it wrote the code.</div>
+          </li>
+        </ol>
+<pre><code>twing review: 2 issues in the work you just finished.
+
+  1  RetryPolicy.jitter has no test coverage
+     You added jitter() and changed backoff(), but retry.test.ts
+     references neither. The declared intent said "survive transient
+     failures" — that behaviour is currently unverified.
+
+  2  retry.test.ts:88 asserts nothing meaningful
+     expect(result).toBeDefined() is the only assertion. It passes
+     whether backoff returns 100ms or throws a string.
+
+  Fix these, then re-run: twing review</code></pre>
+
+        <ol class="seq" data-s>
+          <li><div class="hop"><span class="who s">4 · hand off</span><span class="to">→</span><span class="who">the PR, and twing-monitor</span></div>
+            <div class="msg">For whoever reviews it and <em>didn’t</em> write it — which is the person whose problem this exists to solve.</div>
+          </li>
+        </ol>
+
+        <div class="note key" data-s>
+          <p><span class="h">Why moment 3 is the differentiator</span>
+          Every other reviewer comments on a PR hours later, when the agent has lost all context
+          and a human must relay findings back. twing can hand findings to the agent
+          <strong>while it still has the context that produced the code</strong>. The fix loop
+          closes in seconds instead of hours — and it falls out of infrastructure that already
+          ships.</p>
+        </div>
+
+        <h3 id="commit">Why it reviews committed code</h3>
+        <p data-s>
+          Reviewing a commit range rather than a dirty working tree makes the review
+          <strong>anchored to a SHA</strong> — reproducible, re-runnable, and linkable from
+          twing-monitor. Two consequences:
+        </p>
+        <ul data-s>
+          <li><code>twing review</code> refuses on a dirty tree: <em>“commit first.”</em></li>
+          <li>The range is <strong><code>merge-base(HEAD, main)..HEAD</code></strong>, not the last
+              commit — a design’s work usually spans several. <code>diff-claims.ts</code> already
+              computes exactly this range.</li>
+        </ul>
+
+        <h3 id="install">Turning it on</h3>
+        <p data-s>Opt-in in the file the team already commits, following the <code>capture:</code>
+           precedent exactly:</p>
+<pre><code># .twing/twing.yml
+review:
+  enabled: true
+  block: false      # deterministic findings may block; off by default</code></pre>
+        <p data-s><code>twing init</code> sees it and installs the review package. Nobody who
+           doesn’t want it pays the install cost, and enabling it is a deliberate team decision.</p>
+      </section>
+
+      <section id="pipeline">
+        <h2><span class="num">03</span> Pipeline</h2>
+        <p data-s>
+          The important property: <strong>the local pass always runs</strong> — with no coordinator
+          and no LLM configured. Degraded, never broken.
+        </p>
+
+        <figure data-s>
+          <div class="fig">
+            <svg viewBox="0 0 860 580" role="img" aria-label="Review pipeline, client and coordinator">
+              <path class="edge-d" d="M415,10 L415,566"/>
+              <text class="mono" x="205" y="16" text-anchor="middle">developer machine</text>
+              <text class="mono" x="635" y="16" text-anchor="middle">coordinator</text>
+
+              <rect class="bx-a2" x="60" y="34" width="290" height="44" rx="8"/>
+              <text class="lbl" x="205" y="61" text-anchor="middle">twing review</text>
+
+              <rect class="bx" x="60" y="98" width="290" height="44" rx="8"/>
+              <text class="lbl" x="205" y="119" text-anchor="middle">① clean tree?</text>
+              <text class="sub" x="205" y="135" text-anchor="middle">else stop — “commit first”</text>
+
+              <rect class="bx" x="60" y="162" width="290" height="54" rx="8"/>
+              <text class="lbl" x="205" y="184" text-anchor="middle">② resolve</text>
+              <text class="sub" x="205" y="201" text-anchor="middle">merge-base..HEAD · designs · claims</text>
+
+              <rect class="bx-a2" x="60" y="236" width="290" height="64" rx="8"/>
+              <text class="lbl" x="205" y="260" text-anchor="middle">③ LOCAL PASS — no LLM</text>
+              <text class="sub" x="205" y="277" text-anchor="middle">scope conformance · AST test checks</text>
+              <text class="sub" x="205" y="292" text-anchor="middle">free · instant · offline</text>
+
+              <rect class="bx-ok" x="60" y="320" width="290" height="40" rx="8"/>
+              <text class="lbl" x="205" y="345" text-anchor="middle">printed in &lt; 1s</text>
+
+              <rect class="bx" x="60" y="470" width="290" height="48" rx="8"/>
+              <text class="lbl" x="205" y="492" text-anchor="middle">⑦ poll → print</text>
+              <text class="sub" x="205" y="508" text-anchor="middle">GET /v1/change-reviews/:id</text>
+
+              <rect class="bx" x="470" y="236" width="330" height="50" rx="8"/>
+              <text class="lbl" x="635" y="258" text-anchor="middle">④⑤ persist · return id</text>
+              <text class="sub" x="635" y="275" text-anchor="middle">returns now — does not wait</text>
+
+              <rect class="bx" x="470" y="306" width="330" height="50" rx="8"/>
+              <text class="lbl" x="635" y="328" text-anchor="middle">⑥ specialists</text>
+              <text class="sub" x="635" y="345" text-anchor="middle">independent · sliced evidence</text>
+
+              <rect class="bx-no" x="470" y="376" width="330" height="50" rx="8"/>
+              <text class="lbl" x="635" y="398" text-anchor="middle">verification</text>
+              <text class="sub" x="635" y="415" text-anchor="middle">non-survivors deleted, not downgraded</text>
+
+              <rect class="bx" x="470" y="446" width="330" height="44" rx="8"/>
+              <text class="lbl" x="635" y="473" text-anchor="middle">adjudicate · dedupe · cap</text>
+
+              <rect class="bx-a1" x="470" y="510" width="330" height="44" rx="8"/>
+              <text class="lbl" x="635" y="537" text-anchor="middle">⑧ twing-monitor</text>
+
+              <path class="edge" d="M205,78 L205,94" marker-end="url(#ah)"/>
+              <path class="edge" d="M205,142 L205,158" marker-end="url(#ah)"/>
+              <path class="edge" d="M205,216 L205,232" marker-end="url(#ah)"/>
+              <path class="edge" d="M205,300 L205,316" marker-end="url(#ah)"/>
+
+              <path class="edge" d="M350,262 L466,258" marker-end="url(#ah)"/>
+              <text class="el" x="408" y="238" text-anchor="middle">bundle +</text>
+              <text class="el" x="408" y="250" text-anchor="middle">local findings</text>
+
+              <path class="edge" d="M635,286 L635,302" marker-end="url(#ah)"/>
+              <path class="edge" d="M635,356 L635,372" marker-end="url(#ah)"/>
+              <path class="edge" d="M635,426 L635,442" marker-end="url(#ah)"/>
+              <path class="edge" d="M635,490 L635,506" marker-end="url(#ah)"/>
+
+              <path class="edge" d="M470,468 C420,468 398,486 354,492" marker-end="url(#ah)"/>
+              <text class="el" x="412" y="462" text-anchor="middle">findings</text>
+            </svg>
+          </div>
+          <figcaption>Steps ④–⑥ mirror <code>runSemanticComparatorPass</code>: respond
+            immediately, do the slow work unawaited afterwards.</figcaption>
+        </figure>
+      </section>
+
+      <section id="packages">
+        <h2><span class="num">04</span> Where the code lives</h2>
+        <p data-s>
+          Separate repo, as intended — but with the client talking to <strong>one server only</strong>
+          (the coordinator), reusing the existing PAT and server resolution. No second auth story,
+          no second URL to configure.
+        </p>
+
+        <div class="tw" data-s><table>
+          <thead><tr><th>Package</th><th>Repo</th><th>Used by</th><th>Contains</th></tr></thead>
+          <tbody>
+            <tr><td><code>@twing/review-checks</code></td><td><code>twing-review</code></td><td><strong>client</strong></td><td>Deterministic AST detectors. Pure functions, no network.</td></tr>
+            <tr><td><code>@twing/review-engine</code></td><td><code>twing-review</code></td><td><strong>coordinator</strong></td><td>Prompts, specialists, verification, adjudication.</td></tr>
+            <tr><td><code>/v1/change-reviews/*</code></td><td><code>twing-cli</code></td><td>—</td><td>Routes, persistence, monitor feed.</td></tr>
+          </tbody>
+        </table></div>
+
+        <h3 id="split">Why the split falls here</h3>
+        <div class="grid g3">
+          <div class="card cok" data-s><h5>Deterministic checks → client</h5><p>They need the actual file contents, and Tree-sitter is already in <code>@twing/core</code>. Free, instant, offline, zero configuration.</p></div>
+          <div class="card cok" data-s><h5>LLM checks → coordinator</h5><p>Credentials already live there (<code>llm-client.ts</code>’s ambient provider selection). No developer should have to configure Bedrock keys to review code.</p></div>
+          <div class="card cok" data-s><h5>Persistence → coordinator</h5><p>Designs, claims and the activity log are already there, and twing-monitor already reads from it.</p></div>
+        </div>
+
+        <div class="note key" data-s>
+          <p><span class="h">This also reduces version skew</span>
+          There are already three independently-updated deployables. Putting review logic in the
+          coordinator means fixing a prompt is a <em>redeploy</em>, not an npm release every
+          developer must pull. The separate repo still gets its own release cadence for the part
+          that churns fastest.</p>
+        </div>
+      </section>
+
+      <section id="model">
+        <h2><span class="num">05</span> Data model</h2>
+        <p data-s>
+          Two new current-state tables plus one memory table, following the existing
+          current-state-plus-append-only-log convention. Every raise / accept / dismiss also writes
+          an <code>activity_events</code> row, so monitor’s feed needs no new plumbing.
+        </p>
+
+<pre><code>change_reviews
+  id · projectId · branch · baseSha · headSha
+  designIds (JSON)         -- may cover several designs
+  developerId · status     -- running | complete | failed
+  createdAt · completedAt
+  UNIQUE(projectId, headSha)    -- re-running the same SHA returns the existing review
+
+review_findings
+  id · changeReviewId · projectId
+  category     -- conformance | test_quality | bug | precedent
+  detector     -- "test.untested-symbol" | "llm.conformance"
+  severity     -- blocking | advisory
+  confidence   -- high | medium          (LLM findings only)
+  file · line · symbolId
+  headline · detail · action             -- the existing three-layer grammar
+  status       -- open | accepted | dismissed | fixed
+
+review_policies                          -- memory across reviews
+  projectId · detector · scope (glob) · reason · createdBy
+  -- "always ignore this pattern here" — suppresses permanently</code></pre>
+
+        <div class="note" data-s>
+          <p><span class="h">The <code>UNIQUE(projectId, headSha)</code> is load-bearing</span>
+          Re-running <code>twing review</code> on an unchanged commit returns the existing review
+          instead of burning another round of LLM calls. Cheap idempotency, and it makes the
+          command safe to run reflexively.</p>
+        </div>
+
+        <div class="note bad" data-s>
+          <p><span class="h">Naming collision to avoid</span>
+          <code>PendingReview</code> and <code>/v1/reviews/*</code> already mean “an admin approving
+          a justified divergence.” Don’t overload them — <code>ChangeReview</code> and
+          <code>/v1/change-reviews</code> keep the two concepts apart. Renaming the existing one
+          across the CLI, the Go hook and the dashboard isn’t worth it.</p>
+        </div>
+
+        <h3 id="routes">Routes</h3>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Route</th><th>Does</th></tr></thead>
+          <tbody>
+            <tr><td><code>POST /v1/change-reviews</code></td><td>Start one. Body is the evidence bundle plus local findings. Returns immediately with an id.</td></tr>
+            <tr><td><code>GET /v1/change-reviews/:id</code></td><td>Status + findings. The client polls this.</td></tr>
+            <tr><td><code>GET /v1/change-reviews?projectId=&amp;before=</code></td><td>Paginated list, for monitor. Same cursor shape as every other listing.</td></tr>
+            <tr><td><code>PATCH /v1/change-reviews/:id/findings/:fid</code></td><td>accept · dismiss · fixed</td></tr>
+            <tr><td><code>POST /v1/review-policies</code></td><td>“Always ignore this pattern.”</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <section id="checks">
+        <h2><span class="num">06</span> The check catalogue</h2>
+        <p data-s>
+          Every check — deterministic or LLM — has the same shape. Deterministic ones are
+          <strong>pure functions over the bundle</strong>, testable with plain fixtures and no
+          network, exactly as <code>design-checks.ts</code> is today.
+        </p>
+
+<pre><code>interface Check {
+  id: string;                          // "test.untested-symbol"
+  kind: "deterministic" | "llm";
+  category: FindingCategory;
+  severity: "blocking" | "advisory";
+  run(evidence: EvidenceSlice): Finding[];
+}</code></pre>
+
+        <div class="filters" data-filters=".chk">
+          <span class="lb">Kind</span>
+          <span class="fchip" data-val="all">All</span>
+          <span class="fchip" data-val="det">Deterministic — no LLM</span>
+          <span class="fchip" data-val="llm">Needs an LLM</span>
+          <span class="fcount"></span>
+        </div>
+
+        <div class="tw"><table>
+          <thead><tr><th>Check</th><th>Catches</th><th>Kind</th></tr></thead>
+          <tbody>
+            <tr class="chk" data-tier="det" data-s><td><code>scope.undeclared-file</code></td><td>The diff changes a file no design declared — where “while I was in there” refactors hide</td><td><span class="tag ok">det</span></td></tr>
+            <tr class="chk" data-tier="det" data-s><td><code>scope.unimplemented</code></td><td>A declared file has no changes at all — the plan wasn’t finished</td><td><span class="tag ok">det</span></td></tr>
+            <tr class="chk" data-tier="det" data-s><td><code>test.untested-symbol</code></td><td>A changed symbol that no test file references. <strong>Uses the call graph that already exists.</strong></td><td><span class="tag ok">det</span></td></tr>
+            <tr class="chk" data-tier="det" data-s><td><code>test.assertion-free</code></td><td>A test body with zero assertion calls</td><td><span class="tag ok">det</span></td></tr>
+            <tr class="chk" data-tier="det" data-s><td><code>test.vacuous-assertion</code></td><td><code>toBeDefined()</code> / <code>not.toBeNull()</code> as the <em>only</em> assertion</td><td><span class="tag ok">det</span></td></tr>
+            <tr class="chk" data-tier="det" data-s><td><code>test.skipped</code></td><td><code>.skip</code>, <code>xit</code>, commented-out tests added in this diff</td><td><span class="tag ok">det</span></td></tr>
+            <tr class="chk" data-tier="det" data-s><td><code>test.mock-tautology</code></td><td>The asserted value flows from a stub set up in the same test — tests the mock, not the code</td><td><span class="tag ok">det</span></td></tr>
+            <tr class="chk" data-tier="det" data-s><td><code>test.fixture-clone</code></td><td>N tests, identical inputs, different names</td><td><span class="tag ok">det</span></td></tr>
+            <tr class="chk" data-tier="det" data-s><td><code>constraint.match</code></td><td>The diff touches a path matching a ratified constraint</td><td><span class="tag ok">det</span></td></tr>
+            <tr class="chk" data-tier="det" data-s><td><code>contract.signature-break</code></td><td>A signature changed while live callers exist in the call graph</td><td><span class="tag ok">det</span></td></tr>
+            <tr class="chk" data-tier="llm" data-s><td><code>llm.conformance</code></td><td>The code doesn’t do what the design said — jitter declared, jitter missing</td><td><span class="tag wa">llm</span></td></tr>
+            <tr class="chk" data-tier="llm" data-s><td><code>llm.silent-extra</code></td><td>A change nothing in the declared intent accounts for</td><td><span class="tag wa">llm</span></td></tr>
+            <tr class="chk" data-tier="llm" data-s><td><code>llm.test-relevance</code></td><td>Tests exist and assert things — but not the behaviour that actually changed</td><td><span class="tag wa">llm</span></td></tr>
+            <tr class="chk" data-tier="llm" data-s><td><code>llm.test-coverage-gaps</code></td><td>Error branches and boundaries the code visibly has, that no test exercises</td><td><span class="tag wa">llm</span></td></tr>
+            <tr class="chk" data-tier="llm" data-s><td><code>llm.test-implementation-coupled</code></td><td>Asserts internal call sequences rather than observable behaviour</td><td><span class="tag wa">llm</span></td></tr>
+            <tr class="chk" data-tier="llm" data-s><td><code>llm.bug</code></td><td>Ordinary defects. Commodity — do it, don’t lead with it.</td><td><span class="tag wa">llm</span></td></tr>
+            <tr class="chk" data-tier="llm" data-s><td><code>llm.precedent</code></td><td>Contradicts a constraint, a past decided review, or a sibling design</td><td><span class="tag wa">llm</span></td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="note good" data-s>
+          <p><span class="h">Ten of seventeen need no LLM at all</span>
+          That matters more than it looks. The deterministic set is fast, free, offline and has no
+          false positives by construction — so it can block safely, and it runs even for a
+          developer with no LLM provider configured. It also <em>focuses</em> the expensive calls
+          that follow.</p>
+        </div>
+
+        <details class="acc" data-s>
+          <summary>On “is the decision right or wrong” — the check I’d cut</summary>
+          <div class="body">
+            <p>
+              Free-floating architectural taste from an LLM (“you should have used a queue here”) is
+              the single highest-noise output this system could produce, and noise is what kills
+              review tools.
+            </p>
+            <p>
+              There <em>is</em> a version that works: make it <strong>relational, not
+              absolute</strong> — that’s what <code>llm.precedent</code> above is. Does this
+              contradict a ratified constraint? A decision recorded in a past design or review on
+              the same subsystem? Something a prior review already rejected? All of that is
+              checkable against the activity log you already keep. “Is this a good decision” is
+              not.
+            </p>
+            <p>Ship the relational version. Drop the rest.</p>
+          </div>
+        </details>
+      </section>
+
+      <section id="slicing">
+        <h2><span class="num">07</span> Evidence slicing</h2>
+        <div class="note key" data-s>
+          <p><span class="h">Never send the whole diff to one prompt</span>
+          One mega-prompt over a full diff produces a wall of confident findings, which is the
+          failure mode this design exists to avoid. Each specialist gets a narrow slice, and they
+          run <strong>independently</strong> — no shared context, so they don’t anchor on each
+          other and genuine disagreement can surface.</p>
+        </div>
+
+        <div class="tw" data-s><table>
+          <thead><tr><th>Specialist</th><th>Sees</th><th>Never sees</th></tr></thead>
+          <tbody>
+            <tr><td><code>conformance</code></td><td>Design summary + declared scope + per-symbol diff summary</td><td>Test files, unrelated symbols</td></tr>
+            <tr><td><code>test-semantics</code></td><td>One changed symbol + the tests referencing it</td><td>The rest of the diff</td></tr>
+            <tr><td><code>bug-hunt</code></td><td>One symbol before/after + its callers, via the call graph</td><td>The design</td></tr>
+            <tr><td><code>precedent</code></td><td>Design + matching constraints + prior decided reviews</td><td>The diff body</td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="note" data-s>
+          <p><span class="h">Open problem: bundle size</span>
+          A large PR can produce a bundle too big to slice cheaply. Proposal: cap it at the top-N
+          symbols by blast radius (the call graph gives you that ordering for free) and
+          <strong>say so in the output</strong> — “reviewed 20 of 47 changed symbols, ranked by
+          callers” — rather than silently truncating. Silent truncation in a tool people trust to
+          catch things is worse than no tool.</p>
+        </div>
+      </section>
+
+      <section id="verification">
+        <h2><span class="num">08</span> Verification — where false positives die</h2>
+        <p data-s>
+          Every candidate finding gets a <strong>second call</strong> that sees only the finding and
+          the specific code it names, asked one question: <em>does this actually hold?</em>
+        </p>
+        <div class="note bad" data-s>
+          <p>Non-survivors are <strong>deleted</strong>, not downgraded to “possible issue.”
+          Softening a finding you couldn’t confirm is how a review tool teaches people to skim past
+          its output.</p>
+        </div>
+        <p data-s>
+          This is the same discipline the semantic comparator already uses — validated against a
+          25-case labelled eval with <strong>zero false positives</strong> as the acceptance bar.
+          Without it, this product dies of noise within a month.
+        </p>
+        <div class="note good" data-s>
+          <p><span class="h">You are your own eval corpus</span>
+          This repo has months of merged PRs, the designs that produced them, and an activity log
+          of what the human reviewer actually caught. Backtest: feed a merged PR its own design and
+          see whether the reviewer finds what was really found. Most people building this have to
+          hand-label from scratch.</p>
+        </div>
+      </section>
+
+      <section id="blocking">
+        <h2><span class="num">09</span> What blocks, and what fails how</h2>
+        <p data-s>Mirrors the split that already exists — <code>file_overlap</code> advises,
+           <code>constraint_violation</code> blocks — for the same reason: one is a heuristic, the
+           other is a stated rule.</p>
+
+        <div class="grid g3">
+          <div class="card cno" data-s><h5>Deterministic → may block</h5><p>Facts, not guesses. “Four changed symbols with zero test references” is checkable. Still opt-in per project.</p></div>
+          <div class="card cwa" data-s><h5>LLM → always advisory</h5><p>Never stop a merge on a probabilistic claim.</p></div>
+          <div class="card cok" data-s><h5>Default → nothing blocks</h5><p>twing already blocks at edit time. Earn the right to block at merge time.</p></div>
+        </div>
+
+        <h3 id="failure">Failure modes — all soft</h3>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Failure</th><th>Behaviour</th></tr></thead>
+          <tbody>
+            <tr><td>No LLM provider configured</td><td>Local findings only, stated plainly</td></tr>
+            <tr><td>Coordinator unreachable</td><td>Local findings printed, not persisted</td></tr>
+            <tr><td>One specialist errors</td><td>It yields nothing; the others continue</td></tr>
+            <tr><td>Verification call errors</td><td>The finding is dropped — safer than emitting it unverified</td></tr>
+            <tr><td>No design found</td><td>Extract intent from the diff, label it <strong>inferred</strong></td></tr>
+            <tr><td>Dirty working tree</td><td>Refuse, with “commit first” — the one hard precondition</td></tr>
+          </tbody>
+        </table></div>
+        <p data-s>
+          Note the inversion from the gate: the <strong>gate fails closed</strong> because a silent
+          allow is indistinguishable from a bypass. <strong>Review fails soft</strong> because a
+          missed finding costs a review, while a false block costs the whole team’s trust.
+        </p>
+      </section>
+
+      <section id="compounding">
+        <h2><span class="num">10</span> The payoff: review feeds the gate</h2>
+        <p data-s>
+          This is what makes it more than a linter, and it’s the reason to build it here rather
+          than anywhere else.
+        </p>
+
+<pre><code>review finding  ──►  a human accepts it  ──►  recorded
+                          │
+                          │  (same finding accepted N times across PRs)
+                          ▼
+                 propose a constraint  ──►  an admin ratifies it
+                          │
+                          ▼
+        the GATE now blocks it at edit time — before the code is written</code></pre>
+
+        <div class="note good" data-s>
+          <p><span class="h">The hook for this already exists</span>
+          <code>ConstraintStore.add</code> already accepts
+          <code>source: "ratified_from_divergence:&lt;designId&gt;"</code>. The schema anticipated
+          this loop; nothing has filled it yet.</p>
+        </div>
+
+        <p data-s>
+          Findings a human <strong>dismisses</strong> are recorded too, and never resurface for that
+          pattern — that’s <code>review_policies</code>. So the system gets quieter as it learns,
+          rather than louder.
+        </p>
+        <p data-s>
+          Net effect: constraints get ratified from <em>observed reality</em> instead of written
+          speculatively upfront — which is exactly the failure mode this repo already documented
+          when it pruned six constraints that named real invariants nobody could enforce
+          per-edit without the check degrading into a rubber stamp.
+        </p>
+      </section>
+
+      <section id="build">
+        <h2><span class="num">11</span> Build order</h2>
+        <p data-s>
+          Ordered to test the riskiest assumption first: <strong>does having the design actually
+          make review better than diff-only?</strong> Progress saves locally.
+        </p>
+
+        <div class="progress">
+          <div class="bar"><i id="bldBar"></i></div>
+          <span class="pct" id="bldPct">0 / 0 · 0%</span>
+          <span class="iconbtn" id="bldReset" role="button" tabindex="0">reset</span>
+        </div>
+
+        <div data-checklist="review-build" data-bar="#bldBar" data-pct="#bldPct" data-reset="#bldReset">
+          <div class="item" data-check="b1" data-s><span class="box"></span><div class="b">
+            <b>1 · <code>twing review</code> skeleton</b>
+            <p>Preconditions (clean tree), range resolution, design lookup, evidence bundle
+               assembly. Almost entirely reuse of <code>diff-claims.ts</code> and existing stores.</p>
+          </div></div>
+          <div class="item" data-check="b2" data-s><span class="box"></span><div class="b">
+            <b>2 · One deterministic check: <code>test.untested-symbol</code></b>
+            <p>Changed symbol with no test reference. <strong>No LLM at all.</strong> Uses the call
+               graph that already exists. Shippable on its own, and it tells you fast whether the
+               signal is real.</p>
+          </div></div>
+          <div class="item" data-check="b3" data-s><span class="box"></span><div class="b">
+            <b>3 · Persistence + monitor list view</b>
+            <p><code>change_reviews</code>, <code>review_findings</code>, the routes, and a
+               paginated list. Same shapes as every other listing in the dashboard.</p>
+          </div></div>
+          <div class="item" data-check="b4" data-s><span class="box"></span><div class="b">
+            <b>4 · One LLM check: <code>llm.conformance</code>, with the verification pass</b>
+            <p>The verification pass ships <em>with</em> the first LLM check, never after. It is
+               not an optimisation — it’s what makes the output trustworthy enough to read.</p>
+          </div></div>
+          <div class="item" data-check="b5" data-s><span class="box"></span><div class="b">
+            <b>5 · The eval harness, backtested on this repo</b>
+            <p>Before adding check six. Merged PRs + their designs + what the human actually
+               caught. Zero false positives as the bar.</p>
+          </div></div>
+          <div class="item" data-check="b6" data-s><span class="box"></span><div class="b">
+            <b>6 · The rest of the deterministic set</b>
+            <p>Cheap to add once the harness exists, and each one reduces the LLM surface.</p>
+          </div></div>
+          <div class="item" data-check="b7" data-s><span class="box"></span><div class="b">
+            <b>7 · The nudge</b>
+            <p>Design-completion detection → <code>additionalContext</code>. Deliberately late:
+               don’t make it ambient until the output is worth interrupting for.</p>
+          </div></div>
+          <div class="item" data-check="b8" data-s><span class="box"></span><div class="b">
+            <b>8 · Findings back into the agent’s context</b>
+            <p>Moment 3 — the actual differentiator. Small once everything above exists.</p>
+          </div></div>
+          <div class="item" data-check="b9" data-s><span class="box"></span><div class="b">
+            <b>9 · <code>review_policies</code> and constraint ratification</b>
+            <p>The compounding loop. Last, because it needs real dismissal data to be worth
+               anything.</p>
+          </div></div>
+        </div>
+      </section>
+
+      <section id="open">
+        <h2><span class="num">12</span> Open questions</h2>
+        <div class="grid g2">
+          <div class="card cwa" data-s><h5>Should <code>design close</code> auto-run review?</h5><p>Auto is more ambient, and ambient is what makes twing work — but it spends money and 30 seconds on every close, including trivial ones. I lean <strong>offer</strong>, but it’s a genuine toss-up.</p></div>
+          <div class="card cwa" data-s><h5>Branch-scope or design-scope?</h5><p>A branch often spans several designs. Suggestion: <strong>branch</strong> for the PR surface, <strong>design</strong> for the in-session surface — same findings, different framing.</p></div>
+          <div class="card cwa" data-s><h5>Designs closed without review</h5><p>Monitor could surface “review debt.” Nobody else could compute it. Genuinely useful, or just another nag?</p></div>
+          <div class="card cwa" data-s><h5>Bundle size caps</h5><p>Top-N by blast radius is the proposal, but N and the ranking function both need real data to set.</p></div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="foot">
+    <span>← <a href="findings.html">Findings</a></span>
+    <span>Design proposal · nothing here is implemented</span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

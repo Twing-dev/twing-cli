@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Findings — twing docs</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="topbar"><div class="inner">
+  <a class="brand" href="index.html"><span class="dot"></span>twing <small>docs</small></a>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="journeys.html">Journeys</a>
+    <a href="reference.html">Reference</a>
+    <a href="onboarding.html">Onboarding</a>
+    <a href="findings.html">Findings</a>
+    <a href="review-flow.html">Review ✦</a>
+    <a href="implementation-plan.html">Build ⚒</a>
+  </nav>
+  <span class="spacer"></span>
+  <div class="tb-tools">
+    <div class="searchbox"><input id="q" type="search" placeholder="Filter page…" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+    <span class="iconbtn" id="themeBtn" role="button" tabindex="0">◐ auto</span>
+  </div>
+</div></header>
+
+<div class="page">
+
+  <div class="hero">
+    <div class="eyebrow">Page 6</div>
+    <h1>Findings &amp; open questions</h1>
+    <p class="lede">
+      Observations from a full read of the source. Each is stated with the evidence that supports
+      it and an honest confidence level — none of these has been fixed, and one may not need to be.
+    </p>
+    <div class="chips">
+      <span class="chip">read of ~14 k lines</span>
+      <span class="chip">nothing here is a fix</span>
+    </div>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar"><div class="t">On this page</div><div class="links"></div></aside>
+
+    <main>
+      <div class="nores">No matches on this page.</div>
+
+      <section id="ordering">
+        <h2><span class="num">01</span> Overlap short-circuits the constraint check</h2>
+        <div class="chips" data-s style="margin:0 0 14px">
+          <span class="chip"><span class="tag no">correctness</span></span>
+          <span class="chip">confidence: high</span>
+          <span class="chip">not a security hole</span>
+          <span class="chip"><code>design-checks.ts:461</code></span>
+        </div>
+
+        <p data-s><code>runDesignChecks</code> returns tier 1 before ever reaching tier 3:</p>
+<pre><code>const structuralConflicts = structuralOverlaps(candidate, others);
+if (structuralConflicts.length &gt; 0) {
+  return { verdict: "file_overlap", conflicts: structuralConflicts, constraints: [] };
+}
+const constraintHits = constraintMatch(candidate, constraints);   // ← never reached
+if (constraintHits.length &gt; 0) {
+  return { verdict: "constraint_violation", conflicts: [], constraints: constraintHits };
+}</code></pre>
+
+        <h3 id="ordering-why">Why this used to be fine, and no longer is</h3>
+        <p data-s>
+          When <code>file_overlap</code> still <strong>blocked</strong> (before 2026-08-19),
+          short-circuiting was harmless: you were denied either way, so which reason came back
+          first didn’t change the outcome.
+        </p>
+        <p data-s>
+          Once tier 1 was demoted to advisory-only, that stopped being true. A design that
+          <em>both</em> overlaps another design’s declared paths <em>and</em> violates a project
+          constraint now returns <code>file_overlap</code> — and <code>app.ts</code> only calls
+          <code>designs.flag()</code> on <code>constraint_violation</code>. So the design stays
+          <code>open</code>, and the constraint is never surfaced at registration.
+        </p>
+
+        <div class="note good" data-s>
+          <p><span class="h">Not a hole</span>
+          The §17.9 ground-truth backstop (<code>GET /v1/constraints/match</code>) still catches it
+          on the actual <code>Edit</code>/<code>Write</code> — which is precisely what that backstop
+          exists for. Nothing gets through.</p>
+        </div>
+        <div class="note bad" data-s>
+          <p><span class="h">But the message is wrong</span>
+          The <code>ExitPlanMode</code> registration reports <em>“allow, registered”</em> instead of
+          naming the protected rule. The developer discovers the constraint later and less legibly,
+          at a point where the plan is already written.</p>
+        </div>
+
+        <h3 id="ordering-precedent">There is direct precedent in the codebase</h3>
+        <p data-s>
+          <code>app.ts</code> hits this <em>same ordering problem</em> on the resolve path and works
+          around it explicitly. From that route’s own comment (design <code>7d65230f</code>,
+          2026-08-17):
+        </p>
+        <div class="note" data-s>
+          <p><em>
+            “Originally derived this from <code>checkAmendedScope</code>’s overall verdict — wrong,
+            because <code>runDesignChecks</code> returns tier-1 overlap before it ever reaches
+            tier-3’s constraint check, whenever both happen to be true at once. Found live: this
+            design genuinely touched <code>require_human_review</code> paths <em>and</em> happened to
+            overlap another open design on those same files — the recomputed verdict came back
+            ‘overlap’, <code>constraintId</code> was silently dropped, and the approved review never
+            populated <code>justifiedConstraintIds</code> … the exact bug this design was registered
+            to fix, reproducing itself.”
+          </em></p>
+        </div>
+        <p data-s>
+          The fix there was to call <code>matchConstraintsForPaths</code> directly rather than trust
+          the top-line verdict. The <strong>registration path never got the equivalent fix.</strong>
+        </p>
+
+        <h3 id="ordering-coverage">Test coverage</h3>
+        <p data-s>
+          <code>design-checks.test.ts:106</code> exercises tier 3 with <code>openDesigns: []</code> —
+          so no test covers the combination at all. That’s what makes this a good first
+          contribution: write the failing test before deciding on a fix.
+        </p>
+        <details class="acc" data-s>
+          <summary>Three possible shapes for a fix — none obviously right</summary>
+          <div class="body">
+            <ol>
+              <li><strong>Check constraints first.</strong> Simple reorder. But it inverts the
+                  documented “cheapest first” tier ordering, and a blocking verdict arguably
+                  <em>should</em> outrank an advisory one anyway.</li>
+              <li><strong>Return both.</strong> <code>DesignCheckOutcome</code> already carries
+                  <code>conflicts</code> and <code>constraints</code> as separate fields — populate
+                  both, and let the caller decide which is the headline. Most information
+                  preserved; largest blast radius across callers.</li>
+              <li><strong>Leave it.</strong> Argue the backstop is sufficient and this is only a
+                  message-quality issue. Defensible — but then the tier-1 early return deserves a
+                  comment saying so, because right now it reads as an oversight.</li>
+            </ol>
+            <p>This is a judgement call about the model, not a mechanical bug. Worth a decision
+               from whoever owns §17.</p>
+          </div>
+        </details>
+      </section>
+
+      <section id="skew">
+        <h2><span class="num">02</span> Version skew is the normal state</h2>
+        <div class="chips" data-s style="margin:0 0 14px">
+          <span class="chip"><span class="tag wa">architecture</span></span>
+          <span class="chip">confidence: high</span>
+          <span class="chip">observed live</span>
+        </div>
+
+        <p data-s>
+          Three artifacts deploy on independent schedules, and nothing forces them into step:
+        </p>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Artifact</th><th>Contains</th><th>Updated by</th></tr></thead>
+          <tbody>
+            <tr><td><code>@twing/cli</code></td><td>the CLI <strong>and</strong> the daemon</td><td><code>npm install -g</code></td></tr>
+            <tr><td><code>twing-hook</code></td><td>the capture edge and the whole gate</td><td><strong>only</strong> <code>twing init</code> — a separate GitHub release fetch</td></tr>
+            <tr><td><code>twing serve</code></td><td>all verdict logic and state</td><td>whenever someone redeploys</td></tr>
+          </tbody>
+        </table></div>
+
+        <p data-s>Four separate mechanisms exist purely to manage that:</p>
+        <div class="grid g2">
+          <div class="card cwa" data-s><h5>The 426 middleware</h5><p>Every gate call sends <code>x-twing-hook-version</code>; a mismatch returns <code>426 Upgrade Required</code> before auth even runs, so “you’re out of date” beats “unauthorized” when both are true.</p></div>
+          <div class="card cwa" data-s><h5>Snapshotted daemon version</h5><p><code>daemonVersion</code> is captured at module load and never re-read — because <code>npm install -g</code> overwrites the very <code>package.json</code> a running daemon would read, so a stale process would report itself current.</p></div>
+          <div class="card cwa" data-s><h5>Direction-aware messaging</h5><p><code>compareVersions</code> distinguishes “this machine is behind” (update) from “the coordinator is behind” (wait) — npm cannot move backwards, so the update instruction would be nonsense in the second case.</p></div>
+          <div class="card cwa" data-s><h5>Never-backfill schema</h5><p>Optional columns and absent-tolerant readers are what let an older coordinator and a newer client talk at all.</p></div>
+        </div>
+
+        <div class="note bad" data-s>
+          <p><span class="h">The trap this creates, recorded live 2026-08-27</span>
+          <code>npm install -g @twing/cli@latest &amp;&amp; twing daemon restart</code> looks like the
+          fix and <strong>does not touch the hook binary</strong> —
+          <code>ensureHookInstalled()</code> only runs as part of <code>twing init</code>. A session
+          that followed that exact two-step instruction still failed the retry, because the hook is
+          what actually sends the version being checked. The deny message now says
+          <code>npm i -g … &amp;&amp; twing init &amp;&amp; twing daemon restart</code> for that reason.</p>
+        </div>
+
+        <h3 id="skew-observed">Observed on the live coordinator</h3>
+        <p data-s>
+          While working in this repo, a real deny rendered <code>flaggedLeadAndDetail</code>’s
+          <em>generic fallback</em> lead (“twing compared your plan against other active sessions
+          and found a conflict”) while simultaneously setting <code>requiresAdmin: true</code>.
+        </p>
+        <p data-s>
+          In the current source both derive from the same field, <code>blockedReason</code> — so
+          that combination is impossible from a same-version server. It means the coordinator sent
+          <code>requiresAdmin</code> but <strong>not</strong> <code>verdict</code>, i.e. it predates
+          the 2026-08-26 <code>verdict</code> field.
+        </p>
+        <div class="note bad" data-s>
+          <p><span class="h">User-visible consequence</span>
+          An <code>llm_divergence</code> block is supposed to be <strong>self-approvable</strong> —
+          <code>resolve --justify</code> clears it instantly, no admin. The live server is telling
+          people it needs a project admin. Worth confirming against the deployed version.</p>
+        </div>
+      </section>
+
+      <section id="threads">
+        <h2><span class="num">03</span> Alignment threads are accumulating</h2>
+        <div class="chips" data-s style="margin:0 0 14px">
+          <span class="chip"><span class="tag wa">operational</span></span>
+          <span class="chip">confidence: medium</span>
+          <span class="chip">needs a look, not necessarily a fix</span>
+        </div>
+
+        <p data-s>
+          <code>twing align threads --status open</code> on this project returns roughly twenty
+          open threads. The majority are <code>scope_intrusion</code> rows between two developers,
+          generated from a single session, all naming files under
+          <code>packages/server/src/</code> — one thread per file.
+        </p>
+        <p data-s>
+          That pattern is close to what the 2026-08-23 dedup redesign was built to stop: the
+          <code>findOrCreate</code> key dropped <code>symbolId</code> precisely because one design
+          pair had accumulated 14 simultaneous threads, one per touched file.
+        </p>
+        <details class="acc" data-s>
+          <summary>Why this may be correct behaviour rather than a regression</summary>
+          <div class="body">
+            <p>Two readings, and the evidence doesn’t settle between them:</p>
+            <ul>
+              <li><strong>Pre-fix rows.</strong> These threads may simply predate the redesign.
+                  Nothing backfills old rows, so they’d persist in their original one-per-symbol
+                  shape forever.</li>
+              <li><strong>A different axis.</strong> The dedup key is
+                  <code>(developerId, otherDeveloperId, designId)</code>. If each finding resolved a
+                  <em>different</em> <code>designId</code> on the other side, forking is correct by
+                  the current key — and would indicate the other session had many open designs
+                  rather than one.</li>
+            </ul>
+            <p>
+              Checking <code>openedAt</code> on those rows against the 2026-08-23 change date would
+              distinguish the two in about a minute. Either way, closing the stale ones costs
+              nothing — closing is unilateral and non-blocking.
+            </p>
+          </div>
+        </details>
+      </section>
+
+      <section id="minor">
+        <h2><span class="num">04</span> Smaller observations</h2>
+
+        <details class="acc" data-s>
+          <summary>Inconsistent repo-root resolution in <code>handleSessionEnd</code></summary>
+          <div class="body">
+            <div class="chips" style="margin:0 0 12px"><span class="chip"><span class="tag n">cosmetic</span></span><span class="chip">confidence: high</span><span class="chip">no bug today</span></div>
+            <p>
+              <code>handleEditWriteGate</code> deliberately uses <code>config.RepoRoot</code> rather
+              than <code>payload.Cwd</code>, with a comment explaining why: it’s already the
+              resolved canonical root, so it avoids a second, potentially divergent <code>git</code>
+              shell-out and stays correct when cwd isn’t the repo the edited file lives in.
+            </p>
+            <p>
+              <code>handleSessionEnd</code>, a few dozen lines below, calls
+              <code>computeProjectID(payload.Cwd)</code> instead. Harmless in practice — that path
+              only runs after <code>resolveServerConfig(cwd)</code> already succeeded, which means
+              cwd <em>is</em> inside the repo — but it’s the one call site that didn’t get the
+              treatment, and it will read as an oversight to the next person.
+            </p>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary>A stray attribute typo in this documentation set</summary>
+          <div class="body">
+            <div class="chips" style="margin:0 0 12px"><span class="chip"><span class="tag n">self-reported</span></span></div>
+            <p>
+              Noted for honesty rather than importance: these pages were hand-authored, and at
+              least one <code>data-s</code> attribute was initially written as <code>data-s"</code>.
+              It has been corrected, but if you find page filtering skipping a block, a malformed
+              attribute is the likely cause — the filter only sees elements carrying a clean
+              <code>data-s</code>.
+            </p>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary>Soft claims are dead weight on the wire</summary>
+          <div class="body">
+            <div class="chips" style="margin:0 0 12px"><span class="chip"><span class="tag n">cleanup</span></span><span class="chip">deliberate, documented</span></div>
+            <p>
+              <code>Claim.stage</code> still admits <code>"soft"</code>, and
+              <code>stageForTool</code> still computes it — but as of 2026-08-22 the daemon, the
+              only live producer, never constructs one. Both are kept deliberately (the doc comments
+              say so) in case a future producer legitimately emits one.
+            </p>
+            <p>
+              Worth knowing so you don’t “clean up” a type that’s intentionally wider than its
+              current use.
+            </p>
+          </div>
+        </details>
+
+        <details class="acc" data-s>
+          <summary>The multi-repo <code>ExitPlanMode</code> path is prefix-matched</summary>
+          <div class="body">
+            <div class="chips" style="margin:0 0 12px"><span class="chip"><span class="tag n">design limit</span></span><span class="chip">documented</span></div>
+            <p>
+              When cwd isn’t itself a git repo, the hook treats each immediate child directory as a
+              candidate project and partitions the extracted plan by <em>directory-name prefix</em>.
+              A plan that names no concrete path inside any candidate denies with “can’t tell which
+              project this belongs to” — deliberately, rather than guessing.
+            </p>
+            <p>
+              The limitation to know: matching is one level deep and purely textual. A plan that
+              refers to files without repo-prefixed paths won’t match anything, even when a human
+              would know exactly which repo it means.
+            </p>
+          </div>
+        </details>
+      </section>
+
+      <section id="strengths">
+        <h2><span class="num">05</span> What is notably well built</h2>
+        <p data-s>
+          Findings pages skew negative by construction. For balance — these are the parts that
+          stood out as unusually solid on a full read.
+        </p>
+        <div class="grid g2">
+          <div class="card cok" data-s><h5>The comment discipline</h5><p>Most non-trivial comments cite a date, a live incident, and what was tried and rejected. Several are the only surviving record of why an obvious simplification is wrong. This is rare and genuinely valuable.</p></div>
+          <div class="card cok" data-s><h5>Failure-mode reasoning</h5><p>Fail-open vs. fail-closed is decided per path with an explicit argument, not by default. The reversal of §17.7’s original fail-open recommendation is documented with the reasoning that drove it.</p></div>
+          <div class="card cok" data-s><h5>Deny messages as a product surface</h5><p>Three-layer grammar, rendering constraints written down, the 401/403 split, and the removal of the escape hatch from the version deny after watching an agent stall on it.</p></div>
+          <div class="card cok" data-s><h5>The four-bucket model</h5><p>Collapsing five verdicts, three constraint types and a severity field into four buckets governed by one principle removed a large amount of accidental complexity — and the doc comment records exactly what was checked before doing it.</p></div>
+          <div class="card cok" data-s><h5>The daemon-identity work</h5><p>Replacing “is anything listening?” with “is it the process I started?” across every liveness check, after an 8-day orphan. Eviction is constrained three ways to avoid becoming a worse bug than the one it fixes.</p></div>
+          <div class="card cok" data-s><h5>Empirical thresholds</h5><p><code>PLAN_RETRY_SIMILARITY_THRESHOLD</code> was measured, not guessed — with the sample scores recorded in the comment, and a note that a first instinct of ~0.9 would have missed the real case.</p></div>
+        </div>
+      </section>
+
+      <section id="loose">
+        <h2><span class="num">06</span> Loose ends from this work</h2>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Item</th><th>State</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Design <code>f848658e</code></td>
+              <td>Registered for the original markdown write; aged out of <code>flagged</code></td>
+              <td><code>twing design close --id f848658e-3f60-4450-8d38-895210ab50a0</code></td>
+            </tr>
+            <tr>
+              <td>Design <code>40025938</code></td>
+              <td>Open — covers this documentation set</td>
+              <td>Close it once you’re happy with these pages</td>
+            </tr>
+            <tr>
+              <td><code>docs/architecture-high-level.md</code></td>
+              <td>Untracked; superseded by this site</td>
+              <td>Delete it if you want a single source: <code>rm docs/architecture-high-level.md</code></td>
+            </tr>
+            <tr>
+              <td>This <code>documentation/</code> directory</td>
+              <td>Untracked, self-contained, no source changes</td>
+              <td>Delete wholesale if it isn’t right: <code>rm -rf documentation/</code></td>
+            </tr>
+          </tbody>
+        </table></div>
+
+        <div class="note key" data-s>
+          <p><span class="h">On the divergence this documentation was flagged for</span>
+          An earlier version of this write-up was blocked by the gate against design
+          <code>5e0097d3</code> — an active plan to replace the install-enforcement deny hook with a
+          bootstrap wrapper and drop the launchd/systemd daemon service. That finding was correct:
+          if that work lands, the onboarding section of
+          <a href="architecture.html#install">Architecture</a> and parts of the component
+          descriptions need revisiting. Treat those sections as accurate for the current release and
+          provisional beyond it.</p>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="foot">
+    <span>← <a href="onboarding.html">Onboarding</a></span>
+    <span>End of the set · <a href="index.html">back to Overview</a></span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

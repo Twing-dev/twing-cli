@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The change, and what the design looks like — twing</title>
+<style>
+  :root{
+    --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --bg:#fff;--soft:#f6f7f9;--card:#fbfcfd;--fg:#16191d;--fg2:#3d444d;--mut:#656d78;
+    --line:#dee2e7;--line2:#eaedf1;
+    --ok:#1d7a45;--okbg:#e6f4ec;--no:#b3392c;--nobg:#fdeceb;
+    --bl:#4a53c4;--blbg:#ecedfb;--wa:#96660f;--wabg:#fbf1de;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#101316;--soft:#171b1f;--card:#181c21;--fg:#e7eaee;--fg2:#c4cad2;--mut:#949dab;
+    --line:#2a3037;--line2:#22272d;
+    --ok:#5cc57f;--okbg:#122a1c;--no:#ff7a6b;--nobg:#2e1614;
+    --bl:#9aa1f5;--blbg:#1c1f3d;--wa:#e2ac4d;--wabg:#2c2211;
+  }}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:400 16px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto;padding:0 24px 90px}
+  header{border-bottom:1px solid var(--line);background:var(--soft);padding:38px 0 30px;margin-bottom:34px}
+  header .wrap{padding-bottom:0}
+  .eyebrow{font:600 11.5px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--mut)}
+  h1{font-size:clamp(26px,4vw,36px);line-height:1.15;letter-spacing:-.02em;margin:12px 0 10px;font-weight:680}
+  .lede{font-size:17px;color:var(--fg2);max-width:66ch;margin:0}
+  h2{font-size:21px;font-weight:660;letter-spacing:-.015em;margin:44px 0 6px;padding-bottom:9px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:11px}
+  h2 .n{font:600 12px/1 var(--mono);color:var(--mut)}
+  h3{font-size:15px;font-weight:660;margin:26px 0 8px}
+  p{margin:12px 0;max-width:74ch}
+  ul{max-width:74ch;padding-left:22px} li{margin:6px 0}
+  code{font:500 .875em/1.4 var(--mono);background:var(--soft);border:1px solid var(--line2);padding:1px 5px;border-radius:5px}
+  pre{background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:15px 17px;overflow-x:auto;font:400 13px/1.62 var(--mono);margin:14px 0}
+  pre code{background:none;border:0;padding:0}
+  .note{border-left:3px solid var(--bl);background:var(--blbg);padding:13px 17px;border-radius:0 10px 10px 0;margin:18px 0}
+  .note.wa{border-left-color:var(--wa);background:var(--wabg)}
+  .note.no{border-left-color:var(--no);background:var(--nobg)}
+  .note.ok{border-left-color:var(--ok);background:var(--okbg)}
+  .note p{margin:0;max-width:none} .note p+p{margin-top:8px}
+  .note b{display:block;margin-bottom:4px}
+  .term{background:#0e1116;color:#d7dde5;border:1px solid var(--line);border-radius:10px;padding:16px 18px;font:400 12.6px/1.65 var(--mono);overflow-x:auto;margin:14px 0;white-space:pre}
+  .term .c{color:#6e7a89}.term .g{color:#5cc57f}.term .r{color:#ff7a6b}
+  .term .y{color:#e2ac4d}.term .w{color:#f2f5f8;font-weight:600}.term .b{color:#9aa1f5}
+  .mon{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:16px 0;background:var(--card)}
+  .mon .bar{background:var(--soft);border-bottom:1px solid var(--line);padding:9px 16px;font:600 11.5px/1 var(--mono);color:var(--mut);display:flex;gap:10px;align-items:center}
+  .mon .dot{width:9px;height:9px;border-radius:50%;background:var(--ok)}
+  .mon .body{padding:18px 20px}
+  .mon h4{margin:0 0 3px;font-size:17.5px;font-weight:660;letter-spacing:-.01em}
+  .mon .meta{font:500 12px/1.6 var(--mono);color:var(--mut);margin-bottom:16px}
+  .fld{display:grid;grid-template-columns:100px 1fr;gap:6px 14px;font-size:14px;padding:12px 0;border-top:1px solid var(--line2);margin:0}
+  .fld dt{font:600 11px/1.6 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--mut)}
+  .fld dd{margin:0}
+  .fld dd code{font-size:12.5px}
+  .plan{background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:13px 15px;font:400 12.3px/1.6 var(--mono);white-space:pre;overflow-x:auto;margin-top:4px}
+  .hi{background:var(--wabg);outline:2px solid var(--wa);border-radius:4px}
+  .tw{overflow-x:auto;margin:16px 0;border:1px solid var(--line);border-radius:10px}
+  table{border-collapse:collapse;width:100%;font-size:14px}
+  th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line2);vertical-align:top}
+  thead th{background:var(--soft);font:600 12px/1.4 var(--sans);color:var(--mut);white-space:nowrap}
+  tbody tr:last-child td{border-bottom:0}
+  .tag{display:inline-block;font:600 10.5px/1 var(--mono);padding:4px 7px;border-radius:5px;white-space:nowrap}
+  .tag.ok{background:var(--okbg);color:var(--ok)}.tag.no{background:var(--nobg);color:var(--no)}
+  .tag.wa{background:var(--wabg);color:var(--wa)}.tag.n{background:var(--soft);color:var(--mut)}
+  .tag.bl{background:var(--blbg);color:var(--bl)}
+  footer{border-top:1px solid var(--line);margin-top:46px;padding-top:20px;font-size:13px;color:var(--mut)}
+</style>
+</head>
+<body>
+
+<header><div class="wrap">
+  <div class="eyebrow">twing · the change, and what it produces</div>
+  <h1>What I changed, and what the design looks like</h1>
+  <p class="lede">One new flag. Below: exactly what code changed, then a real design describing
+     <em>this very change</em>, and what it renders as in twing-monitor.</p>
+</div></header>
+
+<div class="wrap">
+
+  <div class="note wa">
+    <p><b>In one sentence</b>
+    You can now register a design from a small YAML file instead of typing flags —
+    <code>twing design register --from design.yml</code> — and <code>creates</code>/<code>touches</code>
+    are computed for you instead of hand-typed.</p>
+  </div>
+
+  <h2><span class="n">01</span> What I changed</h2>
+
+  <div class="tw"><table>
+    <thead><tr><th>File</th><th></th><th>What happened</th></tr></thead>
+    <tbody>
+      <tr><td><code>packages/core/src/design-scope.ts</code></td><td><span class="tag ok">NEW</span></td><td>Parse a template, validate it, derive <code>creates</code>/<code>touches</code> from it. Pure — no I/O.</td></tr>
+      <tr><td><code>packages/core/src/design-scope.test.ts</code></td><td><span class="tag ok">NEW</span></td><td>24 tests</td></tr>
+      <tr><td><code>packages/core/src/types.ts</code></td><td><span class="tag bl">EDIT</span></td><td>Added <code>DesignChangeAction</code> (six values) and <code>DesignChange</code>; optional <code>changes?</code> on <code>DesignStatement</code></td></tr>
+      <tr><td><code>packages/core/src/index.ts</code></td><td><span class="tag bl">EDIT</span></td><td>One export line</td></tr>
+      <tr><td><code>packages/cli/src/design.ts</code></td><td><span class="tag bl">EDIT</span></td><td><code>--from &lt;file&gt;</code>: read, validate, derive, send</td></tr>
+      <tr><td><code>packages/cli/src/index.ts</code></td><td><span class="tag bl">EDIT</span></td><td>The flag + a usage line</td></tr>
+      <tr style="background:var(--nobg)"><td><code><strong>hook/</strong></code></td><td><span class="tag no">UNTOUCHED</span></td><td>Zero changes — it's the one artifact whose version is exact-matched</td></tr>
+      <tr style="background:var(--nobg)"><td><code><strong>packages/server/</strong></code></td><td><span class="tag no">UNTOUCHED</span></td><td>No migration, nothing to deploy</td></tr>
+      <tr style="background:var(--nobg)"><td><code><strong>twing-monitor</strong></code></td><td><span class="tag no">UNTOUCHED</span></td><td>Separate repo</td></tr>
+    </tbody>
+  </table></div>
+
+  <p><strong>Committed as</strong> <code>74fac72</code> on branch <code>docs/structured-design-schema</code>.
+     Tests: core 96/96, cli 302/302. Nothing pushed, nothing deployed.</p>
+
+  <h3>The six actions</h3>
+  <p>Closed set. They split on one question — <strong>is behaviour supposed to change?</strong></p>
+  <div class="tw"><table>
+    <thead><tr><th>Action</th><th>Means</th><th>A checker can assert</th></tr></thead>
+    <tbody>
+      <tr><td><code>add</code></td><td>didn't exist, now does</td><td>new behaviour matches intent</td></tr>
+      <tr><td><code>modify</code></td><td>changed incrementally</td><td>the delta matches intent</td></tr>
+      <tr><td><code>rewrite</code></td><td>substantially replaced</td><td>the <em>whole</em> symbol matches intent</td></tr>
+      <tr><td><code>remove</code></td><td>gone</td><td>nothing still references it</td></tr>
+      <tr><td><code>rename</code></td><td>same code, new name</td><td><span class="tag ok">body identical</span> — pure AST check</td></tr>
+      <tr><td><code>move</code></td><td>same code, new place</td><td><span class="tag ok">body identical</span> — pure AST check</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2><span class="n">02</span> The design for this very change</h2>
+  <p>Not a made-up example. This is the work described above, written in the new template.</p>
+
+<pre><code>goal: "Register a design from a file instead of flags, so what changes is declared, not just where"
+
+changes:
+  - id: c1
+    action: add
+    target: packages/core/src/design-scope.ts
+    intent: "parse a design template, validate it, and derive creates/touches from it"
+
+  - id: c2
+    action: add
+    target: packages/core/src/design-scope.test.ts
+    intent: "cover the derivation, the validation rules, and the round trip"
+
+  - id: c3
+    action: modify
+    target: packages/core/src/types.ts::DesignStatement
+    intent: "carry an optional structured declaration alongside the flat fields"
+
+  - id: c4
+    action: modify
+    target: packages/cli/src/design.ts::runDesignRegister
+    intent: "accept --from &lt;file&gt; as an alternative to the flag form"
+
+  - id: c5
+    action: modify
+    target: packages/core/src/index.ts
+    intent: "export the new module"</code></pre>
+
+  <h3>Running it</h3>
+<pre><code>twing design register --from design.yml</code></pre>
+
+  <div class="term">  <span class="g">✓</span> 5 change(s) declared
+    <span class="c">derived  creates = packages/core/src/design-scope.ts, packages/core/src/design-scope.test.ts</span>
+    <span class="c">         touches = packages/core/src/types.ts, packages/cli/src/design.ts, packages/core/src/index.ts</span>
+
+<span class="w">verdict: clean</span>  design: aaa193b0-0443-4c89-b992-26359ae7eb04
+
+  <span class="b">declared</span>
+  c1  add     packages/core/src/design-scope.ts
+  c2  add     packages/core/src/design-scope.test.ts
+  c3  modify  packages/core/src/types.ts::DesignStatement
+  c4  modify  packages/cli/src/design.ts::runDesignRegister
+  c5  modify  packages/core/src/index.ts</div>
+
+  <div class="note ok">
+    <p><b>You never typed creates or touches</b>
+    They were computed. The two <code>add</code> items became <code>creates</code>; the three
+    <code>modify</code> items became <code>touches</code>. If two items had named the same file,
+    it would appear once — deduped.</p>
+  </div>
+
+  <div class="note no">
+    <p><b>Pass the right session id</b>
+    The gate looks designs up by Claude Code's <em>real</em> session id. Inside a Claude Code
+    session, omit <code>--session</code> entirely and it picks up
+    <code>CLAUDE_CODE_SESSION_ID</code> automatically. Pass an invented one and the design
+    registers fine but the gate will never find it — the edit still gets denied.</p>
+  </div>
+
+  <h2><span class="n">03</span> What twing-monitor shows</h2>
+
+  <div class="mon">
+    <div class="bar"><span class="dot"></span>twing-monitor · design detail</div>
+    <div class="body">
+      <h4>Register a design from a file instead of flags, so what changes is declared, not just where</h4>
+      <div class="meta">aaa193b0 · open · 206395444+ayushsingh4522@… · just now</div>
+
+      <dl class="fld"><dt>Summary</dt><dd>Register a design from a file instead of flags, so what
+        changes is declared, not just where
+        <div style="color:var(--mut);font-size:13px;margin-top:3px">↳ came from <code>goal:</code></div></dd></dl>
+
+      <dl class="fld"><dt>Creates</dt><dd>
+        <code>packages/core/src/design-scope.ts</code><br>
+        <code>packages/core/src/design-scope.test.ts</code></dd></dl>
+
+      <dl class="fld"><dt>Touches</dt><dd>
+        <code>packages/core/src/types.ts</code><br>
+        <code>packages/cli/src/design.ts</code><br>
+        <code>packages/core/src/index.ts</code></dd></dl>
+
+      <dl class="fld"><dt>Depends on</dt><dd style="color:var(--mut)">—</dd></dl>
+
+      <dl class="fld"><dt>Plan</dt><dd>
+        <div class="plan hi">goal: "Register a design from a file instead of flags, so what changes is
+       declared, not just where"
+
+changes:
+  - id: c1
+    action: add
+    target: packages/core/src/design-scope.ts
+    intent: "parse a design template, validate it, and derive creates/touches from it"
+
+  - id: c2
+    action: add
+    target: packages/core/src/design-scope.test.ts
+    intent: "cover the derivation, the validation rules, and the round trip"
+
+  - id: c3
+    action: modify
+    target: packages/core/src/types.ts::DesignStatement
+    intent: "carry an optional structured declaration alongside the flat fields"
+
+  - id: c4
+    action: modify
+    target: packages/cli/src/design.ts::runDesignRegister
+    intent: "accept --from &lt;file&gt; as an alternative to the flag form"
+
+  - id: c5
+    action: modify
+    target: packages/core/src/index.ts
+    intent: "export the new module"</div>
+        <div style="color:var(--wa);font-size:13px;margin-top:6px">↑ <strong>this panel is the only thing that changed</strong></div>
+      </dd></dl>
+    </div>
+  </div>
+
+  <div class="note no">
+    <p><b>Honest caveat</b>
+    I have read the data model, not twing-monitor's UI. The <em>values</em> above are exactly
+    what the server stores — verified against a live coordinator. The <em>layout</em> is my
+    guess. Look for whichever panel shows plan text; the field is <code>rawPlanExcerpt</code>.</p>
+  </div>
+
+  <h2><span class="n">04</span> Before and after</h2>
+  <div class="tw"><table>
+    <thead><tr><th>Field</th><th>Old way (flags)</th><th>New way (template)</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Summary</strong></td><td>what you typed in <code>--summary</code></td><td>your <code>goal:</code> line — <span class="tag n">same kind of thing</span></td></tr>
+      <tr><td><strong>Creates</strong></td><td>what you typed in <code>--creates</code></td><td><span class="tag ok">derived</span> from <code>action: add</code></td></tr>
+      <tr><td><strong>Touches</strong></td><td>what you typed in <code>--touches</code></td><td><span class="tag ok">derived</span>, deduped</td></tr>
+      <tr><td><strong>Plan</strong></td><td>empty, or prose from plan mode</td><td><span class="tag wa">the structured YAML, verbatim</span></td></tr>
+      <tr><td><strong>Verdict</strong></td><td>clean / file_overlap / constraint_violation</td><td>identical — the gate is unchanged</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2><span class="n">05</span> What you will <em>not</em> see</h2>
+  <div class="tw"><table>
+    <thead><tr><th>Not there</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>A table of changes in monitor</td><td>The server has no <code>changes</code> column, so nothing structured exists for monitor to render. You get the YAML as text.</td></tr>
+      <tr><td>✓ / ✗ per item</td><td>That's the review system. Not built.</td></tr>
+      <tr><td>New verdicts, new blocking</td><td>Nothing about the gate changed.</td></tr>
+      <tr><td>Any monitor change</td><td>Separate repo, untouched.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2><span class="n">06</span> When it refuses</h2>
+  <p>Change one <code>action</code> to something invalid and re-run:</p>
+  <div class="term">twing design register: design.yml isn't a valid design template.
+
+  <span class="r">✗</span> missing `goal:` -- one sentence describing what this achieves
+  <span class="r">✗</span> c3  unknown action <span class="r">"refactor"</span> -- valid: add · modify · rewrite · remove · rename · move
+  <span class="r">✗</span> c3  duplicate id "c3" -- ids must be unique within a design
+  <span class="r">✗</span> c4  `from:` only applies to rename/move, not `modify`
+
+<span class="r">Nothing was registered.</span></div>
+  <p>All problems listed at once, and <strong>no network call is made</strong> — it fails before
+     it ever reaches the coordinator. A target that doesn't exist on disk only <em>warns</em>,
+     because that's usually a path written relative to a subdirectory rather than a mistake.</p>
+
+  <h2><span class="n">07</span> Known gap</h2>
+  <div class="note no">
+    <p><b>Someone else has a spec for this</b>
+    A closed design by <code>mbhattacharyarules@gmail.com</code> targets
+    <code>docs/design-format.md</code> and names sections this implementation has no answer for —
+    notably <strong>"approval-reset identity"</strong> (when a design item is edited, does a prior
+    approval still hold?) and a <strong>built-in default template</strong>.</p>
+    <p>That file does not exist in any branch or commit, so it could not be read. Both are real
+    gaps here: this implementation says an <code>id</code> is "stable within the design" and stops
+    there, and it makes you hand-write the YAML from scratch. Worth reconciling before building
+    further.</p>
+  </div>
+
+  <h2><span class="n">08</span> The question this is for</h2>
+  <div class="note">
+    <p><b>Look at the plan panel and ask one thing</b>
+    <strong>Could I review someone's code against this?</strong></p>
+    <p>If yes, the template holds and the review system gets built on it. If it reads like noise,
+    the shape changes now — before any server code, migration or deploy exists. That is the whole
+    reason for testing at this stage.</p>
+  </div>
+
+  <footer>
+    The code is real and committed (<code>74fac72</code>). The monitor layout is a mock; the stored
+    values are verified. Nothing here is pushed or deployed.
+  </footer>
+</div>
+</body>
+</html>

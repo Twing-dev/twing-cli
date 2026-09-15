@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Onboarding — twing docs</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="topbar"><div class="inner">
+  <a class="brand" href="index.html"><span class="dot"></span>twing <small>docs</small></a>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="journeys.html">Journeys</a>
+    <a href="reference.html">Reference</a>
+    <a href="onboarding.html">Onboarding</a>
+    <a href="findings.html">Findings</a>
+    <a href="review-flow.html">Review ✦</a>
+    <a href="implementation-plan.html">Build ⚒</a>
+  </nav>
+  <span class="spacer"></span>
+  <div class="tb-tools">
+    <div class="searchbox"><input id="q" type="search" placeholder="Filter page…" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+    <span class="iconbtn" id="themeBtn" role="button" tabindex="0">◐ auto</span>
+  </div>
+</div></header>
+
+<div class="page">
+
+  <div class="hero">
+    <div class="eyebrow">Page 5</div>
+    <h1>Onboarding</h1>
+    <p class="lede">
+      What to learn before contributing, what you can safely skip, and a concrete first-week
+      plan. The checklist below remembers your progress in this browser.
+    </p>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar"><div class="t">On this page</div><div class="links"></div></aside>
+
+    <main>
+      <div class="nores">No matches on this page.</div>
+
+      <section id="stances">
+        <h2><span class="num">01</span> Four stances worth more than any library</h2>
+        <p data-s>
+          These are the real prerequisites. Internalise them or you will fight the code — every
+          one of them looks like an inconsistency until you see why it isn’t.
+        </p>
+
+        <div class="grid g2">
+          <div class="card c2" data-s>
+            <div class="k">Stance 01</div>
+            <h5>Fail-open vs. fail-closed is a per-path decision</h5>
+            <p>Not a global policy. Capture fails silently; the gate denies. Same binary, opposite
+               defaults, deliberately. Ask “which path am I on?” before choosing an error
+               behaviour.</p>
+          </div>
+          <div class="card c2" data-s>
+            <div class="k">Stance 02</div>
+            <h5>Ground truth beats self-report — and both exist on purpose</h5>
+            <p>A design’s <code>touches</code> is what someone <em>claimed</em>; a Claim is what
+               Tree-sitter <em>saw</em>. Whenever two checks look redundant, that’s usually why:
+               <code>/v1/constraints/match</code> exists precisely because the self-reported
+               version was bypassable.</p>
+          </div>
+          <div class="card c2" data-s>
+            <div class="k">Stance 03</div>
+            <h5>Append-only, never backfill</h5>
+            <p>New column → old rows keep reading correctly without it, and readers handle its
+               absence. This is not laziness; it’s what makes three independently-updated
+               deployables survivable.</p>
+          </div>
+          <div class="card c2" data-s>
+            <div class="k">Stance 04</div>
+            <h5>A deny message is a product surface</h5>
+            <p>Not an error string. Three-layer grammar, no colour, no emoji, exact commands.
+               Collapsing 401 and 403 into one message cost a real user five days. Treat that text
+               as code.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="vocab">
+        <h2><span class="num">02</span> Vocabulary you must own first</h2>
+        <p data-s>
+          These are invented terms with precise local meanings, and every file assumes you already
+          have them. They’re defined in <code>packages/core/src/types.ts</code>.
+        </p>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Term</th><th>Means</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Claim</strong></td><td>A record that a session touched a specific symbol. Derived from the AST, not declared. Path 1.</td></tr>
+            <tr><td><strong>Finding</strong></td><td>The output of a divergence check over claims — structured, so <code>align</code> can say who and why.</td></tr>
+            <tr><td><strong>DesignStatement</strong></td><td>A session’s <em>declared</em> plan: summary + creates/touches/dependsOn. Path 2.</td></tr>
+            <tr><td><strong>Verdict</strong></td><td>One of the four buckets. Determines whether an edit blocks and who can approve the override.</td></tr>
+            <tr><td><strong>Constraint</strong></td><td>A project rule: a statement plus path globs. Always blocks; only an admin waives it.</td></tr>
+            <tr><td><strong>Alignment thread</strong></td><td>The async, voluntary conversation between two developers a finding names.</td></tr>
+            <tr><td><strong>scope-match</strong></td><td>The gate’s own question: is <em>this literal file</em> inside <em>this session’s</em> declared scope?</td></tr>
+            <tr><td><strong>Divergence</strong></td><td>Any of the ways two parties’ work is discovered to be in tension.</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <section id="checklist">
+        <h2><span class="num">03</span> Prerequisites checklist</h2>
+        <p data-s>
+          Ordered by how much leverage each gives you <em>here</em>, not by general importance.
+          Tick items off — progress is saved locally in this browser.
+        </p>
+
+        <div class="progress">
+          <div class="bar"><i id="prqBar"></i></div>
+          <span class="pct" id="prqPct">0 / 0 · 0%</span>
+          <span class="iconbtn" id="prqReset" role="button" tabindex="0">reset</span>
+        </div>
+
+        <div class="filters" data-filters=".prq-item">
+          <span class="lb">Tier</span>
+          <span class="fchip" data-val="all">All</span>
+          <span class="fchip" data-val="must">Must have</span>
+          <span class="fchip" data-val="should">Should have</span>
+          <span class="fchip" data-val="nice">Nice to have</span>
+          <span class="fcount"></span>
+        </div>
+
+        <div data-checklist="prereqs" data-bar="#prqBar" data-pct="#prqPct" data-reset="#prqReset">
+
+          <div class="item prq-item" data-tier="must" data-check="hooks" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>1 · Claude Code hooks <span class="tag a2">must</span></b>
+              <p>The highest-leverage item by a wide margin — the entire system is one application
+                 of the hooks API, and none of the code parses without it. Learn the event names
+                 (<code>PreToolUse</code>, <code>PostToolUse</code>, <code>SessionStart</code>,
+                 <code>UserPromptSubmit</code>, <code>SessionEnd</code>), the JSON payload on
+                 stdin, <code>hookSpecificOutput</code> with <code>permissionDecision</code> and
+                 <code>permissionDecisionReason</code>, <code>additionalContext</code>, matcher
+                 syntax, and how hooks from different settings scopes merge and <em>all</em> fire.
+                 Read <code>hook/main.go</code> and <code>wire-hooks.ts</code> alongside the docs.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="must" data-check="ts" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>2 · TypeScript on Node 20+, ESM, project references <span class="tag a2">must</span></b>
+              <p>Not advanced types. You need <code>"type": "module"</code> and <code>.js</code>
+                 extensions in relative imports (yes, even from <code>.ts</code>),
+                 <code>tsc -b</code> composite builds across workspaces, and <code>node --test</code>.
+                 <strong>Tests run against <code>dist/</code>, not <code>src/</code> — build
+                 first.</strong> That trips up everyone exactly once.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="must" data-check="go" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>3 · Enough Go to read one small module <span class="tag a2">must</span></b>
+              <p><code>hook/</code> is ~1 700 lines of plain Go. Structs with JSON tags,
+                 <code>net</code>/<code>net/http</code>, <code>encoding/json</code>,
+                 <code>os/exec</code>, error-as-value handling, <code>go test ./...</code>. You do
+                 <em>not</em> need goroutines, channels, or generics — the hook deliberately has
+                 none.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="must" data-check="git" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>4 · Git plumbing as an API <span class="tag a2">must</span></b>
+              <p>The codebase shells out to git constantly:
+                 <code>rev-parse --show-toplevel</code>, <code>remote get-url origin</code>,
+                 <code>merge-base</code>, <code>diff --name-status</code>,
+                 <code>show &lt;rev&gt;:&lt;path&gt;</code>,
+                 <code>symbolic-ref refs/remotes/origin/HEAD</code>. Also understand worktrees vs.
+                 clones, and why both produce the same <code>projectId</code>.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="must" data-check="skew" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>5 · Version skew across independent deployables <span class="tag a2">must</span></b>
+              <p>Three artifacts update on different schedules: <code>@twing/cli</code> (npm),
+                 <code>twing-hook</code> (a GitHub release fetched <em>only</em> by
+                 <code>twing init</code>), and the deployed coordinator. Four mechanisms exist just
+                 to manage that. Skew is the normal state, not an edge case — see
+                 <a href="findings.html#skew">Findings</a>.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="must" data-check="race" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>6 · Concurrency &amp; idempotency intuition <span class="tag a2">must</span></b>
+              <p>This is a distributed system with eventual consistency, and the races are handled
+                 explicitly rather than avoided. Learn to spot the pattern: <code>scopeVersion</code>
+                 for cooperative cancellation, re-fetching live state <em>after</em> a slow await,
+                 <code>onConflictDoNothing</code> for racing first contact, clearing a batch before
+                 awaiting, capturing a timestamp before a request rather than after. If TOCTOU
+                 isn’t already a reflex, build it.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="must" data-check="sections" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>7 · The <code>§</code>-numbering convention <span class="tag a2">must</span></b>
+              <p>Source comments cite <code>§4</code>, <code>§17</code>, <code>§17.9</code>
+                 constantly and assume you can look them up. Skim
+                 <code>docs/orchestrator-and-verification-design-doc_v1.md</code> far enough to know
+                 what §4, §5, §6, §8, §11, §12 and §17 cover.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="should" data-check="ast" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>8 · Tree-sitter / AST basics <span class="tag n">should</span></b>
+              <p>Concrete syntax trees, named nodes, node types
+                 (<code>function_declaration</code>, <code>method_definition</code>,
+                 <code>variable_declarator</code>), <code>childForFieldName</code>, walking
+                 ancestors. Enough to follow <code>symbol-id.ts</code> — specifically <em>why</em> a
+                 structure-derived id survives line drift when a line-number one wouldn’t.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="should" data-check="sockets" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>9 · Unix sockets &amp; message framing <span class="tag n">should</span></b>
+              <p>Why a stream socket needs length-prefixed frames at all (writes coalesce and
+                 split), and how a streaming decoder buffers partial frames.
+                 <code>framing.ts</code> is 45 lines and is the whole lesson.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="should" data-check="hono" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>10 · Hono <span class="tag n">should</span></b>
+              <p>A small web framework. Mainly: middleware runs in <em>source registration
+                 order</em> (auth, CORS and the version check are ordered deliberately), and route
+                 matching is registration-ordered too — which is why
+                 <code>/v1/designs/:id</code> must come <em>after</em>
+                 <code>/v1/designs/scope-match</code>.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="should" data-check="drizzle" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>11 · Drizzle ORM + SQLite <span class="tag n">should</span></b>
+              <p>The query-builder style (<code>select().from().where(and(…))</code>,
+                 <code>.get()</code> vs <code>.all()</code> vs <code>.run()</code>), migrations
+                 committed under <code>drizzle/</code>, and <code>better-sqlite3</code>’s
+                 synchronous API. Note the portability discipline in <code>db/schema.ts</code>.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="should" data-check="glob" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>12 · Glob matching with <code>minimatch</code> <span class="tag n">should</span></b>
+              <p>Constraint scopes and design <code>touches</code> are globs. Know the difference
+                 between <code>packages/**</code> and <code>packages/*</code>, and what each one
+                 will and won’t catch.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="nice" data-check="oauth" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>13 · OAuth 2.0 device flow <span class="tag n">nice</span></b>
+              <p>The mechanism <code>gh auth login</code> uses — why a CLI uses it instead of a
+                 local redirect server, and the polling contract
+                 (<code>authorization_pending</code>, <code>slow_down</code>).</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="nice" data-check="llm" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>14 · LLM API integration patterns <span class="tag n">nice</span></b>
+              <p>The OpenAI chat-completions shape (all four providers here speak it), few-shot
+                 prompting via real conversation turns, and — most importantly — the
+                 <strong>fail-soft</strong> discipline: a malformed or unreachable model degrades
+                 to “no check ran,” never to “deny everyone.”</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="nice" data-check="services" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>15 · launchd and systemd <code>--user</code> units <span class="tag n">nice</span></b>
+              <p>Only if you touch <code>daemon-service.ts</code>. The interesting part is why the
+                 code trusts a socket probe over <code>launchctl print</code>’s own bookkeeping.</p>
+            </div>
+          </div>
+
+          <div class="item prq-item" data-tier="nice" data-check="threat" data-s>
+            <span class="box"></span>
+            <div class="b">
+              <b>16 · Threat-modelling habits <span class="tag n">nice</span></b>
+              <p>The identity work (§17.10) reads well as a case study: hashed tokens never stored
+                 in plaintext, <code>timingSafeEqual</code> used for exactly the one single-secret
+                 comparison that needs it, server-side-resolved identity, and permissions verified
+                 against GitHub rather than trusted from the client.</p>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <section id="skip">
+        <h2><span class="num">04</span> What is <em>not</em> a prerequisite</h2>
+        <p data-s>Explicit permission to skip things, so the list above doesn’t read as a wall.</p>
+        <div class="grid g2">
+          <div class="card cok" data-s><h5>Deep Go</h5><p>No goroutines, channels, or generics anywhere in <code>hook/</code>. If you can read a struct and an <code>if err != nil</code>, you’re fine.</p></div>
+          <div class="card cok" data-s><h5>The design doc, front to back</h5><p>It’s ~65 k lines. Skim for the § numbers and treat it as a reference, not a reading assignment.</p></div>
+          <div class="card cok" data-s><h5>The LLM prompt engineering</h5><p><code>design-semantic-check.ts</code>’s prompt was tuned against a 25-case eval. Don’t touch it casually — but you don’t need to understand it to work anywhere else.</p></div>
+          <div class="card cok" data-s><h5>Drizzle / SQLite, on day one</h5><p>Not until you touch the server. That’s days away.</p></div>
+          <div class="card cok" data-s><h5>Tree-sitter internals</h5><p>You need the <em>concept</em> — structure-derived ids survive line drift. The wrapper itself is ~90 lines.</p></div>
+          <div class="card cok" data-s><h5>The dashboard</h5><p><code>twing-monitor</code> is a separate repo. Nothing here depends on understanding it.</p></div>
+        </div>
+      </section>
+
+      <section id="gotchas">
+        <h2><span class="num">05</span> Day-one gotchas in this repo</h2>
+        <div class="tw" data-s><table>
+          <thead><tr><th>Thing</th><th>What happens</th></tr></thead>
+          <tbody>
+            <tr><td><strong>This repo dogfoods its own gate</strong></td><td>Your first edit <em>will</em> be denied for having no registered design. That is the system working, not a broken setup.</td></tr>
+            <tr><td><strong>The coordinator is live and shared</strong></td><td>Every design you register while learning is a real record under your identity, visible to teammates. Use a local <code>twing serve</code> for experiments.</td></tr>
+            <tr><td><strong>Build before test</strong></td><td>Tests run against <code>dist/</code>. Editing <code>src/</code> and running tests tests the old code.</td></tr>
+            <tr><td><strong><code>TWING_DESIGN_GATE=off</code></strong></td><td>Exists for spelunking, not for shipping. Use it while reading, not while contributing.</td></tr>
+            <tr><td><strong><code>~/.twing/design-coordinator.log</code></strong></td><td>Every gate decision, with reasons. First place to look when something denies unexpectedly.</td></tr>
+            <tr><td><strong>The daemon is machine-wide</strong></td><td>One process serves every repo. “Restart the daemon” affects all your projects, not just this one.</td></tr>
+            <tr><td><strong>Hooks are wired globally</strong></td><td>Running <code>twing init</code> anywhere wires <code>~/.claude/settings.json</code> for every repo on the machine.</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <section id="ramp">
+        <h2><span class="num">06</span> A first-week ramp</h2>
+        <p data-s>Reading alone won’t do it. Alternate reading with running.</p>
+
+        <div class="progress">
+          <div class="bar"><i id="rampBar"></i></div>
+          <span class="pct" id="rampPct">0 / 0 · 0%</span>
+          <span class="iconbtn" id="rampReset" role="button" tabindex="0">reset</span>
+        </div>
+
+        <div data-checklist="ramp" data-bar="#rampBar" data-pct="#rampPct" data-reset="#rampReset">
+          <div class="item" data-check="r1" data-s><span class="box"></span><div class="b">
+            <b>Day 1 · Read the spine</b>
+            <p><code>types.ts</code> → <code>hook/main.go</code> → <code>protocol.ts</code>.
+               About 45 minutes. Don’t chase every reference; get the shape.</p>
+          </div></div>
+          <div class="item" data-check="r2" data-s><span class="box"></span><div class="b">
+            <b>Day 1 · Stand up a local coordinator</b>
+            <p><code>npm run start --workspace packages/server</code>, then
+               <code>twing admin bootstrap</code> against it. Now your experiments cost nobody
+               anything.</p>
+          </div></div>
+          <div class="item" data-check="r3" data-s><span class="box"></span><div class="b">
+            <b>Day 2 · Run the simulator</b>
+            <p><code>node simulator/dist/index.js --enable-design-gate</code>. Two real
+               <code>claude</code> sessions against a shared fixture, colliding for real. Nothing
+               in the docs teaches as fast as watching this.</p>
+          </div></div>
+          <div class="item" data-check="r4" data-s><span class="box"></span><div class="b">
+            <b>Day 2 · Break things on purpose</b>
+            <p>Delete your cached token and try to edit — watch it fail <em>closed</em>. Register a
+               design, then edit an undeclared file — watch <code>out_of_scope</code>. Add a
+               constraint matching a file you’re about to touch — watch the §17.9 backstop fire.</p>
+          </div></div>
+          <div class="item" data-check="r5" data-s><span class="box"></span><div class="b">
+            <b>Day 3 · Read the gate end to end</b>
+            <p><code>hook/design_gate.go</code>, all 1 700 lines. After days 1–2 it reads as
+               obvious rather than dense — you’ll already have seen most of it happen.</p>
+          </div></div>
+          <div class="item" data-check="r6" data-s><span class="box"></span><div class="b">
+            <b>Day 3 · Then the server</b>
+            <p><code>checks.ts</code> (simplest detector) → <code>design-checks.ts</code> (verdict
+               logic, all pure) → <code>app.ts</code> (the routes, once you know the pieces).</p>
+          </div></div>
+          <div class="item" data-check="r7" data-s><span class="box"></span><div class="b">
+            <b>Day 4 · Write a test as your first contribution</b>
+            <p>The overlap-before-constraint ordering gap in
+               <a href="findings.html#ordering">Findings</a> is a good one: small, real, and it
+               forces you through <code>design-checks.ts</code> and the test harness at once.</p>
+          </div></div>
+          <div class="item" data-check="r8" data-s><span class="box"></span><div class="b">
+            <b>Day 5 · Ship something small through the real gate</b>
+            <p>Use plan mode so <code>ExitPlanMode</code> registers the design for you. Feel the
+               full loop from the inside — that’s the part no document conveys.</p>
+          </div></div>
+        </div>
+      </section>
+
+      <section id="order">
+        <h2><span class="num">07</span> Reading order</h2>
+        <ol class="path" data-s>
+          <li><span class="f">documentation/index.html</span> <span class="d">— you are here</span></li>
+          <li><span class="f">packages/core/src/types.ts</span> <span class="d">— the vocabulary. Read <code>DesignVerdict</code>’s doc comment twice; it <em>is</em> the model</span></li>
+          <li><span class="f">hook/main.go</span> <span class="d">— the entry point, ~130 lines</span></li>
+          <li><span class="f">packages/core/src/protocol.ts</span> <span class="d">— what the hook says to the daemon</span></li>
+          <li><span class="f">packages/cli/src/daemon/claims.ts</span> <span class="d">— how an edit becomes a Claim</span></li>
+          <li><span class="f">packages/server/src/checks.ts</span> <span class="d">— the simplest detector</span></li>
+          <li><span class="f">packages/server/src/design-checks.ts</span> <span class="d">— the synchronous verdict logic</span></li>
+          <li><span class="f">hook/design_gate.go</span> <span class="d">— the blocking path, end to end</span></li>
+          <li><span class="f">packages/server/src/app.ts</span> <span class="d">— the routes, once you know the pieces</span></li>
+        </ol>
+
+        <div class="note key" data-s>
+          <p><span class="h">Read the comments before changing the code they sit on</span>
+          This codebase’s comments are unusually dense and unusually specific — most cite a date, a
+          live incident, and what was tried and rejected. Several are the <em>only</em> record of
+          why an obvious-looking simplification is wrong. Follow the convention when you add code:
+          say what it does, and say what would break if someone “simplified” it.</p>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="foot">
+    <span>← <a href="reference.html">Reference</a></span>
+    <span><a href="findings.html">Findings</a> →</span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

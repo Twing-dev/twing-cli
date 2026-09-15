@@ -1351,7 +1351,7 @@ func allDenyMessages(t *testing.T) map[string]string {
 		Constraints: []designConstraintInfo{{Statement: "money paths need a second pair of eyes", Type: "review_required"}},
 	}
 	return map[string]string{
-		"noDesign":              noDesignReason(),
+		"noDesign":              noDesignReason("src/net/retry.ts"),
 		"flagged":               flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true, "constraint_violation"),
 		"flaggedPendingRev":     flaggedDesignReason("11111111-2222-3333-4444-555555555555", true, true, "constraint_violation"),
 		"flaggedSelfApprove":    flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "symbol_conflict"),
@@ -1523,7 +1523,7 @@ func TestDormantDesignReason_OmitsMissingSummary(t *testing.T) {
 // fixes ended up as their own untracked designs rather than `--group`-linked
 // into the ongoing effort (twing-cli issue, 2026-08-25).
 func TestNoDesignReason_SuggestsJoiningAnExistingOpenDesign(t *testing.T) {
-	msg := noDesignReason()
+	msg := noDesignReason("src/net/retry.ts")
 	if !strings.Contains(msg, "twing design list --mine --status open") {
 		t.Errorf("should point at listing the caller's own open designs, got %q", msg)
 	}
@@ -1535,7 +1535,7 @@ func TestNoDesignReason_SuggestsJoiningAnExistingOpenDesign(t *testing.T) {
 // The agent note is addressed to the agent, not the person reading the
 // terminal, so it must be visibly separated from the user-facing text.
 func TestDenyOutput_SeparatesAgentNoteFromUserText(t *testing.T) {
-	out := denyOutput("PreToolUse", noDesignReason())
+	out := denyOutput("PreToolUse", noDesignReason("src/net/retry.ts"))
 	hook := out["hookSpecificOutput"].(map[string]any)
 	reason := hook["permissionDecisionReason"].(string)
 
@@ -1749,5 +1749,123 @@ func TestAuthRequiredReason_ManagedInstallOffersInviteAndSavedPAT(t *testing.T) 
 		if strings.Contains(msg, forbidden) {
 			t.Errorf("must not name unrelated command %q: %s", forbidden, msg)
 		}
+	}
+}
+
+// The no-design deny is the single most-travelled registration path there
+// is -- it is what a blocked agent is told to run. Before 2026-09 it handed
+// back `--summary "<the goal>" --touches <files>`, which can only produce a
+// prose blob plus a bag of paths: nothing downstream can check a diff
+// against that. These four assert the structured replacement, because a
+// regression here silently returns the common path to the unusable shape.
+func TestNoDesignReason_OffersAStructuredTemplate(t *testing.T) {
+	msg := noDesignReason("src/net/retry.ts")
+	for _, want := range []string{
+		"design register --from - <<'YAML'",
+		"goal:",
+		"changes:",
+		"action: modify",
+		"intent:",
+		"YAML",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("deny should hand back a fillable template, missing %q in:\n%s", want, msg)
+		}
+	}
+}
+
+// The gate already knows which file it refused. Making the reader retype it
+// is friction, and a retyped path is a path that can be typo'd.
+func TestNoDesignReason_PreFillsTheDeniedPath(t *testing.T) {
+	msg := noDesignReason("packages/core/src/identity.ts")
+	if !strings.Contains(msg, "target: packages/core/src/identity.ts") {
+		t.Errorf("target should be pre-filled with the denied path, got:\n%s", msg)
+	}
+}
+
+// Real Edit payloads always carry file_path, but a deny that renders
+// "target: " with nothing after it would hand back invalid YAML -- a
+// helpful message turning into a second failure.
+func TestNoDesignReason_PlaceholderWhenNoPathIsKnown(t *testing.T) {
+	msg := noDesignReason("")
+	if strings.Contains(msg, "target: \n") || strings.Contains(msg, "target:  ") {
+		t.Errorf("empty path must not render a bare `target:`, got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "target: <path, or path::Symbol.method>") {
+		t.Errorf("expected a placeholder target, got:\n%s", msg)
+	}
+}
+
+// The old form appended a bare path, throwing away *why* the file is part
+// of the work -- the one thing only the person editing it knows, and the
+// one thing a later reviewer needs.
+func TestOutOfScopeReason_AppendsAStructuredChange(t *testing.T) {
+	msg := outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts",
+		[]designSummary{{ID: "11111111-2222-3333-4444-555555555555", Summary: "add retry to HttpClient"}})
+	for _, want := range []string{
+		"design amend --id 11111111-2222-3333-4444-555555555555 --from - <<'YAML'",
+		"changes:",
+		"target: src/net/retry.ts",
+		"intent:",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("out-of-scope deny should append a structured change, missing %q in:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "--touches src/net/retry.ts") {
+		t.Errorf("the bare --touches form should be gone, got:\n%s", msg)
+	}
+}
+
+// A template whose indentation was reflowed is no longer valid YAML. Block
+// lines must survive the formatter exactly as written -- this is why they
+// are a separate field from Command rather than an embedded newline string.
+func TestDenyMessage_BlockLinesAreNotReflowed(t *testing.T) {
+	msg := denyMessage("head", "why", nil, []denyAction{{
+		Label: "do it",
+		Block: []string{"line one", "  indented two", "", "line three"},
+	}})
+	for _, want := range []string{
+		denyCommandIndent + "line one",
+		denyCommandIndent + "  indented two",
+		denyCommandIndent + "line three",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("block line lost its exact indentation, missing %q in:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, denyCommandIndent+"\n") {
+		t.Errorf("a blank block line became trailing whitespace:\n%q", msg)
+	}
+}
+
+// A summary accumulates: amend appends a dated `Update:` entry rather than
+// replacing. Rendered through %q that becomes one enormous label full of
+// literal \n, burying the command underneath it. Found live once the
+// structured-append deny started folding change items into summaries.
+func TestSummaryLabel_FirstLineOnlyAndTruncated(t *testing.T) {
+	multi := "Add retry to HttpClient\n\nUpdate (2026-09-14): also touches the queue worker"
+	if got := summaryLabel(multi); got != "Add retry to HttpClient" {
+		t.Errorf("should keep only the first line, got %q", got)
+	}
+	long := strings.Repeat("x", maxSummaryLabel+40)
+	got := summaryLabel(long)
+	if len([]rune(got)) > maxSummaryLabel+3 {
+		t.Errorf("should truncate, got %d runes", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("truncation should be visible, got %q", got)
+	}
+	// Multi-byte must not be cut mid-rune.
+	if strings.Contains(summaryLabel(strings.Repeat("é", maxSummaryLabel+10)), "�") {
+		t.Error("truncation produced a replacement character")
+	}
+}
+
+func TestOutOfScopeReason_LabelDoesNotCarryLiteralNewlines(t *testing.T) {
+	msg := outOfScopeReason("11111111-2222-3333-4444-555555555555", "README.md",
+		[]designSummary{{ID: "11111111-2222-3333-4444-555555555555", Summary: "Add retry\n\nUpdate: and more"}})
+	if strings.Contains(msg, `\n`) {
+		t.Errorf("a multi-line summary leaked escaped newlines into the label:\n%s", msg)
 	}
 }
