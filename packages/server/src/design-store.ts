@@ -15,6 +15,7 @@ import {
   DEFAULT_DESIGN_ACTIVE_TTL_MS,
   DEFAULT_DESIGN_DORMANT_TTL_MS,
   type DesignStatement,
+  type DesignChange,
   type DesignConstraint,
   type DesignConstraintType,
   type DesignConflict,
@@ -405,18 +406,39 @@ export class DesignRegistry {
        * below targets whichever group this resolves to (the *new* one),
        * not whatever `id` was grouped with before this call. */
       groupId?: string;
+      /** The design's full `changes[]` after this amend, already merged by
+       * the caller (app.ts's amend route, via `mergeChanges`). Absent
+       * leaves the stored declaration untouched -- see the write below for
+       * why that is not the same as clearing it. */
+      changes?: DesignChange[];
     },
   ): DesignStatement | undefined {
     const existing = this.get(id);
     if (!existing || existing.status !== "open") return undefined;
     const merged = mergeDesignScope(existing, delta);
     const scopeVersion = existing.scopeVersion + 1;
+    // Keeps `changes` in step with the scope this amend just merged
+    // (2026-09-15). Previously untouched here, so an amended design kept
+    // whatever `changes` it was registered with while `creates`/`touches`
+    // grew past them -- a structured view showing a strict subset of the
+    // real scope, with nothing to signal the gap. Worse on the path that
+    // matters most: `design amend --from` folded its items into the
+    // summary text instead, so the out-of-scope deny telling an agent to
+    // run it produced changes that never appeared as changes.
+    //
+    // Computing the merged list is the caller's job, not this layer's:
+    // deciding what a change *means* belongs next to `ensureChanges`
+    // (design-changes.ts), and this store stays a persistence layer that
+    // writes what it is handed. Absent `delta.changes` leaves the column
+    // alone rather than clearing it -- an amend that touches only
+    // `groupId` or `summary` must not drop a declaration.
     this.db
       .update(designsTable)
       .set({
         touches: JSON.stringify(merged.touches),
         creates: JSON.stringify(merged.creates),
         dependsOn: JSON.stringify(merged.dependsOn),
+        ...(delta.changes !== undefined ? { changes: JSON.stringify(delta.changes) } : {}),
         // `delta.summary`, if present, already IS the final text to persist
         // -- the caller (app.ts's amend route) has already appended it onto
         // the original via design-checks.ts's appendSummaryUpdate before
@@ -581,7 +603,7 @@ export class DesignRegistry {
    * same contract as `amend`). */
   resume(
     id: string,
-    args: { sessionId: string; developerId: string; delta: { touches?: string[]; creates?: string[]; dependsOn?: string[] } },
+    args: { sessionId: string; developerId: string; delta: { touches?: string[]; creates?: string[]; dependsOn?: string[]; changes?: DesignChange[] } },
   ): DesignStatement | undefined {
     const existing = this.get(id);
     if (!existing || existing.status !== "dormant") return undefined;
@@ -597,6 +619,8 @@ export class DesignRegistry {
         touches: JSON.stringify(merged.touches),
         creates: JSON.stringify(merged.creates),
         dependsOn: JSON.stringify(merged.dependsOn),
+        // Same absent-leaves-it-alone rule as `amend` above.
+        ...(args.delta.changes !== undefined ? { changes: JSON.stringify(args.delta.changes) } : {}),
         scopeVersion: existing.scopeVersion + 1,
         lastActivityAt: now,
       })

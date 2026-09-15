@@ -602,13 +602,17 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
   const addCreates = appended ? appended.creates : splitList(options.creates);
   if (!appended) warnIfTouchesMissing(repoRoot, addTouches);
 
-  // The server has no column for `changes` (as of 0.2.26), so an appended
-  // item would otherwise survive only as a bare path -- losing the action
-  // and the reason, which is the whole point of declaring it. Folding the
-  // items into the summary keeps them readable wherever the design is read,
-  // and `appendSummaryUpdate` server-side files it as a dated `Update:`
-  // entry rather than replacing what is there. Swap this for real
-  // `changes[]` persistence once the column exists.
+  // Appended items now ride as real `changes[]` (2026-09-15) -- the column
+  // exists, and the server's `mergeChanges` reconciles them against what the
+  // design already declares. Until then they were flattened into the summary
+  // text, which meant the out-of-scope deny told an agent to run
+  // `amend --from` and then showed the result everywhere *except* the
+  // structured view it was supposed to fill in.
+  //
+  // The summary fold stays as a fallback for an older coordinator with no
+  // `changes` column: it ignores the new field and still files the items as
+  // a dated `Update:` entry via `appendSummaryUpdate`, so a mixed-version
+  // fleet degrades to the old behaviour instead of losing the declaration.
   const appendedSummary = appended
     ? appended.changes
         .map((c) => `${c.id} ${c.action} ${c.target}${c.from ? ` (from ${c.from})` : ""} -- ${c.intent}`)
@@ -630,6 +634,7 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
         addTouches,
         addCreates,
         addDependsOn: splitList(options.dependsOn),
+        ...(appended ? { changes: appended.changes } : {}),
         ...(appendedSummary ? { summary: appendedSummary } : options.summary ? { summary: options.summary } : {}),
         ...(options.group ? { groupId: options.group } : {}),
       }),
