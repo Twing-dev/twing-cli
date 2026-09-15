@@ -130,3 +130,69 @@ test("routes through bedrock-mantle with the right URL", async () => {
     ),
   );
 });
+
+// Plan mode's half of the "every design carries changes[]" guarantee
+// (2026-09-15). The prompt now asks for a fifth field; these pin that the
+// parser carries it through, and -- more importantly -- that a model
+// getting it wrong cannot regress the four fields the gate actually
+// depends on. See design-changes.ts for what consumes it.
+test("extraction carries the model's structured changes through", async () => {
+  const changes = [{ id: "c1", action: "modify", kind: "code", target: "src/net/retry.ts::RetryPolicy.backoff", intent: "exponential, capped at 30s" }];
+  await withBedrockToken("token", () =>
+    withMockFetch(
+      (async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({ creates: [], touches: ["src/net/retry.ts"], dependsOn: [], summary: "s", changes }) } }],
+          }),
+          { status: 200 },
+        )) as typeof fetch,
+      async () => {
+        const result = await extractDesign("plan", { model: "m", region: "us-east-1" });
+        assert.deepEqual(result.changes, changes);
+      },
+    ),
+  );
+});
+
+test("a malformed `changes` never costs the four fields the gate relies on", async () => {
+  // The regression that would matter: adding item 5 to the prompt must not
+  // make the whole ExitPlanMode path more likely to fail soft to "clean".
+  // `changes` is deliberately excluded from parseExtraction's validation --
+  // ensureChanges re-validates it later and derives from scope if it is
+  // unusable.
+  await withBedrockToken("token", () =>
+    withMockFetch(
+      (async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({ creates: ["a.ts"], touches: [], dependsOn: [], summary: "s", changes: "not-a-list" }) } }],
+          }),
+          { status: 200 },
+        )) as typeof fetch,
+      async () => {
+        const result = await extractDesign("plan", { model: "m", region: "us-east-1" });
+        assert.deepEqual(result.creates, ["a.ts"], "scope survives a bad changes field");
+        assert.equal(result.summary, "s");
+      },
+    ),
+  );
+});
+
+test("an extraction with no changes has no `changes` key at all", async () => {
+  // Absent-is-absent: an older model response must leave the type's shape
+  // exactly as it was, not add a key holding undefined.
+  await withBedrockToken("token", () =>
+    withMockFetch(
+      (async () =>
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: JSON.stringify({ creates: [], touches: [], dependsOn: [], summary: "s" }) } }] }),
+          { status: 200 },
+        )) as typeof fetch,
+      async () => {
+        const result = await extractDesign("plan", { model: "m", region: "us-east-1" });
+        assert.ok(!("changes" in result));
+      },
+    ),
+  );
+});

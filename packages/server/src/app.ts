@@ -36,6 +36,7 @@ import {
   isDesignLive,
 } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
+import { ensureChanges, mergeChanges } from "./design-changes.js";
 import { getServerVersion } from "./version.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
 import { findDesignDivergences } from "./design-divergence.js";
@@ -108,6 +109,14 @@ interface AmendRequestBody {
   addCreates?: string[];
   addDependsOn?: string[];
   summary?: string;
+  /** Structured items to append (2026-09-15), from `design amend --from`.
+   * Same client-supplied-and-re-validated status as the register route's
+   * own `changes`; `mergeChanges` is what reconciles them against what the
+   * design already declares. Absent on every other amend, which then
+   * derives from `addCreates`/`addTouches` instead -- so an amend always
+   * keeps the declaration current whether or not the caller knows about
+   * templates. */
+  changes?: DesignChange[];
   /** §17 design linking (2026-08): join (or move to) a different group
    * after registration -- see DesignRegistry.amend's `groupId` param doc
    * comment for the full reasoning. */
@@ -1549,6 +1558,13 @@ export function createApp(options: CreateAppOptions = {}) {
     let touches = body.touches ?? [];
     let dependsOn = body.dependsOn ?? [];
     let summary = body.summary ?? "";
+    /** The extraction's own structured items, when plan text was what got
+     * us here. Hoisted out of the block below purely so the `register`
+     * call further down can reach it -- it is the plan-mode half of
+     * `ensureChanges`'s precedence, and without this the ExitPlanMode path
+     * would fall straight through to mechanical derivation and throw away
+     * the intent the model just read out of the plan. */
+    let extractedChanges: unknown;
 
     if (body.rawPlanText && !hasStructured) {
       const extracted = await extractDesign(body.rawPlanText, { model: extractModel });
@@ -1556,6 +1572,7 @@ export function createApp(options: CreateAppOptions = {}) {
       touches = extracted.touches;
       dependsOn = extracted.dependsOn;
       summary = extracted.summary;
+      extractedChanges = extracted.changes;
     }
 
     // ExitPlanMode retry dedup (§17, 2026-08-18): `handleExitPlanMode`
@@ -1586,7 +1603,17 @@ export function createApp(options: CreateAppOptions = {}) {
             (similarity >= PLAN_RETRY_SIMILARITY_THRESHOLD ? " -- reregistering in place" : " -- below threshold, registering fresh"),
         );
         if (similarity >= PLAN_RETRY_SIMILARITY_THRESHOLD) {
-          design = designs.reregisterFromPlan(candidate.id, { summary, creates, touches, dependsOn, rawPlanExcerpt: body.rawPlanText });
+          design = designs.reregisterFromPlan(candidate.id, {
+            summary,
+            creates,
+            touches,
+            dependsOn,
+            rawPlanExcerpt: body.rawPlanText,
+            // Recomputed from the retry's own scope, exactly as the
+            // `register` call below does -- a plan retry is a fresh
+            // declaration, not an amendment of the previous attempt.
+            changes: ensureChanges({ changes: body.changes ?? extractedChanges, creates, touches, summary }),
+          });
           reregistered = design !== undefined;
         }
       }
@@ -1619,13 +1646,22 @@ export function createApp(options: CreateAppOptions = {}) {
       creates,
       touches,
       dependsOn,
-      // Stored verbatim as declared, never derived here: `creates`/
-      // `touches` above are what the CLI already computed from it
-      // (`deriveScope`), and recomputing server-side would be a second
-      // implementation of the same rule, free to disagree with the one the
-      // caller was shown. Left `undefined` -- not `[]` -- for every
-      // registration that sent no template.
-      changes: body.changes,
+      // Always populated (2026-09-15), never `undefined`. A declared
+      // template is still stored verbatim -- `creates`/`touches` above are
+      // what the CLI already computed from it (`deriveScope`), and
+      // recomputing those server-side would be a second implementation of
+      // the same rule, free to disagree with the one the caller was shown.
+      //
+      // What changed is the *absence* case. This used to store
+      // `body.changes` directly, so every registration that sent no
+      // template -- plan mode, a bare `--summary/--touches`, any older CLI
+      // -- produced a design with no `changes` at all, and twing-monitor
+      // fell back to bare path lists for almost every real design.
+      // `ensureChanges` closes that by falling back to the LLM extraction's
+      // own items and then to the scope the design already declares, so
+      // this field is a guarantee rather than a property of which client
+      // happened to call.
+      changes: ensureChanges({ changes: body.changes ?? extractedChanges, creates, touches, summary }),
       // No truncation (dropped 2026-08-18, was capped at 2000 chars) -- see
       // DesignStatement.rawPlanExcerpt's doc comment in @twing/core for why.
       rawPlanExcerpt: body.rawPlanText,
@@ -2063,6 +2099,18 @@ export function createApp(options: CreateAppOptions = {}) {
       // param doc comment.
       summaryUpdate: body?.summary,
       groupId: body?.groupId,
+      // Keeps the structured declaration in step with the scope this amend
+      // merges (2026-09-15). `mergeChanges` preserves every already-declared
+      // item verbatim and appends only what this amend genuinely adds --
+      // supplied items from an `amend --from` template, else derived from
+      // the newly added paths. Without this an amended design's `changes`
+      // stayed frozen at registration while its paths grew past them.
+      changes: mergeChanges(design.changes, {
+        changes: body?.changes,
+        creates: body?.addCreates ?? [],
+        touches: body?.addTouches ?? [],
+        summary: body?.summary ?? design.summary,
+      }),
     };
     if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.groupId === undefined) {
       return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/groupId" }, 400);
@@ -2157,7 +2205,19 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!body || typeof body.sessionId !== "string") {
       return c.json({ error: "expected { sessionId, addTouches?, addCreates?, addDependsOn? }" }, 400);
     }
-    const delta = { touches: body.addTouches ?? [], creates: body.addCreates ?? [], dependsOn: body.addDependsOn ?? [] };
+    // Same guarantee as register and amend: a resumed design's structured
+    // declaration grows with the scope the resume merges, rather than
+    // staying frozen at whatever it was registered with.
+    const delta = {
+      touches: body.addTouches ?? [],
+      creates: body.addCreates ?? [],
+      dependsOn: body.addDependsOn ?? [],
+      changes: mergeChanges(design.changes, {
+        creates: body.addCreates ?? [],
+        touches: body.addTouches ?? [],
+        summary: design.summary,
+      }),
+    };
 
     const { outcome, open } = checkAmendedScope(design, delta);
 
