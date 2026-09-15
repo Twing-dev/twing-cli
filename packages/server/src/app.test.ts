@@ -5566,3 +5566,150 @@ test("GET /v1/github-app/setup: a repo already fully onboarded (all three files 
   assert.ok(html.includes("already up to date"), html);
   assert.equal(putCount, 0, "nothing changed, so nothing should be committed");
 });
+
+// --- "every design carries changes[]" -- the cross-route invariant ---
+//
+// Structured templates shipped reaching only `register --from`. Every other
+// path produced a design with no `changes` at all, so twing-monitor fell
+// back to bare path lists for almost every real design. These tests assert
+// the guarantee at the *route* level rather than at `ensureChanges`, because
+// the bug was never in the derivation -- it was in which callers reached it.
+//
+// If someone adds a fifth scope-writing path and forgets to wire it up,
+// the last test in this group is the one that fails.
+
+async function registerVia(app: ReturnType<typeof createApp>, body: Record<string, unknown>) {
+  const res = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...developerHeader("dev@test") },
+    body: JSON.stringify({ projectId: "proj-inv", dependsOn: [], ...body }),
+  });
+  return (await res.json()) as { designId?: string; error?: string };
+}
+
+test("changes[]: a bare summary/touches registration still gets a structured declaration", async () => {
+  const { app, designs } = freshNoAuthApp();
+  const { designId } = await registerVia(app, {
+    sessionId: "s-bare",
+    summary: "No template anywhere in sight",
+    creates: ["src/new.ts"],
+    touches: ["docs/guide.md"],
+  });
+  const design = designs.get(designId!);
+  assert.ok(design?.changes && design.changes.length === 2, "derived from scope, not left absent");
+  assert.deepEqual(
+    design!.changes!.map((c) => [c.action, c.kind, c.target]),
+    [
+      ["add", "code", "src/new.ts"],
+      ["modify", "docs", "docs/guide.md"],
+    ],
+  );
+});
+
+test("changes[]: a client-supplied template is stored verbatim, never re-derived", async () => {
+  const { app, designs } = freshNoAuthApp();
+  const changes = [{ id: "c1", action: "rewrite", kind: "api", target: "src/z.ts", intent: "authored, not inferred" }];
+  const { designId } = await registerVia(app, { sessionId: "s-tpl", summary: "Templated", creates: [], touches: ["src/z.ts"], changes });
+  assert.deepEqual(designs.get(designId!)?.changes, changes);
+});
+
+test("changes[]: an amend keeps the declaration in step with the scope it merged", async () => {
+  const { app, designs } = freshNoAuthApp();
+  const { designId } = await registerVia(app, { sessionId: "s-amend", summary: "Start", creates: [], touches: ["a.ts"] });
+  const before = designs.get(designId!)!.changes!.length;
+
+  const res = await app.request(`/v1/designs/${designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...developerHeader("dev@test") },
+    body: JSON.stringify({ addTouches: ["b/migrations/x.sql"] }),
+  });
+  assert.equal(res.status, 200);
+
+  const design = designs.get(designId!)!;
+  assert.equal(design.changes!.length, before + 1, "the added path became a declared change");
+  assert.equal(design.changes!.at(-1)!.kind, "schema", "and its kind was inferred from the path");
+  assert.equal(design.changes!.length, design.creates.length + design.touches.length, "declaration and scope stay the same size");
+});
+
+test("changes[]: an amend never rewrites an authored intent", async () => {
+  const { app, designs } = freshNoAuthApp();
+  const authored = [{ id: "c1", action: "modify", kind: "code", target: "a.ts", intent: "the author's own words" }];
+  const { designId } = await registerVia(app, { sessionId: "s-keep", summary: "Start", creates: [], touches: ["a.ts"], changes: authored });
+
+  await app.request(`/v1/designs/${designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...developerHeader("dev@test") },
+    body: JSON.stringify({ addTouches: ["b.ts"] }),
+  });
+  assert.deepEqual(designs.get(designId!)!.changes![0], authored[0]);
+});
+
+test("changes[]: a repeated amend of the same path does not duplicate the declaration", async () => {
+  const { app, designs } = freshNoAuthApp();
+  const { designId } = await registerVia(app, { sessionId: "s-dup", summary: "Start", creates: [], touches: ["a.ts"] });
+  for (let i = 0; i < 3; i += 1) {
+    await app.request(`/v1/designs/${designId}/amend`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...developerHeader("dev@test") },
+      body: JSON.stringify({ addTouches: ["b.ts"] }),
+    });
+  }
+  const design = designs.get(designId!)!;
+  assert.equal(design.changes!.length, 2, "amending the same path three times adds it once");
+});
+
+test("changes[]: a plan retry replaces the declaration rather than accumulating it", async () => {
+  // reregisterFromPlan is a *full replace* -- a file dropped between plan
+  // attempts must not linger, and neither must the change describing it.
+  // This is the one scope-writing path where merging would be wrong.
+  const { app, designs } = freshNoAuthApp();
+  const first = await registerVia(app, { sessionId: "s-retry", summary: "First attempt", creates: [], touches: ["gone.ts", "kept.ts"] });
+  const design = designs.get(first.designId!)!;
+  assert.equal(design.changes!.length, 2);
+
+  const replaced = designs.reregisterFromPlan(design.id, {
+    summary: "Second attempt",
+    creates: [],
+    touches: ["kept.ts"],
+    dependsOn: [],
+    rawPlanExcerpt: "plan 2",
+    changes: [{ id: "c1", action: "modify", kind: "code", target: "kept.ts", intent: "still here" }],
+  });
+  assert.equal(replaced!.changes!.length, 1, "the dropped file's change is gone, not merged forward");
+  assert.equal(replaced!.changes![0].target, "kept.ts");
+});
+
+test("changes[]: no scope-writing route can produce a design without a declaration", async () => {
+  // The invariant itself, checked across every route that can create or
+  // widen a design's scope. A fifth path added later without wiring up
+  // ensureChanges fails here rather than silently shipping bare path lists
+  // again.
+  const { app, designs } = freshNoAuthApp();
+  const ids: string[] = [];
+
+  ids.push((await registerVia(app, { sessionId: "r1", summary: "bare", creates: ["a.ts"], touches: [] })).designId!);
+  ids.push((await registerVia(app, { sessionId: "r2", summary: "touches only", creates: [], touches: ["b.ts"] })).designId!);
+  ids.push(
+    (await registerVia(app, {
+      sessionId: "r3",
+      summary: "templated",
+      creates: [],
+      touches: ["c.ts"],
+      changes: [{ id: "c1", action: "modify", kind: "code", target: "c.ts", intent: "i" }],
+    })).designId!,
+  );
+
+  // ...then widen one through each mutating route.
+  await app.request(`/v1/designs/${ids[0]}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...developerHeader("dev@test") },
+    body: JSON.stringify({ addTouches: ["d.ts"] }),
+  });
+
+  for (const id of ids) {
+    const design = designs.get(id)!;
+    const scope = design.creates.length + design.touches.length;
+    assert.ok(design.changes, `design ${design.sessionId} has no changes[] at all`);
+    assert.equal(design.changes!.length, scope, `design ${design.sessionId}: ${design.changes!.length} changes for ${scope} declared paths`);
+  }
+});

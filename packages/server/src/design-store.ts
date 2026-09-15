@@ -791,7 +791,20 @@ export class DesignRegistry {
    * plan retry. Do not "fix" this by threading the new groupId through. */
   reregisterFromPlan(
     id: string,
-    args: { summary: string; creates: string[]; touches: string[]; dependsOn: string[]; rawPlanExcerpt: string },
+    args: {
+      summary: string;
+      creates: string[];
+      touches: string[];
+      dependsOn: string[];
+      rawPlanExcerpt: string;
+      /** The retry's own declaration, already computed by the caller via
+       * `ensureChanges`. **Replaced, never merged** -- same full-replace
+       * contract as `creates`/`touches` above, and for the same reason: a
+       * file dropped between plan attempts must not linger, and neither
+       * must the change that described it. This is the one scope-writing
+       * path where merging would be wrong. */
+      changes?: DesignChange[];
+    },
   ): DesignStatement | undefined {
     const existing = this.get(id);
     if (!existing) return undefined;
@@ -805,6 +818,11 @@ export class DesignRegistry {
         creates: JSON.stringify(args.creates),
         touches: JSON.stringify(args.touches),
         dependsOn: JSON.stringify(args.dependsOn),
+        // Replaced alongside the scope it describes (2026-09-15), not left
+        // behind: this row is being rewritten from a *new* plan, so the
+        // previous attempt's changes describe files that may no longer be
+        // in scope at all.
+        ...(args.changes !== undefined ? { changes: JSON.stringify(args.changes) } : {}),
         rawPlanExcerpt: args.rawPlanExcerpt,
         scopeVersion: existing.scopeVersion + 1,
         lastActivityAt: now,

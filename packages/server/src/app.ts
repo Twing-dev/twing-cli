@@ -1603,7 +1603,17 @@ export function createApp(options: CreateAppOptions = {}) {
             (similarity >= PLAN_RETRY_SIMILARITY_THRESHOLD ? " -- reregistering in place" : " -- below threshold, registering fresh"),
         );
         if (similarity >= PLAN_RETRY_SIMILARITY_THRESHOLD) {
-          design = designs.reregisterFromPlan(candidate.id, { summary, creates, touches, dependsOn, rawPlanExcerpt: body.rawPlanText });
+          design = designs.reregisterFromPlan(candidate.id, {
+            summary,
+            creates,
+            touches,
+            dependsOn,
+            rawPlanExcerpt: body.rawPlanText,
+            // Recomputed from the retry's own scope, exactly as the
+            // `register` call below does -- a plan retry is a fresh
+            // declaration, not an amendment of the previous attempt.
+            changes: ensureChanges({ changes: body.changes ?? extractedChanges, creates, touches, summary }),
+          });
           reregistered = design !== undefined;
         }
       }
