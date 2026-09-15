@@ -5713,3 +5713,86 @@ test("changes[]: no scope-writing route can produce a design without a declarati
     assert.equal(design.changes!.length, scope, `design ${design.sessionId}: ${design.changes!.length} changes for ${scope} declared paths`);
   }
 });
+
+// --- ExitPlanMode specifically: the flow that registers most designs ---
+//
+// This is the path the original gap actually mattered on. The two tests
+// below drive the real route with rawPlanText and a mocked model, one
+// returning structured items and one returning none, because "plan mode is
+// covered" was claimed once already on the strength of reasoning rather
+// than a run.
+
+function llmReturning(payload: Record<string, unknown>): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }), { status: 200 })) as typeof fetch;
+}
+
+test("changes[]: ExitPlanMode with a model that returns changes keeps the model's authored intent", async () => {
+  const { app, designs } = freshNoAuthApp();
+  const modelChanges = [
+    { id: "c1", action: "modify", kind: "code", target: "src/net/retry.ts::RetryPolicy.backoff", intent: "exponential growth capped at 30s" },
+    { id: "c2", action: "add", kind: "test", target: "src/net/retry.test.ts", intent: "cover the capped backoff" },
+  ];
+  await withBedrockEnv(() =>
+    withMockFetch(
+      llmReturning({ creates: ["src/net/retry.test.ts"], touches: ["src/net/retry.ts"], dependsOn: [], summary: "retry policy", changes: modelChanges }),
+      async () => {
+        const res = await app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...developerHeader("dev@test") },
+          body: JSON.stringify({ projectId: "proj-plan", sessionId: "s-plan-rich", rawPlanText: "Add capped exponential backoff to RetryPolicy, with a test." }),
+        });
+        const { designId } = (await res.json()) as { designId: string };
+        const design = designs.get(designId)!;
+        assert.deepEqual(design.changes, modelChanges, "the plan's own intent survives -- not re-derived into a generic one");
+      },
+    ),
+  );
+});
+
+test("changes[]: ExitPlanMode with a model that returns NO changes still gets a declaration", async () => {
+  // The fallback that makes the guarantee hold rather than depend on model
+  // behaviour. An older model, a refusal, a malformed item -- the design
+  // still carries a declaration, derived from the scope the same call
+  // extracted, and honestly labelled as derived.
+  const { app, designs } = freshNoAuthApp();
+  await withBedrockEnv(() =>
+    withMockFetch(llmReturning({ creates: ["docs/plan.md"], touches: ["src/a.ts"], dependsOn: [], summary: "a plan" }), async () => {
+      const res = await app.request("/v1/designs/check", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...developerHeader("dev@test") },
+        body: JSON.stringify({ projectId: "proj-plan", sessionId: "s-plan-bare", rawPlanText: "Write docs and touch a file." }),
+      });
+      const { designId } = (await res.json()) as { designId: string };
+      const design = designs.get(designId)!;
+      assert.equal(design.changes!.length, 2, "derived from the extraction's own scope");
+      assert.deepEqual(
+        design.changes!.map((c) => [c.action, c.kind, c.target]),
+        [
+          ["add", "docs", "docs/plan.md"],
+          ["modify", "code", "src/a.ts"],
+        ],
+      );
+      assert.ok(design.changes!.every((c) => c.intent.includes("derived")), "a derived change says so rather than posing as authored");
+    }),
+  );
+});
+
+test("changes[]: ExitPlanMode with a model returning malformed changes falls back, it does not fail", async () => {
+  const { app, designs } = freshNoAuthApp();
+  await withBedrockEnv(() =>
+    withMockFetch(
+      llmReturning({ creates: [], touches: ["src/a.ts"], dependsOn: [], summary: "s", changes: [{ id: "c1", action: "teleport", target: "src/a.ts", intent: "bogus" }] }),
+      async () => {
+        const res = await app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...developerHeader("dev@test") },
+          body: JSON.stringify({ projectId: "proj-plan", sessionId: "s-plan-bad", rawPlanText: "plan" }),
+        });
+        const design = designs.get(((await res.json()) as { designId: string }).designId)!;
+        assert.equal(design.changes!.length, 1, "an off-list action is dropped, then derivation covers the path");
+        assert.equal(design.changes![0].action, "modify");
+      },
+    ),
+  );
+});
