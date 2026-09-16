@@ -47,6 +47,71 @@ func TestWithResolvedTwingCLI_RewritesCommandsEmbeddedInNotes(t *testing.T) {
 	}
 }
 
+// The commands a deny suggests are only runnable where the repo is. A
+// session started above the repo -- the case the machine-wide wiring exists
+// for -- was handed `twing design resolve --id ...`, which resolves its
+// project from its own cwd and so either failed outright or (with --server)
+// asked about a project id computed from the wrong directory and got a
+// confident empty answer. Found live 2026-09-16.
+func TestRepoScope_NamesTheRepoOnlyWhenTheSessionIsOutsideIt(t *testing.T) {
+	shim := bootstrapOnlyMachine(t)
+	t.Cleanup(func() { repoScopeFlag = "" })
+
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	setRepoScope(parent, repo)
+	got := withResolvedTwingCLI("twing design resolve --id abc --justify \"<reason>\"")
+	want := shim + " -C " + repo + " design resolve"
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("from outside the repo: withResolvedTwingCLI() = %q, want it to start with %q", got, want)
+	}
+
+	for _, cwd := range []string{repo, filepath.Join(repo, "src")} {
+		setRepoScope(cwd, repo)
+		got := withResolvedTwingCLI("twing design resolve --id abc")
+		if strings.Contains(got, "-C ") {
+			t.Errorf("from %q (inside the repo): withResolvedTwingCLI() = %q, want no -C", cwd, got)
+		}
+	}
+}
+
+func TestRepoScope_LeavesMachineLevelCommandsAlone(t *testing.T) {
+	// `login`/`whoami` resolve a coordinator and a machine-local token, never
+	// a project. Naming a repo there would imply a dependence they don't have.
+	bootstrapOnlyMachine(t)
+	t.Cleanup(func() { repoScopeFlag = "" })
+
+	parent := t.TempDir()
+	setRepoScope(parent, filepath.Join(parent, "repo"))
+
+	for _, cmd := range []string{"twing login --token <YOUR-SAVED-PAT>", "twing whoami"} {
+		if got := withResolvedTwingCLI(cmd); strings.Contains(got, "-C ") {
+			t.Errorf("withResolvedTwingCLI(%q) = %q, want no -C", cmd, got)
+		}
+	}
+}
+
+func TestPathWithin_ComparesResolvedPaths(t *testing.T) {
+	// `git rev-parse --show-toplevel` resolves symlinks and a harness-reported
+	// cwd does not, so /tmp vs /private/tmp on macOS would otherwise read as
+	// two unrelated places and put a spurious -C on every deny.
+	repo := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pathWithin(repo, resolved) {
+		t.Errorf("pathWithin(%q, %q) = false, want true", repo, resolved)
+	}
+	if pathWithin(t.TempDir(), resolved) {
+		t.Error("pathWithin() = true for an unrelated directory, want false")
+	}
+}
+
 func TestWithResolvedTwingCLI_LeavesProseAlone(t *testing.T) {
 	// Matching on the subcommand, not the bare word, is what protects these.
 	bootstrapOnlyMachine(t)

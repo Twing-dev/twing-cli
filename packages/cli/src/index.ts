@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { startDaemon } from "./daemon/server.js";
 import { defaultSocketPath, authFetch, computeDeveloperId, readConfig } from "@twing/core";
 import { runInit } from "./init.js";
@@ -77,6 +79,7 @@ function printUsage(): void {
   console.error(
     [
       "Usage:",
+      "  twing [-C <dir>] <command>                (act on the repo at <dir>, not the current one)",
       "  twing --version | -v",
       "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]",
       "  twing init --ghuser                       (once per machine: work from any directory)",
@@ -126,7 +129,7 @@ function printUsage(): void {
 async function runDesignCommand(rest: string[]): Promise<void> {
   const [sub, ...subArgs] = rest;
   const flags = parseFlags(subArgs);
-  const cwd = process.cwd();
+  const cwd = commandCwd;
 
   // `--help` after a subcommand name (`design register --help`) used to
   // reach the real handler like any other unrecognized flag and, for
@@ -200,7 +203,7 @@ async function runDesignCommand(rest: string[]): Promise<void> {
  * alignment-thread subcommands (statefulness redesign, 2026-08) -- same
  * dispatch shape as `runDesignCommand` below. */
 async function runAlignCommand(rest: string[]): Promise<void> {
-  const cwd = process.cwd();
+  const cwd = commandCwd;
   const [maybeSub, ...subArgs] = rest;
 
   // Same dispatcher-level fix as runDesignCommand -- see its comment.
@@ -235,7 +238,7 @@ async function runAlignCommand(rest: string[]): Promise<void> {
 async function runAdminCommand(rest: string[]): Promise<void> {
   const [sub, ...subArgs] = rest;
   const flags = parseFlags(subArgs);
-  const cwd = process.cwd();
+  const cwd = commandCwd;
 
   // Same dispatcher-level fix as runDesignCommand -- see its comment.
   if (flags.help === "true") {
@@ -271,7 +274,7 @@ async function runAdminCommand(rest: string[]): Promise<void> {
 async function runConstraintsCommand(rest: string[]): Promise<void> {
   const [sub, ...subArgs] = rest;
   const flags = parseFlags(subArgs);
-  const cwd = process.cwd();
+  const cwd = commandCwd;
 
   // Same dispatcher-level fix as runDesignCommand -- see its comment.
   if (flags.help === "true") {
@@ -295,7 +298,7 @@ async function runConstraintsCommand(rest: string[]): Promise<void> {
 async function runProjectCommand(rest: string[]): Promise<void> {
   const [sub, ...subArgs] = rest;
   const flags = parseFlags(subArgs);
-  const cwd = process.cwd();
+  const cwd = commandCwd;
 
   // Same dispatcher-level fix as runDesignCommand -- see its comment.
   if (flags.help === "true") {
@@ -390,8 +393,42 @@ async function runDaemonForeground(): Promise<void> {
   }
 }
 
+/**
+ * The directory every repo-scoped command resolves its repo from: `-C <dir>`
+ * when given, cwd otherwise.
+ *
+ * A module-level value rather than a parameter threaded through twenty call
+ * sites, because it is genuinely process-wide: it answers "where is this
+ * invocation standing", which is exactly what cwd answered before, and no
+ * single `twing` process is ever standing in two places.
+ */
+let commandCwd = process.cwd();
+
+/**
+ * Pulls `-C <dir>` out of argv, leaving the rest for the normal parsers.
+ *
+ * Extracted before anything else reads argv: `parseFlags` only recognises
+ * `--flags`, so a leftover `-C` and its value would sit in the positional
+ * stream and be read as a subcommand.
+ */
+function takeRepoScopeFlag(argv: string[]): string[] {
+  const remaining: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if ((argv[i] === "-C" || argv[i] === "--directory") && argv[i + 1] !== undefined) {
+      const dir = path.resolve(argv[i + 1]);
+      if (!fs.existsSync(dir)) throw new Error(`twing: -C ${argv[i + 1]}: no such directory`);
+      commandCwd = dir;
+      i++;
+      continue;
+    }
+    remaining.push(argv[i]);
+  }
+  return remaining;
+}
+
 async function main(): Promise<void> {
-  const [, , command, ...rest] = process.argv;
+  const [, , ...argv] = takeRepoScopeFlag(process.argv);
+  const [command, ...rest] = argv;
   const flags = parseFlags(rest);
 
   // A bare `twing --help`/`-h` already printed usage via the "unknown
@@ -423,31 +460,31 @@ async function main(): Promise<void> {
         noAuth: flags["no-auth"] === "true",
         noGithub: flags["no-github"] === "true",
         unattended: flags.unattended === "true",
-        cwd: process.cwd(),
+        cwd: commandCwd,
       });
       return;
     case "uninstall":
       await runUninstall({ dryRun: flags["dry-run"] === "true" });
       return;
     case "login":
-      await runLogin({ server: flags.server, token: flags.token, cwd: process.cwd() });
+      await runLogin({ server: flags.server, token: flags.token, cwd: commandCwd });
       return;
     case "keygen": {
       if (!flags.invite) throw new Error("twing keygen: --invite <code> is required");
-      const serverUrl = resolveServerUrl(process.cwd(), flags.server);
+      const serverUrl = resolveServerUrl(commandCwd, flags.server);
       if (!serverUrl) throw new Error("twing keygen: no server URL given -- pass --server <url> or set TWING_SERVER.");
-      await runKeygen({ cwd: process.cwd(), serverUrl, invite: flags.invite, label: flags.label });
+      await runKeygen({ cwd: commandCwd, serverUrl, invite: flags.invite, label: flags.label });
       return;
     }
     case "whoami":
-      await runWhoami({ server: flags.server, cwd: process.cwd(), showToken: flags["show-token"] === "true" });
+      await runWhoami({ server: flags.server, cwd: commandCwd, showToken: flags["show-token"] === "true" });
       return;
     case "servers":
       await runServers({ showToken: flags["show-token"] === "true" });
       return;
     case "join":
       if (flags.github !== "true") throw new Error("twing join: --github is required (the only join mechanism this command supports so far)");
-      await runJoinGithub({ server: flags.server, cwd: process.cwd() });
+      await runJoinGithub({ server: flags.server, cwd: commandCwd });
       return;
     case "daemon":
       if (rest[0] === "restart") {

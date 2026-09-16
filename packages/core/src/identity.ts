@@ -33,13 +33,34 @@ function readOrCreatePersistedId(idPath: string): string {
   }
   const generated = crypto.randomUUID();
   try {
-    fs.mkdirSync(path.dirname(idPath), { recursive: true });
-    fs.writeFileSync(idPath, generated);
+    // Write into the directory, never create it. `mkdirSync(recursive)` here
+    // conjured a `.git` where there was none: a twing command run outside any
+    // repo resolved a repo root of `$HOME`, and this wrote `$HOME/.git/
+    // twing-project-id`, leaving behind a directory that is not a repository
+    // but looks exactly like one to every `existsSync(".git")` check --
+    // including findRepoRoot's, which then stopped its walk there forever
+    // after. Found on this developer's own machine 2026-09-16, dated
+    // 2026-08-17: every out-of-repo resolution since had been silently
+    // attributed to that phantom repo.
+    if (fs.existsSync(path.dirname(idPath))) fs.writeFileSync(idPath, generated);
   } catch {
     // Best-effort persistence; an ephemeral id for this run is still
     // correct, just not durable across processes.
   }
   return generated;
+}
+
+/**
+ * Whether git itself considers `dir` to be inside a repository.
+ *
+ * `findRepoRoot` answers the same question with `existsSync(".git")`, which
+ * is cheap and right almost always -- but the two disagree for a directory
+ * holding a `.git` that is not a real repo, and that disagreement is exactly
+ * how a project id gets invented for a place that has no project. Anything
+ * about to *act* on a repo asks git; the cheap walk stays cheap.
+ */
+export function isGitRepo(dir: string): boolean {
+  return git(["rev-parse", "--show-toplevel"], dir) !== null;
 }
 
 /**
@@ -78,6 +99,24 @@ export function computeProjectId(repoRoot: string): string {
   const remoteUrl = git(["remote", "get-url", "origin"], repoRoot);
   if (remoteUrl) {
     return crypto.createHash("sha256").update(canonicalizeRemoteUrl(remoteUrl)).digest("hex");
+  }
+  // The no-remote fallback below is for a *real* repo that simply has no
+  // origin. A directory that is no repo at all reaches here the same way --
+  // `findRepoRoot` returns its argument unchanged when the walk finds no
+  // `.git` -- and used to be handed a freshly minted random id, which the
+  // caller then queried the coordinator with: a syntactically perfect id for
+  // a project that has never existed. `twing design list --server <url>` run
+  // one directory above a repo answered "no designs", exit 0, every call
+  // inventing a different id (found live 2026-09-16). Refusing here is what
+  // turns that into a question the caller can answer.
+  // git's answer, not `existsSync(".git")`: a stray `.git` directory passes
+  // the cheap check and is not a repo, which is the case that made this
+  // fallback mint ids for a phantom project in the first place.
+  if (!isGitRepo(repoRoot)) {
+    throw new Error(
+      `twing: ${repoRoot} is not a git repository, so twing cannot tell which project you mean.\n` +
+        "  Run twing from inside the repo, or point it at one: -C <path-to-repo>",
+    );
   }
   // Edge case (§8): no remote means no way to clone, so no cross-developer
   // coordination need by construction — a random id gitignored per-repo.

@@ -10,6 +10,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -299,7 +300,11 @@ test("createRepoResolver: repeated lookups are served from the cache", () => {
  * absolute path inside it. */
 function repo(optedIn: boolean): { root: string; file: (name: string) => string } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), optedIn ? "twing-optedin-" : "twing-foreign-"));
-  fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+  // A real `git init`, not a bare `mkdir .git`: projectId resolution asks git
+  // now, precisely because a `.git` that is not a repository is a real thing
+  // that happens (one sat in this developer's $HOME for a month, capturing
+  // every out-of-repo resolution on the machine).
+  execFileSync("git", ["init", "-q"], { cwd: root });
   fs.mkdirSync(path.join(root, ".twing"), { recursive: true });
   fs.writeFileSync(path.join(root, ".twing", "twing.yml"), optedIn ? "capture:\n  enabled: true\n" : "coordinator:\n  serverUrl: http://localhost:8787\n");
   fs.mkdirSync(path.join(root, "src"), { recursive: true });

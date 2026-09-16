@@ -11,11 +11,12 @@
  * tied to editing a specific checkout.
  */
 
-import { findRepoRoot, computeProjectId, authFetch } from "@twing/core";
+import { computeProjectId, authFetch } from "@twing/core";
+import { requireRepoRoot } from "./repo-scope.js";
 import { resolveServerUrl, requireAuth } from "./auth.js";
 
 function resolveProjectId(cwd: string, explicit?: string): string {
-  return explicit ?? computeProjectId(findRepoRoot(cwd));
+  return explicit ?? computeProjectId(requireRepoRoot(cwd));
 }
 
 export interface ConstraintsListOptions {

@@ -96,6 +96,12 @@ func setCachedNoAuth(t *testing.T, serverURL string) {
 // real code path rather than a mock of it.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
+	// repoScopeFlag is process-global (design_gate.go) because a real hook
+	// process handles exactly one event for one repo. Tests share a process,
+	// so without this a run that legitimately sets it leaks `-C <its repo>`
+	// into the deny text of every later test in the file.
+	repoScopeFlag = ""
+	t.Cleanup(func() { repoScopeFlag = "" })
 	old := os.Stdout
 	r, w, err := os.Pipe()
 	if err != nil {

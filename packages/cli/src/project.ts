@@ -6,7 +6,8 @@
  * repo's `computeProjectId`, same pattern `design.ts` already uses).
  */
 
-import { findRepoRoot, computeProjectId, authFetch, twingConfigPath } from "@twing/core";
+import { computeProjectId, authFetch, twingConfigPath } from "@twing/core";
+import { requireRepoRoot } from "./repo-scope.js";
 import * as fs from "node:fs";
 import { resolveServerUrl, requireAuth } from "./auth.js";
 import { enableInstallEnforcement, disableInstallEnforcement } from "./enforce-hooks.js";
@@ -14,7 +15,7 @@ import { enableInstallEnforcement, disableInstallEnforcement } from "./enforce-h
 type Role = "admin" | "member";
 
 function resolveProjectId(cwd: string, explicit?: string): string {
-  return explicit ?? computeProjectId(findRepoRoot(cwd));
+  return explicit ?? computeProjectId(requireRepoRoot(cwd));
 }
 
 export interface ProjectInviteOptions {
@@ -159,7 +160,7 @@ export interface ProjectEnforcementOptions {
 }
 
 export function runProjectEnableEnforcement(options: ProjectEnforcementOptions): void {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   if (!fs.existsSync(twingConfigPath(repoRoot))) {
     console.warn("twing project enable-enforcement: this repo has no .twing/twing.yml yet -- the hook will no-op until `twing init` sets one up");
   }
@@ -176,7 +177,7 @@ export function runProjectEnableEnforcement(options: ProjectEnforcementOptions):
 }
 
 export function runProjectDisableEnforcement(options: ProjectEnforcementOptions): void {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   if (!disableInstallEnforcement(repoRoot)) {
     console.log("twing project disable-enforcement: nothing to remove -- not present in .claude/settings.json");
     return;

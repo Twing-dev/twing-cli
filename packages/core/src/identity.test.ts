@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { canonicalizeRemoteUrl, parseGithubOwnerRepo, getOriginRemoteUrl } from "./identity.js";
+import { canonicalizeRemoteUrl, parseGithubOwnerRepo, getOriginRemoteUrl, computeProjectId } from "./identity.js";
 
 // Fixture table shared conceptually with hook/identity_test.go -- both must
 // canonicalize every one of these to the same string, or projectId diverges
@@ -52,6 +52,57 @@ test("parseGithubOwnerRepo: undefined for a malformed/incomplete GitHub path", (
 });
 
 // A repo with no `origin` remote is a normal, handled case (§17 Phase 3's
+// A directory with no `.git` at all reaches the no-remote branch the same
+// way a real repo without an origin does -- findRepoRoot hands back its own
+// argument when the walk finds nothing -- and used to be given a freshly
+// minted random id, which callers then queried the coordinator with. Found
+// live 2026-09-16: `design list --server <url>` one directory above a repo
+// answered "no designs", exit 0, a different invented id every call.
+test("computeProjectId: refuses to invent an id for a directory that is not a repo", () => {
+  const notARepo = fs.mkdtempSync(path.join(os.tmpdir(), "twing-identity-not-a-repo-"));
+  try {
+    assert.throws(() => computeProjectId(notARepo), /not a git repository[\s\S]*-C <path-to-repo>/);
+    assert.equal(fs.existsSync(path.join(notARepo, ".git", "twing-project-id")), false, "and writes nothing");
+  } finally {
+    fs.rmSync(notARepo, { recursive: true, force: true });
+  }
+});
+
+// How the phantom repo got made, and why it survived: a twing command run
+// outside any repo resolved a root of $HOME, the no-remote fallback created
+// $HOME/.git to hold its id, and every findRepoRoot walk from anywhere under
+// $HOME stopped there from then on -- a directory that is not a repository
+// but satisfies every existsSync(".git") check. Found on this developer's
+// machine 2026-09-16, dated 2026-08-17.
+test("computeProjectId: never conjures a .git directory, and rejects a stray one", () => {
+  const notARepo = fs.mkdtempSync(path.join(os.tmpdir(), "twing-identity-phantom-"));
+  try {
+    assert.throws(() => computeProjectId(notARepo), /not a git repository/);
+    assert.equal(fs.existsSync(path.join(notARepo, ".git")), false, "must not create .git");
+
+    // And the shape that actually bit: a .git that exists but is not a repo.
+    fs.mkdirSync(path.join(notARepo, ".git"));
+    assert.throws(() => computeProjectId(notARepo), /not a git repository/, "a stray .git is not a repo, whatever existsSync says");
+    assert.equal(fs.existsSync(path.join(notARepo, ".git", "twing-project-id")), false, "and nothing is written into it");
+  } finally {
+    fs.rmSync(notARepo, { recursive: true, force: true });
+  }
+});
+
+test("computeProjectId: a real repo with no origin still gets its persisted id", () => {
+  // The fallback this guard must not break: no remote means no way to clone,
+  // so a gitignored random id per repo is correct (§8).
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "twing-identity-no-remote-"));
+  try {
+    execFileSync("git", ["init", "--quiet"], { cwd: repoRoot });
+    const first = computeProjectId(repoRoot);
+    assert.match(first, /^[0-9a-f-]{36}$/);
+    assert.equal(computeProjectId(repoRoot), first, "and it is stable across calls");
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
 // no-remote fallback) -- git's own "fatal/error: No such remote 'origin'"
 // isn't a real error here and shouldn't leak anywhere just because we
 // happen to shell out to git to find that out (found live, 2026-08-18).

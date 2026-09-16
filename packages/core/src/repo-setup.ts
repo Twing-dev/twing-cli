@@ -109,7 +109,14 @@ twing_install_for_repo() {
   echo "twing: installing \$_spec (coordinator \$_server)" >> "\$_log" 2>/dev/null
 
   npm install --prefix "\$_lib" "\$_spec" --no-fund --no-audit --loglevel=error >> "\$_log" 2>&1 </dev/null
-  [ -f "\$_cli" ] && node "\$_cli" init --unattended >> "\$_log" 2>&1 </dev/null
+
+  # From the repo, in a subshell. \`init\` resolves the coordinator from its own
+  # cwd, and the caller's cwd is not reliably inside the repo being installed
+  # for: a session started above it (\`cd ~/work && claude\`, then edit a file
+  # below) is exactly the case the resolver identifies by file path instead.
+  # Installing the CLI and then failing with "no coordinator configured" left
+  # the machine half-set-up -- lib present, no hook binary, nothing gated.
+  [ -f "\$_cli" ] && ( cd "\$_root" && node "\$_cli" init --unattended ) >> "\$_log" 2>&1 </dev/null
 }
 `;
 }

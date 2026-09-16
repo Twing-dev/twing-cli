@@ -166,22 +166,28 @@ test("isResolverWired / removeResolverWiring: round trip", async () => {
  * way a real install would, so tests can follow what happens *after* the
  * install -- including whether the payload still reaches the binary.
  */
-function recordingNpm(opts: { installsHook?: boolean } = {}): { path: string; installs: () => number } {
+function recordingNpm(opts: { installsHook?: boolean } = {}): { path: string; installs: () => number; initCwd: () => string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-resolve-npm-"));
   const record = path.join(dir, "record.txt");
+  // A real `npm install` leaves the CLI behind, which is what gates the
+  // script's `init` step -- so the fake one has to as well, or the step under
+  // test never runs.
+  const plantCli = 'mkdir -p "$HOME/.twing/lib/node_modules/@twing/cli/dist"\n: > "$HOME/.twing/lib/node_modules/@twing/cli/dist/index.js"\n';
   const plantHook = opts.installsHook
     ? 'mkdir -p "$HOME/.twing/bin"\nprintf \'#!/bin/sh\\ncat\\n\' > "$HOME/.twing/bin/twing-hook"\nchmod +x "$HOME/.twing/bin/twing-hook"\n'
     : "";
-  fs.writeFileSync(path.join(dir, "npm"), `#!/bin/sh\necho "npm $*" >> ${JSON.stringify(record)}\n${plantHook}`, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, "npm"), `#!/bin/sh\necho "npm $*" >> ${JSON.stringify(record)}\n${plantCli}${plantHook}`, { mode: 0o755 });
   fs.writeFileSync(
     path.join(dir, "node"),
-    `#!/bin/sh\necho "node $*" >> ${JSON.stringify(record)}\n`
+    `#!/bin/sh\necho "node $* [pwd=$(pwd -P)]" >> ${JSON.stringify(record)}\n`
       + `case "$1" in -e) exec ${JSON.stringify(process.execPath)} "$@" ;; esac\n`,
     { mode: 0o755 },
   );
+  const lines = (): string[] => (fs.existsSync(record) ? fs.readFileSync(record, "utf8").split("\n") : []);
   return {
     path: `${dir}:${process.env.PATH ?? ""}`,
-    installs: () => (fs.existsSync(record) ? fs.readFileSync(record, "utf8").split("\n").filter((l) => l.startsWith("npm install")).length : 0),
+    installs: () => lines().filter((l) => l.startsWith("npm install")).length,
+    initCwd: () => lines().find((l) => l.includes("init --unattended"))?.match(/\[pwd=(.*)\]$/)?.[1] ?? "",
   };
 }
 
@@ -320,6 +326,21 @@ test("resolverScript: a PreToolUse editing into a repo installs for it, from a c
 
   run({ cwd: parent, home: tmpdir(), event: "PreToolUse", path: npm.path, input: editPayload(path.join(repo, "src", "a.ts")) });
   assert.equal(npm.installs(), 1, "the edited file identifies the repo even when cwd never enters it");
+});
+
+test("resolverScript: the install runs `init` from the repo, not from the session's directory", async () => {
+  // `init` resolves the coordinator from its own cwd. Anchoring the *search*
+  // on the edited file while leaving `init` in the session's directory
+  // installed the CLI and then failed with "no coordinator configured" --
+  // lib present, no hook binary, nothing gated. Seen live 2026-09-16.
+  const parent = tmpdir();
+  const repo = path.join(parent, "repo");
+  fs.mkdirSync(path.join(repo, ".twing"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".twing", "twing.yml"), "coordinator:\n  serverUrl: http://127.0.0.1:1\n");
+  const npm = recordingNpm();
+
+  run({ cwd: parent, home: tmpdir(), event: "PreToolUse", path: npm.path, input: editPayload(path.join(repo, "src", "a.ts")) });
+  assert.equal(npm.initCwd(), fs.realpathSync(repo), "init must run inside the repo it is installing for");
 });
 
 test("resolverScript: the payload still reaches the binary after the install consumed it", async () => {
