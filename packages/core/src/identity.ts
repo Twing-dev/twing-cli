@@ -103,12 +103,13 @@ export function computeProjectId(repoRoot: string): string {
   // The no-remote fallback below is for a *real* repo that simply has no
   // origin. A directory that is no repo at all reaches here the same way --
   // `findRepoRoot` returns its argument unchanged when the walk finds no
-  // `.git` -- and used to be handed a freshly minted random id, which the
-  // caller then queried the coordinator with: a syntactically perfect id for
-  // a project that has never existed. `twing design list --server <url>` run
-  // one directory above a repo answered "no designs", exit 0, every call
-  // inventing a different id (found live 2026-09-16). Refusing here is what
-  // turns that into a question the caller can answer.
+  // `.git` -- and used to be handed a minted random id, which the caller then
+  // queried the coordinator with: a syntactically perfect id for a project
+  // that has never existed. `twing design list --server <url>` run one
+  // directory above a repo answered "no designs", exit 0 (found live
+  // 2026-09-16). The id persisted, too, so every later out-of-repo call
+  // reused the *same* wrong project -- consistent enough to read as real for
+  // a month. Refusing here is what turns it into a question with an answer.
   // git's answer, not `existsSync(".git")`: a stray `.git` directory passes
   // the cheap check and is not a repo, which is the case that made this
   // fallback mint ids for a phantom project in the first place.

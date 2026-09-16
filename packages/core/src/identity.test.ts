@@ -57,7 +57,8 @@ test("parseGithubOwnerRepo: undefined for a malformed/incomplete GitHub path", (
 // argument when the walk finds nothing -- and used to be given a freshly
 // minted random id, which callers then queried the coordinator with. Found
 // live 2026-09-16: `design list --server <url>` one directory above a repo
-// answered "no designs", exit 0, a different invented id every call.
+// answered "no designs", exit 0 -- and, because the id persisted, answered
+// for the same wrong project every time rather than a fresh one per call.
 test("computeProjectId: refuses to invent an id for a directory that is not a repo", () => {
   const notARepo = fs.mkdtempSync(path.join(os.tmpdir(), "twing-identity-not-a-repo-"));
   try {
