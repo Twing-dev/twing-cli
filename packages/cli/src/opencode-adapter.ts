@@ -138,6 +138,26 @@ function twingBinDir(home: string): string {
 }
 
 /**
+ * The closest ancestor of `dir` that exists.
+ *
+ * A Write creating `repo/newdir/file.ts` names a directory that isn't there
+ * yet, and spawning against a missing directory fails outright. Dropping cwd
+ * instead would hand the hook whatever directory the OpenCode server itself
+ * was started in -- and that is precisely what the resolver walks up from to
+ * decide which repo to install for, so it has to be an ancestor of the file,
+ * not an unrelated directory that happens to be the server's.
+ */
+export function nearestExistingDir(dir: string): string {
+  let current = dir;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
+
+/**
  * What to spawn for an event, mirroring Claude's wiring on the same machine.
  *
  * The resolver first: it is what installs the coordinator-pinned version on a
@@ -166,8 +186,10 @@ export function runTwingHook(payload: TwingHookPayload, home: string = os.homedi
 
   return new Promise((resolve, reject) => {
     // cwd matters to the resolver, which walks up from it to find the repo
-    // to install for. A directory that is gone would fail the spawn itself.
-    const cwd = fs.existsSync(payload.cwd) ? payload.cwd : undefined;
+    // to install for. A directory that isn't there yet (a Write creating one)
+    // would fail the spawn itself, so the nearest existing ancestor stands in
+    // -- the walk up from it reaches the same repo.
+    const cwd = nearestExistingDir(payload.cwd);
     const child = spawn(hook.command, hook.args, {
       cwd,
       env: { ...process.env, TWING_HARNESS: "opencode" },
@@ -223,13 +245,41 @@ export function createOpenCodePlugin(runHook: HookRunner = (payload) => runTwing
 
     const sessionCwd = (sessionID: string): string => sessionDirectories.get(sessionID) || cwd;
 
-    const rememberTarget = (sessionID: string, call: OpenCodeToolCall): void => {
+    /** OpenCode may name a target either way; the session's directory is what
+     * a relative one is relative to. */
+    const absoluteTarget = (sessionID: string, call: OpenCodeToolCall): string | undefined => {
       const filePath = targetPath(call);
-      if (!filePath) return;
-      const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(sessionCwd(sessionID), filePath);
+      if (!filePath) return undefined;
+      return path.isAbsolute(filePath) ? filePath : path.resolve(sessionCwd(sessionID), filePath);
+    };
+
+    const rememberTarget = (sessionID: string, call: OpenCodeToolCall): void => {
+      const absolute = absoluteTarget(sessionID, call);
+      if (!absolute) return;
       let directories = touchedDirectories.get(sessionID);
       if (!directories) touchedDirectories.set(sessionID, directories = new Set());
       directories.add(path.dirname(absolute));
+    };
+
+    /**
+     * What the hook is given for one file: the call with its path resolved,
+     * and the directory to run it from.
+     *
+     * Both come from the same resolution, and they have to. The hook makes a
+     * relative file_path absolute against cwd itself, so sending the file's
+     * own directory as cwd while leaving the path relative counts the
+     * subdirectory twice (`/repo/src` + `src/a.ts` -> `/repo/src/src/a.ts`),
+     * lands outside every repo, and silently allows the edit. Sending the
+     * resolved path is also the shape Claude Code sends, so the hook's two
+     * callers agree.
+     */
+    const forFile = (sessionID: string, call: OpenCodeToolCall): { cwd: string; call: OpenCodeToolCall } => {
+      const absolute = absoluteTarget(sessionID, call);
+      if (!absolute) return { cwd: sessionCwd(sessionID), call };
+      return {
+        cwd: path.dirname(absolute),
+        call: { ...call, toolInput: { ...call.toolInput, file_path: absolute } },
+      };
     };
 
     const invoke = async (
@@ -261,9 +311,10 @@ export function createOpenCodePlugin(runHook: HookRunner = (payload) => runTwing
         for (const call of calls) {
           rememberTarget(input.sessionID, call);
           if (call.toolName !== "Edit" && call.toolName !== "Write") continue;
+          const target = forFile(input.sessionID, call);
           let result: TwingHookOutput | undefined;
           try {
-            result = await invoke("PreToolUse", input.sessionID, sessionCwd(input.sessionID), call);
+            result = await invoke("PreToolUse", input.sessionID, target.cwd, target.call);
           } catch (err) {
             throw new Error(`twing could not check this edit: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -277,8 +328,9 @@ export function createOpenCodePlugin(runHook: HookRunner = (payload) => runTwing
       async "tool.execute.after"(input) {
         for (const call of openCodeToolCalls(input.tool, input.args)) {
           rememberTarget(input.sessionID, call);
+          const target = forFile(input.sessionID, call);
           try {
-            await invoke("PostToolUse", input.sessionID, sessionCwd(input.sessionID), call);
+            await invoke("PostToolUse", input.sessionID, target.cwd, target.call);
           } catch {
             // Claims and reads are advisory. A daemon/hook failure after the
             // tool succeeded must not turn a successful OpenCode tool into a
