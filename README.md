@@ -2,8 +2,8 @@
 
 twing helps multiple coding agents on a developer team coordinate with
 each other instead of quietly stepping on the same work. It's a CLI +
-hook for your coding agent (Claude Code today, others planned) plus a
-small server every agent's client talks to.
+hook for your coding agent (Claude Code and OpenCode today, others
+planned) plus a small server every agent's client talks to.
 
 Full design: `docs/orchestrator-and-verification-design-doc_v1.md`.
 
