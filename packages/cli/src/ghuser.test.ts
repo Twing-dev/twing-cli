@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { withHome, captureConsole } from "./test-support.js";
-import { runGhUser, autoManagedMarkerPath } from "./ghuser.js";
+import { runGhUser, autoManagedMarkerPath, runningFromGlobalInstall } from "./ghuser.js";
 import { isResolverWired, resolverPath } from "./resolve-hook.js";
 import { twingLibDir } from "./daemon/self-update.js";
 import { isOpenCodePluginWired } from "./opencode-plugin.js";
@@ -48,9 +48,24 @@ test("runGhUser: a removed global install leaves no auto-managed marker", async 
   // Nothing to disambiguate: one copy, and managedInstall() is already true
   // without help.
   await withHome(async () => {
+    // Run this suite from the repo (`npm test`), never `npm --prefix <repo> run
+    // test`: `--prefix` sets npm's *global* prefix too, so `npm prefix -g`
+    // answers with the repo root, which really is an ancestor of the copy under
+    // test -- and this test legitimately fails.
     await captureConsole(async () => runGhUser({ githubToken: () => "t", uninstallGlobal: () => true }));
     assert.equal(fs.existsSync(autoManagedMarkerPath()), false);
   });
+});
+
+test("runningFromGlobalInstall: an empty npm prefix is no prefix, not a prefix of everything", () => {
+  // `fs.realpathSync("")` returns the *current directory* rather than throwing,
+  // so an empty `npm prefix -g` would otherwise read as "twing is running from
+  // the global install" for any copy below cwd -- which skips the global
+  // uninstall and marks the machine auto-managed over an install that is not
+  // there. Hardening, not a fix for an observed failure.
+  assert.equal(runningFromGlobalInstall(""), false);
+  assert.equal(runningFromGlobalInstall(undefined), false);
+  assert.equal(runningFromGlobalInstall("/no/such/prefix/anywhere"), false, "an unresolvable prefix is not ours either");
 });
 
 test("runGhUser: a surviving global install gets a marker and a runnable cleanup command", async () => {

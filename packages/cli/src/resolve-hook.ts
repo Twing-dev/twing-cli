@@ -59,7 +59,9 @@ export function resolverPath(): string {
  *
  * `$1` is the hook event, passed as an argument rather than read from the
  * payload: a `PostToolUse` payload for a `Write` carries the whole file body,
- * and `payload=$(cat)` would buffer that on every tool call.
+ * and `payload=$(cat)` would buffer that on every tool call. The install
+ * branch does read the payload, once, for the one event that can act on it --
+ * see the comment on `start_dir` below.
  */
 export function resolverScript(): string {
   return `#!/bin/sh
@@ -106,11 +108,52 @@ case "\$twing_event" in
   *) exit 0 ;;
 esac
 
+# Where to start looking for the repo to install *for*.
+#
+# cwd is the obvious answer and wrong on its own. Claude Code reads no
+# settings above the session's own directory, so the sessions this resolver
+# exists for are exactly the ones started *outside* a repo -- \`cd ~/work &&
+# claude\`, then edit a file in a repo below. Walking up from ~/work finds no
+# manifest, installs nothing, and every edit in that session goes ungated,
+# silently, for the life of the session.
+#
+# On PreToolUse the payload names the file about to be edited, and that is the
+# one anchor pointing *into* the repo. It costs a buffer of the whole payload,
+# so it happens here and only here: after the steady-state exec above (every
+# event once installed, stdin untouched), and only for the event that both
+# carries a path and is allowed to install.
+#
+# Buffered to a file, never to a variable: the payload carries the file's full
+# new contents, so command substitution would hold megabytes in the shell and
+# mangle any NUL along the way. mktemp creates it 0600; it is read back on
+# fd 3 and unlinked at once, so the contents outlive the name only for us. The
+# binary is then fed from that fd, because stdin itself is spent by the time
+# it runs.
+start_dir=\$(pwd -P)
+payload_saved=""
+if [ "\$twing_event" = "PreToolUse" ] && command -v node >/dev/null 2>&1; then
+  payload_file=\$(mktemp "\${TMPDIR:-/tmp}/twing-payload.XXXXXX" 2>/dev/null) || payload_file=""
+  if [ -n "\$payload_file" ]; then
+    cat > "\$payload_file"
+    # node, not sed: the payload is JSON whose *content* may itself contain
+    # the text \`"file_path":\` (editing a file that mentions it -- this script,
+    # for one), and a pattern match cannot tell the field from the body.
+    # Parsing costs nothing new here: the install below needs node anyway.
+    edited_dir=\$(node -e 'let d="";try{const p=JSON.parse(require("fs").readFileSync(0,"utf8"));const f=p&&p.tool_input&&p.tool_input.file_path;if(typeof f==="string"&&f!==""){d=require("path").dirname(require("path").resolve(f));}}catch(e){}process.stdout.write(d);' < "\$payload_file" 2>/dev/null)
+    exec 3< "\$payload_file"
+    rm -f "\$payload_file"
+    payload_saved=1
+    [ -n "\$edited_dir" ] && start_dir="\$edited_dir"
+  fi
+fi
+
 # Find a twing repo to install *for*: the coordinator decides which version to
-# install, so there is nothing to do until one is identified. Walk up from cwd
-# rather than asking git -- cheaper, and it works the same in a worktree.
+# install, so there is nothing to do until one is identified. Walk up rather
+# than asking git -- cheaper, and it works the same in a worktree. A directory
+# that does not exist yet (a Write creating one) simply matches nothing on the
+# way up.
 repo_root=""
-_d=\$(pwd -P)
+_d="\$start_dir"
 while : ; do
   if [ -f "\$_d/.twing/twing.yml" ]; then
     repo_root="\$_d"
@@ -124,6 +167,10 @@ ${coordinatorInstallShell()}
 twing_install_for_repo "\$repo_root"
 
 if [ -x "\$hook_bin" ]; then
+  # <&3 only when we consumed stdin above; otherwise it is still the payload.
+  if [ -n "\$payload_saved" ]; then
+    exec "\$hook_bin" <&3
+  fi
   exec "\$hook_bin"
 fi
 exit 0

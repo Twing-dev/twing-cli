@@ -155,23 +155,57 @@ test("isResolverWired / removeResolverWiring: round trip", async () => {
 
 // --- the script itself, under a real sh -------------------------------------
 
-/** A PATH whose `npm`/`node` only record what they were asked to do. */
-function recordingNpm(): { path: string; installs: () => number } {
+/**
+ * A PATH whose `npm`/`node` only record what they were asked to do.
+ *
+ * `node -e` is the exception and runs for real: the script parses the hook
+ * payload with it (see `start_dir`), which is a different job from the
+ * install steps being stubbed out here.
+ *
+ * `installsHook` makes the fake `npm install` leave a hook binary behind, the
+ * way a real install would, so tests can follow what happens *after* the
+ * install -- including whether the payload still reaches the binary.
+ */
+function recordingNpm(opts: { installsHook?: boolean } = {}): { path: string; installs: () => number; initCwd: () => string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-resolve-npm-"));
   const record = path.join(dir, "record.txt");
-  for (const tool of ["npm", "node"]) {
-    fs.writeFileSync(path.join(dir, tool), `#!/bin/sh\necho "${tool} $*" >> ${JSON.stringify(record)}\n`, { mode: 0o755 });
-  }
+  // A real `npm install` leaves the CLI behind, which is what gates the
+  // script's `init` step -- so the fake one has to as well, or the step under
+  // test never runs.
+  const plantCli = 'mkdir -p "$HOME/.twing/lib/node_modules/@twing/cli/dist"\n: > "$HOME/.twing/lib/node_modules/@twing/cli/dist/index.js"\n';
+  const plantHook = opts.installsHook
+    ? 'mkdir -p "$HOME/.twing/bin"\nprintf \'#!/bin/sh\\ncat\\n\' > "$HOME/.twing/bin/twing-hook"\nchmod +x "$HOME/.twing/bin/twing-hook"\n'
+    : "";
+  fs.writeFileSync(path.join(dir, "npm"), `#!/bin/sh\necho "npm $*" >> ${JSON.stringify(record)}\n${plantCli}${plantHook}`, { mode: 0o755 });
+  fs.writeFileSync(
+    path.join(dir, "node"),
+    `#!/bin/sh\necho "node $* [pwd=$(pwd -P)]" >> ${JSON.stringify(record)}\n`
+      + `case "$1" in -e) exec ${JSON.stringify(process.execPath)} "$@" ;; esac\n`,
+    { mode: 0o755 },
+  );
+  const lines = (): string[] => (fs.existsSync(record) ? fs.readFileSync(record, "utf8").split("\n") : []);
   return {
     path: `${dir}:${process.env.PATH ?? ""}`,
-    installs: () => (fs.existsSync(record) ? fs.readFileSync(record, "utf8").split("\n").filter((l) => l.startsWith("npm install")).length : 0),
+    installs: () => lines().filter((l) => l.startsWith("npm install")).length,
+    initCwd: () => lines().find((l) => l.includes("init --unattended"))?.match(/\[pwd=(.*)\]$/)?.[1] ?? "",
   };
 }
 
-function run(opts: { cwd: string; home: string; event: string; projectDir?: string; path?: string; harness?: string }): { stdout: string; status: number } {
+/** The shape Claude Code sends on a PreToolUse for an edit. */
+function editPayload(filePath: string): string {
+  return JSON.stringify({
+    session_id: "s1",
+    hook_event_name: "PreToolUse",
+    tool_name: "Edit",
+    tool_input: { file_path: filePath, old_string: "a", new_string: "b" },
+  });
+}
+
+function run(opts: { cwd: string; home: string; event: string; projectDir?: string; path?: string; harness?: string; input?: string }): { stdout: string; status: number } {
   try {
     const stdout = execFileSync("sh", ["-c", resolverScript(), "twing-resolver", opts.event], {
       cwd: opts.cwd,
+      input: opts.input ?? "",
       env: {
         HOME: opts.home,
         CLAUDE_PROJECT_DIR: opts.projectDir ?? opts.cwd,
@@ -275,6 +309,90 @@ test("resolverScript: finds the repo from a subdirectory, which is the case that
   const npm = recordingNpm();
   run({ cwd: nested, home: tmpdir(), event: "SessionStart", path: npm.path });
   assert.equal(npm.installs(), 1, "starting Claude in a subdirectory must still find the repo");
+});
+
+// --- the parent-directory session, which cwd alone cannot see ---------------
+
+test("resolverScript: a PreToolUse editing into a repo installs for it, from a cwd outside it", async () => {
+  // `cd ~/work && claude`, then edit ~/work/repo/src/a.ts. Nothing above cwd
+  // is a twing repo, so the cwd walk finds nothing and the whole session used
+  // to run ungated.
+  const parent = tmpdir();
+  const repo = path.join(parent, "repo");
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  fs.mkdirSync(path.join(repo, ".twing"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".twing", "twing.yml"), "coordinator:\n  serverUrl: http://127.0.0.1:1\n");
+  const npm = recordingNpm();
+
+  run({ cwd: parent, home: tmpdir(), event: "PreToolUse", path: npm.path, input: editPayload(path.join(repo, "src", "a.ts")) });
+  assert.equal(npm.installs(), 1, "the edited file identifies the repo even when cwd never enters it");
+});
+
+test("resolverScript: the install runs `init` from the repo, not from the session's directory", async () => {
+  // `init` resolves the coordinator from its own cwd. Anchoring the *search*
+  // on the edited file while leaving `init` in the session's directory
+  // installed the CLI and then failed with "no coordinator configured" --
+  // lib present, no hook binary, nothing gated. Seen live 2026-09-16.
+  const parent = tmpdir();
+  const repo = path.join(parent, "repo");
+  fs.mkdirSync(path.join(repo, ".twing"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".twing", "twing.yml"), "coordinator:\n  serverUrl: http://127.0.0.1:1\n");
+  const npm = recordingNpm();
+
+  run({ cwd: parent, home: tmpdir(), event: "PreToolUse", path: npm.path, input: editPayload(path.join(repo, "src", "a.ts")) });
+  assert.equal(npm.initCwd(), fs.realpathSync(repo), "init must run inside the repo it is installing for");
+});
+
+test("resolverScript: the payload still reaches the binary after the install consumed it", async () => {
+  // stdin is spent by the time the hook binary runs, so the buffered copy has
+  // to be handed over -- otherwise the gate gets an empty payload and the
+  // edit that triggered the install is the one edit nobody checks.
+  const parent = tmpdir();
+  const repo = path.join(parent, "repo");
+  fs.mkdirSync(path.join(repo, ".twing"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".twing", "twing.yml"), "coordinator:\n  serverUrl: http://127.0.0.1:1\n");
+  const npm = recordingNpm({ installsHook: true });
+  const payload = editPayload(path.join(repo, "src", "a.ts"));
+
+  const { stdout } = run({ cwd: parent, home: tmpdir(), event: "PreToolUse", path: npm.path, input: payload });
+  assert.equal(stdout, payload, "the freshly installed binary must read the payload this event carried");
+});
+
+test("resolverScript: a PreToolUse whose file is in no repo installs nothing", async () => {
+  const npm = recordingNpm();
+  const elsewhere = tmpdir();
+
+  run({ cwd: tmpdir(), home: tmpdir(), event: "PreToolUse", path: npm.path, input: editPayload(path.join(elsewhere, "notes.md")) });
+  assert.equal(npm.installs(), 0);
+});
+
+test("resolverScript: a PreToolUse carrying no file path still falls back to cwd", async () => {
+  // ExitPlanMode and friends: no file_path in the payload, so the only anchor
+  // left is where the session is.
+  const npm = recordingNpm();
+  const repo = twingRepo();
+
+  run({ cwd: repo, home: tmpdir(), event: "PreToolUse", path: npm.path, input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "ExitPlanMode", tool_input: { plan: "do a thing" } }) });
+  assert.equal(npm.installs(), 1);
+});
+
+test("resolverScript: a file path that only exists in the edit's *content* is not mistaken for the target", async () => {
+  // Editing a file that itself contains `"file_path":` -- this script, for
+  // one -- would fool a pattern match into installing for whatever repo the
+  // content names.
+  const npm = recordingNpm();
+  const decoy = twingRepo();
+  const payload = JSON.stringify({
+    hook_event_name: "PreToolUse",
+    tool_name: "Edit",
+    tool_input: {
+      file_path: path.join(tmpdir(), "outside.ts"),
+      new_string: `const sample = '{"file_path":"${path.join(decoy, "src", "a.ts")}"}';`,
+    },
+  });
+
+  run({ cwd: tmpdir(), home: tmpdir(), event: "PreToolUse", path: npm.path, input: payload });
+  assert.equal(npm.installs(), 0, "the real target is outside any repo; the decoy in the body must not count");
 });
 
 test("resolverScript: installs nothing when no twing repo is above cwd", async () => {

@@ -451,6 +451,52 @@ var twingSubcommands = []string{
 // afterwards would leave lines wrapped at the wrong width -- and split a
 // command across a line break mid-token, which a test caught doing exactly
 // that to `twing design amend`.
+// repoScopeFlag is `-C <repoRoot> ` when the session's cwd is outside the
+// repo this deny is about, and empty when it is inside it.
+//
+// Every `twing` command the deny text suggests re-derives the project from
+// its own cwd, so a session standing above the repo -- the case the resolver
+// now installs for, and the case this machine-wide wiring exists to cover --
+// is handed commands that cannot work from where it is standing. They either
+// fail outright ("no coordinator configured") or, with `--server` supplied,
+// ask the right coordinator about a project id computed from the wrong
+// directory and get a confident empty answer. Naming the repo is the whole
+// fix; the gate already resolved it (found live 2026-09-16).
+//
+// A package-level value because a hook process handles exactly one event for
+// exactly one repo, the same reason rawPayload is one (main.go).
+var repoScopeFlag string
+
+// setRepoScope records the flag every suggested command needs, if any.
+// Nothing is emitted for a session already inside the repo: that is the
+// common case, and the commands are long enough already.
+func setRepoScope(cwd, repoRoot string) {
+	repoScopeFlag = ""
+	if cwd == "" || repoRoot == "" || pathWithin(cwd, repoRoot) {
+		return
+	}
+	repoScopeFlag = "-C " + repoRoot + " "
+}
+
+// pathWithin reports whether cwd is repoRoot or below it, comparing the
+// symlink-resolved forms -- `git rev-parse --show-toplevel` resolves them
+// and the harness-reported cwd does not, so /tmp vs /private/tmp on macOS
+// would otherwise read as two different places (the same disagreement
+// resolveRepoRelative guards against).
+func pathWithin(cwd, repoRoot string) bool {
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Clean(r)
+		}
+		return filepath.Clean(p)
+	}
+	rel, err := filepath.Rel(resolve(repoRoot), resolve(cwd))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
+
 func withResolvedTwingCLI(message string) string {
 	// A message that tells the reader to `npm install -g` first describes a
 	// machine that will have a bare `twing` on PATH once they do. More than
@@ -461,13 +507,29 @@ func withResolvedTwingCLI(message string) string {
 		return message
 	}
 	cli := twingCLIPath()
-	if cli == "twing" {
+	if cli == "twing" && repoScopeFlag == "" {
 		return message
 	}
 	for _, sub := range twingSubcommands {
-		message = strings.ReplaceAll(message, "twing "+sub, cli+" "+sub)
+		message = strings.ReplaceAll(message, "twing "+sub, cli+" "+repoScopeFor(sub)+sub)
 	}
 	return message
+}
+
+// repoScopeSubcommands is every verb whose behaviour depends on which repo
+// it is run in -- the ones `-C` exists for. `login`/`whoami`/`keygen`/
+// `servers`/`admin` resolve only a coordinator and a machine-local token, so
+// naming a repo for them would be noise that implies a dependence they
+// don't have.
+var repoScopeSubcommands = map[string]bool{
+	"design": true, "align": true, "project": true, "constraints": true, "init": true, "join": true,
+}
+
+func repoScopeFor(sub string) string {
+	if repoScopeSubcommands[sub] {
+		return repoScopeFlag
+	}
+	return ""
 }
 
 // denyAction is one entry under "What now": what it achieves, the command
@@ -961,6 +1023,7 @@ func handlePreToolUse(payload hookPayload) {
 // comment (manifest.go).
 func handleExitPlanMode(payload hookPayload) {
 	if config := resolveServerConfig(payload.Cwd); config.ServerURL != "" {
+		setRepoScope(payload.Cwd, config.RepoRoot)
 		handleExitPlanModeSingle(payload, config)
 		return
 	}
@@ -1981,6 +2044,9 @@ func handleEditWriteGate(payload hookPayload) {
 	if config.ServerURL == "" {
 		return
 	}
+	// Every command this deny may suggest runs against the repo the edited
+	// file is in, which is not necessarily where the session is standing.
+	setRepoScope(payload.Cwd, config.RepoRoot)
 
 	// Resolve once, use everywhere below -- both the constraint check and
 	// the scope-match check compare against repo-relative declarations

@@ -314,7 +314,12 @@ managed and self-updating. A global install's setup records
 `~/.twing/auto-managed`, and once the coordinator-pinned copy exists in
 `~/.twing/lib` the global `twing` hands every command to it, so typing `twing`
 never runs a version the coordinator didn't pick. OpenCode gets a plugin in
-`~/.config/opencode/plugins/twing.js` that drives the same resolver.
+`~/.config/opencode/plugins/twing.js` that drives the same resolver. For file
+operations, the adapter runs the hook from the edited file's directory rather
+than the session's starting directory, so a session opened *above* a repo
+still installs twing on its first edit there -- the resolver decides what to
+install by walking up from where it runs. Which repo a check belongs to is
+resolved from the edited file either way, once the hook binary exists.
 
 **Exactly one hook does the work, in every combination.** At a repo root the
 committed hook runs and the resolver stands down; anywhere else the resolver

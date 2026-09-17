@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   createOpenCodePlugin,
+  nearestExistingDir,
   openCodeToolCalls,
   patchPaths,
   resolveHookCommand,
@@ -47,7 +48,7 @@ test("OpenCode before hook delegates every patch target to the blocking twing ho
   const payloads: TwingHookPayload[] = [];
   const runHook: HookRunner = async (payload) => {
     payloads.push(payload);
-    if (payload.tool_input?.file_path === "repo-b/src/b.ts") {
+    if (payload.tool_input?.file_path === "/workspace/repo-b/src/b.ts") {
       return { hookSpecificOutput: { permissionDecision: "deny", permissionDecisionReason: "repo-b has a conflicting design" } };
     }
     return { hookSpecificOutput: { permissionDecision: "allow" } };
@@ -63,9 +64,29 @@ test("OpenCode before hook delegates every patch target to the blocking twing ho
     /repo-b has a conflicting design/,
   );
   assert.deepEqual(payloads.map((payload) => ({ event: payload.hook_event_name, path: payload.tool_input?.file_path, cwd: payload.cwd })), [
-    { event: "PreToolUse", path: "repo-a/src/a.ts", cwd: "/workspace" },
-    { event: "PreToolUse", path: "repo-b/src/b.ts", cwd: "/workspace" },
+    { event: "PreToolUse", path: "/workspace/repo-a/src/a.ts", cwd: "/workspace/repo-a/src" },
+    { event: "PreToolUse", path: "/workspace/repo-b/src/b.ts", cwd: "/workspace/repo-b/src" },
   ]);
+});
+
+test("a relative target is sent resolved, so the hook cannot re-resolve it against the new cwd", async () => {
+  // The hook makes a relative file_path absolute against cwd itself. Sending
+  // the file's own directory as cwd *and* a relative path counted `src`
+  // twice (`/workspace/repo/src/src/a.ts`), which is inside no repo at all
+  // and therefore silently allowed the edit.
+  const payloads: TwingHookPayload[] = [];
+  const runHook: HookRunner = async (payload) => { payloads.push(payload); return undefined; };
+  const plugin = await createOpenCodePlugin(runHook)({ directory: "/workspace/repo", worktree: "/workspace/repo" });
+
+  await plugin["tool.execute.before"](
+    { tool: "edit", sessionID: "session-1", callID: "call-1" },
+    { args: { filePath: "src/a.ts", oldString: "a", newString: "b" } },
+  );
+
+  assert.deepEqual(
+    payloads.map((payload) => ({ path: payload.tool_input?.file_path, cwd: payload.cwd })),
+    [{ path: "/workspace/repo/src/a.ts", cwd: "/workspace/repo/src" }],
+  );
 });
 
 test("OpenCode blocks a mutation whose target cannot be determined", async () => {
@@ -188,4 +209,31 @@ test("runTwingHook: runs the resolver in the payload's cwd, marked as OpenCode",
   const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "twing-opencode-cwd-")));
   const output = await runTwingHook({ session_id: "s", cwd, hook_event_name: "SessionStart" }, home);
   assert.equal(output?.hookSpecificOutput?.additionalContext, `opencode SessionStart ${cwd}`);
+});
+
+test("runTwingHook: a target directory that doesn't exist yet runs from its nearest existing ancestor", async () => {
+  // A Write creating `repo/newdir/file.ts` names a directory that isn't there
+  // yet. Spawning against it would fail the edit outright; falling back to
+  // the OpenCode server's own directory would send the resolver walking up
+  // from somewhere unrelated to the file.
+  const home = tmpHome();
+  const bin = path.join(home, ".twing", "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(
+    path.join(bin, "twing-resolve"),
+    `#!/bin/sh\ncat >/dev/null\nprintf '{"hookSpecificOutput":{"additionalContext":"%s"}}' "$(pwd -P)"\n`,
+  );
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "twing-opencode-repo-")));
+
+  const output = await runTwingHook(
+    { session_id: "s", cwd: path.join(repo, "newdir", "deeper"), hook_event_name: "PreToolUse" },
+    home,
+  );
+  assert.equal(output?.hookSpecificOutput?.additionalContext, repo);
+});
+
+test("nearestExistingDir: walks up only as far as it must", () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "twing-opencode-ancestor-")));
+  assert.equal(nearestExistingDir(dir), dir, "an existing directory is its own answer");
+  assert.equal(nearestExistingDir(path.join(dir, "a", "b", "c")), dir);
 });

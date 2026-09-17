@@ -16,7 +16,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readConfig, writeConfig, getServerAuth, setServerAuth, normalizeServerUrl, authFetch, findRepoRoot, computeProjectId, computeDeveloperId, githubBinding } from "@twing/core";
+import { readConfig, writeConfig, getServerAuth, setServerAuth, normalizeServerUrl, authFetch, computeProjectId, computeDeveloperId, githubBinding } from "@twing/core";
+import { requireRepoRoot } from "./repo-scope.js";
 import { generateToken, hashToken } from "./keygen.js";
 import { resolveServerUrl } from "./auth.js";
 
@@ -210,7 +211,7 @@ export interface JoinGithubResult {
 }
 
 export async function runJoinGithub(options: JoinOptions): Promise<JoinGithubResult> {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const serverUrl = resolveServerUrl(options.cwd, options.server);
   if (!serverUrl) {
     throw new Error("twing join: no server URL given -- pass --server <url>, set TWING_SERVER, or run this from a repo whose .twing/twing.yml already declares a coordinator.");
@@ -309,7 +310,7 @@ export async function runJoinGithub(options: JoinOptions): Promise<JoinGithubRes
  */
 export async function linkGithubIdentity(options: { cwd: string; server: string; authToken: string }): Promise<void> {
   try {
-    const repoRoot = findRepoRoot(options.cwd);
+    const repoRoot = requireRepoRoot(options.cwd);
     const github = githubBinding(repoRoot);
     if (!github) return;
 

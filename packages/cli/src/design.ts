@@ -14,7 +14,6 @@ import { resolveServerUrl } from "./auth.js";
 import {
   readConfig,
   getServerAuth,
-  findRepoRoot,
   loadManifestFromFile,
   twingConfigPath,
   computeProjectId,
@@ -29,6 +28,7 @@ import {
   suggestAction,
   type DesignChange,
 } from "@twing/core";
+import { requireRepoRoot } from "./repo-scope.js";
 
 interface RequiredConfig {
   serverUrl: string;
@@ -316,7 +316,7 @@ function printDeclaredChanges(changes: DesignChange[]): void {
  * explicit `--session` takes precedence for callers outside an agent shell.
  */
 export async function runDesignRegister(options: RegisterOptions): Promise<void> {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   const session = options.session ?? process.env.TWING_SESSION_ID ?? process.env.CLAUDE_CODE_SESSION_ID;
   if (!session) {
@@ -425,7 +425,7 @@ export interface ResolveOptions {
 }
 
 export async function runDesignResolve(options: ResolveOptions): Promise<void> {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   if (!options.id) {
     throw new Error("twing design resolve: --id <designId> is required");
@@ -488,7 +488,7 @@ export interface CloseOptions {
  * than once.
  */
 export async function runDesignClose(options: CloseOptions): Promise<void> {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   if (!options.id) {
     throw new Error("twing design close: --id <designId> is required");
@@ -558,7 +558,7 @@ export interface AmendOptions {
  * applies unchanged.
  */
 export async function runDesignAmend(options: AmendOptions): Promise<void> {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   if (!options.id) {
     throw new Error("twing design amend: --id <designId> is required");
@@ -664,7 +664,7 @@ export interface ResumeOptions {
  * new files is a valid call). Session resolution mirrors `register`'s.
  */
 export async function runDesignResume(options: ResumeOptions): Promise<void> {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   if (!options.id) {
     throw new Error("twing design resume: --id <designId> is required");
@@ -728,7 +728,7 @@ function relativeTime(ms: number): string {
 }
 
 export async function runDesignList(options: ListOptions): Promise<void> {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   const projectId = computeProjectId(repoRoot);
 
@@ -769,7 +769,7 @@ export interface ReviewsOptions {
 /** The one human-facing command in this set (§17.5): list pending
  * justified-divergence reviews, or decide one. */
 export async function runDesignReviews(options: ReviewsOptions): Promise<void> {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
   const projectId = computeProjectId(repoRoot);
 
@@ -808,7 +808,7 @@ export async function runDesignReviews(options: ReviewsOptions): Promise<void> {
 }
 
 export function runDesignEnableGate(options: { cwd: string }): void {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const projectId = computeProjectId(repoRoot);
   if (!isGateDisabled(projectId)) {
     console.log(`twing design enable-gate: already enabled for this project`);
@@ -819,7 +819,7 @@ export function runDesignEnableGate(options: { cwd: string }): void {
 }
 
 export function runDesignDisableGate(options: { cwd: string }): void {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const projectId = computeProjectId(repoRoot);
   if (isGateDisabled(projectId)) {
     console.log(`twing design disable-gate: already disabled for this project`);

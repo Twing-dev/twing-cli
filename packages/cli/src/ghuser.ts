@@ -47,7 +47,17 @@ export { autoManagedMarkerPath } from "./machine-setup.js";
 
 function npmGlobalPrefix(): string | undefined {
   try {
-    return execFileSync("npm", ["prefix", "-g"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    // Blank output is "no prefix", not a prefix of "": `fs.realpathSync("")`
+    // resolves to the *current directory* instead of throwing, so an empty
+    // string here would make `runningFromGlobalInstall` answer true for any
+    // copy of twing running below cwd -- skipping the uninstall and marking the
+    // machine auto-managed over a global install that isn't there.
+    //
+    // Note what this deliberately does *not* second-guess: npm's answer when it
+    // does give one. `npm --prefix <dir>` sets the global prefix as well as the
+    // local one, so a caller can genuinely make the global prefix a parent of
+    // this checkout, and "running from the global install" is then true.
+    return execFileSync("npm", ["prefix", "-g"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined;
   } catch {
     return undefined;
   }
@@ -63,7 +73,7 @@ function npmGlobalPrefix(): string | undefined {
  * rely on. Through `npx` the running copy lives in the npx cache, so this is
  * false and the uninstall proceeds normally.
  */
-function runningFromGlobalInstall(prefix: string | undefined): boolean {
+export function runningFromGlobalInstall(prefix: string | undefined): boolean {
   if (!prefix) return false;
   try {
     const self = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));

@@ -270,6 +270,43 @@ func TestResolveServerConfigForFile_EmptyFilePathFallsBackToCwd(t *testing.T) {
 	}
 }
 
+// A new file in a directory that doesn't exist yet still belongs to the repo
+// its nearest existing ancestor is in. Before nearestExistingDir, `git -C`
+// failed on the missing directory and the empty config that produced was read
+// as "no coordinator configured" -- a silent allow for every file an agent
+// created in a new directory (found 2026-09-16).
+func TestResolveServerConfigForFile_NewDirectoryResolvesFromExistingAncestor(t *testing.T) {
+	withFakeHome(t)
+	writeGlobalConfig(t, os.Getenv("HOME"), `{"servers":{"http://localhost:8787":{"authToken":"tok-a"}}}`)
+	repoRoot := initTempGitRepo(t)
+	writeTwingYAML(t, repoRoot, "coordinator:\n  serverUrl: http://localhost:8787\n")
+
+	filePath := filepath.Join(repoRoot, "packages", "brand", "new", "module.ts")
+	cfg := resolveServerConfigForFile(repoRoot, filePath)
+	if cfg.ServerURL != "http://localhost:8787" || cfg.AuthToken != "tok-a" {
+		t.Errorf("resolveServerConfigForFile(...) = %+v, want the repo's coordinator for a file in a not-yet-created directory", cfg)
+	}
+	wantRoot := repoRoot
+	if r, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		wantRoot = r
+	}
+	if cfg.RepoRoot != wantRoot {
+		t.Errorf("resolveServerConfigForFile(...) RepoRoot = %q, want %q", cfg.RepoRoot, wantRoot)
+	}
+}
+
+// The ancestor walk must not invent a repo for a file that is in none: a new
+// directory under a plain parent folder still resolves to nothing.
+func TestResolveServerConfigForFile_NewDirectoryOutsideAnyRepo_EmptyConfig(t *testing.T) {
+	withFakeHome(t)
+	parent := t.TempDir()
+
+	cfg := resolveServerConfigForFile(parent, filepath.Join(parent, "newdir", "file.ts"))
+	if cfg.ServerURL != "" {
+		t.Errorf("resolveServerConfigForFile(...) = %+v, want empty ServerURL when no ancestor is a twing repo", cfg)
+	}
+}
+
 func TestResolveServerConfigForFile_FileOutsideAnyRepo_EmptyConfig(t *testing.T) {
 	withFakeHome(t)
 	parent := t.TempDir()

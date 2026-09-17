@@ -155,11 +155,33 @@ func resolveServerConfigForFile(cwd, filePath string) twingConfig {
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(cwd, abs)
 	}
-	serverURL, repoRoot, ok := readCoordinatorServerURL(filepath.Dir(abs))
+	serverURL, repoRoot, ok := readCoordinatorServerURL(nearestExistingDir(filepath.Dir(abs)))
 	if !ok {
 		return twingConfig{}
 	}
 	return configForServerURL(serverURL, repoRoot)
+}
+
+// nearestExistingDir walks up from dir to the first directory that exists.
+//
+// A Write creating `repo/newdir/file.ts` names a directory that isn't there
+// yet, and `git -C` fails outright on one ("cannot change to ..."), which
+// resolved to no coordinator at all -- and an empty config is read by
+// handleEditWriteGate as "this repo has no coordinator", i.e. a silent
+// allow. So every file an agent created in a new directory skipped the gate
+// entirely (found 2026-09-16). The repo a new file will live in is the repo
+// its nearest existing ancestor lives in.
+func nearestExistingDir(dir string) string {
+	for {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir
+		}
+		dir = parent
+	}
 }
 
 // resolveConfigForCandidate resolves auth for one candidate found by

@@ -12,7 +12,8 @@
  * `triggers`/`matchTriggers` mechanism, see manifest.ts's header comment.)
  */
 
-import { readConfig, getServerAuth, findRepoRoot, computeProjectId, computeDeveloperId, loadManifestFromFile, twingConfigPath, authFetch, type Finding } from "@twing/core";
+import { readConfig, getServerAuth, computeProjectId, computeDeveloperId, loadManifestFromFile, twingConfigPath, authFetch, type Finding } from "@twing/core";
+import { requireRepoRoot } from "./repo-scope.js";
 import { gatherClaims } from "./gather-claims.js";
 import { queryDaemonNotices } from "./daemon-client.js";
 import { printReport } from "./report.js";
@@ -46,7 +47,7 @@ export interface AlignOptions {
 }
 
 export async function runAlign(options: AlignOptions): Promise<void> {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
   const projectId = computeProjectId(repoRoot);
 
@@ -110,7 +111,7 @@ export interface AlignRespondOptions {
 export async function runAlignRespond(options: AlignRespondOptions): Promise<void> {
   if (!options.finding) throw new Error('twing align respond: --finding <threadId> is required (see `twing align threads`)');
   if (!options.message) throw new Error('twing align respond: --message "..." is required');
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireCoordinator(repoRoot);
 
   const res = await authFetch(
@@ -161,7 +162,7 @@ interface AlignmentThreadJSON {
 }
 
 export async function runAlignThreads(options: AlignThreadsOptions): Promise<void> {
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireCoordinator(repoRoot);
   const projectId = computeProjectId(repoRoot);
 
@@ -210,7 +211,7 @@ export interface AlignCloseOptions {
 
 export async function runAlignClose(options: AlignCloseOptions): Promise<void> {
   if (!options.finding) throw new Error('twing align close: --finding <threadId> is required (see `twing align threads`)');
-  const repoRoot = findRepoRoot(options.cwd);
+  const repoRoot = requireRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireCoordinator(repoRoot);
 
   const res = await authFetch(`${serverUrl}/v1/alignment-threads/${options.finding}/close`, { method: "PATCH" }, authToken, developerId);
