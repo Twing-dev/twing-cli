@@ -55,7 +55,7 @@ func TestWithResolvedTwingCLI_RewritesCommandsEmbeddedInNotes(t *testing.T) {
 // confident empty answer. Found live 2026-09-16.
 func TestRepoScope_NamesTheRepoOnlyWhenTheSessionIsOutsideIt(t *testing.T) {
 	shim := bootstrapOnlyMachine(t)
-	t.Cleanup(func() { repoScopeFlag = "" })
+	t.Cleanup(func() { repoScopeFlag, currentRepoRoot = "", "" })
 
 	parent := t.TempDir()
 	repo := filepath.Join(parent, "repo")
@@ -63,7 +63,7 @@ func TestRepoScope_NamesTheRepoOnlyWhenTheSessionIsOutsideIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	setRepoScope(parent, repo)
+	setRepoContext(parent, repo)
 	got := withResolvedTwingCLI("twing design resolve --id abc --justify \"<reason>\"")
 	want := shim + " -C " + repo + " design resolve"
 	if !strings.HasPrefix(got, want) {
@@ -71,7 +71,7 @@ func TestRepoScope_NamesTheRepoOnlyWhenTheSessionIsOutsideIt(t *testing.T) {
 	}
 
 	for _, cwd := range []string{repo, filepath.Join(repo, "src")} {
-		setRepoScope(cwd, repo)
+		setRepoContext(cwd, repo)
 		got := withResolvedTwingCLI("twing design resolve --id abc")
 		if strings.Contains(got, "-C ") {
 			t.Errorf("from %q (inside the repo): withResolvedTwingCLI() = %q, want no -C", cwd, got)
@@ -83,10 +83,10 @@ func TestRepoScope_LeavesMachineLevelCommandsAlone(t *testing.T) {
 	// `login`/`whoami` resolve a coordinator and a machine-local token, never
 	// a project. Naming a repo there would imply a dependence they don't have.
 	bootstrapOnlyMachine(t)
-	t.Cleanup(func() { repoScopeFlag = "" })
+	t.Cleanup(func() { repoScopeFlag, currentRepoRoot = "", "" })
 
 	parent := t.TempDir()
-	setRepoScope(parent, filepath.Join(parent, "repo"))
+	setRepoContext(parent, filepath.Join(parent, "repo"))
 
 	for _, cmd := range []string{"twing login --token <YOUR-SAVED-PAT>", "twing whoami"} {
 		if got := withResolvedTwingCLI(cmd); strings.Contains(got, "-C ") {
