@@ -12,20 +12,27 @@ Full design: `docs/orchestrator-and-verification-design-doc_v1.md`.
 ### 1. Install
 
 ```sh
-npm install -g @twing/cli
+curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/install.sh | sh
 ```
 
 Needs Node.js >= 20. No Go toolchain, no clone -- `twing-hook` (the
 client's Go-side hook binary) is fetched automatically the first time
 `twing init` needs one.
 
-That one install also wires twing into Claude Code and OpenCode for every
-directory on the machine, the same wiring `twing init --ghuser` writes but
-without needing GitHub (see "Sessions that don't start at a repo root").
-npm 12 blocks install scripts by default, so there use
-`npm install -g --allow-scripts=@twing/cli @twing/cli`. Without a global npm
-install, `curl -fsSL <install.sh> | sh` does the same wiring and leaves no
-CLI behind.
+This wires twing into Claude Code and OpenCode for every directory on the
+machine -- the same wiring `twing init --ghuser` writes, without needing
+GitHub (see "Sessions that don't start at a repo root") -- and leaves no CLI
+behind: it fetches the package into a throwaway directory, runs the setup,
+and deletes it.
+
+**`npm install -g @twing/cli` is not the way in.** It installs the package
+and, on npm 12 or newer, writes no wiring at all: npm blocks package install
+scripts by default, and a blocked script is a line in npm's output rather
+than a failure -- leaving a machine where `twing` runs, nothing is wired, no
+hook ever fires and no edit is ever checked. Any `twing` command says so if
+you land there. Re-run the install above to fix it; it is safe to repeat, and
+it leaves no global copy to drift out of step with the version your
+coordinator pins.
 
 ### 2. Point it at a coordinator
 
