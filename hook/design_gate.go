@@ -467,10 +467,19 @@ var twingSubcommands = []string{
 // exactly one repo, the same reason rawPayload is one (main.go).
 var repoScopeFlag string
 
-// setRepoScope records the flag every suggested command needs, if any.
-// Nothing is emitted for a session already inside the repo: that is the
-// common case, and the commands are long enough already.
-func setRepoScope(cwd, repoRoot string) {
+// currentRepoRoot is that same repo, unconditionally -- the deny text only
+// needs it when the session stands outside, but version recovery needs it
+// always: `init --unattended` resolves the coordinator by walking up from
+// wherever it runs, so it has to run *in* the repo rather than in this
+// process's cwd (version_recovery.go).
+var currentRepoRoot string
+
+// setRepoContext records the repo this event is about: the directory
+// recovery must run in, and the flag every suggested command needs, if any.
+// Nothing is emitted in the flag for a session already inside the repo: that
+// is the common case, and the commands are long enough already.
+func setRepoContext(cwd, repoRoot string) {
+	currentRepoRoot = repoRoot
 	repoScopeFlag = ""
 	if cwd == "" || repoRoot == "" || pathWithin(cwd, repoRoot) {
 		return
@@ -1023,7 +1032,7 @@ func handlePreToolUse(payload hookPayload) {
 // comment (manifest.go).
 func handleExitPlanMode(payload hookPayload) {
 	if config := resolveServerConfig(payload.Cwd); config.ServerURL != "" {
-		setRepoScope(payload.Cwd, config.RepoRoot)
+		setRepoContext(payload.Cwd, config.RepoRoot)
 		handleExitPlanModeSingle(payload, config)
 		return
 	}
@@ -2046,7 +2055,7 @@ func handleEditWriteGate(payload hookPayload) {
 	}
 	// Every command this deny may suggest runs against the repo the edited
 	// file is in, which is not necessarily where the session is standing.
-	setRepoScope(payload.Cwd, config.RepoRoot)
+	setRepoContext(payload.Cwd, config.RepoRoot)
 
 	// Resolve once, use everywhere below -- both the constraint check and
 	// the scope-match check compare against repo-relative declarations

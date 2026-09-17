@@ -210,11 +210,21 @@ func attemptVersionRecovery(serverVersion string) bool {
 	// is what the gate actually sends) and the launch marker; the restart is
 	// required because `init` only ensures *a* daemon is running and reports
 	// "already-running" against a stale one.
+	//
+	// `init` runs in the repo the gate resolved, not in this process's cwd.
+	// It reads the coordinator out of a committed `.twing/twing.yml` found by
+	// walking up from where it runs, so from a session standing *above* the
+	// repo -- the case machine-wide wiring exists to cover -- it exits 1 with
+	// "no coordinator configured", recovery aborts before the hook binary is
+	// refreshed, and the gate denies every edit for the length of the
+	// cooldown. Found live 2026-09-17, the first 0.2.27 -> 0.2.28 recovery
+	// from a `~/Projects` session, minutes after shipping the fix for this
+	// same cwd-anchoring mistake everywhere else.
 	deadline := time.Now().Add(versionRecoveryTimeout)
-	steps := [][]string{
-		{"npm", "install", "--prefix", lib, "@twing/cli@" + serverVersion, "--no-fund", "--no-audit", "--loglevel=error"},
-		{shim, "init", "--unattended"},
-		{shim, "daemon", "restart"},
+	steps := []recoveryStep{
+		{argv: []string{"npm", "install", "--prefix", lib, "@twing/cli@" + serverVersion, "--no-fund", "--no-audit", "--loglevel=error"}},
+		{argv: []string{shim, "init", "--unattended"}, dir: currentRepoRoot},
+		{argv: []string{shim, "daemon", "restart"}},
 	}
 	for _, step := range steps {
 		if !runRecoveryStep(step, deadline) {
@@ -226,10 +236,20 @@ func attemptVersionRecovery(serverVersion string) bool {
 	return true
 }
 
+// recoveryStep is one command plus the directory it must run in. An empty
+// dir inherits this process's cwd, which is right for the two steps that
+// address everything by absolute path (`npm --prefix`, `daemon restart`) and
+// wrong for `init`, which resolves the repo from wherever it starts.
+type recoveryStep struct {
+	argv []string
+	dir  string
+}
+
 // runRecoveryStep runs one command against the shared deadline, so the three
 // of them together cannot exceed versionRecoveryTimeout no matter how the
 // time is distributed between them.
-func runRecoveryStep(argv []string, deadline time.Time) bool {
+func runRecoveryStep(step recoveryStep, deadline time.Time) bool {
+	argv := step.argv
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		logVersionRecovery("ran out of time before `" + strings.Join(argv, " ") + "`")
@@ -237,6 +257,9 @@ func runRecoveryStep(argv []string, deadline time.Time) bool {
 	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
+	if step.dir != "" {
+		cmd.Dir = step.dir
+	}
 	if logFile, err := openGateLog(); err == nil {
 		defer logFile.Close()
 		cmd.Stdout = logFile

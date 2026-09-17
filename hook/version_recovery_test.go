@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -281,5 +282,65 @@ func TestTwingCLIPath_UsesPathWhenThereIsNoMarker(t *testing.T) {
 
 	if got := twingCLIPath(); got != "twing" {
 		t.Errorf("twingCLIPath() = %q, want the PATH copy unchanged", got)
+	}
+}
+
+// The step order and each step's directory, proven by running the real
+// recovery against stand-ins that record how they were called.
+//
+// `init --unattended` resolves the coordinator by walking up from wherever
+// it runs. Recovery used to start it in this process's cwd, so a session
+// standing above the repo -- the case machine-wide wiring exists for --
+// failed with "no coordinator configured", aborted before the hook binary
+// was refreshed, and left the gate denying every edit until the cooldown
+// expired. Found live on the first 0.2.27 -> 0.2.28 recovery, 2026-09-17.
+func TestAttemptVersionRecovery_RunsInitInTheRepoTheGateResolved(t *testing.T) {
+	home := managedHome(t)
+	calls := filepath.Join(t.TempDir(), "calls")
+
+	// The shim records its own working directory alongside its arguments.
+	// `pwd -P`, and EvalSymlinks on the other side: a macOS t.TempDir() hands
+	// back /var/..., a symlink to /private/var/..., and only one of those is
+	// what a child process reports.
+	shim := filepath.Join(home, ".twing", "bin", "twing")
+	script := "#!/bin/sh\necho \"$(pwd -P)|$*\" >> " + calls + "\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir() // npm has to be findable; twing must not be
+	if err := os.WriteFile(filepath.Join(pathDir, "npm"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	original := version
+	version = "0.2.27"
+	t.Cleanup(func() { version = original })
+
+	repo := t.TempDir()
+	setRepoContext(filepath.Dir(repo), repo) // a session standing above it
+	t.Cleanup(func() { setRepoContext("", "") })
+
+	if !attemptVersionRecovery("0.2.28") {
+		t.Fatal("every step succeeded; recovery must report success")
+	}
+
+	recorded, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(recorded)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected npm/init/daemon-restart, got %d calls: %q", len(lines), lines)
+	}
+	if !strings.Contains(lines[1], "init --unattended") {
+		t.Fatalf("second step must be init, got %q", lines[1])
+	}
+	wantDir, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDir := strings.SplitN(lines[1], "|", 2)[0]; gotDir != wantDir {
+		t.Errorf("init ran in %q, must run in the repo the gate resolved (%q)", gotDir, wantDir)
 	}
 }
