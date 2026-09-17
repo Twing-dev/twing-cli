@@ -20,6 +20,7 @@ import { readConfig, writeConfig, getServerAuth, setServerAuth, normalizeServerU
 import { requireRepoRoot } from "./repo-scope.js";
 import { generateToken, hashToken } from "./keygen.js";
 import { resolveServerUrl } from "./auth.js";
+import { announceNewToken } from "./new-token-output.js";
 
 /**
  * twing-cli's own registered GitHub OAuth App (device flow enabled, no
@@ -271,8 +272,7 @@ export async function runJoinGithub(options: JoinOptions): Promise<JoinGithubRes
   if (twingToken) {
     writeConfig(setServerAuth(config, normalizedServer, { authToken: twingToken }));
     console.log(`twing join: generated a new personal access token for ${result.developerId}.`);
-    console.log(`twing join: ${twingToken}`);
-    console.log("twing join: this is the only time it will be shown -- it's cached locally in ~/.twing/config.json.");
+    announceNewToken("twing join", twingToken, options.unattended);
   } else {
     console.log(`twing join: attached this project to your existing PAT for ${result.developerId}.`);
   }

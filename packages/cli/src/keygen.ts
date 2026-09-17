@@ -11,6 +11,7 @@
 
 import * as crypto from "node:crypto";
 import { readConfig, writeConfig, getServerAuth, setServerAuth, normalizeServerUrl, authFetch, computeDeveloperId } from "@twing/core";
+import { announceNewToken } from "./new-token-output.js";
 
 export function generateToken(): string {
   return crypto.randomBytes(32).toString("hex");
@@ -25,6 +26,8 @@ export interface KeygenOptions {
   serverUrl: string;
   invite: string;
   label?: string;
+  /** `init --unattended`: no human is watching and stdout is a log file. */
+  unattended?: boolean;
 }
 
 interface RedeemResponseJSON {
@@ -65,7 +68,6 @@ export async function runKeygen(options: KeygenOptions): Promise<string> {
 
   writeConfig(setServerAuth(readConfig(), serverUrl, { authToken: token }));
   console.log(`twing keygen: generated a new personal access token for ${body.developerId}.`);
-  console.log(`twing keygen: ${token}`);
-  console.log("twing keygen: this is the only time it will be shown -- it's cached locally in ~/.twing/config.json.");
+  announceNewToken("twing keygen", token, options.unattended);
   return token;
 }
