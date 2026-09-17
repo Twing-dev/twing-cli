@@ -114,6 +114,30 @@ gate's hard deny both suggest it) could briefly resolve to something older
 than what the server now expects (`TWING_DESIGN_GATE=off` is the escape
 hatch for that window).
 
+And a green workflow is still not quite the same thing as an installable
+version. npm serves two documents that propagate independently: the
+per-version doc (`registry.npmjs.org/@twing/cli/0.2.30`) lands first, and
+the full packument (`registry.npmjs.org/@twing/cli`) lags it -- 80 seconds
+for 0.2.28, several minutes for 0.2.29 and 0.2.30. npm resolves from the
+packument, *including for an exact version*, so in between the two, `npm
+install @twing/cli@<the version the server now declares>` fails with
+`ETARGET / No matching version found` even though curl can fetch that
+version's metadata perfectly well.
+
+Confirmed live on the 0.2.30 redeploy (2026-09-17): every machine
+checking in during that window 426s, its version recovery fails on the
+install, and -- because one failed attempt stamps
+`~/.twing/version-recovery-attempted` -- it then fails closed for the full
+30-minute cooldown before it will even retry. In practice nobody redeploys
+within seconds of a tag, so this is a small window; it is also exactly the
+window someone shipping a hotfix will be standing in.
+
+So check what npm itself resolves, not what curl can fetch:
+
+```sh
+npm view @twing/cli@0.2.30 version --prefer-online   # prints the version, or ETARGET
+```
+
 ## Rate limiting
 
 `Caddyfile` rate-limits the pre-authentication, brute-forceable routes
