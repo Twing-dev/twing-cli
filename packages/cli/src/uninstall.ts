@@ -1,5 +1,6 @@
 /**
- * `twing uninstall` -- undoes what `twing init` set up on *this machine*.
+ * `twing uninstall` -- undoes what npm package installation (or a later
+ * `twing init` convergence run) set up on *this machine*.
  *
  * `npm uninstall -g @twing/cli` on its own leaves the machine in a worse
  * state than either installed or clean: the package goes away, but the
@@ -33,6 +34,7 @@ import { requestDaemonShutdown, queryDaemonIdentity } from "./daemon-client.js";
 import { hookBinaryPath } from "./install-hook.js";
 import { unwireHooks, globalSettingsPath } from "./wire-hooks.js";
 import { removeResolverWiring } from "./resolve-hook.js";
+import { unwireOpenCodePlugin } from "./opencode-plugin.js";
 import { uninstallDaemonService } from "./daemon-service.js";
 
 export interface UninstallOptions {
@@ -109,7 +111,7 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
     console.log("twing uninstall --dry-run: would remove");
     console.log(`  - any launchd/systemd definition for the twing daemon`);
     console.log(`  - the running daemon (socket ${defaultSocketPath()})`);
-    console.log(`  - twing's hook entries in ~/.claude/settings.json (${hookPath})`);
+    console.log(`  - twing's Claude hooks and global OpenCode plugin (${hookPath})`);
     console.log(`  - ${dir} (hook binary, the ~/.twing/lib CLI install, cached tokens, gate overrides, captured sessions)`);
     console.log("twing uninstall --dry-run: would NOT touch any repo's committed .claude/settings.json");
     return;
@@ -136,10 +138,11 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
   // earlier uninstall defeated itself while reporting success.
   result.hooksUnwired = unwireHooks(hookPath);
   result.hooksUnwired = removeResolverWiring(globalSettingsPath()) || result.hooksUnwired;
+  result.hooksUnwired = unwireOpenCodePlugin() || result.hooksUnwired;
   console.log(
     result.hooksUnwired
-      ? "twing uninstall: removed twing's hook entries from ~/.claude/settings.json"
-      : "twing uninstall: no twing hook entries in ~/.claude/settings.json",
+      ? "twing uninstall: removed twing's global Claude/OpenCode integrations"
+      : "twing uninstall: no twing hook entries or OpenCode plugin found",
   );
 
   try {

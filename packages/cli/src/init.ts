@@ -31,6 +31,7 @@ import {
 import { ensureHookInstalled, ensureCliShim } from "./install-hook.js";
 import { wireHooks, stripLegacyRepoLocalHooks, globalSettingsPath } from "./wire-hooks.js";
 import { isResolverWired, writeResolverWiring } from "./resolve-hook.js";
+import { isOpenCodePluginWired, wireOpenCodePlugin } from "./opencode-plugin.js";
 import { autoManagedMarkerPath } from "./ghuser.js";
 import { enableInstallEnforcement } from "./enforce-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
@@ -240,10 +241,15 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   if (isResolverWired(globalSettingsPath()) && writeResolverWiring(globalSettingsPath())) {
     console.log("twing init: refreshed twing's machine-wide wiring in ~/.claude/settings.json");
   }
+  // Same reason for OpenCode: its adapter is a copy, so an update reaches it
+  // only by being re-copied from the version that just installed.
+  if (isOpenCodePluginWired() && wireOpenCodePlugin()) {
+    console.log("twing init: refreshed twing's OpenCode plugin");
+  }
 
   if (!options.unattended) {
     const wired = deps.wireHooks(hookPath);
-    console.log(wired ? "twing init: wired hooks into ~/.claude/settings.json (all repos on this machine)" : "twing init: hooks already wired in ~/.claude/settings.json");
+    console.log(wired ? "twing init: wired hooks into Claude and OpenCode globally (all repos on this machine)" : "twing init: hooks already wired in Claude and OpenCode global configuration");
   }
 
   // Upgrade migration: a repo `init`'d before wiring went global may still

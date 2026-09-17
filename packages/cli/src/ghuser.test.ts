@@ -14,6 +14,7 @@ import { withHome, captureConsole } from "./test-support.js";
 import { runGhUser, autoManagedMarkerPath } from "./ghuser.js";
 import { isResolverWired, resolverPath } from "./resolve-hook.js";
 import { twingLibDir } from "./daemon/self-update.js";
+import { isOpenCodePluginWired } from "./opencode-plugin.js";
 
 function settingsPath(home: string): string {
   return path.join(home, ".claude", "settings.json");
@@ -27,7 +28,8 @@ test("runGhUser: wires the resolver, and installs nothing at all", async () => {
     await captureConsole(async () => runGhUser({ githubToken: () => "gh-token", uninstallGlobal: () => true }));
 
     assert.equal(isResolverWired(settingsPath(home)), true);
-    assert.ok(fs.existsSync(resolverPath()), "the resolver script is the only thing written");
+    assert.ok(fs.existsSync(resolverPath()));
+    assert.equal(isOpenCodePluginWired(), true, "same wiring as the one-step install, OpenCode included");
     assert.equal(fs.existsSync(twingLibDir()), false, "must not npm install anything");
     assert.equal(fs.existsSync(path.join(home, ".twing", "bin", "twing-hook")), false, "must not fetch the binary");
   });

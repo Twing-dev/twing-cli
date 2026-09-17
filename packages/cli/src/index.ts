@@ -4,6 +4,7 @@ import { defaultSocketPath, authFetch, computeDeveloperId, readConfig } from "@t
 import { runInit } from "./init.js";
 import { runGhUser } from "./ghuser.js";
 import { installTwingHintResolution } from "./twing-command.js";
+import { delegateToManagedInstall } from "./managed-delegate.js";
 import { runUninstall } from "./uninstall.js";
 import { getCliVersion } from "./version.js";
 import { runDaemonRestart } from "./daemon-restart.js";
@@ -475,6 +476,10 @@ async function main(): Promise<void> {
       process.exit(1);
   }
 }
+
+// Before anything else runs: an unmanaged copy on an auto-managed machine
+// re-executes the command in ~/.twing/lib and exits (managed-delegate.ts).
+delegateToManagedInstall();
 
 // Before anything prints: hints like "run `twing login`" assume a `twing`
 // on PATH, which a bootstrap-onboarded machine does not have. Installed

@@ -168,11 +168,16 @@ function recordingNpm(): { path: string; installs: () => number } {
   };
 }
 
-function run(opts: { cwd: string; home: string; event: string; projectDir?: string; path?: string }): { stdout: string; status: number } {
+function run(opts: { cwd: string; home: string; event: string; projectDir?: string; path?: string; harness?: string }): { stdout: string; status: number } {
   try {
     const stdout = execFileSync("sh", ["-c", resolverScript(), "twing-resolver", opts.event], {
       cwd: opts.cwd,
-      env: { HOME: opts.home, CLAUDE_PROJECT_DIR: opts.projectDir ?? opts.cwd, PATH: opts.path ?? process.env.PATH ?? "" },
+      env: {
+        HOME: opts.home,
+        CLAUDE_PROJECT_DIR: opts.projectDir ?? opts.cwd,
+        PATH: opts.path ?? process.env.PATH ?? "",
+        ...(opts.harness ? { TWING_HARNESS: opts.harness } : {}),
+      },
     });
     return { stdout: stdout.toString(), status: 0 };
   } catch (err) {
@@ -215,6 +220,17 @@ test("resolverScript: stands down when the project dir commits its own twing hoo
   const { stdout, status } = run({ cwd: proj, home: homeWithBinary("SHOULD_NOT_RUN"), event: "PreToolUse" });
   assert.equal(status, 0);
   assert.equal(stdout, "", "the committed hook owns this session");
+});
+
+test("resolverScript: does not stand down under OpenCode, which never loads the committed Claude hook", async () => {
+  const proj = tmpdir();
+  fs.mkdirSync(path.join(proj, ".claude"), { recursive: true });
+  fs.writeFileSync(
+    path.join(proj, ".claude", "settings.json"),
+    JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: "sh", args: ["${CLAUDE_PROJECT_DIR}/.twing/bootstrap-hook.sh", "PreToolUse"] }] }] } }),
+  );
+  const { stdout } = run({ cwd: proj, home: homeWithBinary("VERDICT_FROM_HOOK"), event: "PreToolUse", harness: "opencode" });
+  assert.equal(stdout, "VERDICT_FROM_HOOK");
 });
 
 test("resolverScript: stands down for an older inlined committed hook too", async () => {

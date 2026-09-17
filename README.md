@@ -19,6 +19,14 @@ Needs Node.js >= 20. No Go toolchain, no clone -- `twing-hook` (the
 client's Go-side hook binary) is fetched automatically the first time
 `twing init` needs one.
 
+That one install also wires twing into Claude Code and OpenCode for every
+directory on the machine, the same wiring `twing init --ghuser` writes but
+without needing GitHub (see "Sessions that don't start at a repo root").
+npm 12 blocks install scripts by default, so there use
+`npm install -g --allow-scripts=@twing/cli @twing/cli`. Without a global npm
+install, `curl -fsSL <install.sh> | sh` does the same wiring and leaves no
+CLI behind.
+
 ### 2. Point it at a coordinator
 
 ```sh
@@ -301,11 +309,12 @@ decides which version to install and none is known yet, so the install waits
 for the first session that opens a repo using twing, exactly as the committed
 script does. A machine that never opens one downloads nothing at all.
 
-**Why `npx` rather than `npm install -g`.** A global install makes the
-machine ineligible for automatic version recovery -- twing won't replace a
-package you installed deliberately -- so installing twing to get better
-coverage would buy worse version handling. Run through `npx` nothing is left
-behind, and the machine stays managed and self-updating.
+**`npx`, `npm install -g`, or `install.sh`.** All three leave the machine
+managed and self-updating. A global install's setup records
+`~/.twing/auto-managed`, and once the coordinator-pinned copy exists in
+`~/.twing/lib` the global `twing` hands every command to it, so typing `twing`
+never runs a version the coordinator didn't pick. OpenCode gets a plugin in
+`~/.config/opencode/plugins/twing.js` that drives the same resolver.
 
 **Exactly one hook does the work, in every combination.** At a repo root the
 committed hook runs and the resolver stands down; anywhere else the resolver
@@ -326,7 +335,8 @@ yourself still gets the leftover copy, and the CLI sends no version header,
 so that skew is silent.
 
 `--ghuser` signs in with `gh auth token`, so it needs GitHub. Machines
-without it use `npm install -g @twing/cli` and `twing init`, unchanged.
+without it get the identical wiring from `npm install -g @twing/cli` or
+`install.sh`.
 
 **Turning it on and off** -- both are plain local file edits, no server call
 and no auth, since the real authorization is your own branch protection / PR

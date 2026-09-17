@@ -310,24 +310,19 @@ function printDeclaredChanges(changes: DesignChange[]): void {
 }
 
 /**
- * The Edit|Write PreToolUse gate looks up open designs by Claude Code's
- * exact session id. Confirmed live (2026-08-11, against a real gated
- * session): Claude Code sets `CLAUDE_CODE_SESSION_ID` in the environment a
- * Bash tool call runs in, and it matches the `session_id` the hook receives
- * -- registering with it and retrying an Edit actually unblocks. Falls back
- * to `--session` for callers/harnesses where that env var isn't set (spec
- * §9a's original open question -- still real for non-Claude-Code callers,
- * just resolved for the common case here).
+ * The Edit|Write PreToolUse gate looks up open designs by the agent's exact
+ * session id. Agent adapters expose it as `TWING_SESSION_ID`; Claude Code's
+ * native `CLAUDE_CODE_SESSION_ID` remains a compatibility fallback. An
+ * explicit `--session` takes precedence for callers outside an agent shell.
  */
 export async function runDesignRegister(options: RegisterOptions): Promise<void> {
   const repoRoot = findRepoRoot(options.cwd);
   const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
-  const session = options.session ?? process.env.CLAUDE_CODE_SESSION_ID;
+  const session = options.session ?? process.env.TWING_SESSION_ID ?? process.env.CLAUDE_CODE_SESSION_ID;
   if (!session) {
     throw new Error(
-      "twing design register: no session id -- pass --session <id> explicitly (must be Claude Code's actual " +
-        "session id; CLAUDE_CODE_SESSION_ID wasn't set in this environment). If unavailable, use plan mode instead: " +
-        "ExitPlanMode registers a design automatically.",
+      "twing design register: no session id -- pass --session <id> explicitly (it must be the coding agent's actual " +
+        "session id; neither TWING_SESSION_ID nor CLAUDE_CODE_SESSION_ID was set in this environment).",
     );
   }
 
@@ -674,11 +669,11 @@ export async function runDesignResume(options: ResumeOptions): Promise<void> {
   if (!options.id) {
     throw new Error("twing design resume: --id <designId> is required");
   }
-  const session = options.session ?? process.env.CLAUDE_CODE_SESSION_ID;
+  const session = options.session ?? process.env.TWING_SESSION_ID ?? process.env.CLAUDE_CODE_SESSION_ID;
   if (!session) {
     throw new Error(
-      "twing design resume: no session id -- pass --session <id> explicitly (must be Claude Code's actual " +
-        "session id; CLAUDE_CODE_SESSION_ID wasn't set in this environment).",
+      "twing design resume: no session id -- pass --session <id> explicitly (it must be the coding agent's actual " +
+        "session id; neither TWING_SESSION_ID nor CLAUDE_CODE_SESSION_ID was set in this environment).",
     );
   }
 

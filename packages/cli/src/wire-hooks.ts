@@ -1,7 +1,7 @@
 /**
- * Merges twing's hook entries into the user-level `~/.claude/settings.json`
- * (§6 step 3, retargeted from repo-local as part of the install-once
- * onboarding work). Every downstream check already tolerates "no
+ * Installs twing's machine-global Claude and OpenCode integrations. Claude
+ * entries are merged into `~/.claude/settings.json`; OpenCode gets a loader
+ * in `~/.config/opencode/plugins/`. Every downstream check tolerates "no
  * coordinator configured for this repo" as a silent no-op (capture) or
  * silent allow (gate) -- so wiring once, globally, means every repo a
  * developer works in already has hooks active, no per-repo `wireHooks` run
@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { readClaudeSettings, writeClaudeSettings, type ClaudeSettings, type HookCommand, type HookMatcherEntry } from "@twing/core";
 import { isBootstrapHook } from "./enforce-hooks.js";
+import { wireOpenCodePlugin } from "./opencode-plugin.js";
 
 export function globalSettingsPath(): string {
   return path.join(os.homedir(), ".claude", "settings.json");
@@ -44,6 +45,7 @@ function addEntry(settings: ClaudeSettings, eventName: string, hookPath: string,
 
 /** Returns true if the file was changed. */
 export function wireHooks(hookPath: string): boolean {
+  const changedOpenCode = wireOpenCodePlugin();
   const settingsPath = globalSettingsPath();
   const settings = readClaudeSettings(settingsPath);
 
@@ -64,7 +66,7 @@ export function wireHooks(hookPath: string): boolean {
   // stopped being the right mechanism for a per-repo toggle.
   const changedDesignGate = wireDesignGate(settingsPath, settings, hookPath);
 
-  return changed || changedDesignGate;
+  return changed || changedDesignGate || changedOpenCode;
 }
 
 /** §17: wires the PreToolUse design-gate matchers plus a SessionEnd close
@@ -115,7 +117,10 @@ export function stripLegacyRepoLocalHooks(repoRoot: string, hookPath: string): b
  * and stays out of scope (`twing project disable-enforcement`).
  *
  * Another tool's hooks and unrelated settings are untouched either way.
- * Returns true if anything was removed. */
+ * Claude-only: `--ghuser` and machine setup call this to swap binary-path
+ * entries for the resolver, and must keep the OpenCode plugin while doing it
+ * (`twing uninstall` removes that separately). Returns true if anything was
+ * removed. */
 export function unwireHooks(hookPath: string): boolean {
   return stripHooksByCommand(globalSettingsPath(), hookPath, { includeBootstrapHooks: true });
 }

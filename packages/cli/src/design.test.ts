@@ -58,18 +58,30 @@ test("runDesignRegister: falls back to CLAUDE_CODE_SESSION_ID when --session is 
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
-    await withEnv({ CLAUDE_CODE_SESSION_ID: "env-session" }, () =>
+    await withEnv({ TWING_SESSION_ID: undefined, CLAUDE_CODE_SESSION_ID: "env-session" }, () =>
       withMockFetch(fetch, () => runDesignRegister({ cwd: repo, summary: "test summary" })),
     );
     assert.equal((calls[0].body as { sessionId: string }).sessionId, "env-session");
   });
 });
 
-test("runDesignRegister: throws when neither --session nor CLAUDE_CODE_SESSION_ID is available", async () => {
+test("runDesignRegister: uses the agent-neutral TWING_SESSION_ID when --session is omitted", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
-    await withEnv({ CLAUDE_CODE_SESSION_ID: undefined }, async () => {
+    await withEnv({ TWING_SESSION_ID: "opencode-session", CLAUDE_CODE_SESSION_ID: undefined }, () =>
+      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, summary: "test summary" })),
+    );
+    assert.equal((calls[0].body as { sessionId: string }).sessionId, "opencode-session");
+  });
+});
+
+test("runDesignRegister: throws when no explicit or agent-provided session id is available", async () => {
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await withEnv({ TWING_SESSION_ID: undefined, CLAUDE_CODE_SESSION_ID: undefined }, async () => {
       await assert.rejects(() => runDesignRegister({ cwd: repo, summary: "test summary" }), /no session id/);
     });
   });
@@ -340,7 +352,7 @@ test("runDesignResume: throws without --id, or without a resolvable session", as
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
     await assert.rejects(() => runDesignResume({ cwd: repo, session: "s1" }), /--id/);
-    await withEnv({ CLAUDE_CODE_SESSION_ID: undefined }, async () => {
+    await withEnv({ TWING_SESSION_ID: undefined, CLAUDE_CODE_SESSION_ID: undefined }, async () => {
       await assert.rejects(() => runDesignResume({ cwd: repo, id: "d1" }), /no session id/);
     });
   });
