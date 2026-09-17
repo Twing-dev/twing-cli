@@ -22,6 +22,22 @@ try {
 const machineInstall = process.env.npm_config_global === "true" || process.argv.includes("--machine-setup");
 if (!machineInstall) process.exit(0);
 
+// The last gate before wiring, and the only one that sees the Node actually
+// running the CLI rather than the one that happened to be on PATH in some
+// shell. npm treats an unsatisfiable `engines` as a warning, so reaching here
+// on an old Node is entirely possible -- and the import below is where it
+// would fail, with a syntax or missing-API error pointing into dist/ that
+// says nothing about the real cause. Keep in step with MIN_NODE_MAJOR /
+// MIN_NODE_MINOR in packages/core/src/repo-setup.ts.
+const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
+if (nodeMajor < 20 || (nodeMajor === 20 && nodeMinor < 0)) {
+  console.error(
+    `twing: this machine runs Node ${process.versions.node}, and twing needs 20.0 or newer. ` +
+      "Nothing was wired -- upgrade Node and run the install again.",
+  );
+  process.exit(1);
+}
+
 import("./dist/machine-setup.js")
   .then(({ runMachineSetup }) => runMachineSetup())
   .catch((err) => {

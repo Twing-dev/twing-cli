@@ -568,9 +568,17 @@ async function fakeCoordinator(version: string): Promise<{ url: string; close: (
 function recordingNpm(): { path: string; calls: () => string[] } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-npm-spy-"));
   const record = path.join(dir, "record.txt");
-  for (const tool of ["npm", "node"]) {
-    fs.writeFileSync(path.join(dir, tool), `#!/bin/sh\necho "${tool} $*" >> ${JSON.stringify(record)}\n`, { mode: 0o755 });
-  }
+  fs.writeFileSync(path.join(dir, "npm"), `#!/bin/sh\necho "npm $*" >> ${JSON.stringify(record)}\n`, { mode: 0o755 });
+  // `node -v` answers for real, because the script now checks the version
+  // before it installs anything. A stub that stays silent there reads as "no
+  // usable node" and the install is skipped -- correctly, which is why the
+  // stub has to be the thing that changes.
+  fs.writeFileSync(
+    path.join(dir, "node"),
+    `#!/bin/sh\necho "node $*" >> ${JSON.stringify(record)}\n`
+      + `case "$1" in -v|--version) echo "v22.0.0" ;; esac\n`,
+    { mode: 0o755 },
+  );
   return {
     path: `${dir}:${process.env.PATH ?? ""}`,
     calls: () => (fs.existsSync(record) ? fs.readFileSync(record, "utf8").trim().split("\n").filter(Boolean) : []),

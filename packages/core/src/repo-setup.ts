@@ -76,8 +76,43 @@ export const WIRED_HOOK_EVENTS: { event: string; matcher?: string }[] = [
  * binary exists. With neither `curl` nor `wget` present it falls back to
  * `@latest` -- no worse than what it replaced.
  */
+/**
+ * The oldest Node that can run the installed CLI, as one source of truth.
+ *
+ * Declared in both published `package.json`s so npm warns, checked by
+ * `install.sh`, and interpolated into the shell below so the two zero-touch
+ * paths check it too. Raising the floor means editing this and the two
+ * manifests; every install path follows from here.
+ */
+export const MIN_NODE_MAJOR = 20;
+export const MIN_NODE_MINOR = 0;
+
 export function coordinatorInstallShell(): string {
   return `
+# Is the Node already on this machine new enough to run what is about to be
+# installed?
+#
+# npm does not refuse an install over an unsatisfiable \`engines\` field -- it
+# prints EBADENGINE and carries on -- so without this the install "succeeds"
+# and the failure surfaces later, inside \`init\`, as a missing-API or syntax
+# error in a file the reader has never heard of. On this path that error goes
+# to bootstrap.log, and the gate meanwhile denies every edit with a message
+# listing causes that do not include the real one.
+#
+# Parameter expansion rather than sed/cut: this runs before twing exists on a
+# machine, and it saves three subprocesses on the path that has none to spare.
+twing_node_ok() {
+  _nv=\$(node -v 2>/dev/null) || return 1
+  _nv=\${_nv#v}
+  _major=\${_nv%%.*}
+  _rest=\${_nv#*.}
+  _minor=\${_rest%%.*}
+  case "\$_major" in ''|*[!0-9]*) return 1 ;; esac
+  case "\$_minor" in ''|*[!0-9]*) _minor=0 ;; esac
+  [ "\$_major" -gt ${MIN_NODE_MAJOR} ] && return 0
+  [ "\$_major" -eq ${MIN_NODE_MAJOR} ] && [ "\$_minor" -ge ${MIN_NODE_MINOR} ]
+}
+
 twing_fetch() {
   if command -v curl >/dev/null 2>&1; then
     curl -fsS --max-time 10 "\$1" 2>/dev/null
@@ -94,6 +129,14 @@ twing_install_for_repo() {
   _log="\$HOME/.twing/bootstrap.log"
   mkdir -p "\$HOME/.twing"
   echo "=== twing bootstrap \$(date -u +%Y-%m-%dT%H:%M:%SZ) ===" >> "\$_log" 2>/dev/null
+
+  # Before anything is downloaded. Returning early leaves the machine exactly
+  # as it was -- no half-installed lib, no hook binary -- which is the state
+  # the caller's own "did it work?" check already handles.
+  if ! twing_node_ok; then
+    echo "twing: node \$(node -v 2>/dev/null || echo 'not found') is too old -- twing needs Node ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR} or newer, and will not install until it is upgraded" >> "\$_log" 2>/dev/null
+    return 1
+  fi
 
   # coordinator.serverUrl straight out of the committed manifest.
   _server=\$(sed -n 's/^[[:space:]]*serverUrl:[[:space:]]*//p' "\$_root/.twing/twing.yml" 2>/dev/null | head -1 | tr -d '"' | tr -d '\\r')
