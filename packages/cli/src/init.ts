@@ -430,7 +430,7 @@ async function resolveAuthToken(repoRoot: string, serverUrl: string, options: In
     }
     return { token: auth.authToken, adminRole: false };
   }
-  if (options.invite) return { token: await runKeygen({ cwd: repoRoot, serverUrl, invite: options.invite }), adminRole: false };
+  if (options.invite) return { token: await runKeygen({ cwd: repoRoot, serverUrl, invite: options.invite, unattended: options.unattended }), adminRole: false };
   if (options.noGithub) return { token: await requireAuth(serverUrl, "twing init"), adminRole: false };
   if (githubBinding(repoRoot)) {
     try {

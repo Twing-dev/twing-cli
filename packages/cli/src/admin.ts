@@ -11,6 +11,7 @@ import * as os from "node:os";
 import { readConfig, writeConfig, setServerAuth, authFetch, computeDeveloperId } from "@twing/core";
 import { resolveServerUrl, requireAuth } from "./auth.js";
 import { generateToken, hashToken } from "./keygen.js";
+import { announceNewToken } from "./new-token-output.js";
 
 type Role = "admin" | "member";
 
@@ -65,8 +66,7 @@ export async function runAdminBootstrap(options: AdminBootstrapOptions): Promise
 
   writeConfig(setServerAuth(readConfig(), serverUrl, { authToken: token }));
   console.log(`twing admin bootstrap: created organization ${body.orgId} with you (${body.developerId}) as its admin.`);
-  console.log(`twing admin bootstrap: ${token}`);
-  console.log("twing admin bootstrap: this is the only time your PAT will be shown -- it's cached locally in ~/.twing/config.json.");
+  announceNewToken("twing admin bootstrap", token);
 }
 
 export interface AdminInviteOptions {
