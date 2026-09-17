@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -220,6 +221,25 @@ func attemptVersionRecovery(serverVersion string) bool {
 	// cooldown. Found live 2026-09-17, the first 0.2.27 -> 0.2.28 recovery
 	// from a `~/Projects` session, minutes after shipping the fix for this
 	// same cwd-anchoring mistake everywhere else.
+	// Refuse to trade a working install for a broken one.
+	//
+	// Every other Node check guards a machine that has nothing yet, where
+	// failing means staying at nothing. This path is different: it replaces a
+	// CLI that currently works with a newer one, then runs `init` using it.
+	// If this machine's Node is too old for that newer CLI -- an nvm switch,
+	// a system rollback, any downgrade since the original install -- the npm
+	// step still "succeeds", `init` then dies on a missing API, and a machine
+	// that was gating fine minutes ago is left mid-upgrade with a stale hook
+	// binary and a cooldown's worth of denials. Staying on the old version is
+	// strictly better: the version mismatch still denies, but it denies with
+	// a message about versions, and the install underneath stays intact.
+	if !nodeCanRunCLI() {
+		logVersionRecovery("not updating: " + nodeVersionString() + " is older than the Node " +
+			minNodeVersionString() + " the CLI needs, and replacing a working install with one this " +
+			"machine cannot run would be worse than the version mismatch")
+		return false
+	}
+
 	deadline := time.Now().Add(versionRecoveryTimeout)
 	steps := []recoveryStep{
 		{argv: []string{"npm", "install", "--prefix", lib, "@twing/cli@" + serverVersion, "--no-fund", "--no-audit", "--loglevel=error"}},
@@ -337,4 +357,75 @@ func logVersionRecovery(line string) {
 	}
 	defer f.Close()
 	_, _ = f.WriteString(time.Now().UTC().Format(time.RFC3339) + " twing version-recovery: " + line + "\n")
+}
+
+// The oldest Node the installed CLI can run under.
+//
+// A deliberate cross-language mirror of MIN_NODE_MAJOR/MIN_NODE_MINOR in
+// `packages/core/src/repo-setup.ts`, in the same spirit as identity.go
+// mirroring identity.ts: this process has no way to read that constant, and
+// shelling out to the CLI to ask would need the very install this is about
+// to replace. Raising the floor means raising it in both places.
+const (
+	minNodeMajor = 20
+	minNodeMinor = 0
+)
+
+func minNodeVersionString() string {
+	return strconv.Itoa(minNodeMajor) + "." + strconv.Itoa(minNodeMinor)
+}
+
+// nodeVersionString is what `node -v` reports, for messages. "node (not
+// found)" when there is no node at all, which is a different problem with the
+// same consequence here.
+func nodeVersionString() string {
+	out, err := exec.Command("node", "-v").Output()
+	if err != nil {
+		return "node (not found)"
+	}
+	v := strings.TrimSpace(string(out))
+	if v == "" {
+		return "node (not found)"
+	}
+	return "node " + v
+}
+
+// nodeCanRunCLI reports whether the node on PATH is new enough for the CLI
+// version being installed. Anything unparseable is treated as too old: a node
+// whose version cannot be read is not one to bet a working install on.
+func nodeCanRunCLI() bool {
+	out, err := exec.Command("node", "-v").Output()
+	if err != nil {
+		return false
+	}
+	major, minor, ok := parseNodeVersion(strings.TrimSpace(string(out)))
+	if !ok {
+		return false
+	}
+	if major != minNodeMajor {
+		return major > minNodeMajor
+	}
+	return minor >= minNodeMinor
+}
+
+// parseNodeVersion pulls major and minor out of "v22.23.2". Tolerates a
+// missing leading "v" and a prerelease suffix ("v23.0.0-nightly").
+func parseNodeVersion(raw string) (int, int, bool) {
+	v := strings.TrimPrefix(raw, "v")
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }

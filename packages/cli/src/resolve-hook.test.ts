@@ -318,8 +318,23 @@ test("resolverScript: a Node too old to run twing installs nothing, and says so"
 
   const log = fs.readFileSync(path.join(home, ".twing", "bootstrap.log"), "utf8");
   assert.match(log, /v18\.20\.4/, "name the version actually found, not just the requirement");
-  assert.match(log, /too old/);
   assert.match(log, /Node 20/, "and what it needs to be");
+});
+
+test("resolverScript: a too-old Node denies the edit rather than allowing it ungated", async () => {
+  // The install paths here are asynchronous -- nobody is watching a terminal
+  // -- so bootstrap.log is written where nobody reads. A PreToolUse deny is the one
+  // channel that surfaces. Falling through to the silent `exit 0` the other
+  // early returns use would leave the session ungated for its whole life.
+  const npm = recordingNpm({ nodeVersion: "v18.20.4" });
+  const { stdout, status } = run({ cwd: twingRepo(), home: tmpdir(), event: "PreToolUse", path: npm.path });
+
+  assert.equal(status, 0, "a deny is carried in stdout, never by exiting non-zero");
+  const verdict = JSON.parse(stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+  assert.equal(verdict.hookSpecificOutput.permissionDecision, "deny");
+  assert.match(verdict.hookSpecificOutput.permissionDecisionReason, /v18\.20\.4/, "name the version found");
+  assert.match(verdict.hookSpecificOutput.permissionDecisionReason, /nothing on this machine was changed/);
+  assert.equal(npm.installs(), 0);
 });
 
 test("resolverScript: finds the repo from a subdirectory, which is the case that was broken", async () => {

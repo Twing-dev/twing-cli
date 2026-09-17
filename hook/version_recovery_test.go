@@ -311,6 +311,10 @@ func TestAttemptVersionRecovery_RunsInitInTheRepoTheGateResolved(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(pathDir, "npm"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// So does node: recovery now refuses to replace a working install when
+	// this machine's node is too old for the version it would install, and a
+	// PATH with no node at all reads as exactly that.
+	writeFakeNode(t, pathDir, "v22.0.0")
 	t.Setenv("PATH", pathDir)
 
 	original := version
@@ -342,5 +346,67 @@ func TestAttemptVersionRecovery_RunsInitInTheRepoTheGateResolved(t *testing.T) {
 	}
 	if gotDir := strings.SplitN(lines[1], "|", 2)[0]; gotDir != wantDir {
 		t.Errorf("init ran in %q, must run in the repo the gate resolved (%q)", gotDir, wantDir)
+	}
+}
+
+// writeFakeNode puts a `node` on a test's PATH that reports the version given
+// and does nothing else. Recovery reads `node -v` before it will replace a
+// working install, so a test PATH without one reads as "too old to risk it".
+func writeFakeNode(t *testing.T, dir, version string) {
+	t.Helper()
+	script := "#!/bin/sh\ncase \"$1\" in -v|--version) echo \"" + version + "\" ;; esac\n"
+	if err := os.WriteFile(filepath.Join(dir, "node"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestParseNodeVersion(t *testing.T) {
+	cases := []struct {
+		raw          string
+		major, minor int
+		ok           bool
+	}{
+		{"v22.23.2", 22, 23, true},
+		{"22.5.0", 22, 5, true},
+		{"v23.0.0-nightly20240101", 23, 0, true},
+		{"v20", 0, 0, false},
+		{"", 0, 0, false},
+		{"not a version", 0, 0, false},
+	}
+	for _, c := range cases {
+		major, minor, ok := parseNodeVersion(c.raw)
+		if ok != c.ok || (ok && (major != c.major || minor != c.minor)) {
+			t.Errorf("parseNodeVersion(%q) = %d, %d, %v; want %d, %d, %v", c.raw, major, minor, ok, c.major, c.minor, c.ok)
+		}
+	}
+}
+
+// The point of the guard: a machine whose node was downgraded after install
+// keeps the twing it has, rather than trading it for one it cannot run.
+func TestAttemptVersionRecovery_RefusesWhenNodeIsTooOld(t *testing.T) {
+	home := managedHome(t)
+	calls := filepath.Join(t.TempDir(), "calls")
+
+	shim := filepath.Join(home, ".twing", "bin", "twing")
+	script := "#!/bin/sh\necho \"$*\" >> " + calls + "\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "npm"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeNode(t, pathDir, "v18.20.4")
+	t.Setenv("PATH", pathDir)
+
+	original := version
+	version = "0.2.27"
+	t.Cleanup(func() { version = original })
+
+	if attemptVersionRecovery("0.2.31") {
+		t.Error("recovery must not report success when it deliberately did nothing")
+	}
+	if _, err := os.Stat(calls); err == nil {
+		t.Error("nothing may run: the existing install has to be left exactly as it was")
 	}
 }
