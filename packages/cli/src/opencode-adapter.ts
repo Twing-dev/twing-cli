@@ -70,6 +70,56 @@ export type OpenCodePlugin = (context: OpenCodePluginContext) => Promise<OpenCod
 
 const MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch"]);
 
+/**
+ * OpenCode's other tool names -- the ones this adapter has looked at and
+ * decided not to gate.
+ *
+ * It exists so that "not in `MUTATION_TOOLS`" can stop meaning two different
+ * things at once. `read`/`grep`/`glob` are translated for claim capture;
+ * `list`, `todowrite`, `todoread`, `webfetch`, `task` and `invalid` touch no
+ * file and are dropped. `bash` is the deliberate one: it can certainly write
+ * a file (`sed -i`, a redirect, `mv`), and it is still not gated here,
+ * because the Claude Code side doesn't gate Bash either -- `WIRED_EVENTS`
+ * matches `Edit|Write` and nothing else. Gating it on one harness but not the
+ * other would make what twing promises depend on which agent you happen to
+ * run, which is worse than one honest, documented gap.
+ *
+ * Read out of the shipped OpenCode binary (2026-09-17), not guessed at.
+ */
+const INERT_TOOLS = new Set([
+  "read", "grep", "glob", "list", "bash",
+  "todowrite", "todoread", "webfetch", "task", "invalid",
+]);
+
+/**
+ * A tool in neither set: OpenCode has grown one since this adapter was
+ * written.
+ *
+ * Allow it, and say so. A deny would break the agent outright on every use of
+ * a new tool, at a version the user cannot unpin -- the coordinator decides
+ * which twing they run -- and most new tools mutate nothing. But a *silent*
+ * allow is exactly how a new mutating tool would walk past the design gate
+ * with nobody ever finding out, which is the failure this set exists to make
+ * impossible. So the gap gets announced instead: once per tool name, per
+ * OpenCode process.
+ */
+export function isUnrecognisedTool(tool: string): boolean {
+  const name = tool.toLowerCase();
+  return !MUTATION_TOOLS.has(name) && !INERT_TOOLS.has(name);
+}
+
+const announcedUnknownTools = new Set<string>();
+
+export function announceUnrecognisedTool(tool: string, warn: (message: string) => void): void {
+  const name = tool.toLowerCase();
+  if (!isUnrecognisedTool(name) || announcedUnknownTools.has(name)) return;
+  announcedUnknownTools.add(name);
+  warn(
+    `twing: OpenCode's "${tool}" tool is newer than this twing build, so twing is not checking it. ` +
+      "If it edits files, those edits are not going through the design gate.",
+  );
+}
+
 function stringField(args: Record<string, unknown>, ...names: string[]): string | undefined {
   for (const name of names) {
     const value = args[name];
@@ -128,6 +178,9 @@ export function openCodeToolCalls(tool: string, args: Record<string, unknown>): 
       // intentional: the Go hook resolves each file independently.
       return patchPaths(patchText).map((filePath) => ({ toolName: "Write", toolInput: { file_path: filePath } }));
     }
+    // Nothing to translate: either a tool that names no file, or one this
+    // build has never heard of. `isUnrecognisedTool` is what tells those two
+    // apart -- this function deliberately can't, since both are "no calls".
     default:
       return [];
   }
@@ -304,6 +357,7 @@ export function createOpenCodePlugin(runHook: HookRunner = (payload) => runTwing
       },
 
       async "tool.execute.before"(input, output) {
+        announceUnrecognisedTool(input.tool, (message) => console.warn(message));
         const calls = openCodeToolCalls(input.tool, output.args);
         if (MUTATION_TOOLS.has(input.tool.toLowerCase()) && calls.length === 0) {
           throw new Error(`twing could not determine which file OpenCode's ${input.tool} call will modify`);
