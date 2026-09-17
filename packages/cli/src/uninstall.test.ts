@@ -170,7 +170,22 @@ test("runUninstall: never deletes a coordination server's database", async () =>
 
     const joined = logs.join("\n");
     assert.match(joined, /except .*serve-data/, "silence would let the next `twing serve` resurrect it inexplicably");
-    assert.match(joined, /remove it by hand/, "say how, since there is deliberately no flag");
+    assert.match(joined, /--purge-server-data/, "and name the way to get rid of it deliberately");
+  });
+});
+
+test("runUninstall --purge-server-data: deletes it when the caller says so", async () => {
+  // Nothing on disk distinguishes a throwaway local server from a real
+  // coordinator, so the person running the command states which they have.
+  await withHome(async (home) => {
+    seedInstalledMachine();
+    const { dataDir } = seedLocalCoordinator();
+
+    const { logs } = await captureConsole(() => runUninstall({ purgeServerData: true }));
+
+    assert.equal(fs.existsSync(dataDir), false, "asked for, so actually gone");
+    assert.equal(fs.existsSync(path.join(home, ".twing")), false, "and nothing is left to hold the directory open");
+    assert.ok(!logs.join("\n").includes("except"), "no caveat to give -- this was the whole point of the flag");
   });
 });
 
@@ -183,5 +198,9 @@ test("runUninstall --dry-run: promises to leave server data alone, and only when
     seedLocalCoordinator();
     const { logs: withData } = await captureConsole(() => runUninstall({ dryRun: true }));
     assert.match(withData.join("\n"), /would NOT touch .*serve-data/);
+    assert.match(withData.join("\n"), /--purge-server-data/, "a dry run is where you learn the flag exists");
+
+    const { logs: purging } = await captureConsole(() => runUninstall({ dryRun: true, purgeServerData: true }));
+    assert.match(purging.join("\n"), /would ALSO remove .*serve-data/, "the dry run has to reflect the flag, or it lies");
   });
 });

@@ -86,7 +86,7 @@ function printUsage(): void {
       "  twing --version | -v",
       "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]",
       "  twing init --ghuser                       (once per machine: work from any directory)",
-      "  twing uninstall [--dry-run]",
+      "  twing uninstall [--dry-run] [--purge-server-data]",
       "  twing login [--server <url>] [--token <pat>]",
       "  twing keygen --invite <code> [--server <url>] [--label <email>]",
       "  twing whoami [--server <url>] [--show-token]",
@@ -501,7 +501,10 @@ async function main(): Promise<void> {
       });
       return;
     case "uninstall":
-      await runUninstall({ dryRun: flags["dry-run"] === "true" });
+      await runUninstall({
+        dryRun: flags["dry-run"] === "true",
+        purgeServerData: flags["purge-server-data"] === "true",
+      });
       return;
     case "login":
       await runLogin({ server: flags.server, token: flags.token, cwd: commandCwd });

@@ -24,16 +24,21 @@
  * next edit, which is the correct behavior for a repo that still requires
  * it.
  *
- * Nor `~/.twing/serve-data`. That is a *coordination server's* database --
- * designs, identities, PATs, projects and capture blobs belonging to
- * everyone who points at it -- and this is a client-side command. It only
- * sits under `~/.twing` at all because `db/client.ts` defaults there when
- * `TWING_SERVE_DATA_DIR` is unset, which is the local-development and
- * native-`deploy/` case (the Docker deployment bind-mounts `/data` and was
- * never exposed). Deleting a server's state while uninstalling a client is
- * not this command's decision to make, so there is deliberately no flag for
- * it either: removing a coordinator's data means removing that directory by
- * hand, knowingly.
+ * Nor `~/.twing/serve-data`, unless `--purge-server-data` says so. That is a
+ * *coordination server's* database -- designs, identities, PATs, projects
+ * and capture blobs belonging to everyone who points at it -- and this is a
+ * client-side command. It only sits under `~/.twing` at all because
+ * `db/client.ts` defaults there when `TWING_SERVE_DATA_DIR` is unset, which
+ * covers both a throwaway `npm run start --workspace packages/server` on a
+ * laptop and a real coordinator installed by `deploy/install-service.sh`
+ * (whose systemd unit sets no data dir either; only the Docker deployment
+ * moves it, to a `/data` bind mount).
+ *
+ * Nothing on disk tells those two apart, and the person running the command
+ * always knows which one they have -- so the choice is theirs to state
+ * rather than this command's to guess. Defaulting to keep is what makes the
+ * two mistakes asymmetric: a kept directory costs one `rm -rf` on a laptop,
+ * a deleted one costs a coordinator with no undo.
  */
 
 import { execFileSync } from "node:child_process";
@@ -51,6 +56,10 @@ import { uninstallDaemonService } from "./daemon-service.js";
 export interface UninstallOptions {
   /** Report what would be removed without touching anything. */
   dryRun?: boolean;
+  /** Also delete `~/.twing/serve-data` -- a coordination server's database.
+   * Off by default; see this module's header comment for why the caller has
+   * to say it rather than this command inferring it. */
+  purgeServerData?: boolean;
 }
 
 /** Everything `twing uninstall` acts on, so `--dry-run` and the real run
@@ -71,24 +80,24 @@ function twingDir(): string {
 const SERVER_DATA_DIR = "serve-data";
 
 /**
- * Removes `~/.twing`, except any server data dir inside it.
+ * Removes `~/.twing`, holding back the server data dir unless asked not to.
  *
- * Returns what happened, because the two outcomes need different words: a
- * machine that never ran `twing serve` gets the directory deleted outright,
- * and one that did keeps it and has to be told, or the next `twing serve`
- * silently resurrects an "uninstalled" coordinator's entire history and
- * nobody knows why.
+ * Returns what happened, because the outcomes need different words: a
+ * machine that never ran `twing serve` gets the directory deleted outright
+ * and needs no explanation, while one that keeps its data has to be told, or
+ * the next `twing serve` silently resurrects an "uninstalled" coordinator's
+ * entire history and nobody knows why.
  *
  * `rmSync` per entry rather than one call on the parent: there is no
  * exclusion option, and the alternative -- move the data aside, delete, move
  * it back -- puts a window in the middle where a crash loses the database,
- * which is the exact outcome this exists to prevent.
+ * which is the exact outcome the default exists to prevent.
  */
-function removeTwingDir(dir: string): "removed" | "kept-server-data" | "absent" {
+function removeTwingDir(dir: string, purgeServerData: boolean): "removed" | "kept-server-data" | "absent" {
   if (!fs.existsSync(dir)) return "absent";
   let keptServerData = false;
   for (const entry of fs.readdirSync(dir)) {
-    if (entry === SERVER_DATA_DIR) {
+    if (entry === SERVER_DATA_DIR && !purgeServerData) {
       keptServerData = true;
       continue;
     }
@@ -159,9 +168,12 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
     console.log(`  - ${dir} (hook binary, the ~/.twing/lib CLI install, cached tokens, gate overrides, captured sessions)`);
     console.log("twing uninstall --dry-run: would NOT touch any repo's committed .claude/settings.json");
     if (fs.existsSync(path.join(dir, SERVER_DATA_DIR))) {
+      const serverData = path.join(dir, SERVER_DATA_DIR);
       console.log(
-        `twing uninstall --dry-run: would NOT touch ${path.join(dir, SERVER_DATA_DIR)} -- ` +
-          "a twing server's database is not a client uninstall's to delete",
+        options.purgeServerData
+          ? `twing uninstall --dry-run: would ALSO remove ${serverData} -- a twing server's database (--purge-server-data)`
+          : `twing uninstall --dry-run: would NOT touch ${serverData} -- a twing server's database. ` +
+              "Pass --purge-server-data if this machine's server is a throwaway you want gone too",
       );
     }
     return;
@@ -196,7 +208,7 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
   );
 
   try {
-    const outcome = removeTwingDir(dir);
+    const outcome = removeTwingDir(dir, options.purgeServerData === true);
     result.twingDirRemoved = outcome !== "absent";
     if (outcome === "removed") {
       console.log(`twing uninstall: removed ${dir}`);
@@ -204,7 +216,8 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
       console.log(`twing uninstall: removed ${dir}, except ${path.join(dir, SERVER_DATA_DIR)}`);
       console.log(
         "twing uninstall: that directory is a twing *server*'s database -- designs, identities and tokens for " +
-          "everyone pointing at it. Uninstalling a client doesn't get to delete it; remove it by hand if you mean to.",
+          "everyone pointing at it. Only you know whether this machine's server is a throwaway: " +
+          "re-run with --purge-server-data to delete it too, or remove it by hand.",
       );
     }
   } catch (err) {
