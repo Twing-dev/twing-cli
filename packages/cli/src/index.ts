@@ -24,6 +24,9 @@ import {
   runAdminListDevelopers,
 } from "./admin.js";
 import { runConstraintsList, runConstraintsRemove } from "./constraints.js";
+import { isResolverWired } from "./resolve-hook.js";
+import { globalSettingsPath } from "./wire-hooks.js";
+import { hookBinaryPath } from "./install-hook.js";
 import {
   runProjectInvite,
   runProjectListInvites,
@@ -83,7 +86,7 @@ function printUsage(): void {
       "  twing --version | -v",
       "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]",
       "  twing init --ghuser                       (once per machine: work from any directory)",
-      "  twing uninstall [--dry-run]",
+      "  twing uninstall [--dry-run] [--purge-server-data]",
       "  twing login [--server <url>] [--token <pat>]",
       "  twing keygen --invite <code> [--server <url>] [--label <email>]",
       "  twing whoami [--server <url>] [--show-token]",
@@ -426,10 +429,44 @@ function takeRepoScopeFlag(argv: string[]): string[] {
   return remaining;
 }
 
+/** The one-step install, named wherever a machine turns out to need it. */
+const INSTALL_COMMAND = "curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/install.sh | sh";
+
+/**
+ * Says so when twing is installed but wired into nothing.
+ *
+ * npm 12 blocks package install scripts by default, so `npm install -g
+ * @twing/cli` no longer runs the setup that writes this machine's hook
+ * wiring -- and a blocked script is a warning in npm's output, not a
+ * failure. The result is a machine where `twing` runs, nothing is wired, no
+ * hook ever fires, nothing is ever installed lazily, and no edit is ever
+ * gated. Nothing else in the system is in a position to notice: the whole
+ * design is that hooks fire without anyone typing a command.
+ *
+ * Deliberately quiet whenever there is any sign of wiring. `isResolverWired`
+ * covers the machine-wide route; an existing hook binary covers a machine
+ * wired the older way (binary-path entries from a pre-resolver `twing init`)
+ * or by a repo's committed bootstrap hook, both of which are fine and
+ * neither of which this should second-guess.
+ */
+function warnIfUnwired(command: string | undefined): void {
+  if (command === "uninstall" || command === "--version" || command === "-v") return;
+  try {
+    if (isResolverWired(globalSettingsPath())) return;
+    if (fs.existsSync(hookBinaryPath())) return;
+    console.error(
+      `twing: installed, but not wired into any coding agent on this machine -- no hook will fire and no edit will be checked.\n  ${INSTALL_COMMAND}`,
+    );
+  } catch {
+    // Unreadable settings are not this function's problem to report.
+  }
+}
+
 async function main(): Promise<void> {
   const [, , ...argv] = takeRepoScopeFlag(process.argv);
   const [command, ...rest] = argv;
   const flags = parseFlags(rest);
+  warnIfUnwired(command);
 
   // A bare `twing --help`/`-h` already printed usage via the "unknown
   // command" fallback below (command === "--help" matches no case), but
@@ -464,7 +501,10 @@ async function main(): Promise<void> {
       });
       return;
     case "uninstall":
-      await runUninstall({ dryRun: flags["dry-run"] === "true" });
+      await runUninstall({
+        dryRun: flags["dry-run"] === "true",
+        purgeServerData: flags["purge-server-data"] === "true",
+      });
       return;
     case "login":
       await runLogin({ server: flags.server, token: flags.token, cwd: commandCwd });

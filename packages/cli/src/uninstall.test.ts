@@ -137,3 +137,70 @@ test("runUninstall: says nothing about PATH when no twing survives", async () =>
     assert.ok(!logs.join("\n").includes("still resolves to"), "the clean case needs no caveat");
   });
 });
+
+/** The machine above, plus a `twing serve` that has been run on it: the
+ * server's SQLite database and its bootstrap token, where `db/client.ts`
+ * puts them when TWING_SERVE_DATA_DIR is unset. */
+function seedLocalCoordinator(): { dataDir: string; db: string } {
+  const dataDir = path.join(os.homedir(), ".twing", "serve-data");
+  fs.mkdirSync(path.join(dataDir, "captures"), { recursive: true });
+  const db = path.join(dataDir, "twing.db");
+  fs.writeFileSync(db, "SQLite format 3");
+  fs.writeFileSync(path.join(dataDir, "bootstrap-token"), "a-real-token");
+  fs.writeFileSync(path.join(dataDir, "captures", "blob"), "a captured conversation");
+  return { dataDir, db };
+}
+
+test("runUninstall: never deletes a coordination server's database", async () => {
+  // Found by running the real command on a machine that had a local
+  // coordinator: uninstalling the *client* destroyed every design, identity
+  // and PAT the server held, with nothing in the output admitting it.
+  await withHome(async (home) => {
+    const { hookPath } = seedInstalledMachine();
+    const { dataDir, db } = seedLocalCoordinator();
+
+    const { logs } = await captureConsole(() => runUninstall());
+
+    assert.equal(fs.readFileSync(db, "utf8"), "SQLite format 3", "a server's data is not a client uninstall's to delete");
+    assert.equal(fs.existsSync(path.join(dataDir, "bootstrap-token")), true);
+    assert.equal(fs.existsSync(path.join(dataDir, "captures", "blob")), true, "including the capture blobs beside it");
+
+    assert.equal(fs.existsSync(hookPath), false, "everything that IS client state still goes");
+    assert.equal(fs.existsSync(path.join(home, ".twing", "config.json")), false, "the cached token included");
+
+    const joined = logs.join("\n");
+    assert.match(joined, /except .*serve-data/, "silence would let the next `twing serve` resurrect it inexplicably");
+    assert.match(joined, /--purge-server-data/, "and name the way to get rid of it deliberately");
+  });
+});
+
+test("runUninstall --purge-server-data: deletes it when the caller says so", async () => {
+  // Nothing on disk distinguishes a throwaway local server from a real
+  // coordinator, so the person running the command states which they have.
+  await withHome(async (home) => {
+    seedInstalledMachine();
+    const { dataDir } = seedLocalCoordinator();
+
+    const { logs } = await captureConsole(() => runUninstall({ purgeServerData: true }));
+
+    assert.equal(fs.existsSync(dataDir), false, "asked for, so actually gone");
+    assert.equal(fs.existsSync(path.join(home, ".twing")), false, "and nothing is left to hold the directory open");
+    assert.ok(!logs.join("\n").includes("except"), "no caveat to give -- this was the whole point of the flag");
+  });
+});
+
+test("runUninstall --dry-run: promises to leave server data alone, and only when there is some", async () => {
+  await withHome(async () => {
+    seedInstalledMachine();
+    const { logs: without } = await captureConsole(() => runUninstall({ dryRun: true }));
+    assert.ok(!without.join("\n").includes("serve-data"), "no coordinator here, so the caveat would just be noise");
+
+    seedLocalCoordinator();
+    const { logs: withData } = await captureConsole(() => runUninstall({ dryRun: true }));
+    assert.match(withData.join("\n"), /would NOT touch .*serve-data/);
+    assert.match(withData.join("\n"), /--purge-server-data/, "a dry run is where you learn the flag exists");
+
+    const { logs: purging } = await captureConsole(() => runUninstall({ dryRun: true, purgeServerData: true }));
+    assert.match(purging.join("\n"), /would ALSO remove .*serve-data/, "the dry run has to reflect the flag, or it lies");
+  });
+});

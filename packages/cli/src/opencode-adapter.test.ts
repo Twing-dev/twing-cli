@@ -4,7 +4,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  announceUnrecognisedTool,
   createOpenCodePlugin,
+  isUnrecognisedTool,
   nearestExistingDir,
   openCodeToolCalls,
   patchPaths,
@@ -25,6 +27,43 @@ test("openCodeToolCalls translates edit argument casing without losing edit cont
     toolName: "Edit",
     toolInput: { file_path: "/workspace/repo/src/a.ts", old_string: "before", new_string: "after", replace_all: true },
   }]);
+});
+
+test("isUnrecognisedTool: OpenCode's real tool surface is accounted for, one way or the other", () => {
+  // Every tool name in the shipped OpenCode binary as of 2026-09-17. None of
+  // them may read as "new" -- that word has to keep meaning something.
+  for (const tool of ["edit", "write", "apply_patch", "patch", "read", "grep", "glob",
+    "list", "bash", "todowrite", "todoread", "webfetch", "task", "invalid"]) {
+    assert.equal(isUnrecognisedTool(tool), false, `${tool} ships today and is not new`);
+  }
+  assert.equal(isUnrecognisedTool("Apply_Patch"), false, "tool names are matched case-insensitively");
+  assert.equal(isUnrecognisedTool("multiedit"), true, "a plausible future mutating tool");
+});
+
+test("announceUnrecognisedTool: warns once per unknown tool, and never about a known one", () => {
+  const warnings: string[] = [];
+  const warn = (message: string) => warnings.push(message);
+
+  announceUnrecognisedTool("edit", warn);
+  announceUnrecognisedTool("bash", warn);
+  assert.deepEqual(warnings, [], "a tool twing has decided about is not a surprise");
+
+  announceUnrecognisedTool("sculpt", warn);
+  announceUnrecognisedTool("sculpt", warn);
+  announceUnrecognisedTool("SCULPT", warn);
+  assert.equal(warnings.length, 1, "once per name, not once per call -- this fires on every tool use");
+  assert.match(warnings[0]!, /sculpt/);
+  assert.match(warnings[0]!, /not going through the design gate/, "must say what the user loses, not just that something is unknown");
+});
+
+test("an unrecognised tool is still allowed through", async () => {
+  // The deliberate half of the trade: twing will not break an OpenCode
+  // version it is older than. Warning is the whole intervention.
+  const calls: TwingHookPayload[] = [];
+  const runner: HookRunner = async (payload) => { calls.push(payload); return undefined; };
+  const plugin = await createOpenCodePlugin(runner)({ directory: "/workspace", worktree: "/workspace" });
+  await plugin["tool.execute.before"]({ tool: "sculpt", sessionID: "s1", callID: "c1" }, { args: { filePath: "/workspace/a.ts" } });
+  assert.deepEqual(calls, [], "no gate check -- twing has nothing to say about a tool it cannot interpret");
 });
 
 test("patchPaths returns every unique file in an OpenCode patch", () => {
