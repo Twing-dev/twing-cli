@@ -23,6 +23,17 @@
  * their own machine. Left in place, it simply bootstraps twing again on the
  * next edit, which is the correct behavior for a repo that still requires
  * it.
+ *
+ * Nor `~/.twing/serve-data`. That is a *coordination server's* database --
+ * designs, identities, PATs, projects and capture blobs belonging to
+ * everyone who points at it -- and this is a client-side command. It only
+ * sits under `~/.twing` at all because `db/client.ts` defaults there when
+ * `TWING_SERVE_DATA_DIR` is unset, which is the local-development and
+ * native-`deploy/` case (the Docker deployment bind-mounts `/data` and was
+ * never exposed). Deleting a server's state while uninstalling a client is
+ * not this command's decision to make, so there is deliberately no flag for
+ * it either: removing a coordinator's data means removing that directory by
+ * hand, knowingly.
  */
 
 import { execFileSync } from "node:child_process";
@@ -53,6 +64,39 @@ interface Teardown {
 
 function twingDir(): string {
   return path.join(os.homedir(), ".twing");
+}
+
+/** A coordination server's own state, which a client uninstall never removes.
+ * See this module's header comment for why it is under `~/.twing` at all. */
+const SERVER_DATA_DIR = "serve-data";
+
+/**
+ * Removes `~/.twing`, except any server data dir inside it.
+ *
+ * Returns what happened, because the two outcomes need different words: a
+ * machine that never ran `twing serve` gets the directory deleted outright,
+ * and one that did keeps it and has to be told, or the next `twing serve`
+ * silently resurrects an "uninstalled" coordinator's entire history and
+ * nobody knows why.
+ *
+ * `rmSync` per entry rather than one call on the parent: there is no
+ * exclusion option, and the alternative -- move the data aside, delete, move
+ * it back -- puts a window in the middle where a crash loses the database,
+ * which is the exact outcome this exists to prevent.
+ */
+function removeTwingDir(dir: string): "removed" | "kept-server-data" | "absent" {
+  if (!fs.existsSync(dir)) return "absent";
+  let keptServerData = false;
+  for (const entry of fs.readdirSync(dir)) {
+    if (entry === SERVER_DATA_DIR) {
+      keptServerData = true;
+      continue;
+    }
+    fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
+  }
+  if (keptServerData) return "kept-server-data";
+  fs.rmSync(dir, { recursive: true, force: true });
+  return "removed";
 }
 
 /**
@@ -114,6 +158,12 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
     console.log(`  - twing's Claude hooks and global OpenCode plugin (${hookPath})`);
     console.log(`  - ${dir} (hook binary, the ~/.twing/lib CLI install, cached tokens, gate overrides, captured sessions)`);
     console.log("twing uninstall --dry-run: would NOT touch any repo's committed .claude/settings.json");
+    if (fs.existsSync(path.join(dir, SERVER_DATA_DIR))) {
+      console.log(
+        `twing uninstall --dry-run: would NOT touch ${path.join(dir, SERVER_DATA_DIR)} -- ` +
+          "a twing server's database is not a client uninstall's to delete",
+      );
+    }
     return;
   }
 
@@ -146,10 +196,16 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
   );
 
   try {
-    if (fs.existsSync(dir)) {
-      fs.rmSync(dir, { recursive: true, force: true });
-      result.twingDirRemoved = true;
+    const outcome = removeTwingDir(dir);
+    result.twingDirRemoved = outcome !== "absent";
+    if (outcome === "removed") {
       console.log(`twing uninstall: removed ${dir}`);
+    } else if (outcome === "kept-server-data") {
+      console.log(`twing uninstall: removed ${dir}, except ${path.join(dir, SERVER_DATA_DIR)}`);
+      console.log(
+        "twing uninstall: that directory is a twing *server*'s database -- designs, identities and tokens for " +
+          "everyone pointing at it. Uninstalling a client doesn't get to delete it; remove it by hand if you mean to.",
+      );
     }
   } catch (err) {
     // Everything above already succeeded; a stubborn directory is worth
