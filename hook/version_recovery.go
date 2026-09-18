@@ -393,7 +393,12 @@ func nodeVersionString() string {
 // nodeCanRunCLI reports whether the node on PATH is new enough for the CLI
 // version being installed. Anything unparseable is treated as too old: a node
 // whose version cannot be read is not one to bet a working install on.
-func nodeCanRunCLI() bool {
+// A var, like isManagedInstall above, so tests can pin it. Without that,
+// every test touching a deny message that consults it would silently depend
+// on the Node of whoever happens to be running the suite -- green on a 22.5
+// machine, failing on a 20 one, for reasons having nothing to do with the
+// test's subject.
+var nodeCanRunCLI = func() bool {
 	out, err := exec.Command("node", "-v").Output()
 	if err != nil {
 		return false
