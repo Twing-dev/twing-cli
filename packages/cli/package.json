@@ -1,6 +1,6 @@
 {
   "name": "@twing/cli",
-  "version": "0.2.30",
+  "version": "0.2.31",
   "engines": {
     "node": ">=20"
   },
@@ -31,7 +31,7 @@
     "test": "node --test dist/*.test.js dist/*/*.test.js"
   },
   "dependencies": {
-    "@twing/core": "^0.2.30",
+    "@twing/core": "^0.2.31",
     "web-tree-sitter": "^0.26.12"
   }
 }
