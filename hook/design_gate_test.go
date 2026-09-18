@@ -1444,6 +1444,18 @@ func pinInstallKind(t *testing.T, managed bool) {
 	original := isManagedInstall
 	isManagedInstall = func() bool { return managed }
 	t.Cleanup(func() { isManagedInstall = original })
+	// Pin Node too. hookVersionMismatchReason consults nodeCanRunCLI, so
+	// without this every deny-message test below would quietly depend on the
+	// Node of whoever runs the suite. Usable by default -- the too-old case
+	// is a deliberate opt-in via pinNodeUsable.
+	pinNodeUsable(t, true)
+}
+
+func pinNodeUsable(t *testing.T, usable bool) {
+	t.Helper()
+	original := nodeCanRunCLI
+	nodeCanRunCLI = func() bool { return usable }
+	t.Cleanup(func() { nodeCanRunCLI = original })
 }
 
 // 401 and 403 are different problems with different fixes. Collapsing them
@@ -1873,5 +1885,76 @@ func TestOutOfScopeReason_LabelDoesNotCarryLiteralNewlines(t *testing.T) {
 		[]designSummary{{ID: "11111111-2222-3333-4444-555555555555", Summary: "Add retry\n\nUpdate: and more"}})
 	if strings.Contains(msg, `\n`) {
 		t.Errorf("a multi-line summary leaked escaped newlines into the label:\n%s", msg)
+	}
+}
+
+// A managed machine refused the update because its Node is below the floor
+// used to fall through to the generic "couldn't fix itself" message, whose
+// named causes are network, registry reachability, disk and timeout -- none
+// of them true, and no mention of Node at all. A reader handed four wrong
+// causes picks the plausible one; the real reason was only ever in
+// design-coordinator.log, which that message asks them to read but which
+// nobody reads before reporting what the deny said.
+//
+// Written against the 1.0.0 floor move (20.0 -> 22.5), which is the first
+// release where a previously-working machine can be refused for this reason.
+func TestHookVersionMismatchReason_TooOldNodeNamesNodeAsTheCause(t *testing.T) {
+	pinInstallKind(t, true)
+	pinNodeUsable(t, false)
+
+	msg := flattenMessage(hookVersionMismatchReason("1.0.0", "1.1.0"))
+
+	if !strings.Contains(msg, "Node") {
+		t.Fatalf("the deny must name Node as the cause, got: %s", msg)
+	}
+	if !strings.Contains(msg, minNodeVersionString()) {
+		t.Errorf("must name the required Node version %q, got: %s", minNodeVersionString(), msg)
+	}
+	// The generic cause list is actively misleading here: every item in it is
+	// false, and each one sends the reader somewhere real but wrong.
+	for _, forbidden := range []string{"no network/DNS", "npm registry", "disk full", "3-minute budget"} {
+		if strings.Contains(msg, forbidden) {
+			t.Errorf("must not offer %q as a cause when Node is the known cause: %s", forbidden, msg)
+		}
+	}
+	// Same contract the rest of the managed-install denies hold to.
+	for _, forbidden := range []string{"npm install", "twing init", "twing daemon restart"} {
+		if strings.Contains(msg, forbidden) {
+			t.Errorf("a managed install must not be told to run %q: %s", forbidden, msg)
+		}
+	}
+	if !strings.Contains(msg, "operational problem") {
+		t.Errorf("should frame it as operational, not something the agent works around: %s", msg)
+	}
+}
+
+// The counterpart: a usable Node must still get the generic message. The new
+// branch is meant to catch one specific cause, not to swallow every mismatch.
+func TestHookVersionMismatchReason_UsableNodeKeepsTheGenericCauses(t *testing.T) {
+	pinInstallKind(t, true)
+	pinNodeUsable(t, true)
+
+	msg := flattenMessage(hookVersionMismatchReason("1.0.0", "1.1.0"))
+
+	if strings.Contains(msg, "Node is too old") {
+		t.Errorf("Node is not the cause here and must not be named: %s", msg)
+	}
+	if !strings.Contains(msg, "couldn't fix itself") {
+		t.Errorf("should still be the generic self-heal-failed message, got: %s", msg)
+	}
+}
+
+// A self-installed machine never runs version recovery at all, so the Node
+// floor is not why it is mismatched -- it must keep getting the commands to
+// run rather than being told to upgrade Node and wait for a self-heal that
+// will never come.
+func TestHookVersionMismatchReason_SelfInstalledIsUnaffectedByNodeFloor(t *testing.T) {
+	pinInstallKind(t, false)
+	pinNodeUsable(t, false)
+
+	msg := flattenMessage(hookVersionMismatchReason("1.0.0", "1.1.0"))
+
+	if !strings.Contains(msg, "npm install") {
+		t.Errorf("a self-installed machine still has something to run, got: %s", msg)
 	}
 }

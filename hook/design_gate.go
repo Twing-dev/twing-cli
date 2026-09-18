@@ -926,6 +926,53 @@ func hookVersionMismatchReason(hookVersion, serverVersion string) string {
 	// rather than retrying on every single edit -- naming that here is what
 	// stops a reader from assuming the next edit will simply try again right
 	// away.
+	// If the update was refused because this machine's Node is below the
+	// floor, we know the cause exactly, and the generic list below does not
+	// contain it.
+	//
+	// Added 2026-09-18, ahead of the 1.0.0 floor move (20.0 -> 22.5). Until
+	// then every real refusal genuinely was one of network/registry/disk/
+	// timeout, so a menu was honest. It stops being honest the moment a
+	// working machine can be refused for a reason the menu omits: a reader
+	// handed four wrong causes does not conclude "none of these" -- they pick
+	// the plausible one and go looking for a proxy problem that was never
+	// there. Naming it costs one `node -v` on a path that has already given
+	// up.
+	//
+	// Scoped to the managed branch on purpose: `attemptVersionRecovery` is
+	// the only thing that refuses over the Node floor, and it only ever runs
+	// for a managed install. A self-installed machine is told to run the
+	// install itself, and npm's own EBADENGINE warning is in front of that
+	// reader already.
+	if isManagedInstall() && !nodeCanRunCLI() {
+		return denyMessage(
+			"twing can't check for conflicts -- this machine's Node is too old for the version the coordinator is running.",
+			"twing updates itself on this machine, but it will not replace a working install with one "+
+				"this machine cannot run, so it left the current version in place and stopped. That is "+
+				"why this is not fixing itself on the next edit. Upgrading Node is all it needs -- "+
+				"nothing was installed, changed, or broken. This is an operational problem, not a task "+
+				"for you to work around: do not try to install or update twing another way, and do not "+
+				"edit or remove the hook.",
+			// Labels stay inside denyDetailLabelWidth (14) like every other
+			// detail block -- a longer one runs straight into its value with
+			// no separator. The value drops nodeVersionString's "node "
+			// prefix, which the label already says.
+			[]denyDetail{
+				{"Node here", strings.TrimPrefix(nodeVersionString(), "node ")},
+				{"Node needed", minNodeVersionString() + " or newer"},
+				{"This machine", hookVersion},
+				{"Server", serverVersion},
+			},
+			[]denyAction{
+				{
+					Label: "Report the Node version to whoever runs this machine",
+					Note: "Upgrading Node to " + minNodeVersionString() + " or newer is the whole fix; twing will " +
+						"catch itself up on the next edit. ~/.twing/design-coordinator.log records the same reason.",
+				},
+			},
+		)
+	}
+
 	if isManagedInstall() {
 		return denyMessage(
 			"twing can't check for conflicts -- this machine's twing doesn't match the coordinator and couldn't fix itself.",
