@@ -14,6 +14,27 @@ command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1 || {
   exit 1
 }
 
+# Present is not the same as new enough, and this script used to claim a
+# version it never checked. npm only *warns* on an unsatisfiable `engines`
+# field, so an old Node gets a successful-looking install that fails later
+# inside the CLI, with an error naming a file the reader has never seen.
+#
+# Kept in step with MIN_NODE_MAJOR/MIN_NODE_MINOR in
+# packages/core/src/repo-setup.ts, which is where the two zero-touch install
+# paths read the same floor from. This script is standalone by necessity --
+# it is fetched over curl before any of that exists.
+node_version=$(node -v 2>/dev/null | sed 's/^v//')
+node_major=${node_version%%.*}
+node_rest=${node_version#*.}
+node_minor=${node_rest%%.*}
+case "$node_major" in ''|*[!0-9]*) node_major=0 ;; esac
+case "$node_minor" in ''|*[!0-9]*) node_minor=0 ;; esac
+if [ "$node_major" -lt 20 ] || { [ "$node_major" -eq 20 ] && [ "$node_minor" -lt 0 ]; }; then
+  echo "twing install: this machine runs Node ${node_version:-unknown}, and twing needs 20.0 or newer." >&2
+  echo "twing install: nothing was installed. Upgrade Node and run this again." >&2
+  exit 1
+fi
+
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/twing-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT INT TERM
 

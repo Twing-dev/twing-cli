@@ -1,6 +1,9 @@
 {
   "name": "@twing/cli",
   "version": "0.2.30",
+  "engines": {
+    "node": ">=20"
+  },
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "bin": {

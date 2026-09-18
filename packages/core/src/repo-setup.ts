@@ -76,8 +76,75 @@ export const WIRED_HOOK_EVENTS: { event: string; matcher?: string }[] = [
  * binary exists. With neither `curl` nor `wget` present it falls back to
  * `@latest` -- no worse than what it replaced.
  */
+/**
+ * The oldest Node that can run the installed CLI, as one source of truth.
+ *
+ * Declared in both published `package.json`s so npm warns, checked by
+ * `install.sh`, and interpolated into the shell below so the two zero-touch
+ * paths check it too. Raising the floor means editing this and the two
+ * manifests; every install path follows from here.
+ */
+export const MIN_NODE_MAJOR = 20;
+export const MIN_NODE_MINOR = 0;
+
 export function coordinatorInstallShell(): string {
   return `
+# Is the Node already on this machine new enough to run what is about to be
+# installed?
+#
+# npm does not refuse an install over an unsatisfiable \`engines\` field -- it
+# prints EBADENGINE and carries on -- so without this the install "succeeds"
+# and the failure surfaces later, inside \`init\`, as a missing-API or syntax
+# error in a file the reader has never heard of. On this path that error goes
+# to bootstrap.log, and the gate meanwhile denies every edit with a message
+# listing causes that do not include the real one.
+#
+# Parameter expansion rather than sed/cut: this runs before twing exists on a
+# machine, and it saves three subprocesses on the path that has none to spare.
+twing_node_ok() {
+  _nv=\$(node -v 2>/dev/null) || return 1
+  _nv=\${_nv#v}
+  _major=\${_nv%%.*}
+  _rest=\${_nv#*.}
+  _minor=\${_rest%%.*}
+  case "\$_major" in ''|*[!0-9]*) return 1 ;; esac
+  case "\$_minor" in ''|*[!0-9]*) _minor=0 ;; esac
+  [ "\$_major" -gt ${MIN_NODE_MAJOR} ] && return 0
+  [ "\$_major" -eq ${MIN_NODE_MAJOR} ] && [ "\$_minor" -ge ${MIN_NODE_MINOR} ]
+}
+
+# Says so through the one channel a person actually reads.
+#
+# The paths that reach this are asynchronous -- nobody is watching a terminal
+# when the resolver or the committed hook runs -- so writing the reason to
+# bootstrap.log means writing it nowhere. A \`PreToolUse\` deny is the only
+# channel that surfaces: it reaches the agent, which reports it. Every other
+# event has nowhere to put a verdict, so it stays quiet.
+#
+# Reads \$twing_event, which both generated scripts set from their first
+# argument before this is sourced.
+# Everything that happens when this machine's node is too old, in one place:
+# record it where a maintainer would look, then tell the agent, which is the
+# only way it reaches a person. Both generated scripts call this instead of
+# deciding for themselves, so the wording cannot drift between them.
+twing_node_unusable() {
+  mkdir -p "\$HOME/.twing" 2>/dev/null
+  echo "twing: node \$(node -v 2>/dev/null || echo 'not found') is older than the Node ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR} twing requires -- not installing, and nothing was changed" >> "\$HOME/.twing/bootstrap.log" 2>/dev/null
+  twing_node_deny
+}
+
+twing_node_deny() {
+  [ "\${twing_event:-}" = "PreToolUse" ] || return 0
+  _found=\$(node -v 2>/dev/null) || _found=""
+  [ -n "\$_found" ] || _found="not found"
+  # \`%s\` as the whole format, with the JSON as an argument -- printf expands
+  # backslash escapes in a *format* string, which would turn every \\n in the
+  # message into a real newline and produce invalid JSON. The version is
+  # spliced in by ending the single-quoted run rather than by a placeholder,
+  # for the same reason.
+  printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"twing cannot set itself up on this machine: it needs Node ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR} or newer, and this machine runs '"\$_found"'.\\n\\n  This repo uses twing (https://twing.dev) to stop two AI sessions\\n  silently colliding on the same code. Its setup normally runs\\n  automatically, with nothing to do by hand -- but it will not install\\n  against a Node this old, because that produces a broken install\\n  rather than a working one.\\n\\n  Nothing was installed and nothing on this machine was changed.\\n  Upgrading Node is all it needs; twing will set itself up on the next\\n  edit.\\n\\n  This is an operational problem, not a task for you to work around:\\n  do not try to install twing another way, and do not edit or remove\\n  the hook. Report the Node version to whoever runs this machine."}}'
+}
+
 twing_fetch() {
   if command -v curl >/dev/null 2>&1; then
     curl -fsS --max-time 10 "\$1" 2>/dev/null
@@ -94,6 +161,14 @@ twing_install_for_repo() {
   _log="\$HOME/.twing/bootstrap.log"
   mkdir -p "\$HOME/.twing"
   echo "=== twing bootstrap \$(date -u +%Y-%m-%dT%H:%M:%SZ) ===" >> "\$_log" 2>/dev/null
+
+  # Before anything is downloaded. Returning early leaves the machine exactly
+  # as it was -- no half-installed lib, no hook binary -- which is the state
+  # the caller's own "did it work?" check already handles.
+  if ! twing_node_ok; then
+    echo "twing: node \$(node -v 2>/dev/null || echo 'not found') is too old -- twing needs Node ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR} or newer, and will not install until it is upgraded" >> "\$_log" 2>/dev/null
+    return 1
+  fi
 
   # coordinator.serverUrl straight out of the committed manifest.
   _server=\$(sed -n 's/^[[:space:]]*serverUrl:[[:space:]]*//p' "\$_root/.twing/twing.yml" 2>/dev/null | head -1 | tr -d '"' | tr -d '\\r')
@@ -175,6 +250,15 @@ ${coordinatorInstallShell()}
 # the deny text below, which now points here instead.
 log="\$HOME/.twing/bootstrap.log"
 mkdir -p "\$HOME/.twing"
+
+# Before either install route below, and before the generic failure text at
+# the bottom: that text lists everything that can go wrong and asks the
+# reader to go find the real cause in bootstrap.log. When the cause is
+# already known, say it here instead of sending someone log-hunting.
+if ! twing_node_ok; then
+  twing_node_unusable
+  exit 0
+fi
 
 # Reuse a twing that is already on PATH before fetching another copy: a
 # machine with a working global install needs no download at all, and

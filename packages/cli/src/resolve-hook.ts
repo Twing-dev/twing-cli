@@ -164,6 +164,20 @@ while : ; do
 done
 [ -n "\$repo_root" ] || exit 0
 ${coordinatorInstallShell()}
+
+# A repo that wants twing, on a machine that cannot run it.
+#
+# Distinguish this from the silent \`exit 0\`s above, which all mean "nothing
+# to gate here" -- no repo, no coordinator, an event that cannot install.
+# This one means the opposite: there *is* something to gate, and we have just
+# determined the machine cannot do it. Falling through to the same silent
+# allow would leave the session ungated for its whole life with no signal
+# anywhere, which is the failure this whole script exists to prevent.
+if ! twing_node_ok; then
+  twing_node_unusable
+  exit 0
+fi
+
 twing_install_for_repo "\$repo_root"
 
 if [ -x "\$hook_bin" ]; then
