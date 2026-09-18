@@ -35,7 +35,19 @@ func readOrCreatePersistedID(idPath string) string {
 	buf := make([]byte, 16)
 	_, _ = rand.Read(buf)
 	generated := hex.EncodeToString(buf)
-	_ = os.MkdirAll(filepath.Dir(idPath), 0o755)
+	// Write into the directory, never create it -- mirrors the same guard in
+	// identity.ts's readOrCreatePersistedId. MkdirAll here conjured a `.git`
+	// where there was none, leaving a directory that is not a repository but
+	// looks exactly like one to every existsSync(".git") check, including
+	// findRepoRoot's, which then stopped its walk there forever after. Found
+	// on the TS side 2026-09-16 and fixed there; this port kept the bug until
+	// 2026-09-18, when a stray $HOME/.git holding nothing but twing-project-id
+	// was still being attributed to as a phantom project.
+	if info, err := os.Stat(filepath.Dir(idPath)); err != nil || !info.IsDir() {
+		// No durable home for it: an ephemeral id for this run is still
+		// correct, just not stable across processes.
+		return generated
+	}
 	_ = os.WriteFile(idPath, []byte(generated), 0o644)
 	return generated
 }
@@ -83,12 +95,32 @@ func canonicalizeRemoteURL(raw string) string {
 // git remote get-url origin), falling back to a gitignored random id per repo
 // (§8). `cwd` need not be the repo root -- git resolves the enclosing repo
 // from any subdirectory.
+//
+// The fallback resolves that root explicitly rather than joining `cwd`, which
+// is the second half of the phantom-.git fix above: a repo with no origin,
+// entered from a subdirectory, used to persist its id at
+// `<subdir>/.git/twing-project-id` -- a phantom nested *inside* a real repo,
+// which findRepoRoot then stops at instead of the true root, so the same
+// checkout reports two different projects depending on where the hook fired.
+//
+// Returning "" for a non-repository is this side's answer to the error
+// identity.ts raises there. It cannot throw: a hook that fails a tool call is
+// worse than one that declines to name a project (§4, and this module's own
+// "always exits 0" contract). Every current caller resolves a coordinator
+// first, which already requires a repo root, so this is a guard against a
+// future caller rather than a live path -- but the id it would otherwise mint
+// is a syntactically perfect name for a project that has never existed, and
+// that is exactly how the TS side spent a month querying a phantom.
 func computeProjectID(cwd string) string {
 	if remoteURL, ok := gitOutput(cwd, "remote", "get-url", "origin"); ok && remoteURL != "" {
 		sum := sha256.Sum256([]byte(canonicalizeRemoteURL(remoteURL)))
 		return hex.EncodeToString(sum[:])
 	}
-	return readOrCreatePersistedID(filepath.Join(cwd, ".git", "twing-project-id"))
+	repoRoot, ok := gitOutput(cwd, "rev-parse", "--show-toplevel")
+	if !ok || repoRoot == "" {
+		return ""
+	}
+	return readOrCreatePersistedID(filepath.Join(repoRoot, ".git", "twing-project-id"))
 }
 
 // developerId is no longer computed on this side at all for the full-auth
