@@ -81,7 +81,7 @@ func captureDaemon(t *testing.T) chan sessionEndMessage {
 func TestSendSessionEnd_SendsOneFrameAndReturnsWithoutAReply(t *testing.T) {
 	received := captureDaemon(t)
 
-	sendSessionEnd("sess1", "/Users/dev/proj", "/tmp/transcript.jsonl")
+	sendSessionEnd("sess1", "/Users/dev/proj", "/tmp/transcript.jsonl", nil)
 
 	select {
 	case msg := <-received:
@@ -96,10 +96,38 @@ func TestSendSessionEnd_SendsOneFrameAndReturnsWithoutAReply(t *testing.T) {
 	}
 }
 
-func TestSendSessionEnd_NoTranscriptPath_SendsNothing(t *testing.T) {
+// A harness that names a source but no transcript path -- OpenCode, which
+// has no per-session file -- must still reach the daemon. The early return
+// below used to test the path alone, which would have dropped every OpenCode
+// session end without a sound.
+func TestSendSessionEnd_SourceButNoTranscriptPath_StillSends(t *testing.T) {
 	received := captureDaemon(t)
 
-	sendSessionEnd("sess1", "/Users/dev/proj", "")
+	sendSessionEnd("sess1", "/Users/dev/proj", "", &transcriptSource{
+		Kind:   "opencode-sqlite",
+		Values: map[string]string{"sessionId": "ses_abc"},
+	})
+
+	select {
+	case msg := <-received:
+		if msg.Source == nil {
+			t.Fatalf("frame carried no source descriptor: %+v", msg)
+		}
+		if msg.Source.Kind != "opencode-sqlite" {
+			t.Errorf("kind = %q, want opencode-sqlite", msg.Source.Kind)
+		}
+		if got := msg.Source.Values["sessionId"]; got != "ses_abc" {
+			t.Errorf("values[sessionId] = %q, want ses_abc -- the hook must forward the bag verbatim", got)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("no frame reached the daemon")
+	}
+}
+
+func TestSendSessionEnd_NeitherPathNorSource_SendsNothing(t *testing.T) {
+	received := captureDaemon(t)
+
+	sendSessionEnd("sess1", "/Users/dev/proj", "", nil)
 
 	select {
 	case msg := <-received:
@@ -117,7 +145,7 @@ func TestSendSessionEnd_NoDaemon_StaysInsideTheHookBudget(t *testing.T) {
 	t.Setenv("TWING_SOCK", filepath.Join(t.TempDir(), "no-such.sock"))
 
 	start := time.Now()
-	sendSessionEnd("sess1", "/Users/dev/proj", "/tmp/transcript.jsonl")
+	sendSessionEnd("sess1", "/Users/dev/proj", "/tmp/transcript.jsonl", nil)
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Errorf("took %s, want well inside the fire-and-forget budget with nothing listening", elapsed)
 	}
@@ -156,7 +184,7 @@ func TestCacheCheck_ForwardsCwdAndTranscriptPath(t *testing.T) {
 		_, _ = conn.Write(frame)
 	}()
 
-	cacheCheck("sess1", "/Users/dev/proj", "/tmp/transcript.jsonl")
+	cacheCheck("sess1", "/Users/dev/proj", "/tmp/transcript.jsonl", nil)
 
 	select {
 	case req := <-received:

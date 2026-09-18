@@ -22,6 +22,38 @@ export interface TwingHookPayload {
   hook_event_name: "PreToolUse" | "PostToolUse" | "SessionStart" | "UserPromptSubmit" | "SessionEnd";
   tool_name?: "Edit" | "Write" | "Read" | "Grep" | "Glob";
   tool_input?: Record<string, unknown>;
+  /** Where this session's conversation lives. Claude Code hands the hook a
+   * `transcript_path`; OpenCode has no per-session file, so this says which
+   * session of which database instead. Mirrors
+   * `TranscriptSourceDescriptor` in `@twing/core` -- restated rather than
+   * imported because this module is copied standalone to
+   * `~/.twing/opencode/adapter.mjs` and cannot resolve `@twing/core` from
+   * there. */
+  twing_source?: { kind: string; values: Record<string, string> };
+}
+
+/**
+ * The descriptor for an OpenCode session.
+ *
+ * Two keys, both of which OpenCode itself told us: the session id comes from
+ * the hook input, and `XDG_DATA_HOME` from this process's own environment --
+ * this code runs *inside* OpenCode, so its environment is OpenCode's, which
+ * is the only place that answer exists. The daemon is long-lived and shared
+ * across every session on the machine, usually started from an entirely
+ * different shell, so it cannot read this for itself.
+ *
+ * An allowlist, deliberately, and one that must stay short. This crosses a
+ * process boundary into a daemon and is echoed into the capture header, so
+ * nothing goes in that could carry a secret -- never `process.env` wholesale,
+ * never the hook payload, never anything a user could have put a token in.
+ * `XDG_DATA_HOME` is a directory path that the user's own shell profile set,
+ * and nothing else qualifies today.
+ */
+function openCodeSourceDescriptor(sessionID: string): TwingHookPayload["twing_source"] {
+  const values: Record<string, string> = { sessionId: sessionID };
+  const xdgDataHome = process.env.XDG_DATA_HOME;
+  if (xdgDataHome && xdgDataHome.trim() !== "") values.xdgDataHome = xdgDataHome;
+  return { kind: "opencode-sqlite", values };
 }
 
 interface HookSpecificOutput {
@@ -345,6 +377,11 @@ export function createOpenCodePlugin(runHook: HookRunner = (payload) => runTwing
       cwd: eventCwd,
       hook_event_name: event,
       ...(call ? { tool_name: call.toolName, tool_input: call.toolInput } : {}),
+      // Sent on every event, exactly as Claude Code sends `transcript_path`
+      // on every event. The capture path is watermark-based and stateless
+      // per event, so there is no "first" event to attach this to -- and a
+      // session whose SessionStart was missed must still capture.
+      twing_source: openCodeSourceDescriptor(sessionID),
     });
 
     return {

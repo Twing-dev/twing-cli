@@ -61,32 +61,49 @@ func newEnqueueMessage(sessionID, cwd, toolName string, toolInput json.RawMessag
 	}
 }
 
+// transcriptSource mirrors TranscriptSourceDescriptor in
+// packages/core/src/protocol.ts: where this session's conversation lives, as
+// the harness describes it.
+//
+// Opaque on this side, deliberately. The hook neither builds one nor reads
+// one -- it copies whatever the payload carried straight through to the
+// daemon (§4). A property bag rather than a field per harness is what keeps
+// that true: adding a harness changes the daemon's registry and never this
+// file, so the one binary that runs on every tool call stops being a place
+// harness knowledge accumulates.
+type transcriptSource struct {
+	Kind   string            `json:"kind"`
+	Values map[string]string `json:"values"`
+}
+
 // getNoticesMessage mirrors GetNoticesMessage in packages/core/src/protocol.ts.
 // Cwd and TranscriptPath ride along for session conversation capture: this
 // message already fires on every SessionStart/UserPromptSubmit, so capture
 // needs no new event and no new decision here -- the daemon reads the
 // transcript and decides what to keep.
 type getNoticesMessage struct {
-	Type           string `json:"type"`
-	SessionID      string `json:"sessionId"`
-	Cwd            string `json:"cwd,omitempty"`
-	TranscriptPath string `json:"transcriptPath,omitempty"`
+	Type           string            `json:"type"`
+	SessionID      string            `json:"sessionId"`
+	Cwd            string            `json:"cwd,omitempty"`
+	TranscriptPath string            `json:"transcriptPath,omitempty"`
+	Source         *transcriptSource `json:"source,omitempty"`
 }
 
-func newGetNoticesMessage(sessionID, cwd, transcriptPath string) getNoticesMessage {
-	return getNoticesMessage{Type: "get_notices", SessionID: sessionID, Cwd: cwd, TranscriptPath: transcriptPath}
+func newGetNoticesMessage(sessionID, cwd, transcriptPath string, source *transcriptSource) getNoticesMessage {
+	return getNoticesMessage{Type: "get_notices", SessionID: sessionID, Cwd: cwd, TranscriptPath: transcriptPath, Source: source}
 }
 
 // sessionEndMessage mirrors SessionEndMessage in packages/core/src/protocol.ts.
 type sessionEndMessage struct {
-	Type           string `json:"type"`
-	SessionID      string `json:"sessionId"`
-	Cwd            string `json:"cwd"`
-	TranscriptPath string `json:"transcriptPath,omitempty"`
+	Type           string            `json:"type"`
+	SessionID      string            `json:"sessionId"`
+	Cwd            string            `json:"cwd"`
+	TranscriptPath string            `json:"transcriptPath,omitempty"`
+	Source         *transcriptSource `json:"source,omitempty"`
 }
 
-func newSessionEndMessage(sessionID, cwd, transcriptPath string) sessionEndMessage {
-	return sessionEndMessage{Type: "session_end", SessionID: sessionID, Cwd: cwd, TranscriptPath: transcriptPath}
+func newSessionEndMessage(sessionID, cwd, transcriptPath string, source *transcriptSource) sessionEndMessage {
+	return sessionEndMessage{Type: "session_end", SessionID: sessionID, Cwd: cwd, TranscriptPath: transcriptPath, Source: source}
 }
 
 // noticesMessage mirrors NoticesMessage in packages/core/src/protocol.ts.

@@ -2,7 +2,8 @@
  * OpenCode's conversation store, as a `TranscriptSource`.
  *
  * OpenCode keeps conversations in one machine-global SQLite database
- * (`~/.local/share/opencode/opencode.db`), not a file per session: `message`
+ * (`$XDG_DATA_HOME/opencode/opencode.db`, defaulting to `~/.local/share`),
+ * not a file per session: `message`
  * rows carry `{role, time: {created, completed?}, ...}` as JSON, and `part`
  * rows hang off them carrying the actual text and tool calls.
  *
@@ -41,10 +42,34 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Cursor, TranscriptEntry, TranscriptSource } from "./transcript-source.js";
+import { registerTranscriptSource, type Cursor, type TranscriptEntry, type TranscriptSource } from "./transcript-source.js";
 
+/**
+ * Where OpenCode keeps its database.
+ *
+ * `XDG_DATA_HOME` is honoured because OpenCode honours it -- verified against
+ * the shipped binary, which reports `data /tmp/probe/opencode` when it is set
+ * (and note it is `data`, not the `state` directory OpenCode's own plugin API
+ * exposes: those are two different paths and only one has a database in it).
+ *
+ * The environment has to be *passed in* rather than read from `process.env`.
+ * The daemon is a long-lived process shared by every session on the machine
+ * and is usually started by something other than the shell running OpenCode,
+ * so its own environment says nothing about where this session's OpenCode
+ * keeps its data. The adapter, which runs inside OpenCode, is the only party
+ * that knows -- see `TranscriptSourceDescriptor`.
+ */
+export function openCodeDbPath(xdgDataHome?: string): string {
+  const dataHome = xdgDataHome && xdgDataHome.trim() !== ""
+    ? xdgDataHome
+    : path.join(os.homedir(), ".local", "share");
+  return path.join(dataHome, "opencode", "opencode.db");
+}
+
+/** @deprecated Use `openCodeDbPath`, which honours `XDG_DATA_HOME`. Kept for
+ * the tests and scripts that name it. */
 export function defaultOpenCodeDbPath(): string {
-  return path.join(os.homedir(), ".local", "share", "opencode", "opencode.db");
+  return openCodeDbPath();
 }
 
 const TIME_PREFIX = "t:";
@@ -318,3 +343,10 @@ export class OpenCodeSqliteSource implements TranscriptSource {
     }
   }
 }
+
+// `directory` is optional and deliberately not `required`: it only supplies
+// the entry `cwd` used to resolve relative tool paths, and OpenCode's tool
+// inputs are absolute in practice. `sessionId` is not optional -- without it
+// this would read every project's conversation out of a shared database.
+registerTranscriptSource("opencode-sqlite", ["sessionId"], (values) =>
+  new OpenCodeSqliteSource(openCodeDbPath(values.xdgDataHome), values.sessionId, openSqliteReader, values.directory));

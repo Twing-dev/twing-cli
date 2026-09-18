@@ -11,6 +11,38 @@ import type { Claim, CallEdge } from "./types.js";
 
 export type HookToolName = "Edit" | "Write" | "Read" | "Grep" | "Glob";
 
+/**
+ * Where this session's conversation lives, as the harness describes it.
+ *
+ * A property bag rather than a field per harness. Claude Code needs one
+ * absolute path; OpenCode needs a session id and (when the user has moved it)
+ * a data directory; whatever comes next will need something else again. Those
+ * have nothing in common but their purpose, so the protocol carries the
+ * purpose and leaves the contents to the one layer that forks per harness --
+ * the `TranscriptSource` implementations, whose own `kind` field is exactly
+ * this `kind`. Adding a harness adds a registry entry here and changes no
+ * wire format, no Go mirror, and no daemon plumbing.
+ *
+ * `values` is an **allowlist the sender fills in deliberately**, never a dump
+ * of the environment or of a hook payload. It crosses a process boundary into
+ * a long-lived daemon and everything in it is attacker-visible if any part of
+ * that chain is; there is no reason for a secret to be in here, so nothing
+ * that could be one goes in.
+ *
+ * Both the hook and the adapter treat this as opaque: they fill it and
+ * forward it, never read it back or branch on it (§4).
+ */
+export interface TranscriptSourceDescriptor {
+  /** Names the `TranscriptSource` implementation that can read it, e.g.
+   * `"claude-code-jsonl"` or `"opencode-sqlite"`. An unrecognised kind is
+   * reported, never silently ignored -- see `resolveTranscriptSource`. */
+  kind: string;
+  /** Whatever that source needs. Strings only: this is a wire format, and a
+   * richer type here would be a second schema to keep mirrored in Go for no
+   * gain -- every value any source has wanted so far is a path or an id. */
+  values: Record<string, string>;
+}
+
 export interface EnqueueMessage {
   type: "enqueue";
   sessionId: string;
@@ -32,8 +64,18 @@ export interface GetNoticesMessage {
    * event). The *path*, never the content -- `framing.ts` caps a frame at
    * 10MB and real transcripts run far past that. Optional: an older hook
    * binary doesn't send it, and the daemon treats its absence as "nothing to
-   * capture", never an error. */
+   * capture", never an error.
+   *
+   * @deprecated Superseded by `source`, which says *which* harness the path
+   * belongs to instead of assuming Claude Code. Still sent and still read:
+   * hook binaries update on their own schedule (version recovery), so a
+   * machine mid-upgrade has a new daemon talking to an old hook for a while.
+   * The daemon synthesizes a `claude-code-jsonl` descriptor from it when
+   * `source` is absent, which is exactly what that older hook meant. */
   transcriptPath?: string;
+  /** Where the conversation lives, when the harness said. Takes precedence
+   * over `transcriptPath`. */
+  source?: TranscriptSourceDescriptor;
   /** The session's cwd, needed to resolve which repo (and therefore which
    * `.twing/twing.yml` `capture:` switch) governs conversation capture.
    * `get_notices` never needed it before -- notices are keyed by session id
@@ -50,7 +92,9 @@ export interface SessionEndMessage {
   type: "session_end";
   sessionId: string;
   cwd: string;
+  /** @deprecated See `GetNoticesMessage.transcriptPath`. */
   transcriptPath?: string;
+  source?: TranscriptSourceDescriptor;
 }
 
 export interface NoticeItem {

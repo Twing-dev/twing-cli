@@ -55,8 +55,13 @@ func enqueue(sessionID, cwd, toolName string, toolInput []byte) {
 // swallowed. Deliberately not routed through design_gate.go's HTTP client:
 // that path is §17's blocking exception and is gated on designGateEnabled(),
 // which is the wrong lifecycle for capture.
-func sendSessionEnd(sessionID, cwd, transcriptPath string) {
-	if transcriptPath == "" {
+func sendSessionEnd(sessionID, cwd, transcriptPath string, source *transcriptSource) {
+	// Nothing to say if the harness named neither a transcript nor a source.
+	// OpenCode only ever sends the latter -- it has no per-session file -- so
+	// testing the path alone here would drop every OpenCode session end
+	// silently, which is precisely the class of failure this wiring exists to
+	// stop producing.
+	if transcriptPath == "" && source == nil {
 		return
 	}
 	path := socketPath()
@@ -69,7 +74,7 @@ func sendSessionEnd(sessionID, cwd, transcriptPath string) {
 	}
 	defer conn.Close()
 
-	frame, err := encodeFrame(newSessionEndMessage(sessionID, cwd, transcriptPath))
+	frame, err := encodeFrame(newSessionEndMessage(sessionID, cwd, transcriptPath, source))
 	if err != nil {
 		return
 	}
@@ -97,7 +102,7 @@ type cacheCheckResult struct {
 // failure (no socket, daemon down, timeout) returns a zero-value result,
 // which the caller treats as "nothing cached" — an empty stdout, exit 0
 // no-op.
-func cacheCheck(sessionID, cwd, transcriptPath string) cacheCheckResult {
+func cacheCheck(sessionID, cwd, transcriptPath string, source *transcriptSource) cacheCheckResult {
 	path := socketPath()
 	if path == "" {
 		return cacheCheckResult{}
@@ -114,7 +119,7 @@ func cacheCheck(sessionID, cwd, transcriptPath string) cacheCheckResult {
 	deadline := time.Now().Add(cacheCheckTimeout)
 	_ = conn.SetDeadline(deadline)
 
-	frame, err := encodeFrame(newGetNoticesMessage(sessionID, cwd, transcriptPath))
+	frame, err := encodeFrame(newGetNoticesMessage(sessionID, cwd, transcriptPath, source))
 	if err != nil {
 		return cacheCheckResult{}
 	}
