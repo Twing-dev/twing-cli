@@ -103,7 +103,10 @@ test("captureSession: a partial trailing line is left for the next pass, not cap
 
   const first = await captureSession({ sessionId: "s4", transcriptPath: transcript, cwd, sessionsDir });
   assert.equal(first.turnsWritten, 1);
-  assert.equal(first.offset, Buffer.byteLength(complete), "the watermark stops at the last complete line");
+  // That the watermark stopped at the last *complete* line is asserted in
+  // byte terms by transcript-source.test.ts, where a byte offset is a legal
+  // thing to know about. What matters here is the consequence, below: the
+  // torn line is captured whole, exactly once, on the pass that completes it.
 
   // The rest of that line arrives; it must be captured whole exactly once.
   fs.appendFileSync(transcript, humanTurn("partial turn").slice(40));
@@ -124,8 +127,11 @@ test("captureSession: a truncated/rotated transcript restarts from the beginning
   fs.writeFileSync(transcript, humanTurn("short"));
   const after = await captureSession({ sessionId: "s5", transcriptPath: transcript, cwd, sessionsDir });
 
+  // One turn, not zero: the stored watermark pointed past the end of the
+  // replacement file, so the pass restarted rather than reading from the
+  // middle of a line. The byte-level version of this is in
+  // transcript-source.test.ts (`resume` past EOF returns `beginning`).
   assert.equal(after.turnsWritten, 1);
-  assert.equal(after.offset, Buffer.byteLength(humanTurn("short")));
 });
 
 test("captureSession: file paths are emitted once, deduped across passes", async () => {
@@ -335,7 +341,7 @@ test("captureSession: capture reaches back over discussion to the point the opte
     .filter((r) => r.type === "turn")
     .map((r) => r.text);
   assert.deepEqual(texts, ["now let's look at the other project", "Reading it.", "Found the bug."]);
-  assert.ok(result.startedFrom !== undefined && result.startedFrom > 0, "it reached back, but not to the start of the session");
+  assert.equal(result.reachedBack, "consent-boundary", "it reached back, but not to the start of the session");
 });
 
 // The consent boundary. Everything before the last foreign touch belongs to
@@ -367,7 +373,7 @@ test("captureSession: with no foreign touch before it, the reach-back runs to th
 
   const result = await captureSession({ sessionId: "reach3", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
 
-  assert.equal(result.startedFrom, 0);
+  assert.equal(result.reachedBack, "session-start");
   const texts = readCapture(sessionsDir, "reach3")
     .filter((r) => r.type === "turn")
     .map((r) => r.text);
@@ -402,7 +408,7 @@ test("captureSession: once on, capture stays on for turns that touch nothing or 
   const second = await captureSession({ sessionId: "sticky1", transcriptPath: transcript, cwd: foreign.root, sessionsDir });
 
   assert.equal(second.turnsWritten, 2);
-  assert.equal(second.startedFrom, undefined, "the boundary is settled once, not re-decided every pass");
+  assert.equal(second.reachedBack, undefined, "the boundary is settled once, not re-decided every pass");
 });
 
 // Project attribution. A projectId is derived from a repo's git remote, so

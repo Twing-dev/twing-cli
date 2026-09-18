@@ -10,12 +10,19 @@
  * letting data accumulate from day one -- we can't distill what we never
  * captured.
  *
- * **Watermark, not end-of-session.** Every capture records the byte offset
- * it read up to (`<sessionId>.state.json`, beside the capture) and resumes
+ * **Watermark, not end-of-session.** Every capture records the position it
+ * read up to (`<sessionId>.state.json`, beside the capture) and resumes
  * from there. Anchoring on `SessionEnd` alone would have lost the session
  * this was built against entirely: it ran 11 days across three repos and
  * produced zero commits. Its `SessionEnd` message is a last drain, never
  * the mechanism.
+ *
+ * That position is an opaque `Cursor` owned by a `TranscriptSource`
+ * (`transcript-source.ts`), not a byte offset. Everything in this file is
+ * harness-neutral -- consent, reach-back, filtering, redaction, the capture
+ * file, upload targets -- and reading the raw conversation is the one part
+ * that is not, so it lives behind that interface. Nothing here may parse a
+ * cursor or compare two.
  *
  * **Storage is machine-local**, under `~/.twing/` with the socket, the
  * launch marker and the gate overrides -- never inside a repo working tree,
@@ -29,12 +36,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { captureEnabled, computeProjectId, filterTranscriptEntry, findRepoRoot, loadManifestFromFile, reposForEntry, twingConfigPath, type CapturedRecord, type RepoResolver } from "@twing/core";
 import { redact } from "./redact.js";
-
-/** Read the transcript delta in bounded chunks rather than one big buffer:
- * the first capture of an already-long session can be tens of MB, and a
- * daemon serving every repo on the machine has no business holding that in
- * memory at once. */
-const READ_CHUNK_BYTES = 4 * 1024 * 1024;
+import { ClaudeCodeJsonlSource, type Cursor, type TranscriptSource } from "./transcript-source.js";
 
 export function defaultSessionsDir(): string {
   return path.join(os.homedir(), ".twing", "sessions");
@@ -53,6 +55,11 @@ export interface CaptureInput {
   cwd?: string;
   /** Overridable for tests; production always uses `defaultSessionsDir()`. */
   sessionsDir?: string;
+  /** Where to read the raw conversation from. Defaults to
+   * `ClaudeCodeJsonlSource` over `transcriptPath`, which is the only source
+   * any production caller uses today. Injected rather than selected here so
+   * this file never grows a harness switch. */
+  source?: TranscriptSource;
 }
 
 /**
@@ -73,11 +80,19 @@ export interface CaptureResult {
   skipped?: "no-transcript-path" | "transcript-missing" | "disabled" | "nothing-new";
   turnsWritten: number;
   pathsWritten: number;
-  /** Byte offset now recorded as read. */
-  offset: number;
-  /** On the pass that turned capture on, the byte offset it reached back
-   * to. Absent on every later pass. */
-  startedFrom?: number;
+  /** Position now recorded as read. Opaque -- see `Cursor`. */
+  cursor: Cursor;
+  /**
+   * On the pass that turned capture on, how far back it reached. Absent on
+   * every later pass, which is how a caller tells the enabling pass from
+   * the rest.
+   *
+   * A discriminator rather than the position itself: the only question
+   * anyone actually asks of it is "did the whole session qualify, or did we
+   * stop at a boundary", and a cursor cannot answer that without being
+   * parsed -- which no caller is allowed to do.
+   */
+  reachedBack?: "session-start" | "consent-boundary";
   /** Where this session's capture may be uploaded, across every opted-in
    * repo it has touched so far -- not only the ones touched this pass, so a
    * pass that adds no new paths still reports the full set. Empty when the
@@ -88,8 +103,11 @@ export interface CaptureResult {
 
 interface CaptureState {
   transcriptPath: string;
-  /** Bytes of the transcript already captured. */
-  offset: number;
+  /** How far into the transcript this session has already been captured, as
+   * the source's own opaque cursor. Written as `cursor`; a state file from
+   * before this seam existed carries a numeric `offset` instead, which
+   * `readState` still accepts -- see its own note. */
+  cursor?: Cursor;
   /** Whether capture has turned on for this session. Sticky on purpose:
    * once any repo the session touched has opted in, the session is captured
    * for the rest of its life, including stretches that touch nothing or
@@ -123,14 +141,12 @@ export function captureSession(input: CaptureInput): Promise<CaptureResult> {
 }
 
 async function runCapture(input: CaptureInput): Promise<CaptureResult> {
-  const empty = (skipped: CaptureResult["skipped"], offset = 0): CaptureResult => ({ skipped, turnsWritten: 0, pathsWritten: 0, offset, targets: [] });
+  const empty = (skipped: CaptureResult["skipped"], cursor: Cursor = ""): CaptureResult => ({ skipped, turnsWritten: 0, pathsWritten: 0, cursor, targets: [] });
 
   if (!input.transcriptPath) return empty("no-transcript-path");
 
-  let stat: fs.Stats;
-  try {
-    stat = await fsp.stat(input.transcriptPath);
-  } catch {
+  const source: TranscriptSource = input.source ?? new ClaudeCodeJsonlSource(input.transcriptPath);
+  if (!(await source.exists())) {
     // The transcript can legitimately be gone (a deleted session, a path
     // from another machine in a synced home directory). Not an error.
     return empty("transcript-missing");
@@ -143,11 +159,10 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   const capturePath = path.join(sessionsDir, `${input.sessionId}.jsonl`);
   const state = await readState(statePath, input.transcriptPath);
 
-  // A transcript that shrank, or a session id now pointing at a different
-  // file, means the offset describes bytes that no longer exist -- start
-  // over rather than reading from the middle of a line.
-  let offset = state.transcriptPath === input.transcriptPath ? state.offset : 0;
-  if (offset > stat.size) offset = 0;
+  // A session id now pointing at a different transcript makes the stored
+  // cursor describe something else entirely; the source handles the rest of
+  // that family (a file that shrank or rotated) inside `resume`.
+  let cursor = await source.resume(state.transcriptPath === input.transcriptPath ? state.cursor : undefined);
 
   // Consent, decided once per session and then sticky. Until some repo the
   // session touched has opted in, nothing is captured *and the watermark is
@@ -157,35 +172,31 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   const isOptedIn = createOptedInCache();
   const projectId = createProjectIdCache();
   const coordinator = createCoordinatorCache();
-  let startedFrom: number | undefined;
+  let reachedBack: CaptureResult["reachedBack"];
 
   if (!state.enabled) {
     const root = cwdRepo(input.cwd, resolve);
     if (root !== undefined && isOptedIn(root)) {
       // The session is rooted in a repo that opted in: no boundary to find,
-      // the whole session qualifies from its first byte.
-      startedFrom = 0;
+      // the whole session qualifies from its first entry.
+      cursor = source.beginning;
+      reachedBack = "session-start";
     } else {
-      startedFrom = await findCaptureStart(input.transcriptPath, stat.size, isOptedIn, resolve);
-      if (startedFrom === undefined) return empty("disabled");
+      const start = await findCaptureStart(source, isOptedIn, resolve);
+      if (start === undefined) return empty("disabled");
+      cursor = start;
+      reachedBack = start === source.beginning ? "session-start" : "consent-boundary";
     }
-    offset = startedFrom;
   }
 
-  if (offset === stat.size) return empty("nothing-new", offset);
+  if (await source.atEnd(cursor)) return empty("nothing-new", cursor);
 
   const seenPaths = new Set(state.paths);
   const records: CapturedRecord[] = [];
   const newPaths: string[] = [];
 
-  const readTo = await forEachNewLine(input.transcriptPath, offset, stat.size, (line) => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      return; // a torn or malformed line is skipped, never fatal
-    }
-    const filtered = filterTranscriptEntry(parsed);
+  const readTo = await source.read(cursor, ({ value }) => {
+    const filtered = filterTranscriptEntry(value);
     for (const p of filtered.paths) {
       if (seenPaths.has(p)) continue;
       seenPaths.add(p);
@@ -245,7 +256,7 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
 
   await writeState(statePath, {
     transcriptPath: input.transcriptPath,
-    offset: readTo,
+    cursor: readTo,
     enabled: true,
     paths: [...seenPaths],
     updatedAt: new Date().toISOString(),
@@ -254,9 +265,9 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   return {
     turnsWritten: records.filter((r) => r.type === "turn").length,
     pathsWritten: newPaths.length,
-    offset: readTo,
+    cursor: readTo,
     targets,
-    ...(startedFrom !== undefined ? { startedFrom } : {}),
+    ...(reachedBack !== undefined ? { reachedBack } : {}),
   };
 }
 
@@ -362,94 +373,51 @@ function cwdRepo(cwd: string | undefined, resolve: RepoResolver): string | undef
  * first opted-in touch.
  */
 async function findCaptureStart(
-  transcriptPath: string,
-  size: number,
+  source: TranscriptSource,
   isOptedIn: (repoRoot: string) => boolean,
   resolve: RepoResolver,
-): Promise<number | undefined> {
-  let start: number | undefined;
-  let boundary = 0;
+): Promise<Cursor | undefined> {
+  let start: Cursor | undefined;
+  let boundary = source.beginning;
 
-  await forEachNewLine(transcriptPath, 0, size, (line, lineStart) => {
+  await source.read(source.beginning, ({ value, after }) => {
     if (start !== undefined) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      return;
-    }
-    const repos = reposForEntry(filterTranscriptEntry(parsed), resolve);
+    const repos = reposForEntry(filterTranscriptEntry(value), resolve);
     if (repos.length === 0) return; // touched no repo: neither a trigger nor a boundary
 
     // An entry touching an opted-in repo *and* a foreign one still counts
     // as the first opted-in touch: it is work in the consenting repo, and
-    // stopping on it would put the boundary after the very line that
+    // stopping on it would put the boundary after the very entry that
     // granted permission.
     if (repos.some(isOptedIn)) {
       start = boundary;
       return;
     }
-    boundary = lineStart + Buffer.byteLength(line, "utf8") + 1;
+    boundary = after;
   });
 
   return start;
 }
 
 /**
- * Streams `[from, to)` of a file, handing each complete line to `onLine`,
- * and returns the offset of the last line terminator seen. A trailing
- * partial line -- normal, since Claude Code is appending to this file while
- * we read it -- is deliberately left outside the returned watermark, so the
- * next pass picks it up whole instead of splitting a JSON object in two.
+ * A state file written before the `TranscriptSource` seam existed holds
+ * `{"offset": 22696087}` -- a bare number -- where this one writes
+ * `{"cursor": "b:22696087"}`.
+ *
+ * Both are read, and the legacy field is handed to the source as a cursor
+ * rather than being translated here: `ClaudeCodeJsonlSource` accepts a bare
+ * number precisely so this file never has to know what a byte offset is.
+ * Getting this wrong is silent, not loud -- an unread legacy watermark
+ * re-captures the session from its first entry and re-uploads all of it, on
+ * every machine with a session in flight at upgrade time.
  */
-async function forEachNewLine(filePath: string, from: number, to: number, onLine: (line: string, lineStart: number) => void): Promise<number> {
-  const handle = await fsp.open(filePath, "r");
-  try {
-    const buffer = Buffer.alloc(READ_CHUNK_BYTES);
-    let position = from;
-    let consumed = from;
-    let lineStart = from;
-    // Carried as bytes, not a string: a UTF-8 sequence split across a chunk
-    // boundary would decode to replacement characters (and throw the byte
-    // accounting below off) if each chunk were decoded independently.
-    let carry = Buffer.alloc(0);
-
-    while (position < to) {
-      const { bytesRead } = await handle.read(buffer, 0, Math.min(READ_CHUNK_BYTES, to - position), position);
-      if (bytesRead === 0) break;
-      position += bytesRead;
-
-      const chunk = carry.length === 0 ? Buffer.from(buffer.subarray(0, bytesRead)) : Buffer.concat([carry, buffer.subarray(0, bytesRead)]);
-      const lastBreak = chunk.lastIndexOf(0x0a);
-      if (lastBreak === -1) {
-        carry = chunk;
-        continue;
-      }
-
-      for (const line of chunk.subarray(0, lastBreak).toString("utf8").split("\n")) {
-        if (line.length > 0) onLine(line, lineStart);
-        // Advance past this line and its terminator. Byte length, not
-        // string length: a line carrying any non-ASCII character occupies
-        // more bytes than it has characters, and every offset downstream of
-        // this is a file position.
-        lineStart += Buffer.byteLength(line, "utf8") + 1;
-      }
-      carry = Buffer.from(chunk.subarray(lastBreak + 1));
-      consumed = position - carry.length;
-    }
-
-    return consumed;
-  } finally {
-    await handle.close();
-  }
-}
-
 async function readState(statePath: string, transcriptPath: string): Promise<CaptureState> {
   try {
-    const parsed = JSON.parse(await fsp.readFile(statePath, "utf8")) as Partial<CaptureState>;
+    const parsed = JSON.parse(await fsp.readFile(statePath, "utf8")) as Partial<CaptureState> & { offset?: unknown };
+    const legacyOffset = typeof parsed.offset === "number" && Number.isSafeInteger(parsed.offset) && parsed.offset >= 0 ? String(parsed.offset) : undefined;
     return {
       transcriptPath: typeof parsed.transcriptPath === "string" ? parsed.transcriptPath : transcriptPath,
-      offset: typeof parsed.offset === "number" && parsed.offset >= 0 ? parsed.offset : 0,
+      cursor: typeof parsed.cursor === "string" ? parsed.cursor : legacyOffset,
       enabled: parsed.enabled === true,
       paths: Array.isArray(parsed.paths) ? parsed.paths.filter((p): p is string => typeof p === "string") : [],
       updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
@@ -461,7 +429,7 @@ async function readState(statePath: string, transcriptPath: string): Promise<Cap
     // the alternative (guessing an offset, and silently losing whatever
     // sits before the guess). `writeState` is write-then-rename precisely
     // so this stays the rare path.
-    return { transcriptPath, offset: 0, enabled: false, paths: [], updatedAt: "" };
+    return { transcriptPath, cursor: undefined, enabled: false, paths: [], updatedAt: "" };
   }
 }
 
