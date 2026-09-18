@@ -1,6 +1,6 @@
 {
   "name": "@twing/core",
-  "version": "0.2.31",
+  "version": "1.0.0",
   "engines": {
     "node": ">=22.5"
   },
