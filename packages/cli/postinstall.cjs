@@ -30,9 +30,9 @@ if (!machineInstall) process.exit(0);
 // says nothing about the real cause. Keep in step with MIN_NODE_MAJOR /
 // MIN_NODE_MINOR in packages/core/src/repo-setup.ts.
 const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
-if (nodeMajor < 20 || (nodeMajor === 20 && nodeMinor < 0)) {
+if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 5)) {
   console.error(
-    `twing: this machine runs Node ${process.versions.node}, and twing needs 20.0 or newer. ` +
+    `twing: this machine runs Node ${process.versions.node}, and twing needs 22.5 or newer. ` +
       "Nothing was wired -- upgrade Node and run the install again.",
   );
   process.exit(1);

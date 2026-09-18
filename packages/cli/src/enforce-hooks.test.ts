@@ -576,7 +576,7 @@ function recordingNpm(): { path: string; calls: () => string[] } {
   fs.writeFileSync(
     path.join(dir, "node"),
     `#!/bin/sh\necho "node $*" >> ${JSON.stringify(record)}\n`
-      + `case "$1" in -v|--version) echo "v22.0.0" ;; esac\n`,
+      + `case "$1" in -v|--version) echo "v22.5.0" ;; esac\n`,
     { mode: 0o755 },
   );
   return {

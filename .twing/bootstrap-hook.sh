@@ -56,8 +56,8 @@ twing_node_ok() {
   _minor=${_rest%%.*}
   case "$_major" in ''|*[!0-9]*) return 1 ;; esac
   case "$_minor" in ''|*[!0-9]*) _minor=0 ;; esac
-  [ "$_major" -gt 20 ] && return 0
-  [ "$_major" -eq 20 ] && [ "$_minor" -ge 0 ]
+  [ "$_major" -gt 22 ] && return 0
+  [ "$_major" -eq 22 ] && [ "$_minor" -ge 5 ]
 }
 
 # Says so through the one channel a person actually reads.
@@ -76,7 +76,7 @@ twing_node_ok() {
 # deciding for themselves, so the wording cannot drift between them.
 twing_node_unusable() {
   mkdir -p "$HOME/.twing" 2>/dev/null
-  echo "twing: node $(node -v 2>/dev/null || echo 'not found') is older than the Node 20.0 twing requires -- not installing, and nothing was changed" >> "$HOME/.twing/bootstrap.log" 2>/dev/null
+  echo "twing: node $(node -v 2>/dev/null || echo 'not found') is older than the Node 22.5 twing requires -- not installing, and nothing was changed" >> "$HOME/.twing/bootstrap.log" 2>/dev/null
   twing_node_deny
 }
 
@@ -89,7 +89,7 @@ twing_node_deny() {
   # message into a real newline and produce invalid JSON. The version is
   # spliced in by ending the single-quoted run rather than by a placeholder,
   # for the same reason.
-  printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"twing cannot set itself up on this machine: it needs Node 20.0 or newer, and this machine runs '"$_found"'.\n\n  This repo uses twing (https://twing.dev) to stop two AI sessions\n  silently colliding on the same code. Its setup normally runs\n  automatically, with nothing to do by hand -- but it will not install\n  against a Node this old, because that produces a broken install\n  rather than a working one.\n\n  Nothing was installed and nothing on this machine was changed.\n  Upgrading Node is all it needs; twing will set itself up on the next\n  edit.\n\n  This is an operational problem, not a task for you to work around:\n  do not try to install twing another way, and do not edit or remove\n  the hook. Report the Node version to whoever runs this machine."}}'
+  printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"twing cannot set itself up on this machine: it needs Node 22.5 or newer, and this machine runs '"$_found"'.\n\n  This repo uses twing (https://twing.dev) to stop two AI sessions\n  silently colliding on the same code. Its setup normally runs\n  automatically, with nothing to do by hand -- but it will not install\n  against a Node this old, because that produces a broken install\n  rather than a working one.\n\n  Nothing was installed and nothing on this machine was changed.\n  Upgrading Node is all it needs; twing will set itself up on the next\n  edit.\n\n  This is an operational problem, not a task for you to work around:\n  do not try to install twing another way, and do not edit or remove\n  the hook. Report the Node version to whoever runs this machine."}}'
 }
 
 twing_fetch() {
@@ -113,7 +113,7 @@ twing_install_for_repo() {
   # as it was -- no half-installed lib, no hook binary -- which is the state
   # the caller's own "did it work?" check already handles.
   if ! twing_node_ok; then
-    echo "twing: node $(node -v 2>/dev/null || echo 'not found') is too old -- twing needs Node 20.0 or newer, and will not install until it is upgraded" >> "$_log" 2>/dev/null
+    echo "twing: node $(node -v 2>/dev/null || echo 'not found') is too old -- twing needs Node 22.5 or newer, and will not install until it is upgraded" >> "$_log" 2>/dev/null
     return 1
   fi
 

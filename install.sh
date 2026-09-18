@@ -29,8 +29,8 @@ node_rest=${node_version#*.}
 node_minor=${node_rest%%.*}
 case "$node_major" in ''|*[!0-9]*) node_major=0 ;; esac
 case "$node_minor" in ''|*[!0-9]*) node_minor=0 ;; esac
-if [ "$node_major" -lt 20 ] || { [ "$node_major" -eq 20 ] && [ "$node_minor" -lt 0 ]; }; then
-  echo "twing install: this machine runs Node ${node_version:-unknown}, and twing needs 20.0 or newer." >&2
+if [ "$node_major" -lt 22 ] || { [ "$node_major" -eq 22 ] && [ "$node_minor" -lt 5 ]; }; then
+  echo "twing install: this machine runs Node ${node_version:-unknown}, and twing needs 22.5 or newer." >&2
   echo "twing install: nothing was installed. Upgrade Node and run this again." >&2
   exit 1
 fi
