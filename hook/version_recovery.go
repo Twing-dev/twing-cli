@@ -367,8 +367,8 @@ func logVersionRecovery(line string) {
 // shelling out to the CLI to ask would need the very install this is about
 // to replace. Raising the floor means raising it in both places.
 const (
-	minNodeMajor = 20
-	minNodeMinor = 0
+	minNodeMajor = 22
+	minNodeMinor = 5
 )
 
 func minNodeVersionString() string {

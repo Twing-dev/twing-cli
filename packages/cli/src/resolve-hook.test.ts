@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { withHome } from "./test-support.js";
-import { WIRED_HOOK_EVENTS } from "@twing/core";
+import { MIN_NODE_MAJOR, MIN_NODE_MINOR, WIRED_HOOK_EVENTS } from "@twing/core";
 import {
   RESOLVER_MARKER,
   resolverScript,
@@ -182,7 +182,7 @@ function recordingNpm(opts: { installsHook?: boolean; nodeVersion?: string } = {
     `#!/bin/sh\necho "node $* [pwd=$(pwd -P)]" >> ${JSON.stringify(record)}\n`
       // `-v` answers for real: the script checks the version before installing,
       // and a stub silent here reads as "no usable node", skipping the install.
-      + `case "$1" in -v|--version) echo "${opts.nodeVersion ?? "v22.0.0"}"; exit 0 ;; esac\n`
+      + `case "$1" in -v|--version) echo "${opts.nodeVersion ?? "v22.5.0"}"; exit 0 ;; esac\n`
       + `case "$1" in -e) exec ${JSON.stringify(process.execPath)} "$@" ;; esac\n`,
     { mode: 0o755 },
   );
@@ -318,7 +318,10 @@ test("resolverScript: a Node too old to run twing installs nothing, and says so"
 
   const log = fs.readFileSync(path.join(home, ".twing", "bootstrap.log"), "utf8");
   assert.match(log, /v18\.20\.4/, "name the version actually found, not just the requirement");
-  assert.match(log, /Node 20/, "and what it needs to be");
+  // Derived from the constant rather than written as a literal: this
+  // assertion was `/Node 20/` and went stale the moment the floor moved,
+  // failing a test whose subject had not changed.
+  assert.match(log, new RegExp(`Node ${MIN_NODE_MAJOR}\\.${MIN_NODE_MINOR}`), "and what it needs to be");
 });
 
 test("resolverScript: a too-old Node denies the edit rather than allowing it ungated", async () => {

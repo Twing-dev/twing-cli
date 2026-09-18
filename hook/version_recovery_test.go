@@ -314,7 +314,7 @@ func TestAttemptVersionRecovery_RunsInitInTheRepoTheGateResolved(t *testing.T) {
 	// So does node: recovery now refuses to replace a working install when
 	// this machine's node is too old for the version it would install, and a
 	// PATH with no node at all reads as exactly that.
-	writeFakeNode(t, pathDir, "v22.0.0")
+	writeFakeNode(t, pathDir, "v22.5.0")
 	t.Setenv("PATH", pathDir)
 
 	original := version

@@ -83,9 +83,25 @@ export const WIRED_HOOK_EVENTS: { event: string; matcher?: string }[] = [
  * `install.sh`, and interpolated into the shell below so the two zero-touch
  * paths check it too. Raising the floor means editing this and the two
  * manifests; every install path follows from here.
+ *
+ * **22.5, as of 2026-09-18** (was 20.0). Two independent reasons, either
+ * sufficient:
+ *
+ *  - Node 20 reached end-of-life on 2026-04-30. A floor below the oldest
+ *    security-supported release is not a floor anyone should be standing on,
+ *    and twing installs itself onto other people's machines.
+ *  - `node:sqlite` lands in 22.5, and session capture needs it to read
+ *    OpenCode's conversation store -- OpenCode keeps conversations in SQLite,
+ *    not a file. Below 22.5 that capture could only degrade to a silent
+ *    no-op on a machine that satisfies twing's stated requirement, which is
+ *    the shape this codebase has been deliberately removing elsewhere.
+ *
+ * 22.5 rather than 22.0 because that is the version the feature actually
+ * needs; rather than 24, because 22 is the active LTS (EOL 2027-04-30) and
+ * there is no reason to exclude it.
  */
-export const MIN_NODE_MAJOR = 20;
-export const MIN_NODE_MINOR = 0;
+export const MIN_NODE_MAJOR = 22;
+export const MIN_NODE_MINOR = 5;
 
 export function coordinatorInstallShell(): string {
   return `
