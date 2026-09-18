@@ -698,9 +698,23 @@ product, and a subset is what left one developer with the gate but no daemon
 and no capture. None of the stand-downs can rely on ordering: Claude Code
 runs every matching hook from every settings scope in parallel, so each one
 decides from static file state instead. Expect `Edit`/`Write` gate checks to fire in this repo's own
-sessions; if one denies with "no design registered", run `twing design
-register --summary "..." --touches <paths>` (or enter plan mode, which registers one
-automatically via `ExitPlanMode`) before retrying. A gate denial naming a
+sessions; if one denies with "no design registered", **run the command the
+deny message hands you** — it carries a filled-in `twing design register
+--from - <<'YAML'` template whose `target` is already the file you just
+tried to edit (or enter plan mode, which registers one automatically via
+`ExitPlanMode`) before retrying. Same for `amend`: the deny you get for
+editing a file outside your design's scope carries the `changes:` block to
+append.
+
+Prefer that structured form over the flat `--summary`/`--touches` flags, even
+though both still work. `--touches` takes **one comma-separated value**
+(`--touches a,b,c`): `parseFlags` (`packages/cli/src/index.ts`) builds a
+`Record<string, string>`, so `--touches a b c` silently keeps only `a`, and a
+repeated `--touches` keeps only the last. The declared scope quietly loses
+files, the design registers `clean` against whatever survived, and the next
+edit is denied for a file you thought you had declared. A YAML list cannot
+collapse that way. Hit in this repo on 2026-09-18, from this very paragraph,
+which used to read `--touches <paths>`. A gate denial naming a
 path *outside* this repo's tree (e.g. Claude Code's own `~/.claude/plans/`
 files) is a bug, not expected behavior — the gate resolves the coordinator
 from `cwd`, but `resolveRepoRelative` (`hook/design_gate.go`) should already
