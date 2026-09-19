@@ -53,7 +53,7 @@ func TestCacheCheck_VersionMismatchPresent_ReturnedAlongsideItems(t *testing.T) 
 		VersionMismatch: &versionMismatchInfo{ClientVersion: "0.0.1", ServerVersion: "9.9.9"},
 	})
 
-	result := cacheCheck("sess1", "", "")
+	result := cacheCheck("sess1", "", "", nil)
 	if len(result.Items) != 1 || result.Items[0].Message != "some other notice" {
 		t.Errorf("Items = %+v, want the one notice from the fake daemon", result.Items)
 	}
@@ -68,7 +68,7 @@ func TestCacheCheck_VersionMismatchPresent_ReturnedAlongsideItems(t *testing.T) 
 func TestCacheCheck_NoDaemon_ReturnsZeroValue(t *testing.T) {
 	t.Setenv("TWING_SOCK", filepath.Join(t.TempDir(), "no-such.sock"))
 
-	result := cacheCheck("sess1", "", "")
+	result := cacheCheck("sess1", "", "", nil)
 	if result.Items != nil || result.VersionMismatch != nil {
 		t.Errorf("result = %+v, want the zero value when nothing is listening", result)
 	}
@@ -85,7 +85,7 @@ func TestCacheCheck_LiveDaemonWithNothingCached_IsNotReportedUnreachable(t *test
 	// must not trigger a respawn, or every quiet prompt would start one.
 	fakeDaemon(t, noticesMessage{Type: "notices"})
 
-	result := cacheCheck("sess1", "", "")
+	result := cacheCheck("sess1", "", "", nil)
 	if len(result.Items) != 0 {
 		t.Fatalf("Items = %+v, want none", result.Items)
 	}

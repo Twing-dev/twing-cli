@@ -25,6 +25,16 @@ type hookPayload struct {
 	// keeping -- the path only, never the content: transcripts run far past
 	// the 10MB frame cap in packages/core/src/framing.ts.
 	TranscriptPath string `json:"transcript_path"`
+	// Source is where the conversation lives, when the harness said so
+	// explicitly rather than by handing over a path. Claude Code never sends
+	// it (it has TranscriptPath); twing's own OpenCode adapter does, because
+	// OpenCode has no per-session file to name -- its conversations live in
+	// one shared database addressed by session id.
+	//
+	// Forwarded verbatim, exactly like ToolInput: this binary does not build
+	// one, read one, or branch on one. Whatever a future harness needs to say
+	// goes in here without this file changing again.
+	Source *transcriptSource `json:"twing_source"`
 }
 
 // rawPayload is the exact bytes this process read from stdin, kept so a
@@ -78,7 +88,7 @@ func main() {
 		// enqueue, while handleSessionEnd below is the design gate's
 		// synchronous HTTP path and short-circuits on designGateEnabled().
 		// Capture must not inherit that lifecycle.
-		sendSessionEnd(payload.SessionID, payload.Cwd, payload.TranscriptPath)
+		sendSessionEnd(payload.SessionID, payload.Cwd, payload.TranscriptPath, payload.Source)
 		// §17.6 close trigger. No-op unless the design gate is registered
 		// (handleSessionEnd checks TWING_DESIGN_GATE itself).
 		handleSessionEnd(payload)
@@ -97,7 +107,7 @@ func handlePostToolUse(payload hookPayload) {
 }
 
 func handleCacheCheck(payload hookPayload) {
-	result := cacheCheck(payload.SessionID, payload.Cwd, payload.TranscriptPath)
+	result := cacheCheck(payload.SessionID, payload.Cwd, payload.TranscriptPath, payload.Source)
 
 	// A daemon that died mid-session (crash, idle-exit racing a long pause,
 	// an upgrade) used to stay dead until the next SessionStart, silently

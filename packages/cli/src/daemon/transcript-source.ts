@@ -213,3 +213,81 @@ export class ClaudeCodeJsonlSource implements TranscriptSource {
     }
   }
 }
+
+/**
+ * Why a source could not be built. Never a thrown error: a session whose
+ * conversation cannot be located must still get its notices, its claims and
+ * its design gate -- capture is the one part of twing that is allowed to not
+ * happen. But it must not be allowed to not happen *quietly*, which is the
+ * whole reason this type exists rather than `undefined`.
+ *
+ * Both bugs found on 2026-09-18 had this shape: a key spelled `filePath`
+ * where the filter wanted `file_path`, and a database looked for under
+ * `~/.local/share` when the user had moved it. Neither threw, neither logged,
+ * and both left a system that looked completely healthy while capturing
+ * nothing whatsoever. A reason string is what turns the next one of those
+ * into a line in `~/.twing/design-coordinator.log` instead of a silence.
+ */
+export interface UnresolvedSource {
+  kind: string;
+  reason: string;
+}
+
+export type SourceResolution =
+  | { ok: true; source: TranscriptSource }
+  | { ok: false; problem: UnresolvedSource };
+
+/** What a descriptor must carry for each kind, and how to build it. Adding a
+ * harness means adding an entry here -- not touching the protocol, the Go
+ * mirror, or `transcript.ts`. */
+const BUILDERS: Record<string, { required: string[]; build: (values: Record<string, string>) => TranscriptSource }> = {};
+
+/** Registered by the modules that implement them, so this file keeps no
+ * import of any concrete source but the one it defines. */
+export function registerTranscriptSource(
+  kind: string,
+  required: string[],
+  build: (values: Record<string, string>) => TranscriptSource,
+): void {
+  BUILDERS[kind] = { required, build };
+}
+
+registerTranscriptSource("claude-code-jsonl", ["path"], (values) => new ClaudeCodeJsonlSource(values.path));
+
+/**
+ * Turn a descriptor into a source, or say why not.
+ *
+ * Validation is by *name*: a required value that is missing or empty is
+ * reported with the key that was wanted. That is deliberately more than a
+ * boolean -- when this fails, the person reading the log is looking at a
+ * harness adapter they cannot see the source of, and "missing value
+ * `sessionId`" is the difference between a fix and an investigation.
+ */
+export function resolveTranscriptSource(descriptor: { kind: string; values: Record<string, string> }): SourceResolution {
+  const builder = BUILDERS[descriptor.kind];
+  if (!builder) {
+    return {
+      ok: false,
+      problem: {
+        kind: descriptor.kind,
+        reason: `no transcript source is registered for "${descriptor.kind}" (known: ${Object.keys(BUILDERS).sort().join(", ")})`,
+      },
+    };
+  }
+
+  const missing = builder.required.filter((key) => !descriptor.values[key]);
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      problem: { kind: descriptor.kind, reason: `missing value(s): ${missing.join(", ")}` },
+    };
+  }
+
+  try {
+    return { ok: true, source: builder.build(descriptor.values) };
+  } catch (err) {
+    // A constructor that throws is a bug, but not one worth taking the
+    // daemon's event loop down for -- capture stops, everything else runs.
+    return { ok: false, problem: { kind: descriptor.kind, reason: err instanceof Error ? err.message : String(err) } };
+  }
+}

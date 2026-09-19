@@ -34,9 +34,14 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { captureEnabled, computeProjectId, filterTranscriptEntry, findRepoRoot, loadManifestFromFile, reposForEntry, twingConfigPath, type CapturedRecord, type RepoResolver } from "@twing/core";
+import { captureEnabled, computeProjectId, filterTranscriptEntry, findRepoRoot, loadManifestFromFile, reposForEntry, twingConfigPath, type CapturedRecord, type RepoResolver, type TranscriptSourceDescriptor } from "@twing/core";
 import { redact } from "./redact.js";
-import { ClaudeCodeJsonlSource, type Cursor, type TranscriptSource } from "./transcript-source.js";
+import { resolveTranscriptSource, type Cursor, type TranscriptSource } from "./transcript-source.js";
+// Imported for its side effect: registering `opencode-sqlite` in the source
+// registry. Without this the descriptor an OpenCode session sends resolves to
+// "no transcript source is registered", which is at least a loud failure --
+// but the whole point of this wiring is that it not fail at all.
+import "./opencode-sqlite-source.js";
 
 export function defaultSessionsDir(): string {
   return path.join(os.homedir(), ".twing", "sessions");
@@ -55,11 +60,35 @@ export interface CaptureInput {
   cwd?: string;
   /** Overridable for tests; production always uses `defaultSessionsDir()`. */
   sessionsDir?: string;
-  /** Where to read the raw conversation from. Defaults to
-   * `ClaudeCodeJsonlSource` over `transcriptPath`, which is the only source
-   * any production caller uses today. Injected rather than selected here so
-   * this file never grows a harness switch. */
+  /** Where to read the raw conversation from, as the harness described it.
+   * Resolved through `resolveTranscriptSource`'s registry, so this file
+   * never grows a harness switch -- adding a harness adds a registry entry
+   * and touches nothing here. When absent, a `transcriptPath` is treated as
+   * a `claude-code-jsonl` descriptor, which is what an older hook binary
+   * that predates the descriptor meant by sending one. */
+  sourceDescriptor?: TranscriptSourceDescriptor;
+  /** A ready-made source, for tests that want to drive capture without a
+   * registry entry or a real transcript. Wins over `sourceDescriptor`. */
   source?: TranscriptSource;
+}
+
+/**
+ * A stable name for "the thing this cursor is a position in".
+ *
+ * The stored watermark is only meaningful against the source it came from, so
+ * a session id that starts pointing somewhere else has to reset rather than
+ * resume at a byte offset into a different file. For Claude Code that identity
+ * was the transcript path, and this deliberately still *is* that path for
+ * `claude-code-jsonl`, so every state file written before descriptors existed
+ * keeps matching and no session re-captures itself on upgrade.
+ */
+export function sourceIdentity(descriptor: TranscriptSourceDescriptor): string {
+  if (descriptor.kind === "claude-code-jsonl") return descriptor.values.path ?? "";
+  const values = Object.keys(descriptor.values)
+    .sort()
+    .map((key) => `${key}=${descriptor.values[key]}`)
+    .join("&");
+  return `${descriptor.kind}:${values}`;
 }
 
 /**
@@ -77,7 +106,12 @@ export interface CaptureTarget {
 
 export interface CaptureResult {
   /** Why nothing was captured, when nothing was. */
-  skipped?: "no-transcript-path" | "transcript-missing" | "disabled" | "nothing-new";
+  skipped?: "no-transcript-path" | "transcript-missing" | "disabled" | "nothing-new" | "unresolved-source";
+  /** Why the source could not be built, when `skipped` is
+   * `"unresolved-source"`. Carried out rather than swallowed so the daemon
+   * can log it: a capture that silently does nothing is the failure mode
+   * this whole path keeps producing. */
+  problem?: string;
   turnsWritten: number;
   pathsWritten: number;
   /** Position now recorded as read. Opaque -- see `Cursor`. */
@@ -102,7 +136,11 @@ export interface CaptureResult {
 }
 
 interface CaptureState {
-  transcriptPath: string;
+  /** What the cursor is a position *in* -- see `sourceIdentity`. Written as
+   * `sourceId`; a state file from before harnesses other than Claude Code
+   * existed carries the equivalent value under `transcriptPath`, which
+   * `readState` still accepts. */
+  sourceId: string;
   /** How far into the transcript this session has already been captured, as
    * the source's own opaque cursor. Written as `cursor`; a state file from
    * before this seam existed carries a numeric `offset` instead, which
@@ -143,9 +181,25 @@ export function captureSession(input: CaptureInput): Promise<CaptureResult> {
 async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   const empty = (skipped: CaptureResult["skipped"], cursor: Cursor = ""): CaptureResult => ({ skipped, turnsWritten: 0, pathsWritten: 0, cursor, targets: [] });
 
-  if (!input.transcriptPath) return empty("no-transcript-path");
+  // An older hook binary sends only a path, and means Claude Code by it.
+  const descriptor: TranscriptSourceDescriptor | undefined = input.sourceDescriptor
+    ?? (input.transcriptPath ? { kind: "claude-code-jsonl", values: { path: input.transcriptPath } } : undefined);
+  if (!input.source && !descriptor) return empty("no-transcript-path");
 
-  const source: TranscriptSource = input.source ?? new ClaudeCodeJsonlSource(input.transcriptPath);
+  let source: TranscriptSource;
+  if (input.source) {
+    source = input.source;
+  } else {
+    const resolved = resolveTranscriptSource(descriptor!);
+    if (!resolved.ok) {
+      // Reported, never swallowed. This is the branch that would otherwise
+      // produce a system that looks entirely healthy and captures nothing.
+      return { ...empty("unresolved-source"), problem: `${resolved.problem.kind}: ${resolved.problem.reason}` };
+    }
+    source = resolved.source;
+  }
+
+  const identity = descriptor ? sourceIdentity(descriptor) : (input.transcriptPath ?? "");
   if (!(await source.exists())) {
     // The transcript can legitimately be gone (a deleted session, a path
     // from another machine in a synced home directory). Not an error.
@@ -157,12 +211,12 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
 
   const statePath = path.join(sessionsDir, `${input.sessionId}.state.json`);
   const capturePath = path.join(sessionsDir, `${input.sessionId}.jsonl`);
-  const state = await readState(statePath, input.transcriptPath);
+  const state = await readState(statePath, identity);
 
-  // A session id now pointing at a different transcript makes the stored
-  // cursor describe something else entirely; the source handles the rest of
-  // that family (a file that shrank or rotated) inside `resume`.
-  let cursor = await source.resume(state.transcriptPath === input.transcriptPath ? state.cursor : undefined);
+  // A session id now pointing at a different source makes the stored cursor
+  // describe something else entirely; the source handles the rest of that
+  // family (a file that shrank or rotated) inside `resume`.
+  let cursor = await source.resume(state.sourceId === identity ? state.cursor : undefined);
 
   // Consent, decided once per session and then sticky. Until some repo the
   // session touched has opted in, nothing is captured *and the watermark is
@@ -235,7 +289,7 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   if (records.length > 0) {
     const header = fs.existsSync(capturePath)
       ? ""
-      : JSON.stringify({ type: "session", sessionId: input.sessionId, transcriptPath: input.transcriptPath, capturedFrom: new Date().toISOString() }) + "\n";
+      : JSON.stringify({ type: "session", sessionId: input.sessionId, source: descriptor?.kind ?? "claude-code-jsonl", sourceId: identity, capturedFrom: new Date().toISOString() }) + "\n";
     await fsp.appendFile(capturePath, header + records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
   }
 
@@ -255,7 +309,7 @@ async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   }
 
   await writeState(statePath, {
-    transcriptPath: input.transcriptPath,
+    sourceId: identity,
     cursor: readTo,
     enabled: true,
     paths: [...seenPaths],
@@ -411,12 +465,17 @@ async function findCaptureStart(
  * re-captures the session from its first entry and re-uploads all of it, on
  * every machine with a session in flight at upgrade time.
  */
-async function readState(statePath: string, transcriptPath: string): Promise<CaptureState> {
+async function readState(statePath: string, sourceId: string): Promise<CaptureState> {
   try {
-    const parsed = JSON.parse(await fsp.readFile(statePath, "utf8")) as Partial<CaptureState> & { offset?: unknown };
+    const parsed = JSON.parse(await fsp.readFile(statePath, "utf8")) as Partial<CaptureState> & { offset?: unknown; transcriptPath?: unknown };
     const legacyOffset = typeof parsed.offset === "number" && Number.isSafeInteger(parsed.offset) && parsed.offset >= 0 ? String(parsed.offset) : undefined;
+    // `sourceIdentity` returns the bare path for `claude-code-jsonl`, so a
+    // legacy `transcriptPath` compares equal to the new identity without any
+    // migration -- an in-flight session keeps its watermark across the
+    // upgrade instead of re-capturing and re-uploading itself.
+    const legacySourceId = typeof parsed.transcriptPath === "string" ? parsed.transcriptPath : undefined;
     return {
-      transcriptPath: typeof parsed.transcriptPath === "string" ? parsed.transcriptPath : transcriptPath,
+      sourceId: typeof parsed.sourceId === "string" ? parsed.sourceId : (legacySourceId ?? sourceId),
       cursor: typeof parsed.cursor === "string" ? parsed.cursor : legacyOffset,
       enabled: parsed.enabled === true,
       paths: Array.isArray(parsed.paths) ? parsed.paths.filter((p): p is string => typeof p === "string") : [],
@@ -429,7 +488,7 @@ async function readState(statePath: string, transcriptPath: string): Promise<Cap
     // the alternative (guessing an offset, and silently losing whatever
     // sits before the guess). `writeState` is write-then-rename precisely
     // so this stays the rare path.
-    return { transcriptPath, cursor: undefined, enabled: false, paths: [], updatedAt: "" };
+    return { sourceId, cursor: undefined, enabled: false, paths: [], updatedAt: "" };
   }
 }
 
