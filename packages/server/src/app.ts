@@ -999,13 +999,21 @@ export function createApp(options: CreateAppOptions = {}) {
         const liveCurrent = designs.get(current.id);
         const liveOther = designs.get(other.id);
         const reopenEligible = isDesignLive(liveCurrent) || isDesignLive(liveOther);
+        // The comparator's resolution hint rides in the same free text as
+        // `reason` rather than a column of its own: the alignment thread has
+        // no structured field for it, and the gate's deny reads
+        // `systemDescription` verbatim (see the flagged branch of
+        // /v1/designs/scope-match). Keeping it as one "Suggested:" sentence
+        // costs no schema change and no migration, and it never decides
+        // anything -- the deny still offers every resolution.
+        const conflictText = result.suggestion ? `${result.reason}\n\nSuggested: ${result.suggestion}` : result.reason;
         const thread = alignmentThreads.findOrCreate({
           projectId: current.projectId,
           symbolIds: [], // no real symbol for a design-vs-design finding
           developerId: current.developerId,
           otherDeveloperId: other.developerId,
           designId: other.id,
-          systemDescription: result.reason,
+          systemDescription: conflictText,
           category: "llm_divergence",
           subKind,
           summary: buildAlignmentSummary(subKind, other.summary, 0),
@@ -1019,10 +1027,10 @@ export function createApp(options: CreateAppOptions = {}) {
           kind: "design_semantic_conflict",
           relatedId: thread.id,
           ts: Date.now(),
-          payload: { otherDesignId: other.id, kind: result.kind, reason: result.reason },
+          payload: { otherDesignId: other.id, kind: result.kind, reason: result.reason, suggestion: result.suggestion || undefined },
         });
-        store.addNotice(current.developerId, result.reason, Date.now(), thread.id);
-        store.addNotice(other.developerId, result.reason, Date.now(), thread.id);
+        store.addNotice(current.developerId, conflictText, Date.now(), thread.id);
+        store.addNotice(other.developerId, conflictText, Date.now(), thread.id);
         designs.flag(current.id, "llm_divergence", {
           conflicts: [
             {
@@ -2416,12 +2424,49 @@ export function createApp(options: CreateAppOptions = {}) {
       // DesignVerdict's doc comment (core/types.ts) for the full four-bucket
       // model.
       const requiresAdmin = flaggedDesign.blockedReason === "constraint_violation";
+      // For a peer-vs-peer flag, pull the counterpart design and the
+      // comparator's own explanation off the open alignment thread this
+      // design is a party to, so the deny can say *why* it is blocked and
+      // *what* it collides with instead of one generic sentence. The
+      // information already exists -- it was simply only reachable by
+      // running a second command, which meant the blocked session was told
+      // that it conflicted and not what with.
+      //
+      // `constraint_violation` is deliberately excluded: it is one design
+      // against a fixed project rule, so there is no counterpart design and
+      // no comparator text to show. Every field below is optional, so an
+      // older hook ignores them and a newer hook against an older
+      // coordinator simply doesn't receive them -- both degrade to today's
+      // message. See flaggedDesignReason (hook/design_gate.go).
+      let conflictingDesignId: string | undefined;
+      let conflictSummary: string | undefined;
+      let conflictReason: string | undefined;
+      if (!requiresAdmin) {
+        // Both sides of a divergent pair are flagged and share one thread,
+        // so this design may be named as either party -- match on both, the
+        // same way /v1/designs/:id/resolve does.
+        const thread = alignmentThreads
+          .listByProject(flaggedDesign.projectId, "open")
+          .find((t) => t.initiatingDesignId === flaggedDesign.id || t.designId === flaggedDesign.id);
+        if (thread) {
+          conflictReason = thread.systemDescription || undefined;
+          // The counterpart is whichever end of the thread isn't this one.
+          const otherId = thread.initiatingDesignId === flaggedDesign.id ? thread.designId : thread.initiatingDesignId;
+          if (otherId) {
+            conflictingDesignId = otherId;
+            conflictSummary = designs.get(otherId)?.summary;
+          }
+        }
+      }
       return c.json({
         state: "flagged",
         designId: flaggedDesign.id,
         pendingReview: designs.hasPendingReview(flaggedDesign.id),
         requiresAdmin,
         verdict: flaggedDesign.blockedReason,
+        ...(conflictingDesignId ? { conflictingDesignId } : {}),
+        ...(conflictSummary ? { conflictSummary } : {}),
+        ...(conflictReason ? { conflictReason } : {}),
       });
     }
 

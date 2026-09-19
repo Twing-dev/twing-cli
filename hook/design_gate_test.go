@@ -1358,12 +1358,12 @@ func allDenyMessages(t *testing.T) map[string]string {
 	}
 	return map[string]string{
 		"noDesign":              noDesignReason("src/net/retry.ts"),
-		"flagged":               flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true, "constraint_violation"),
-		"flaggedPendingRev":     flaggedDesignReason("11111111-2222-3333-4444-555555555555", true, true, "constraint_violation"),
-		"flaggedSelfApprove":    flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "symbol_conflict"),
-		"flaggedSymbolConflict": flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "symbol_conflict"),
-		"flaggedLlmDivergence":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, "llm_divergence"),
-		"flaggedLegacyVerdict":  flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, ""),
+		"flagged":               flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", PendingReview: false, RequiresAdmin: true, Verdict: "constraint_violation"}),
+		"flaggedPendingRev":     flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", PendingReview: true, RequiresAdmin: true, Verdict: "constraint_violation"}),
+		"flaggedSelfApprove":    flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", PendingReview: false, RequiresAdmin: false, Verdict: "symbol_conflict"}),
+		"flaggedSymbolConflict": flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", PendingReview: false, RequiresAdmin: false, Verdict: "symbol_conflict"}),
+		"flaggedLlmDivergence":  flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", PendingReview: false, RequiresAdmin: false, Verdict: "llm_divergence"}),
+		"flaggedLegacyVerdict":  flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", PendingReview: false, RequiresAdmin: false, Verdict: ""}),
 		"outOfScope":            outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", nil),
 		"outOfScopeMulti": outOfScopeReason("11111111-2222-3333-4444-555555555555", "src/net/retry.ts", []designSummary{
 			{ID: "11111111-2222-3333-4444-555555555555", Summary: "add retry with backoff"},
@@ -1490,7 +1490,7 @@ func TestAuthRejectedReason_DistinguishesUnauthorizedFromForbidden(t *testing.T)
 // registration, so the old "conflict from its own registration" wording was
 // simply false in the common case.
 func TestFlaggedDesignReason_DoesNotClaimConflictCameFromRegistration(t *testing.T) {
-	msg := flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, true, "constraint_violation")
+	msg := flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", PendingReview: false, RequiresAdmin: true, Verdict: "constraint_violation"})
 	if strings.Contains(msg, "registration") {
 		t.Errorf("should not attribute the conflict to registration time: %q", msg)
 	}
@@ -1505,7 +1505,7 @@ func TestFlaggedDesignReason_DoesNotClaimConflictCameFromRegistration(t *testing
 // relevant next step.
 func TestFlaggedDesignReason_OffersCloseAcrossAllThreeVerdicts(t *testing.T) {
 	for _, verdict := range []string{"constraint_violation", "symbol_conflict", "llm_divergence"} {
-		msg := flaggedDesignReason("11111111-2222-3333-4444-555555555555", false, false, verdict)
+		msg := flaggedDesignReason(designScopeMatchResponse{DesignID: "11111111-2222-3333-4444-555555555555", Verdict: verdict})
 		wantCmd := "twing design close --id 11111111-2222-3333-4444-555555555555"
 		if !strings.Contains(msg, wantCmd) {
 			t.Errorf("%s: expected a close action (%q), got %q", verdict, wantCmd, msg)
@@ -1956,5 +1956,100 @@ func TestHookVersionMismatchReason_SelfInstalledIsUnaffectedByNodeFloor(t *testi
 
 	if !strings.Contains(msg, "npm install") {
 		t.Errorf("a self-installed machine still has something to run, got: %s", msg)
+	}
+}
+
+// The comparator's explanation reaching the deny (2026-09-19). Before this,
+// a blocked session was told *that* it conflicted and not what with: the
+// explanation existed, but only in the alignment thread, so learning
+// anything meant running a second command.
+func TestFlaggedDesignReason_CarriesTheComparatorsReasonAndCounterpart(t *testing.T) {
+	msg := flaggedDesignReason(designScopeMatchResponse{
+		DesignID:            "11111111-2222-3333-4444-555555555555",
+		Verdict:             "llm_divergence",
+		ConflictingDesignID: "99999999-8888-7777-6666-555555555555",
+		ConflictSummary:     "Add a per-user rate limiter in the API gateway",
+		ConflictReason:      "Both plans add request throttling.\n\nSuggested: build on the gateway limiter and drop the middleware one.",
+	})
+
+	for _, want := range []string{
+		"Both plans add request throttling",
+		"Suggested: build on the gateway limiter",
+		"Add a per-user rate limiter in the API gateway",
+		"99999999-8888-7777-6666-555555555555",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("deny message is missing %q:\n%s", want, msg)
+		}
+	}
+
+	// The counterpart id has to be readable, because `--adopt <theirPlanId>`
+	// still asks for it. That command is deliberately unchanged here.
+	if !strings.Contains(msg, "--adopt <theirPlanId>") {
+		t.Errorf("the resolution menu should be untouched by this change:\n%s", msg)
+	}
+}
+
+// An older coordinator sends none of the new fields. The message must be
+// exactly what it was before, not a half-rendered version with empty labels.
+func TestFlaggedDesignReason_WithoutCounterpartFieldsIsUnchanged(t *testing.T) {
+	msg := flaggedDesignReason(designScopeMatchResponse{
+		DesignID: "11111111-2222-3333-4444-555555555555",
+		Verdict:  "llm_divergence",
+	})
+
+	if strings.Contains(msg, "Their plan") {
+		t.Errorf("no counterpart was sent, so none should be shown:\n%s", msg)
+	}
+	if !strings.Contains(msg, "Your plan") || !strings.Contains(msg, "on hold until resolved") {
+		t.Errorf("the pre-existing details must survive:\n%s", msg)
+	}
+}
+
+// constraint_violation is one design against a fixed project rule: there is
+// no counterpart design, so the server sends no comparator text and the
+// admin-gated wording stays.
+func TestFlaggedDesignReason_ConstraintViolationKeepsItsOwnWording(t *testing.T) {
+	msg := flaggedDesignReason(designScopeMatchResponse{
+		DesignID:      "11111111-2222-3333-4444-555555555555",
+		Verdict:       "constraint_violation",
+		RequiresAdmin: true,
+	})
+
+	if strings.Contains(msg, "Their plan") {
+		t.Errorf("a constraint violation has no counterpart plan:\n%s", msg)
+	}
+	if !strings.Contains(msg, "project admin") {
+		t.Errorf("the admin-gated note must survive:\n%s", msg)
+	}
+}
+
+// Printed, not just substring-matched. Two rendering bugs shipped earlier in
+// this file's history because every test asserted on substrings and nobody
+// looked at the output: a label longer than denyDetailLabelWidth ran into its
+// own value, and a value arrived with a prefix already on it.
+func TestFlaggedDesignReason_RendersLegibly(t *testing.T) {
+	msg := flaggedDesignReason(designScopeMatchResponse{
+		DesignID:            "11111111-2222-3333-4444-555555555555",
+		Verdict:             "llm_divergence",
+		ConflictingDesignID: "99999999-8888-7777-6666-555555555555",
+		ConflictSummary:     "Add a per-user rate limiter in the API gateway",
+		ConflictReason:      "Both plans add request throttling to the same request path.\n\nSuggested: build on the gateway limiter and drop the middleware one.",
+	})
+	t.Log("\n" + msg)
+
+	for _, line := range strings.Split(msg, "\n") {
+		for _, label := range []string{"Your plan", "Their plan", "Their plan id", "Status"} {
+			if !strings.HasPrefix(strings.TrimSpace(line), label) {
+				continue
+			}
+			rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), label))
+			if rest == "" {
+				continue
+			}
+			if !strings.HasPrefix(line, " ") || !strings.Contains(line, "  ") {
+				t.Errorf("label %q looks collided with its value: %q", label, line)
+			}
+		}
 	}
 }

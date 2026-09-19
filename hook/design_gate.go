@@ -579,9 +579,26 @@ func wrapText(s string, width int) []string {
 	return append(lines, current)
 }
 
+// writeWrapped wraps each *paragraph* separately, keeping blank lines between
+// them. `wrapText` alone runs the whole string through `strings.Fields`, which
+// flattens every run of whitespace -- so a deliberate paragraph break used to
+// vanish and its second paragraph got glued onto the end of the first. Visible
+// the moment the comparator's reason arrived carrying a separate "Suggested:"
+// sentence (2026-09-19): the recommendation ended up orphaned mid-line, read
+// as part of the explanation, and stopped looking like a recommendation at
+// all. Single newlines still collapse, which is what any of these callers
+// wants for a sentence wrapped in source.
 func writeWrapped(b *strings.Builder, text, indent string) {
-	for _, line := range wrapText(text, denyWrapWidth-len(indent)) {
-		b.WriteString("\n" + indent + line)
+	for i, para := range strings.Split(text, "\n\n") {
+		if strings.TrimSpace(para) == "" {
+			continue
+		}
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		for _, line := range wrapText(para, denyWrapWidth-len(indent)) {
+			b.WriteString("\n" + indent + line)
+		}
 	}
 }
 
@@ -1622,6 +1639,22 @@ type designScopeMatchResponse struct {
 	// doesn't send this field yet leaves it empty, and
 	// flaggedDesignReason falls back to its pre-2026-08-26 generic wording.
 	Verdict string `json:"verdict,omitempty"`
+	// Set only for state "flagged" with a peer-vs-peer verdict
+	// ("llm_divergence"/"symbol_conflict") -- the counterpart design this one
+	// collides with, and the semantic comparator's own explanation of the
+	// clash, both read off the shared alignment thread server-side.
+	//
+	// Before these, a blocked session was told *that* it conflicted and not
+	// what with: the explanation existed, but only in the alignment thread,
+	// so learning anything meant running a second command. ConflictReason
+	// already carries a "Suggested: ..." line when the model offered one.
+	//
+	// All three absent -- an older coordinator, or a "constraint_violation"
+	// flag, which has no counterpart design -- falls back to the generic
+	// per-bucket sentence, unchanged from before.
+	ConflictingDesignID string `json:"conflictingDesignId,omitempty"`
+	ConflictSummary     string `json:"conflictSummary,omitempty"`
+	ConflictReason      string `json:"conflictReason,omitempty"`
 	// Set only for state "out_of_scope" (2026-08-25) -- every open design
 	// for this session, newest-first, not just the one `DesignID` names.
 	// Found live: with more than one open design in a session, silently
@@ -1697,9 +1730,11 @@ func checkDesignScope(serverURL, authToken, developerID, projectID, sessionID, f
 // whoever's authority you'd be overriding" principle this reflects. When
 // `pendingReview` is also true, `requiresAdmin` further distinguishes
 // "waiting on a person" from "already resolved, nothing more to do".
-func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool, verdict string) string {
-	lead, detail := flaggedLeadAndDetail(verdict)
-	if pendingReview {
+func flaggedDesignReason(m designScopeMatchResponse) string {
+	designID := m.DesignID
+	requiresAdmin := m.RequiresAdmin
+	lead, detail := flaggedLeadAndDetail(m.Verdict)
+	if m.PendingReview {
 		if requiresAdmin {
 			return denyMessage(
 				"You're waiting on a person, not on twing.",
@@ -1730,10 +1765,30 @@ func flaggedDesignReason(designID string, pendingReview bool, requiresAdmin bool
 	if requiresAdmin {
 		note = "This goes to a project admin. You stay blocked until they decide."
 	}
+	// The comparator's own explanation when the coordinator sent one,
+	// otherwise the generic per-bucket sentence. Newlines collapse to spaces
+	// through denyMessage's wrapper, which is fine for a "Suggested:" clause.
+	why := detail
+	if m.ConflictReason != "" {
+		why = m.ConflictReason
+	}
+	// Naming the counterpart is what makes the `--adopt <theirPlanId>` below
+	// actually runnable: the id is right here to copy. The command itself is
+	// deliberately left as-is -- the resolution model is not this change's
+	// business.
+	details := []denyDetail{{"Your plan", designID}}
+	if m.ConflictSummary != "" {
+		details = append(details, denyDetail{"Their plan", m.ConflictSummary})
+	}
+	if m.ConflictingDesignID != "" {
+		details = append(details, denyDetail{"Their plan id", m.ConflictingDesignID})
+	}
+	details = append(details, denyDetail{"Status", "on hold until resolved"})
+
 	return denyMessage(
 		lead,
-		detail,
-		[]denyDetail{{"Your plan", designID}, {"Status", "on hold until resolved"}},
+		why,
+		details,
 		[]denyAction{
 			{
 				Label:   "Build on their work instead",
@@ -2177,7 +2232,7 @@ func handleEditWriteGate(payload hookPayload) {
 	case "in_scope":
 		writeJSON(allowOutput("PreToolUse"))
 	case "flagged":
-		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch.DesignID, scopeMatch.PendingReview, scopeMatch.RequiresAdmin, scopeMatch.Verdict)))
+		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch)))
 	case "dormant":
 		writeJSON(denyOutput("PreToolUse", dormantDesignReason(scopeMatch.DesignID, scopeMatch.Summary, scopeMatch.DormantSinceMs)))
 	case "out_of_scope":

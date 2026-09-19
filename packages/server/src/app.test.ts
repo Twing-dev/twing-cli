@@ -5796,3 +5796,54 @@ test("changes[]: ExitPlanMode with a model returning malformed changes falls bac
     ),
   );
 });
+
+// The comparator's explanation reaching the deny (2026-09-19). Everything
+// below already existed: the reason is written to the alignment thread by
+// runSemanticComparatorPass, and the counterpart design is one of the
+// thread's two parties. It simply was not reachable from the gate, so a
+// blocked session was told *that* it conflicted and not what with.
+//
+// Flagged and threaded directly rather than through the real comparator --
+// this is about what scope-match returns, not about the LLM's judgment
+// (same reasoning, and the same idiom, as the design_flagged test above).
+test("GET /v1/designs/scope-match: a peer flag carries the counterpart design and the comparator's reason", async () => {
+  const { app, dataDir, designs, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const register = async (sessionId: string, summary: string, touches: string[]) => {
+    const res = await app.request("/v1/designs/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ projectId: "proj-1", sessionId, summary, creates: [], touches, dependsOn: [] }),
+    });
+    return (await res.json()) as { designId: string };
+  };
+
+  const theirs = await register("s-them", "Add a per-user rate limiter in the API gateway", ["gateway.ts"]);
+  const mine = await register("s-me", "Throttle requests in the auth middleware", ["middleware.ts"]);
+
+  alignmentThreads.findOrCreate({
+    projectId: "proj-1",
+    symbolIds: [],
+    developerId: admin.developerId,
+    otherDeveloperId: "other-dev",
+    designId: theirs.designId,
+    systemDescription: "Both plans add request throttling.\n\nSuggested: build on the gateway limiter.",
+    category: "llm_divergence",
+    subKind: "duplication",
+    summary: "duplication",
+    initiatingDesignId: mine.designId,
+    ts: Date.now(),
+    reopenEligible: true,
+  });
+  designs.flag(mine.designId, "llm_divergence", { conflicts: [], constraints: [] });
+
+  const res = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s-me&path=middleware.ts`, { headers: bearer(admin.token) });
+  const body = (await res.json()) as Record<string, unknown>;
+
+  assert.equal(body.state, "flagged");
+  assert.equal(body.conflictingDesignId, theirs.designId, "the counterpart is the thread's other party");
+  assert.equal(body.conflictSummary, "Add a per-user rate limiter in the API gateway");
+  assert.match(String(body.conflictReason), /Both plans add request throttling/);
+  assert.match(String(body.conflictReason), /Suggested: build on the gateway limiter/);
+});
