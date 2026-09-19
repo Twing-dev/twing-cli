@@ -75,7 +75,7 @@ test("checkSemanticConflict: conflict:true parses kind/reason, sends system+few-
     ),
   );
 
-  assert.deepEqual(result, { conflict: true, kind: "tension", reason: "they fight over the same guarantee" });
+  assert.deepEqual(result, { conflict: true, kind: "tension", reason: "they fight over the same guarantee", suggestion: "" });
   assert.equal(capturedMessages[0].role, "system");
   // 3 few-shot pairs (6 messages) + the real user turn
   assert.equal(capturedMessages.length, 1 + 6 + 1);
@@ -92,7 +92,7 @@ test("checkSemanticConflict: conflict:false parses cleanly", async () => {
       () => checkSemanticConflict(design({ id: "a" }), design({ id: "b" }), { model: "google.gemma-4-31b" }),
     ),
   );
-  assert.deepEqual(result, { conflict: false, kind: null, reason: "unrelated" });
+  assert.deepEqual(result, { conflict: false, kind: null, reason: "unrelated", suggestion: "" });
 });
 
 test("checkSemanticConflict: markdown-fenced JSON is unwrapped", async () => {
@@ -102,7 +102,7 @@ test("checkSemanticConflict: markdown-fenced JSON is unwrapped", async () => {
       () => checkSemanticConflict(design({ id: "a" }), design({ id: "b" }), { model: "google.gemma-4-31b" }),
     ),
   );
-  assert.deepEqual(result, { conflict: true, kind: "duplication", reason: "r" });
+  assert.deepEqual(result, { conflict: true, kind: "duplication", reason: "r", suggestion: "" });
 });
 
 test("checkSemanticConflict: malformed JSON after one retry fails soft to no-conflict", async () => {
@@ -116,7 +116,7 @@ test("checkSemanticConflict: malformed JSON after one retry fails soft to no-con
       () => checkSemanticConflict(design({ id: "a" }), design({ id: "b" }), { model: "google.gemma-4-31b" }),
     ),
   );
-  assert.deepEqual(result, { conflict: false, kind: null, reason: "" });
+  assert.deepEqual(result, { conflict: false, kind: null, reason: "", suggestion: "" });
   assert.equal(calls, 2);
 });
 
@@ -127,7 +127,7 @@ test("checkSemanticConflict: an invalid kind value is rejected as malformed (fai
       () => checkSemanticConflict(design({ id: "a" }), design({ id: "b" }), { model: "google.gemma-4-31b" }),
     ),
   );
-  assert.deepEqual(result, { conflict: false, kind: null, reason: "" });
+  assert.deepEqual(result, { conflict: false, kind: null, reason: "", suggestion: "" });
 });
 
 test("checkSemanticConflict: repeated network error fails soft to no-conflict, never throws", async () => {
@@ -139,7 +139,7 @@ test("checkSemanticConflict: repeated network error fails soft to no-conflict, n
       () => checkSemanticConflict(design({ id: "a" }), design({ id: "b" }), { model: "google.gemma-4-31b" }),
     ),
   );
-  assert.deepEqual(result, { conflict: false, kind: null, reason: "" });
+  assert.deepEqual(result, { conflict: false, kind: null, reason: "", suggestion: "" });
 });
 
 test("checkSemanticConflict: no AWS_BEARER_TOKEN_BEDROCK fails soft to no-conflict, never throws", async () => {
@@ -147,9 +147,36 @@ test("checkSemanticConflict: no AWS_BEARER_TOKEN_BEDROCK fails soft to no-confli
   delete process.env.AWS_BEARER_TOKEN_BEDROCK;
   try {
     const result = await checkSemanticConflict(design({ id: "a" }), design({ id: "b" }), { model: "google.gemma-4-31b", region: "us-east-1" });
-    assert.deepEqual(result, { conflict: false, kind: null, reason: "" });
+    assert.deepEqual(result, { conflict: false, kind: null, reason: "", suggestion: "" });
   } finally {
     if (originalToken === undefined) delete process.env.AWS_BEARER_TOKEN_BEDROCK;
     else process.env.AWS_BEARER_TOKEN_BEDROCK = originalToken;
   }
+});
+
+// `suggestion` is advisory, so its absence or malformation must never cost us
+// an otherwise-good conflict judgment -- losing a real conflict signal over a
+// cosmetic string would be far worse than showing no suggestion.
+test("checkSemanticConflict: a suggestion is parsed and trimmed when the model sends one", async () => {
+  const result = await withBedrockEnv(() =>
+    withMockFetch(
+      (async () => llmResponse({ conflict: true, kind: "duplication", reason: "r", suggestion: "  build one shared helper  " })) as typeof fetch,
+      () => checkSemanticConflict(design({ id: "a" }), design({ id: "b" }), { model: "m" }),
+    ),
+  );
+
+  assert.equal(result.suggestion, "build one shared helper");
+});
+
+test("checkSemanticConflict: a non-string suggestion degrades to empty, keeping the conflict", async () => {
+  const result = await withBedrockEnv(() =>
+    withMockFetch(
+      (async () => llmResponse({ conflict: true, kind: "tension", reason: "r", suggestion: { not: "a string" } })) as typeof fetch,
+      () => checkSemanticConflict(design({ id: "a" }), design({ id: "b" }), { model: "m" }),
+    ),
+  );
+
+  assert.equal(result.conflict, true, "the conflict judgment must survive a bad suggestion");
+  assert.equal(result.kind, "tension");
+  assert.equal(result.suggestion, "");
 });

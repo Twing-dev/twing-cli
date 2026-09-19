@@ -49,6 +49,22 @@ export interface SemanticConflictResult {
   conflict: boolean;
   kind: SemanticConflictKind | null;
   reason: string;
+  /** One-line, human-readable recommendation for resolving the conflict,
+   * surfaced verbatim in the Edit/Write gate's deny alongside `reason`.
+   *
+   * Advisory only. It never decides anything and never narrows the options
+   * offered -- the model is describing a way out, not picking one, and the
+   * menu still lists every resolution regardless of what this says.
+   *
+   * Empty when `conflict` is false, and empty when the model omits it:
+   * `isValidResult` deliberately does not check this field, so a missing or
+   * malformed value can never invalidate an otherwise-good conflict
+   * judgment. Losing a real conflict signal over a cosmetic string would be
+   * a far worse failure than showing no suggestion.
+   *
+   * Phrased about the two *plans*, never "yours"/"theirs": both sides of a
+   * divergent pair are flagged and read the identical text. */
+  suggestion: string;
 }
 
 export interface SemanticCheckOptions {
@@ -58,7 +74,7 @@ export interface SemanticCheckOptions {
   region?: string;
 }
 
-const EMPTY_RESULT: SemanticConflictResult = { conflict: false, kind: null, reason: "" };
+const EMPTY_RESULT: SemanticConflictResult = { conflict: false, kind: null, reason: "", suggestion: "" };
 
 const SYSTEM_PROMPT = [
   "You are comparing two independent implementation plans for the same codebase, written by different developers who have not seen each other's plan.",
@@ -72,8 +88,9 @@ const SYSTEM_PROMPT = [
   "",
   "Plans can duplicate work or conflict even when they touch completely different files, components, or layers of the system. Do not treat different file paths, or 'different layer/component' framing, as evidence of no conflict by itself -- judge (a)/(b)/(c) on what each plan actually does, not on whether their file lists overlap.",
   "",
-  'Return JSON only: {"conflict": boolean, "kind": "duplication"|"contradictory_assumptions"|"tension"|null, "reason": string}.',
+  'Return JSON only: {"conflict": boolean, "kind": "duplication"|"contradictory_assumptions"|"tension"|null, "reason": string, "suggestion": string}.',
   "reason is required in all cases (even conflict: false) -- one or two sentences, concrete, naming the specific detail from each plan that drove your answer.",
+  'suggestion: when conflict is true, one sentence on how to resolve it -- which approach to build on and which to drop, or how to split the two so they stop overlapping. Name the plans by what they do ("the gateway limiter", "the per-user quota"), never "Plan A"/"Plan B" or "yours"/"theirs": both developers read this identical text. Empty string "" when conflict is false.',
   "No prose outside the JSON, no markdown code fences.",
 ].join("\n");
 
@@ -119,6 +136,8 @@ const FEW_SHOT: { user: string; assistant: string }[] = [
       kind: "tension",
       reason:
         "Plan A's idle-timeout enforcement lives in the session-refresh middleware and isn't described as aware of Plan B's long_lived flag, while Plan B's skip is described as bypassing 'the normal session-expiry check' without naming the idle-timeout path specifically -- if idle-timeout isn't part of what Plan B's skip covers, a remembered session could get silently logged out despite the 30-day promise; if it is, Plan A's security control gets silently bypassed for those sessions. Either reading is a real tension between the two mechanisms, not a stated agreement about which wins.",
+      suggestion:
+        "Decide whether the idle timeout applies to long_lived sessions, then make the idle-timeout check handle that flag explicitly one way or the other, instead of leaving the interaction undefined.",
     }),
   },
   {
@@ -138,6 +157,7 @@ const FEW_SHOT: { user: string; assistant: string }[] = [
       kind: null,
       reason:
         "Both are small, independent UI additions with no shared data, no shared contract, and no overlapping problem -- a Storybook-only dev preview tool and a runtime keyboard-shortcuts modal don't build the same thing, assume anything about each other, or change any behavior the other depends on.",
+      suggestion: "",
     }),
   },
 ];
@@ -172,7 +192,9 @@ function userTurn(candidateText: string, otherText: string): string {
   return `PLAN A:\n${candidateText}\n\n---\n\nPLAN B:\n${otherText}`;
 }
 
-function isValidResult(v: unknown): v is SemanticConflictResult {
+/** `suggestion` is deliberately absent from this guard -- see the field's own
+ * doc comment. `parseResult` normalizes it after this passes. */
+function isValidResult(v: unknown): v is Omit<SemanticConflictResult, "suggestion"> {
   if (typeof v !== "object" || v === null) return false;
   const obj = v as Record<string, unknown>;
   if (typeof obj.conflict !== "boolean") return false;
@@ -192,7 +214,9 @@ function parseResult(text: string): SemanticConflictResult | undefined {
   } catch {
     return undefined;
   }
-  return isValidResult(parsed) ? parsed : undefined;
+  if (!isValidResult(parsed)) return undefined;
+  const raw = (parsed as Record<string, unknown>).suggestion;
+  return { ...parsed, suggestion: typeof raw === "string" ? raw.trim() : "" };
 }
 
 function buildMessages(candidate: DesignStatement, other: DesignStatement): ChatMessage[] {
