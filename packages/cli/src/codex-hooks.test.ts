@@ -339,3 +339,29 @@ test("the launcher exits cleanly when twing is not installed", () => {
   assert.equal(run.status, 0);
   assert.equal(run.stdout.toString(), "", "a silent no-op, not a verdict");
 });
+
+test("changing the wired entries invalidates the recorded trust, which is why a refresh re-stamps", () => {
+  // Codex runs a hook only while the hash it recorded still matches the
+  // entry. So a twing version that changes the block -- a new event, a
+  // different timeout -- turns every already-wired machine's entries
+  // `modified`, and Codex reports that by running nothing at all. This
+  // pins the property `init`'s refresh path depends on: the trust block
+  // survives re-wiring untouched, so it is stale rather than absent, and
+  // only a re-stamp can make it current again.
+  const ws = workspace();
+  wireCodexHooks(ws);
+  const stale = "sha256:recorded-against-the-previous-entries";
+  fs.appendFileSync(
+    ws.configPath,
+    `\n${CODEX_TRUST_START}\n[hooks.state."${ws.configPath}:pre_tool_use:0:0"]\nenabled = true\ntrusted_hash = "${stale}"\n# <<< twing-codex-trust-v1 <<<\n`,
+  );
+
+  // A later version wires a different set of entries.
+  const entries = codexHookEvents();
+  const changed = wireCodexHooks({ ...ws, force: true });
+
+  assert.ok(entries.length > 0);
+  assert.equal(changed.present, true);
+  assert.ok(ws.read().includes(stale), "the stale hash is still there -- re-wiring cannot quietly drop it");
+  assert.equal(ws.read().split(CODEX_TRUST_START).length - 1, 1, "and there is still exactly one trust block to replace");
+});

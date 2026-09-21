@@ -30,7 +30,7 @@ import {
 } from "@twing/core";
 import { ensureHookInstalled, ensureCliShim } from "./install-hook.js";
 import { wireHooks, stripLegacyRepoLocalHooks, globalSettingsPath } from "./wire-hooks.js";
-import { isCodexHooksWired, reportCodexTrust } from "./codex-hooks.js";
+import { isCodexHooksWired, reportCodexTrust, wireCodexHooks } from "./codex-hooks.js";
 import { isResolverWired, writeResolverWiring } from "./resolve-hook.js";
 import { isOpenCodePluginWired, wireOpenCodePlugin } from "./opencode-plugin.js";
 import { autoManagedMarkerPath } from "./ghuser.js";
@@ -253,6 +253,18 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // only by being re-copied from the version that just installed.
   if (isOpenCodePluginWired() && wireOpenCodePlugin()) {
     console.log("twing init: refreshed twing's OpenCode plugin");
+  }
+  // And for Codex, where staleness is worse than stale: Codex runs a hook
+  // only while its recorded hash still matches the entry, so a version that
+  // changes the block turns every already-wired machine's entries
+  // `modified` -- which Codex reports by running nothing at all. Refreshing
+  // without re-stamping would *cause* that, so the two go together.
+  //
+  // Strictly a no-op on a machine with no Codex, and on one whose entries
+  // this version didn't change -- which is every run but an upgrade.
+  if (isCodexHooksWired() && wireCodexHooks().changed) {
+    console.log("twing init: refreshed twing's Codex hook entries");
+    await reportCodexTrust({ trust: options.trustCodexHooks });
   }
 
   if (!options.unattended) {
