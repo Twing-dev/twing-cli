@@ -1,7 +1,8 @@
 /**
- * Installs twing's machine-global Claude and OpenCode integrations. Claude
- * entries are merged into `~/.claude/settings.json`; OpenCode gets a loader
- * in `~/.config/opencode/plugins/`. Every downstream check tolerates "no
+ * Installs twing's machine-global Claude, OpenCode and Codex integrations.
+ * Claude entries are merged into `~/.claude/settings.json`; OpenCode gets a
+ * loader in `~/.config/opencode/plugins/`; Codex gets a marked block in its
+ * own `config.toml` (`codex-hooks.ts`), on the machines that have one. Every downstream check tolerates "no
  * coordinator configured for this repo" as a silent no-op (capture) or
  * silent allow (gate) -- so wiring once, globally, means every repo a
  * developer works in already has hooks active, no per-repo `wireHooks` run
@@ -14,6 +15,7 @@ import * as path from "node:path";
 import { readClaudeSettings, writeClaudeSettings, type ClaudeSettings, type HookCommand, type HookMatcherEntry } from "@twing/core";
 import { isBootstrapHook } from "./enforce-hooks.js";
 import { wireOpenCodePlugin } from "./opencode-plugin.js";
+import { wireCodexHooks } from "./codex-hooks.js";
 
 export function globalSettingsPath(): string {
   return path.join(os.homedir(), ".claude", "settings.json");
@@ -46,6 +48,11 @@ function addEntry(settings: ClaudeSettings, eventName: string, hookPath: string,
 /** Returns true if the file was changed. */
 export function wireHooks(hookPath: string): boolean {
   const changedOpenCode = wireOpenCodePlugin();
+  // Codex's own config, where Codex is installed. Trust is a separate,
+  // asynchronous step the caller runs (`reportCodexTrust`): Codex will not
+  // run an entry whose hash it has not recorded, and asking it for that hash
+  // means talking to it.
+  const changedCodex = wireCodexHooks().changed;
   const settingsPath = globalSettingsPath();
   const settings = readClaudeSettings(settingsPath);
 
@@ -66,7 +73,7 @@ export function wireHooks(hookPath: string): boolean {
   // stopped being the right mechanism for a per-repo toggle.
   const changedDesignGate = wireDesignGate(settingsPath, settings, hookPath);
 
-  return changed || changedDesignGate || changedOpenCode;
+  return changed || changedDesignGate || changedOpenCode || changedCodex;
 }
 
 /** §17: wires the PreToolUse design-gate matchers plus a SessionEnd close

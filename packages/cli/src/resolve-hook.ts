@@ -83,10 +83,14 @@ hook_bin="\$HOME/.twing/bin/twing-hook"
 # Matches older inlined markers too: a repo may still carry a v1-v3 committed
 # hook, which covers this session just as well.
 #
-# Not under OpenCode: it never reads .claude/settings.json, so a committed
-# Claude hook covers nothing there and this entry is the only one running.
+# Claude Code only. Every other harness reaches this script through its own
+# launcher, which says which one it is (TWING_HARNESS) -- and none of them
+# reads .claude/settings.json, so a committed Claude hook covers nothing
+# there and this entry is the only one running. Phrased as "no harness
+# named" rather than a list of the ones to skip, so a harness added later is
+# correct here by default instead of standing down into silence.
 proj="\${CLAUDE_PROJECT_DIR:-\$PWD}"
-if [ "\${TWING_HARNESS:-}" != "opencode" ] && \\
+if [ -z "\${TWING_HARNESS:-}" ] && \\
    grep -qE 'bootstrap-hook\\.sh|twing-bootstrap-hook|twing-install-enforcement-hook' \\
      "\$proj/.claude/settings.json" 2>/dev/null; then
   exit 0

@@ -53,10 +53,18 @@ export function setUserEmail(repo: string, email: string): void {
 export async function withHome<T>(run: (home: string) => Promise<T>): Promise<T> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "twing-cli-home-"));
   const original = process.env.HOME;
+  // CODEX_HOME outranks $HOME for anything Codex-related (`codex-hooks.ts`),
+  // so a developer who exports it would otherwise have the suite wire their
+  // real Codex config -- the one machine-level file isolating $HOME doesn't
+  // cover.
+  const originalCodexHome = process.env.CODEX_HOME;
+  delete process.env.CODEX_HOME;
   process.env.HOME = home;
   try {
     return await run(home);
   } finally {
+    if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = originalCodexHome;
     if (original === undefined) delete process.env.HOME;
     else process.env.HOME = original;
   }

@@ -126,7 +126,9 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     (`diff-claims.ts`) needs the same pure algorithm without pulling in the
     daemon's socket-server/sync machinery.
   - `transcript-filter.ts` — the session-capture contract, as a pure
-    function over one line of Claude Code's transcript JSONL. Keeps human
+    function over one line of Claude Code's transcript JSONL (the other
+    harnesses translate into that shape rather than teaching this a second
+    dialect: `daemon/opencode-sqlite-source.ts`, `daemon/codex-rollout-source.ts`). Keeps human
     turns, assistant prose, and the file paths tool calls named; drops every
     tool input and result, `<system-reminder>` blocks, the `<command-*>`
     family, and compaction summaries (recursive lossy filtering — capturing
@@ -199,7 +201,17 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   different local `user.email`).
   - **Session capture** (`transcript.ts`, `redact.ts`, `capture-upload.ts`,
     2026-09): triggered by the same `get_notices`/`session_end` messages the
-    hook already sends, which now carry Claude Code's `transcript_path`.
+    hook already sends, which now carry the harness's `transcript_path` and,
+    for every harness but Claude Code, a `TranscriptSourceDescriptor` saying
+    what that path (or session id) *is* -- resolved through
+    `transcript-source.ts`'s registry, which is where a harness is added.
+    `server.ts` has to forward that descriptor into the capture pass:
+    dropping it (as it silently did until 2026-09-21) reads a Codex rollout
+    as Claude Code JSONL -- which parses fine, matches neither entry type the
+    filter allows, and advances the watermark past a session nobody captured
+    -- and skips OpenCode outright, since OpenCode sends no path at all.
+    `daemon/capture-routing.test.ts` drives a real daemon over its socket to
+    keep that wired.
     Anchored on a **byte watermark** (`~/.twing/sessions/<id>.state.json`),
     never on `SessionEnd` — the session this was built against ran 11 days
     across three repos and produced zero commits, so an end-anchored capture
@@ -514,9 +526,31 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   entries, the OpenCode plugin (`opencode-plugin.ts`, a loader in
   `~/.config/opencode/plugins/twing.js` importing an adapter copied to
   `~/.twing/opencode/adapter.mjs`, which spawns the resolver with
-  `TWING_HARNESS=opencode`) and `~/.twing/auto-managed`, nothing installed.
-  `managed-delegate.ts` makes that outside copy re-exec every command in
-  `~/.twing/lib` once it exists. `unwireHooks` is Claude-only; `twing
+  `TWING_HARNESS=opencode`), the Codex block (`codex-hooks.ts`, below) and
+  `~/.twing/auto-managed`, nothing installed.
+  `codex-hooks.ts` (2026-09-21) is the third harness, and the
+  only one whose wiring goes into a file twing does not own: Codex reads
+  `$CODEX_HOME/config.toml` (else `~/.codex/config.toml`), which is TOML
+  carrying the user's own comments and formatting, so twing's entries live in
+  one marked block (`# >>> twing-codex-hooks-v1 >>>`) regenerated wholesale
+  by text surgery, never a parse-and-re-emit. Codex's hook protocol is
+  deliberately Claude-Code-shaped -- same event names, same
+  `tool_name`/`tool_input`, same `hookSpecificOutput.permissionDecision`,
+  `transcript_path` on every event -- so the wired command is a launcher
+  (`~/.twing/bin/twing-codex-hook`) that exports `TWING_HARNESS=codex` and
+  execs the same resolver/binary Claude Code runs. Two Codex-specific
+  obstacles, both handled here and neither optional: `features.hooks` is
+  still an under-development flag and **nothing runs with it off**, and Codex
+  refuses to run a hook whose sha256 is not recorded in
+  `hooks.state."<key>".trusted_hash` -- normally approved through a TUI
+  screen, which `codex exec` never shows anyone. `trustCodexHooks` therefore
+  records it, reading the hash back from Codex itself (`queryCodexHooks`
+  drives `codex app-server`'s `hooks/list` over stdio) rather than
+  recomputing a format that would have to stay mirrored; it stamps **only**
+  entries whose `sourcePath` is twing's config *and* whose command is the one
+  twing generates, so no other hook becomes trusted because twing ran.
+  `twing init --no-trust-codex-hooks` opts out. `managed-delegate.ts` makes
+  that outside copy re-exec every command in `~/.twing/lib` once it exists. `unwireHooks` is Claude-only; `twing
   uninstall` removes the OpenCode plugin itself. `init --unattended`
   refreshes that wiring whenever `isResolverWired`, so a change to
   `WIRED_EVENTS` reaches resolver machines through version recovery instead
@@ -581,6 +615,24 @@ real decision logic on purpose: `hook/design_gate.go` (the gate's own
 verdict/deny logic, §17) and `hook/daemon_launch.go` (the liveness-check
 self-heal exception noted above).
 
+`hook/codex.go` is the one place this binary knows a second harness exists.
+Codex's payloads are Claude Code's, bar two things: its editing tool is
+`apply_patch`, whose `tool_input.command` is a patch that can name several
+files at once, and its `transcript_path` points at a Codex *rollout* JSONL,
+a different shape entirely. So a patch is expanded into one canonical
+`Edit`/`Write` payload per target before any existing handler sees it (the
+gate checks every file, first deny wins -- `handleCodexPatchGate` in
+`design_gate.go`; a patch whose targets can't be read fails closed), and
+`TWING_HARNESS=codex` turns the path into a `codex-rollout` descriptor the
+daemon can resolve. The added lines of the first hunk ride along as
+`new_string`, which is what buys a symbol-level claim instead of the bare
+file path a whole-file `Write` degrades to. Also here: the `--session <id>`
+that Codex denials carry in their `twing design register` template -- Codex
+exports neither `TWING_SESSION_ID` (twing's OpenCode adapter) nor
+`CLAUDE_CODE_SESSION_ID`, so an agent running the command a deny handed it
+would otherwise register its design against nothing and be denied again.
+The test is the hook's own environment, not a list of harness names.
+
 Two files on the gate's side carry decision logic worth knowing about before
 touching either. `plan_paths.go` answers *which coordinator governs an
 `ExitPlanMode`*: it regexes path-like tokens out of the plan text, resolves
@@ -625,8 +677,10 @@ Claude Code tool call
                                                                                        -> allow / deny verdict, written back to stdout as
                                                                                           hookSpecificOutput.permissionDecision
 
-Claude Code session transcript (Claude Code writes it; twing only reads)
-  -> twing-hook (UserPromptSubmit / SessionStart / SessionEnd, carrying transcript_path)
+Session transcript (the harness writes it; twing only reads) -- Claude Code's
+JSONL, OpenCode's SQLite, or Codex's rollout JSONL
+  -> twing-hook (UserPromptSubmit / SessionStart / SessionEnd, carrying transcript_path
+     and, for every harness but Claude Code, a source descriptor saying what it is)
                                --[Unix socket, fire-and-forget]-->  daemon
                                                                        |  opted-in? (any repo touched, sticky)
                                                                        |  reach back to the consent boundary
@@ -720,6 +774,13 @@ files) is a bug, not expected behavior — the gate resolves the coordinator
 from `cwd`, but `resolveRepoRelative` (`hook/design_gate.go`) should already
 be catching that case and allowing silently; see its own doc comment for
 the live incident this was found from.
+
+Working here from **Codex** rather than Claude Code changes two things about
+the loop above: there is no `ExitPlanMode` equivalent (Codex's `update_plan`
+fires no hook), so the first `apply_patch` is what gets denied and the deny's
+own `twing design register --session <id> ...` template is the way through;
+and a patch touching several files is checked file by file, so the first
+target outside your design's scope is the one named in the deny.
 
 Session capture is **on** in this repo (`capture: {enabled: true}` in
 `.twing/twing.yml`) — this is the repo the feature is built and dogfooded

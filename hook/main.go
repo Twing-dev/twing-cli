@@ -67,6 +67,10 @@ func main() {
 	}
 	rawPayload = data
 	currentHookEvent = payload.HookEventName
+	// The one harness that describes its transcript by path without saying
+	// what shape that file is in -- see codex.go. A no-op for Claude Code and
+	// for anything that already named a source.
+	payload = withHarnessSource(payload)
 
 	switch payload.HookEventName {
 	case "PostToolUse":
@@ -101,6 +105,13 @@ func handlePostToolUse(payload hookPayload) {
 	switch payload.ToolName {
 	case "Edit", "Write", "Read", "Grep", "Glob":
 		enqueue(payload.SessionID, payload.Cwd, payload.ToolName, payload.ToolInput)
+	case codexPatchTool:
+		// Codex's one editing tool, which can name several files in a single
+		// call. One claim per file, in the canonical shape -- the daemon
+		// never learns that a patch was involved (codex.go).
+		for _, expanded := range expandCodexPatch(payload) {
+			enqueue(expanded.SessionID, expanded.Cwd, expanded.ToolName, expanded.ToolInput)
+		}
 	default:
 		// No-op: not a capture-worthy tool call.
 	}

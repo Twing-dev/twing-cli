@@ -12,6 +12,7 @@ import {
   type GetNoticesMessage,
   type GetClaimsMessage,
   type SessionEndMessage,
+  type TranscriptSourceDescriptor,
   type Claim,
   type CallEdge,
 } from "@twing/core";
@@ -418,7 +419,7 @@ function handleMessage(
     // on every SessionStart/UserPromptSubmit, off the reply path: the hook
     // gets its notices at the same speed as before, and capture is
     // watermark-based so a dropped pass costs nothing but latency.
-    startCapture({ sessionId: req.sessionId, cwd: req.cwd, transcriptPath: req.transcriptPath });
+    startCapture({ sessionId: req.sessionId, cwd: req.cwd, transcriptPath: req.transcriptPath, sourceDescriptor: req.source });
     const developerId = developerBySession.get(req.sessionId);
     // No claims from this session yet, so no developerId to look up
     // notices for -- an honest empty answer, not a lookup failure.
@@ -447,7 +448,7 @@ function handleMessage(
     // Fire-and-forget from the hook, so no ack: one last drain of whatever
     // the transcript gained after the session's final prompt.
     const req = raw as SessionEndMessage;
-    startCapture({ sessionId: req.sessionId, cwd: req.cwd, transcriptPath: req.transcriptPath });
+    startCapture({ sessionId: req.sessionId, cwd: req.cwd, transcriptPath: req.transcriptPath, sourceDescriptor: req.source });
     return;
   }
 
@@ -501,8 +502,20 @@ function handleMessage(
 /** Capture never blocks a hook reply and never fails one: same
  * ack-immediately-then-work-async shape `enqueue` uses, with every error
  * logged and swallowed. */
-function startCapture(input: { sessionId: string; cwd?: string; transcriptPath?: string }): void {
-  if (!input.transcriptPath) return;
+function startCapture(input: {
+  sessionId: string;
+  cwd?: string;
+  transcriptPath?: string;
+  /** Which harness's conversation this is, when the harness said so. Dropped
+   * on the floor here until 2026-09-21, which quietly cost every non-Claude
+   * harness its capture: OpenCode sends a descriptor and no path at all, so
+   * the guard below returned immediately, and Codex sends both, so its
+   * rollout was read as Claude Code JSONL -- a file that parses cleanly,
+   * matches none of the two entry types the filter allows, and advances the
+   * watermark past a session nobody captured. */
+  sourceDescriptor?: TranscriptSourceDescriptor;
+}): void {
+  if (!input.transcriptPath && !input.sourceDescriptor) return;
   captureSession(input)
     .then((result) => {
       if (result.turnsWritten > 0 || result.pathsWritten > 0) {

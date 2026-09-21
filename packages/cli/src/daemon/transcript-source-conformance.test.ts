@@ -25,6 +25,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ClaudeCodeJsonlSource, type TranscriptSource } from "./transcript-source.js";
 import { OpenCodeSqliteSource, type SqliteReader, type SqliteRow, parseTimeCursor } from "./opencode-sqlite-source.js";
+import { CodexRolloutSource } from "./codex-rollout-source.js";
 
 /** What a conformance fixture has to be able to express, in harness-neutral
  * terms. `append` is what makes the incremental-read rules testable. */
@@ -119,9 +120,42 @@ function sqliteFixture(): Fixture {
   };
 }
 
+// --- Codex: a rollout JSONL -------------------------------------------------
+
+/** Same append-only file as Claude Code's, in Codex's own dialect: a
+ * `session_meta` header, then one `response_item` per turn wrapping a
+ * Responses-shaped message. Included here because the dialect is exactly
+ * where a source can get the shared rules wrong -- a translation that emits
+ * an entry for a record the cursor has already passed, or swallows a torn
+ * line, breaks the pipeline the same way whatever the harness. */
+function codexRolloutFixture(): Fixture {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-conf-codex-"));
+  const file = path.join(dir, "rollout.jsonl");
+  fs.writeFileSync(file, `${JSON.stringify({ type: "session_meta", payload: { cwd: dir } })}\n`);
+  const line = (role: "user" | "assistant", text: string) =>
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: "response_item",
+      payload: { type: "message", role, content: [{ type: role === "user" ? "input_text" : "output_text", text }] },
+    }) + "\n";
+
+  return {
+    addUserTurn: (t) => fs.appendFileSync(file, line("user", t)),
+    addAssistantTurn: (t) => fs.appendFileSync(file, line("assistant", t)),
+    addUnfinishedTurn() {
+      fs.appendFileSync(file, '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"');
+    },
+    finishUnfinishedTurn(text) {
+      fs.appendFileSync(file, `${text}"}]}}\n`);
+    },
+    source: () => new CodexRolloutSource(file),
+  };
+}
+
 const sources: { name: string; fixture: () => Fixture }[] = [
   { name: "ClaudeCodeJsonlSource", fixture: jsonlFixture },
   { name: "OpenCodeSqliteSource", fixture: sqliteFixture },
+  { name: "CodexRolloutSource", fixture: codexRolloutFixture },
 ];
 
 /** Reads everything from `cursor`, returning the entries and the new cursor. */

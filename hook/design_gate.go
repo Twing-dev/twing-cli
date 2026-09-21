@@ -438,6 +438,55 @@ var twingSubcommands = []string{
 	"project", "admin", "align", "daemon", "constraints", "uninstall", "servers",
 }
 
+// sessionScopeFlag is ` --session <id>`, inserted into the deny messages'
+// commands that act on *this* session -- or empty when the agent's own shell
+// already knows its session id.
+//
+// `twing design register` resolves the session from TWING_SESSION_ID (what
+// twing's OpenCode adapter exports) or CLAUDE_CODE_SESSION_ID (Claude Code's
+// own). Codex exports neither: it has no per-session shell environment to put
+// one in, and no hook event that could add one. An agent there would run the
+// command this deny just handed it, register a design against nothing, and be
+// denied again on the retry for a reason the message it was reading does not
+// mention.
+//
+// The test is the hook's *own* environment, not a list of harness names. This
+// process is a child of the harness, so a session id visible here is one the
+// agent's shell will see too -- and a harness added later gets the flag by
+// default rather than the silent second deny.
+var sessionScopeFlag string
+
+// Commands whose subject is the current session. `design register` and
+// `design resume` are the whole list: everything else in the deny messages
+// names its subject with `--id`.
+var sessionScopedCommands = []string{"design register", "design resume"}
+
+func setSessionContext(sessionID string) {
+	sessionScopeFlag = ""
+	if sessionID == "" || agentKnowsSessionID() {
+		return
+	}
+	sessionScopeFlag = " --session " + sessionID
+}
+
+// agentKnowsSessionID reports whether the coding agent's shell can resolve a
+// session id on its own.
+func agentKnowsSessionID() bool {
+	return os.Getenv("TWING_SESSION_ID") != "" || os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
+}
+
+// withResolvedSession pins the session-scoped commands in a message to the
+// session this deny is about.
+func withResolvedSession(message string) string {
+	if sessionScopeFlag == "" {
+		return message
+	}
+	for _, command := range sessionScopedCommands {
+		message = strings.ReplaceAll(message, "twing "+command, "twing "+command+sessionScopeFlag)
+	}
+	return message
+}
+
 // withResolvedTwingCLI rewrites `twing <subcommand>` anywhere in a rendered
 // message to whatever actually runs on this machine.
 //
@@ -515,6 +564,9 @@ func withResolvedTwingCLI(message string) string {
 	if strings.Contains(message, "npm install -g") {
 		return message
 	}
+	// Before the CLI rewrite, which turns `twing design` into a path plus
+	// flags and would no longer match these.
+	message = withResolvedSession(message)
 	cli := twingCLIPath()
 	if cli == "twing" && repoScopeFlag == "" {
 		return message
@@ -1081,11 +1133,18 @@ func handlePreToolUse(payload hookPayload) {
 	if !designGateEnabled() {
 		return
 	}
+	// Every deny this event can produce may hand back a command that has to
+	// run against *this* session -- see setSessionContext.
+	setSessionContext(payload.SessionID)
 	switch payload.ToolName {
 	case "ExitPlanMode":
 		handleExitPlanMode(payload)
 	case "Edit", "Write":
 		handleEditWriteGate(payload)
+	case codexPatchTool:
+		// Codex's editing tool, which is a patch over one or more files
+		// rather than one file_path -- see codex.go.
+		handleCodexPatchGate(payload)
 	}
 }
 
@@ -1445,6 +1504,36 @@ func postDesignExtract(serverURL, authToken, developerID, planText string) (desi
 		return designExtractResponse{}, coordinatorErrorReason("malformed response")
 	}
 	return result, ""
+}
+
+// unparseablePatchReason is the deny for a Codex `apply_patch` call whose
+// patch names no file twing could resolve.
+//
+// Rare by construction -- every patch Codex has been observed to emit names
+// its targets in the envelope -- and deliberately not silent. The gate's job
+// is to know which file is about to change; when it cannot, the honest answer
+// is to say so and stop, not to wave through an edit nobody can attribute.
+func unparseablePatchReason() string {
+	return denyMessage(
+		"twing could not tell which files this patch changes, so it stopped it.",
+		"This repo asks twing to check every edit against a registered design. A patch "+
+			"whose targets twing cannot read is a change it cannot check, which is why "+
+			"this is a block rather than a shrug.",
+		nil,
+		[]denyAction{
+			{
+				Label: "Make the same change one file at a time",
+				Note: "A patch that names its files in the usual `*** Update File: <path>` " +
+					"form goes through the normal check.",
+			},
+			{
+				Label:   "If the patch looks fine, this is a twing bug worth reporting",
+				Command: "cat ~/.twing/design-coordinator.log",
+				Note: "The log line above this deny has the patch twing could not read. " +
+					"Report it rather than working around the gate.",
+			},
+		},
+	)
 }
 
 // noDesignReason was an inline string at its single call site until
@@ -2140,20 +2229,16 @@ func pathConstraintReason(filePath string, constraints []designConstraintInfo) s
 // distinguishes "nothing registered" from "something's registered but its
 // own verdict flagged a conflict" -- previously indistinguishable from a
 // clean design as far as this gate was concerned.
-func handleEditWriteGate(payload hookPayload) {
-	var input struct {
-		FilePath string `json:"file_path"`
-	}
-	_ = json.Unmarshal(payload.ToolInput, &input)
+func editWriteVerdict(payload hookPayload, filePath string) map[string]any {
 
 	// Resolved from the file's own path, not cwd (fix, 2026-08-18): a
 	// session whose cwd is a shared parent of several independently
 	// onboarded repos (e.g. a backend + its separate UI repo) previously
 	// resolved no coordinator at all here, since cwd itself wasn't inside
 	// any git repo -- see resolveServerConfigForFile's own doc comment.
-	config := resolveServerConfigForFile(payload.Cwd, input.FilePath)
+	config := resolveServerConfigForFile(payload.Cwd, filePath)
 	if config.ServerURL == "" {
-		return
+		return nil
 	}
 	// Every command this deny may suggest runs against the repo the edited
 	// file is in, which is not necessarily where the session is standing.
@@ -2172,11 +2257,11 @@ func handleEditWriteGate(payload hookPayload) {
 	// allow, never a call into scope/constraint logic that assumes the
 	// target is in-repo.
 	relPath := ""
-	if input.FilePath != "" {
-		rel, ok := resolveRepoRelative(payload.Cwd, config.RepoRoot, input.FilePath)
+	if filePath != "" {
+		rel, ok := resolveRepoRelative(payload.Cwd, config.RepoRoot, filePath)
 		if !ok {
-			logDesignGate("path %s is outside repo %s -- skipping gate", input.FilePath, config.RepoRoot)
-			return
+			logDesignGate("path %s is outside repo %s -- skipping gate", filePath, config.RepoRoot)
+			return nil
 		}
 		relPath = rel
 	}
@@ -2192,7 +2277,7 @@ func handleEditWriteGate(payload hookPayload) {
 	// category as "no coordinator configured": this machine has
 	// deliberately opted this project out, not a failure.
 	if isGateDisabled(projectID) {
-		return
+		return nil
 	}
 
 	if config.AuthToken == "" && !config.NoAuth {
@@ -2202,12 +2287,11 @@ func handleEditWriteGate(payload hookPayload) {
 		// though the credential had been there all along -- the edit
 		// proceeds instead of costing the agent a denial and a chore.
 		if attemptAuthRecovery(config.RepoRoot) {
-			config = resolveServerConfigForFile(payload.Cwd, input.FilePath)
+			config = resolveServerConfigForFile(payload.Cwd, filePath)
 		}
 	}
 	if config.AuthToken == "" && !config.NoAuth {
-		writeJSON(authRequiredOutput("PreToolUse", config.ServerURL))
-		return
+		return authRequiredOutput("PreToolUse", config.ServerURL)
 	}
 	developerID := ""
 	if config.NoAuth {
@@ -2217,32 +2301,107 @@ func handleEditWriteGate(payload hookPayload) {
 	if relPath != "" {
 		verdict, reason := checkPathConstraint(config.ServerURL, config.AuthToken, developerID, projectID, payload.SessionID, relPath)
 		if verdict == constraintMatched || verdict == constraintCheckFailed {
-			writeJSON(denyOutput("PreToolUse", reason))
-			return
+			return denyOutput("PreToolUse", reason)
 		}
 	}
 
 	scopeMatch, failReason := checkDesignScope(config.ServerURL, config.AuthToken, developerID, projectID, payload.SessionID, relPath)
 	if failReason != "" {
-		writeJSON(denyOutput("PreToolUse", failReason))
-		return
+		return denyOutput("PreToolUse", failReason)
 	}
 
 	switch scopeMatch.State {
 	case "in_scope":
-		writeJSON(allowOutput("PreToolUse"))
+		return allowOutput("PreToolUse")
 	case "flagged":
-		writeJSON(denyOutput("PreToolUse", flaggedDesignReason(scopeMatch)))
+		return denyOutput("PreToolUse", flaggedDesignReason(scopeMatch))
 	case "dormant":
-		writeJSON(denyOutput("PreToolUse", dormantDesignReason(scopeMatch.DesignID, scopeMatch.Summary, scopeMatch.DormantSinceMs)))
+		return denyOutput("PreToolUse", dormantDesignReason(scopeMatch.DesignID, scopeMatch.Summary, scopeMatch.DormantSinceMs))
 	case "out_of_scope":
-		writeJSON(denyOutput("PreToolUse", outOfScopeReason(scopeMatch.DesignID, relPath, scopeMatch.OpenDesigns)))
+		return denyOutput("PreToolUse", outOfScopeReason(scopeMatch.DesignID, relPath, scopeMatch.OpenDesigns))
 	case "no_design":
-		writeJSON(denyOutput("PreToolUse", noDesignReason(relPath)))
+		return denyOutput("PreToolUse", noDesignReason(relPath))
 	default:
 		logDesignGate("design scope check: unknown state %q (blocking)", scopeMatch.State)
-		writeJSON(coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown state %q", scopeMatch.State)))
+		return coordinatorErrorOutput("PreToolUse", fmt.Sprintf("unknown state %q", scopeMatch.State))
 	}
+}
+
+// handleEditWriteGate is the single-file entry point: Claude Code (and
+// OpenCode, through twing's adapter) name exactly one file per call.
+func handleEditWriteGate(payload hookPayload) {
+	var input struct {
+		FilePath string `json:"file_path"`
+	}
+	_ = json.Unmarshal(payload.ToolInput, &input)
+
+	if verdict := editWriteVerdict(payload, input.FilePath); verdict != nil {
+		writeJSON(verdict)
+	}
+}
+
+// handleCodexPatchGate is the same gate for Codex, whose one editing tool
+// can name several files in a single call (codex.go).
+//
+// Every target is checked, and the first deny wins: a patch is applied
+// whole, so allowing it because its *first* file was in scope would let every
+// other file in the same call past the gate. Checking stops at that first
+// deny rather than reporting all of them -- the agent has to re-register or
+// amend its design and retry either way, and one reason is what the deny
+// message has room to explain well.
+//
+// A patch whose targets cannot be read is the one case here that has no
+// counterpart on the single-file path, and it fails closed: twing has been
+// handed a mutation it cannot attribute to a file, against a repo that has
+// asked to be gated. Allowing it would be indistinguishable, from the
+// coordinator's side, from an edit that never happened.
+func handleCodexPatchGate(payload hookPayload) {
+	targets := expandCodexPatch(payload)
+	if len(targets) == 0 {
+		// Same silent-allow rule as everywhere else on this path first: a
+		// repo with no coordinator is not a repo twing has anything to say
+		// about, whether or not the patch parsed.
+		if config := resolveServerConfig(payload.Cwd); config.ServerURL == "" {
+			return
+		}
+		logDesignGate("codex apply_patch named no file twing could resolve -- blocking")
+		writeJSON(denyOutput("PreToolUse", unparseablePatchReason()))
+		return
+	}
+
+	var allow map[string]any
+	for _, target := range targets {
+		var input struct {
+			FilePath string `json:"file_path"`
+		}
+		_ = json.Unmarshal(target.ToolInput, &input)
+
+		verdict := editWriteVerdict(target, input.FilePath)
+		if verdict == nil {
+			continue // this file is outside every coordinator's jurisdiction
+		}
+		if isDenyVerdict(verdict) {
+			writeJSON(verdict)
+			return
+		}
+		allow = verdict
+	}
+	if allow != nil {
+		writeJSON(allow)
+	}
+}
+
+// isDenyVerdict reads back what denyOutput wrote. Inspecting the map rather
+// than threading a second return value through editWriteVerdict keeps that
+// function's every branch a one-liner -- and the shape it inspects is the
+// hook protocol's own, which is checked by the tests that assert what this
+// binary writes to stdout.
+func isDenyVerdict(verdict map[string]any) bool {
+	specific, ok := verdict["hookSpecificOutput"].(map[string]any)
+	if !ok {
+		return false
+	}
+	return specific["permissionDecision"] == "deny"
 }
 
 // handleSessionEnd best-effort closes any open design for this session --

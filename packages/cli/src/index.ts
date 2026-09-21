@@ -84,7 +84,7 @@ function printUsage(): void {
       "Usage:",
       "  twing [-C <dir>] <command>                (act on the repo at <dir>, not the current one)",
       "  twing --version | -v",
-      "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended]",
+      "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended] [--no-trust-codex-hooks]",
       "  twing init --ghuser                       (once per machine: work from any directory)",
       "  twing uninstall [--dry-run] [--purge-server-data]",
       "  twing login [--server <url>] [--token <pat>]",
@@ -488,7 +488,7 @@ async function main(): Promise<void> {
       // root are covered too. Short-circuits before runInit, which resolves a
       // coordinator immediately and has nothing to resolve here.
       if (flags.ghuser === "true") {
-        runGhUser();
+        await runGhUser();
         return;
       }
       await runInit({
@@ -497,6 +497,10 @@ async function main(): Promise<void> {
         noAuth: flags["no-auth"] === "true",
         noGithub: flags["no-github"] === "true",
         unattended: flags.unattended === "true",
+        // Codex refuses to run a hook whose hash it has not recorded, so
+        // wiring stamps twing's own entries by default. This leaves them for
+        // Codex's own review screen instead.
+        trustCodexHooks: flags["no-trust-codex-hooks"] !== "true",
         cwd: commandCwd,
       });
       return;

@@ -51,6 +51,7 @@ import { hookBinaryPath } from "./install-hook.js";
 import { unwireHooks, globalSettingsPath } from "./wire-hooks.js";
 import { removeResolverWiring } from "./resolve-hook.js";
 import { unwireOpenCodePlugin } from "./opencode-plugin.js";
+import { codexConfigPath, unwireCodexHooks } from "./codex-hooks.js";
 import { uninstallDaemonService } from "./daemon-service.js";
 
 export interface UninstallOptions {
@@ -165,6 +166,7 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
     console.log(`  - any launchd/systemd definition for the twing daemon`);
     console.log(`  - the running daemon (socket ${defaultSocketPath()})`);
     console.log(`  - twing's Claude hooks and global OpenCode plugin (${hookPath})`);
+    console.log(`  - twing's hook entries in Codex's config (${codexConfigPath()}), leaving the rest of that file alone`);
     console.log(`  - ${dir} (hook binary, the ~/.twing/lib CLI install, cached tokens, gate overrides, captured sessions)`);
     console.log("twing uninstall --dry-run: would NOT touch any repo's committed .claude/settings.json");
     if (fs.existsSync(path.join(dir, SERVER_DATA_DIR))) {
@@ -201,10 +203,17 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
   result.hooksUnwired = unwireHooks(hookPath);
   result.hooksUnwired = removeResolverWiring(globalSettingsPath()) || result.hooksUnwired;
   result.hooksUnwired = unwireOpenCodePlugin() || result.hooksUnwired;
+  // Codex's config is the user's own file, so this removes twing's marked
+  // blocks and nothing else -- their hooks, their model settings and their
+  // comments survive verbatim. A `features.hooks` they declared themselves
+  // is left on too -- it is Codex's switch, not twing's, and their other
+  // hooks may depend on it; the one twing wrote lives inside twing's block
+  // and goes with it.
+  result.hooksUnwired = unwireCodexHooks() || result.hooksUnwired;
   console.log(
     result.hooksUnwired
-      ? "twing uninstall: removed twing's global Claude/OpenCode integrations"
-      : "twing uninstall: no twing hook entries or OpenCode plugin found",
+      ? "twing uninstall: removed twing's global Claude/OpenCode/Codex integrations"
+      : "twing uninstall: no twing hook entries, OpenCode plugin or Codex config block found",
   );
 
   try {

@@ -42,6 +42,7 @@ import { fileURLToPath } from "node:url";
 import { githubTokenFromGhCli } from "./join.js";
 import { globalSettingsPath } from "./wire-hooks.js";
 import { wireMachine, markAutoManaged } from "./machine-setup.js";
+import { isCodexHooksWired, reportCodexTrust } from "./codex-hooks.js";
 
 export { autoManagedMarkerPath } from "./machine-setup.js";
 
@@ -108,7 +109,7 @@ export interface GhUserOptions {
  * there is no GitHub credential, which is the one thing that cannot be worked
  * around here.
  */
-export function runGhUser(options: GhUserOptions = {}): boolean {
+export async function runGhUser(options: GhUserOptions = {}): Promise<boolean> {
   const token = (options.githubToken ?? githubTokenFromGhCli)();
   if (!token) {
     throw new Error(
@@ -130,10 +131,11 @@ export function runGhUser(options: GhUserOptions = {}): boolean {
   }
 
   // The same wiring the one-step install writes (machine-setup.ts), so the two
-  // can't drift: resolver entries replacing any binary-path ones, and OpenCode.
+  // can't drift: resolver entries replacing any binary-path ones, OpenCode,
+  // and Codex where there is one.
   const settings = globalSettingsPath();
   const wiring = wireMachine();
-  const changed = wiring.claude || wiring.openCode;
+  const changed = wiring.claude || wiring.openCode || wiring.codex;
 
   if (globalSurvived) {
     markAutoManaged();
@@ -151,6 +153,11 @@ export function runGhUser(options: GhUserOptions = {}): boolean {
           "coordinator asks for."
       : `twing init --ghuser: already wired in ${settings}; nothing to change.`,
   );
+
+  // Codex needs one step more than the other two: it runs no hook whose hash
+  // it has not recorded, so wiring alone would leave this machine looking set
+  // up and checking nothing there. See `trustCodexHooks`.
+  if (isCodexHooksWired()) await reportCodexTrust();
   return true;
 }
 

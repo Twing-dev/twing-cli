@@ -34,8 +34,9 @@ export type HookToolName = "Edit" | "Write" | "Read" | "Grep" | "Glob";
  */
 export interface TranscriptSourceDescriptor {
   /** Names the `TranscriptSource` implementation that can read it, e.g.
-   * `"claude-code-jsonl"` or `"opencode-sqlite"`. An unrecognised kind is
-   * reported, never silently ignored -- see `resolveTranscriptSource`. */
+   * `"claude-code-jsonl"`, `"opencode-sqlite"` or `"codex-rollout"`. An
+   * unrecognised kind is reported, never silently ignored -- see
+   * `resolveTranscriptSource`. */
   kind: string;
   /** Whatever that source needs. Strings only: this is a wire format, and a
    * richer type here would be a second schema to keep mirrored in Go for no

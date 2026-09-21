@@ -2,7 +2,7 @@
 
 twing helps multiple coding agents on a developer team coordinate with
 each other instead of quietly stepping on the same work. It's a CLI +
-hook for your coding agent (Claude Code and OpenCode today, others
+hook for your coding agent (Claude Code, OpenCode and Codex today, others
 planned) plus a small server every agent's client talks to.
 
 Full design: `docs/orchestrator-and-verification-design-doc_v1.md`.
@@ -19,8 +19,8 @@ Needs Node.js >= 20. No Go toolchain, no clone -- `twing-hook` (the
 client's Go-side hook binary) is fetched automatically the first time
 `twing init` needs one.
 
-This wires twing into Claude Code and OpenCode for every directory on the
-machine -- the same wiring `twing init --ghuser` writes, without needing
+This wires twing into Claude Code, OpenCode and Codex for every directory on
+the machine -- the same wiring `twing init --ghuser` writes, without needing
 GitHub (see "Sessions that don't start at a repo root") -- and leaves no CLI
 behind: it fetches the package into a throwaway directory, runs the setup,
 and deletes it.
@@ -327,6 +327,39 @@ than the session's starting directory, so a session opened *above* a repo
 still installs twing on its first edit there -- the resolver decides what to
 install by walking up from where it runs. Which repo a check belongs to is
 resolved from the edited file either way, once the hook binary exists.
+
+**Codex.** twing writes its hook entries into Codex's own `config.toml`
+(`$CODEX_HOME`, else `~/.codex`), inside a marked block it regenerates
+wholesale -- everything else in that file, including your own hooks and
+comments, is left exactly as it was, and `twing uninstall` removes the block
+and nothing else. Wiring only touches machines that have Codex; install it
+later and the next `twing init` picks it up.
+
+Two things about Codex are worth knowing, because twing changes both:
+
+- **`features.hooks` gets turned on.** Codex's hook system is still behind
+  that flag, and with it off Codex reads twing's entries and runs none of
+  them.
+- **twing records Codex's trust hash for its own entries.** Codex refuses to
+  run a hook it has not seen approved, and its approval screen is a TUI --
+  so without this, `twing init` would report a wired machine where nothing
+  is actually checked, and `codex exec` in CI would never prompt anyone.
+  twing asks Codex itself for the hash (`codex app-server`, one short-lived
+  process at wiring time) and records it for **its own entries only**; no
+  other hook in that file becomes trusted because twing ran, and editing
+  twing's entry afterwards breaks the hash exactly as Codex intends. Run
+  `twing init --no-trust-codex-hooks` to skip it and approve twing yourself
+  in Codex's startup review.
+
+What twing checks under Codex is the same design gate and the same session
+capture, with one difference that comes from Codex's tool set: Codex edits
+files through `apply_patch`, so a patch touching five files is five gate
+checks and five claims, while reads and searches happen inside its shell tool
+and are not captured -- the same gap Claude Code's `Bash` has.
+
+If `codex` is packaged as a snap, its `CODEX_HOME` is pinned to the snap's
+own data directory rather than `~/.codex`; twing says so when it notices, and
+`CODEX_HOME=<that path> twing init` wires the one Codex actually reads.
 
 **Exactly one hook does the work, in every combination.** At a repo root the
 committed hook runs and the resolver stands down; anywhere else the resolver

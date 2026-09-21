@@ -42,6 +42,10 @@ import { resolveTranscriptSource, type Cursor, type TranscriptSource } from "./t
 // "no transcript source is registered", which is at least a loud failure --
 // but the whole point of this wiring is that it not fail at all.
 import "./opencode-sqlite-source.js";
+// Same, for `codex-rollout`: Codex hands over a path like Claude Code does,
+// but the file behind it is a Codex rollout, which the Claude reader would
+// parse without error and reduce to nothing at all.
+import "./codex-rollout-source.js";
 
 export function defaultSessionsDir(): string {
   return path.join(os.homedir(), ".twing", "sessions");

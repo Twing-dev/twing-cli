@@ -30,6 +30,7 @@ import {
 } from "@twing/core";
 import { ensureHookInstalled, ensureCliShim } from "./install-hook.js";
 import { wireHooks, stripLegacyRepoLocalHooks, globalSettingsPath } from "./wire-hooks.js";
+import { isCodexHooksWired, reportCodexTrust } from "./codex-hooks.js";
 import { isResolverWired, writeResolverWiring } from "./resolve-hook.js";
 import { isOpenCodePluginWired, wireOpenCodePlugin } from "./opencode-plugin.js";
 import { autoManagedMarkerPath } from "./ghuser.js";
@@ -81,6 +82,13 @@ export interface InitOptions {
    * The daemon still starts -- it's unprivileged, and without it capture,
    * symbol-conflict detection and notice delivery all silently no-op. */
   unattended?: boolean;
+  /** Whether to record Codex's own trust hash for the hook entries twing
+   * writes into Codex's config (`--no-trust-codex-hooks` sets this false).
+   * Default true: Codex runs no hook it has not seen approved, and its
+   * approval screen is a TUI, so leaving this off means a wired machine
+   * where nothing is gated and nothing says so. Only twing's own entries
+   * are ever stamped -- see `trustCodexHooks` (codex-hooks.ts). */
+  trustCodexHooks?: boolean;
   cwd: string;
 }
 
@@ -250,6 +258,12 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   if (!options.unattended) {
     const wired = deps.wireHooks(hookPath);
     console.log(wired ? "twing init: wired hooks into Claude and OpenCode globally (all repos on this machine)" : "twing init: hooks already wired in Claude and OpenCode global configuration");
+    // Codex, on the machines that have it. Separate from the line above
+    // because it has a second step Claude and OpenCode do not: Codex will
+    // not run an entry whose hash it has not recorded, and asking it for
+    // that hash means starting Codex, which is slow enough to be worth
+    // doing only where there is a Codex to ask.
+    if (isCodexHooksWired()) await reportCodexTrust({ trust: options.trustCodexHooks });
   }
 
   // Upgrade migration: a repo `init`'d before wiring went global may still

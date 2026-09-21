@@ -21,6 +21,7 @@ import { hookBinaryPath } from "./install-hook.js";
 import { unwireHooks, globalSettingsPath } from "./wire-hooks.js";
 import { writeResolverWiring } from "./resolve-hook.js";
 import { wireOpenCodePlugin } from "./opencode-plugin.js";
+import { isCodexHooksWired, reportCodexTrust, wireCodexHooks } from "./codex-hooks.js";
 
 /**
  * Set when a copy of twing outside `~/.twing` survives, and read by
@@ -46,6 +47,9 @@ export interface MachineWiring {
   claude: boolean;
   /** The OpenCode loader or adapter changed. */
   openCode: boolean;
+  /** Codex's `config.toml` or the launcher script changed. False on a
+   * machine with no Codex on it, which is left alone entirely. */
+  codex: boolean;
 }
 
 export function wireMachine(): MachineWiring {
@@ -54,17 +58,33 @@ export function wireMachine(): MachineWiring {
   unwireHooks(hookBinaryPath());
   const claude = writeResolverWiring(globalSettingsPath());
   const openCode = wireOpenCodePlugin();
-  return { claude, openCode };
+  const codex = wireCodexHooks().changed;
+  return { claude, openCode, codex };
 }
 
-/** The one-step install's setup: `postinstall.cjs` calls this. */
-export function runMachineSetup(): void {
+/** The one-step install's setup: `postinstall.cjs` calls this.
+ *
+ * Async only because of Codex's trust step, which asks Codex itself for the
+ * hashes of the entries just written (`trustCodexHooks`). Everything else
+ * here is a synchronous file write, and the trust step is best-effort: a
+ * machine with no Codex, or one whose Codex predates hooks, gets an
+ * unavailable verdict and nothing is written. */
+export async function runMachineSetup(): Promise<void> {
   const wiring = wireMachine();
   markAutoManaged();
+
+  const harnesses = ["Claude Code", "OpenCode", ...(wiring.codex || isCodexHooksWired() ? ["Codex"] : [])];
   console.log(
-    wiring.claude || wiring.openCode
-      ? "twing setup: wired twing into Claude Code and OpenCode for every directory on this machine. It installs " +
+    wiring.claude || wiring.openCode || wiring.codex
+      ? `twing setup: wired twing into ${listHarnesses(harnesses)} for every directory on this machine. It installs ` +
           "itself the first time a session opens a repo that uses twing, at the version that repo's coordinator asks for."
       : "twing setup: already wired; nothing to change.",
   );
+
+  if (wiring.codex || isCodexHooksWired()) await reportCodexTrust();
+}
+
+function listHarnesses(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
