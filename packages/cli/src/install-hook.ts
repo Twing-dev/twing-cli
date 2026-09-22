@@ -32,6 +32,39 @@ export function hookBinaryPath(): string {
   return path.join(os.homedir(), ".twing", "bin", `twing-hook${ext}`);
 }
 
+/**
+ * The version of the CLI that installed the hook binary sitting beside it.
+ *
+ * Written whenever the binary is installed, and read by `twing-resolve`
+ * before it hands an event over. The binary itself carries its version
+ * (`version.go`), but nothing can ask it for one cheaply -- it reads a hook
+ * payload on stdin and answers hooks, so there is no `--version` to run per
+ * event. A one-line file beside it is what makes "is the binary as new as the
+ * CLI that wrote the resolver" answerable by a shell builtin.
+ *
+ * The case this exists for: a machine that already had twing upgrades its
+ * CLI, the resolver and the Codex launcher are rewritten, and the *binary*
+ * is not -- so Codex's `apply_patch` reaches a binary with no case for it and
+ * every edit is silently allowed. Found live on a real machine (a pre-Codex
+ * binary from eight days before the CLI beside it). Claude Code recovers
+ * from this on its own, because its edits reach the gate's version check;
+ * Codex cannot, because the missing case *is* the gate path.
+ */
+export function hookVersionStampPath(): string {
+  return `${hookBinaryPath()}.version`;
+}
+
+/** Records which CLI installed the binary now in place. Best-effort: a
+ * machine that cannot write the stamp still has a working hook, it just
+ * re-checks on the next session. */
+function stampHookVersion(): void {
+  try {
+    fs.writeFileSync(hookVersionStampPath(), `${getCliVersion()}\n`);
+  } catch {
+    /* the binary is installed either way */
+  }
+}
+
 /** Where `ensureCliShim` puts a runnable `twing`, beside the hook binary. */
 export function cliShimPath(): string {
   return path.join(os.homedir(), ".twing", "bin", "twing");
@@ -255,6 +288,7 @@ export async function ensureHookInstalled(): Promise<string> {
         ? ["build", `-ldflags=-linkmode=external ${versionLdflag}`, "-o", target, "."]
         : ["build", `-ldflags=${versionLdflag}`, "-o", target, "."];
     execFileSync("go", buildArgs, { cwd: source, stdio: "inherit", env: { ...process.env, CGO_ENABLED: process.platform === "darwin" ? "1" : process.env.CGO_ENABLED } });
+    stampHookVersion();
     return target;
   }
 
@@ -262,6 +296,7 @@ export async function ensureHookInstalled(): Promise<string> {
   // -- the CLI, and the hook binary whose version the gate actually sends --
   // can never disagree. See fetchPrebuiltHook's doc comment.
   if (await fetchPrebuiltHook(target, getCliVersion())) {
+    stampHookVersion();
     return target;
   }
 

@@ -59,7 +59,6 @@ test("wiring writes the launcher and one entry per wired event", () => {
 
   const result = wireCodexHooks(ws);
 
-  assert.equal(result.present, true);
   assert.equal(result.changed, true);
   const config = ws.read();
   for (const { event, matcher } of codexHookEvents()) {
@@ -78,15 +77,31 @@ test("wiring writes the launcher and one entry per wired event", () => {
   assert.equal(fs.statSync(ws.scriptPath).mode & 0o111, 0o111, "must be executable");
 });
 
-test("a machine with no Codex is left completely alone", () => {
+test("a machine with no Codex yet is wired anyway, so installing it later needs nothing", () => {
+  // Waiting for Codex to exist sounds tidier and is worse: nothing twing owns
+  // runs again on that machine unless the developer types a command, which is
+  // the one thing they are promised they never have to.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-nocodex-"));
-  const configPath = path.join(dir, "codex-that-isnt-there", "config.toml");
+  const configPath = path.join(dir, "codex-not-installed-yet", "config.toml");
 
   const result = wireCodexHooks({ configPath, scriptPath: path.join(dir, "bin", "hook") });
 
-  assert.equal(result.present, false);
-  assert.equal(result.changed, false);
-  assert.equal(fs.existsSync(path.dirname(configPath)), false, "no config directory invented for a tool that isn't installed");
+  assert.equal(result.changed, true);
+  assert.ok(fs.existsSync(configPath), "the entries are in place for the Codex that arrives later");
+  assert.match(fs.readFileSync(configPath, "utf8"), /\[\[hooks\.PreToolUse\]\]/);
+});
+
+test("with no Codex to ask, trust says what will happen rather than reporting a failure", async () => {
+  const ws = workspace();
+  wireCodexHooks(ws);
+  const lines: string[] = [];
+
+  const result = await reportCodexTrust({ configPath: ws.configPath, codexInstalled: false, log: (m) => void lines.push(m) });
+
+  assert.equal(result.outcome, "unavailable");
+  assert.equal(ws.read().includes(CODEX_TRUST_START), false, "nothing recorded for a Codex that isn't there");
+  assert.match(lines.join("\n"), /isn't installed here yet/);
+  assert.match(lines.join("\n"), /approve twing's hooks once/, "and what the first session will ask");
 });
 
 test("the user's own config survives wiring byte for byte", () => {
@@ -358,10 +373,87 @@ test("changing the wired entries invalidates the recorded trust, which is why a 
 
   // A later version wires a different set of entries.
   const entries = codexHookEvents();
-  const changed = wireCodexHooks({ ...ws, force: true });
+  const changed = wireCodexHooks({ ...ws });
 
   assert.ok(entries.length > 0);
-  assert.equal(changed.present, true);
+  assert.equal(changed.changed, false, "the entries did not move, so the recorded hashes still describe them");
   assert.ok(ws.read().includes(stale), "the stale hash is still there -- re-wiring cannot quietly drop it");
   assert.equal(ws.read().split(CODEX_TRUST_START).length - 1, 1, "and there is still exactly one trust block to replace");
+});
+
+test("trust matches through a symlinked Codex home", async () => {
+  // Codex resolves symlinks in the path it reports; twing did not, so a home
+  // reached through one (an NFS mount, a container bind) matched nothing and
+  // trust was silently never stamped on a machine that looked wired.
+  const ws = workspace();
+  wireCodexHooks(ws);
+  const linked = path.join(path.dirname(path.dirname(ws.configPath)), "link");
+  fs.symlinkSync(path.dirname(ws.configPath), linked);
+
+  const result = await trustCodexHooks({
+    configPath: path.join(linked, "config.toml"),
+    // Codex answers with the resolved path, as it does live.
+    query: async () => ({ codexHome: path.dirname(ws.configPath), hooks: [hookEntry(ws.configPath, "SessionStart")] }),
+  });
+
+  assert.equal(result.outcome, "trusted");
+  assert.equal(result.stamped, 1);
+  assert.equal(result.otherCodexHome, undefined, "one spelling of the same directory is not a different home");
+});
+
+test("a hook the user turned off in Codex stays off through a refresh", async () => {
+  // Codex's UI writes `enabled = false` into the very block twing
+  // regenerates. Re-asserting `true` would switch twing's hooks back on for
+  // someone who deliberately switched them off.
+  const ws = workspace();
+  wireCodexHooks(ws);
+
+  await trustCodexHooks({
+    configPath: ws.configPath,
+    query: async () => ({
+      hooks: [
+        hookEntry(ws.configPath, "PreToolUse", { enabled: false }),
+        hookEntry(ws.configPath, "SessionStart", { enabled: true }),
+      ],
+    }),
+  });
+
+  const after = ws.read();
+  assert.match(after, /pretooluse:0:0"\]\nenabled = false/, "their choice survives");
+  assert.match(after, /sessionstart:0:0"\]\nenabled = true/, "and the others are untouched");
+});
+
+test("an entry Codex reports without a hash is skipped, not written as `undefined`", async () => {
+  // `trusted_hash = undefined` is not valid TOML, and Codex answers an
+  // unparseable config by refusing to load any of it -- so this would have
+  // broken the user's Codex outright rather than just twing's part of it.
+  const ws = workspace();
+  wireCodexHooks(ws);
+  const hashless = hookEntry(ws.configPath, "PreToolUse");
+  delete (hashless as { currentHash?: string }).currentHash;
+
+  const result = await trustCodexHooks({
+    configPath: ws.configPath,
+    query: async () => ({ hooks: [hashless, hookEntry(ws.configPath, "SessionStart")] }),
+  });
+
+  assert.equal(result.stamped, 1, "only the entry that had a hash");
+  assert.equal(ws.read().includes("undefined"), false);
+  assert.match(ws.read(), /trusted_hash = "sha256:SessionStart"/);
+});
+
+test("uninstalling removes a config file twing created, and keeps one it didn't", () => {
+  // twing writes this file for a Codex that may never arrive. Leaving an
+  // empty config.toml behind is litter in a directory the machine has no
+  // other use for -- but a file with anything else in it is the user's.
+  const mine = workspace();
+  wireCodexHooks(mine);
+  unwireCodexHooks(mine);
+  assert.equal(fs.existsSync(mine.configPath), false, "nothing of the user's was in it");
+
+  const theirs = workspace();
+  fs.writeFileSync(theirs.configPath, 'model = "gpt-5.5"\n');
+  wireCodexHooks(theirs);
+  unwireCodexHooks(theirs);
+  assert.equal(fs.readFileSync(theirs.configPath, "utf8").trim(), 'model = "gpt-5.5"', "their settings survive, untouched");
 });

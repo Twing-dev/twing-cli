@@ -2358,10 +2358,19 @@ func handleEditWriteGate(payload hookPayload) {
 func handleCodexPatchGate(payload hookPayload) {
 	targets := expandCodexPatch(payload)
 	if len(targets) == 0 {
-		// Same silent-allow rule as everywhere else on this path first: a
-		// repo with no coordinator is not a repo twing has anything to say
-		// about, whether or not the patch parsed.
-		if config := resolveServerConfig(payload.Cwd); config.ServerURL == "" {
+		// Both silent-allow rules apply here before the deny does, and they
+		// have to be repeated rather than inherited: the per-file path checks
+		// them inside `editWriteVerdict`, which a patch naming no file never
+		// reaches. A repo with no coordinator is not twing's business, and
+		// neither is one this machine has deliberately opted out with
+		// `twing design disable-gate` -- without that second check, the one
+		// switch a developer has for turning the gate off would be silently
+		// ignored by exactly the case most likely to need it.
+		config := resolveServerConfig(payload.Cwd)
+		if config.ServerURL == "" {
+			return
+		}
+		if isGateDisabled(computeProjectID(config.RepoRoot)) {
 			return
 		}
 		logDesignGate("codex apply_patch named no file twing could resolve -- blocking")

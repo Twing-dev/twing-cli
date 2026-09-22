@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -278,5 +279,51 @@ func TestSessionScopedCommands_LeftAloneWhenTheAgentAlreadyKnows(t *testing.T) {
 
 	if got := withResolvedSession("twing design register --from -"); got != "twing design register --from -" {
 		t.Errorf("got %q, want it unchanged", got)
+	}
+}
+
+// --- what the review found -------------------------------------------------
+
+func TestCodexPatchText_OneOddFieldDoesNotBlankThePatch(t *testing.T) {
+	// The day Codex sends `command` as an argv array -- the natural shape for
+	// a shell-ish field -- a struct decode would lose every field with it,
+	// read the patch as empty, and deny every edit in every gated repo.
+	input := json.RawMessage(`{"command":["bash","-lc","x"],"input":"*** Begin Patch\n*** Update File: a.ts\n+x\n*** End Patch"}`)
+
+	if got := codexPatchText(input); !strings.Contains(got, "Update File: a.ts") {
+		t.Errorf("got %q, want the patch read from the field that is still a string", got)
+	}
+}
+
+func TestCodexPatchText_NoUsableFieldIsEmptyNotAGuess(t *testing.T) {
+	if got := codexPatchText(json.RawMessage(`{"command":42,"input":null}`)); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestParseApplyPatch_AddedContentIsNotAUnifiedDiffHeader(t *testing.T) {
+	// An added line whose content begins `++ ` is written `+++ `. Reading it
+	// as a header invented a target the patch never named -- in a gated repo,
+	// a deny naming a file the agent never edited.
+	targets := parseApplyPatch("*** Begin Patch\n" +
+		"*** Update File: docs/notes.md\n" +
+		"@@\n" +
+		"+++ a footnote, not a header\n" +
+		"*** End Patch\n")
+
+	if len(targets) != 1 {
+		t.Fatalf("got %d targets, want only the one the patch names: %+v", len(targets), targets)
+	}
+	if targets[0].Path != "docs/notes.md" {
+		t.Errorf("Path = %q", targets[0].Path)
+	}
+}
+
+func TestParseApplyPatch_RealUnifiedDiffStillResolves(t *testing.T) {
+	// The tolerance is still there for a patch from some other generator,
+	// which has no `***` envelope at all.
+	targets := parseApplyPatch("--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1 +1 @@\n-old\n+new\n")
+	if len(targets) != 1 || targets[0].Path != "src/x.ts" {
+		t.Fatalf("targets = %+v, want one src/x.ts", targets)
 	}
 }

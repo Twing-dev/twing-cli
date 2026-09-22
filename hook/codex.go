@@ -108,11 +108,21 @@ func parseApplyPatch(patch string) []codexPatchTarget {
 
 	current := -1
 	collecting := false
+	// Whether this is one of Codex's own envelopes (`*** Begin Patch`, `***
+	// Update File:` ...) rather than a unified diff. It decides whether a
+	// `+++ ` line is a header or content: in a Codex patch an added line
+	// beginning `++ ` is written `+++ `, and reading that as a header
+	// invented a target the patch never named -- which in a gated repo is a
+	// deny naming a file the agent never edited.
+	codexEnvelope := false
 
 	for _, raw := range strings.Split(patch, "\n") {
 		line := strings.TrimRight(raw, "\r")
+		if strings.HasPrefix(line, "***") {
+			codexEnvelope = true
+		}
 
-		if path, ok := patchFileHeader(line); ok {
+		if path, ok := patchFileHeader(line, codexEnvelope); ok {
 			if existing, seen := index[path]; seen {
 				current = existing
 			} else {
@@ -149,14 +159,18 @@ func parseApplyPatch(patch string) []codexPatchTarget {
 }
 
 // patchFileHeader returns the path a patch header names, if the line is one.
-func patchFileHeader(line string) (string, bool) {
+//
+// `codexEnvelope` says a `***` header has already been seen, which makes this
+// Codex's format rather than a unified diff -- and in that format `+++ ` is
+// never a header, only an added line whose content starts with `++ `.
+func patchFileHeader(line string, codexEnvelope bool) (string, bool) {
 	for _, prefix := range []string{"*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"} {
 		if strings.HasPrefix(line, prefix) {
 			path := strings.TrimSpace(strings.TrimPrefix(line, prefix))
 			return path, path != ""
 		}
 	}
-	if strings.HasPrefix(line, "+++ ") {
+	if !codexEnvelope && strings.HasPrefix(line, "+++ ") {
 		path := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
 		path = strings.TrimPrefix(path, "b/")
 		if path == "" || path == "/dev/null" {
@@ -168,20 +182,28 @@ func patchFileHeader(line string) (string, bool) {
 }
 
 // codexPatchText pulls the patch out of an apply_patch `tool_input`.
+//
+// Decoded field by field rather than into a struct of strings, so one field
+// arriving in an unexpected shape costs only that field. A struct decode is
+// all-or-nothing: the day Codex sends `command` as an argv array -- the
+// natural shape for a shell-ish field, on a tool its own docs call
+// under development -- every key would be lost with it, the patch would read
+// as empty, and `handleCodexPatchGate` would then deny *every* edit in every
+// repo with a coordinator. Degrading to "read whichever field is a string"
+// turns that from an outage into a missing feature.
 func codexPatchText(toolInput json.RawMessage) string {
 	if len(toolInput) == 0 {
 		return ""
 	}
-	var input struct {
-		Command string `json:"command"`
-		Input   string `json:"input"`
-		Patch   string `json:"patch"`
-	}
-	if err := json.Unmarshal(toolInput, &input); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(toolInput, &fields); err != nil {
 		return ""
 	}
-	for _, candidate := range []string{input.Command, input.Input, input.Patch} {
-		if candidate != "" {
+	// `command` first: that is what Codex actually sends. `input` is what the
+	// model sends, in case a future version forwards it verbatim.
+	for _, key := range []string{"command", "input", "patch"} {
+		var candidate string
+		if raw, ok := fields[key]; ok && json.Unmarshal(raw, &candidate) == nil && candidate != "" {
 			return candidate
 		}
 	}

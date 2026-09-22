@@ -276,3 +276,38 @@ test("nearestExistingDir: walks up only as far as it must", () => {
   assert.equal(nearestExistingDir(dir), dir, "an existing directory is its own answer");
   assert.equal(nearestExistingDir(path.join(dir, "a", "b", "c")), dir);
 });
+
+test("patchPaths: an added line that begins '+++ ' is content, not a header", () => {
+  // Three callers share this parser -- OpenCode's gate translation and both
+  // harnesses' capture -- so a phantom target here becomes a file the gate
+  // checks and a path the capture records, neither of which the patch named.
+  // The Go parser makes the same distinction; an external review caught that
+  // this copy did not.
+  assert.deepEqual(
+    patchPaths("*** Begin Patch\n*** Update File: docs/notes.md\n@@\n+++ a footnote, not a header\n*** End Patch"),
+    ["docs/notes.md"],
+  );
+});
+
+test("patchPaths: a real unified diff still resolves, since it has no envelope", () => {
+  assert.deepEqual(patchPaths("--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1 +1 @@\n-old\n+new"), ["src/x.ts"]);
+});
+
+test("the source descriptor names the session's directory, which is what makes relative paths resolvable", async () => {
+  // The capture side resolves a patch's relative targets against this. Until
+  // it was sent, that resolution had nothing to resolve against and silently
+  // did nothing in production -- the daemon then attributed the edit to
+  // whichever repo it happened to be started in.
+  const payloads: TwingHookPayload[] = [];
+  const plugin = await createOpenCodePlugin(async (payload) => {
+    payloads.push(payload);
+    return undefined;
+  })({ directory: "/work/plugin-context", worktree: "/work/plugin-context" });
+
+  await plugin.event({ event: { type: "session.created", properties: { info: { id: "ses_1", directory: "/work/actual-repo" } } } });
+
+  const descriptor = payloads[0]?.twing_source;
+  assert.equal(descriptor?.kind, "opencode-sqlite");
+  assert.equal(descriptor?.values.sessionId, "ses_1");
+  assert.equal(descriptor?.values.directory, "/work/actual-repo", "the session's own directory, not the plugin context's");
+});

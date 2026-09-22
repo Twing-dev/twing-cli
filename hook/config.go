@@ -155,12 +155,32 @@ func resolveServerConfigForFile(cwd, filePath string) twingConfig {
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(cwd, abs)
 	}
-	serverURL, repoRoot, ok := readCoordinatorServerURL(nearestExistingDir(filepath.Dir(abs)))
-	if !ok {
-		return twingConfig{}
+
+	// Memoized per directory, because Codex asks this once per file in a
+	// patch and every answer costs a `git rev-parse` plus a manifest read.
+	// Claude Code never exposed it -- one Edit is one file -- but a
+	// twenty-file patch is twenty subprocesses before a single check is even
+	// sent, on the path that blocks the agent. Files in a patch overwhelmingly
+	// share a handful of directories, so this collapses to one resolution per
+	// directory. Process-scoped and therefore never stale: this binary is
+	// spawned fresh per hook event.
+	dir := nearestExistingDir(filepath.Dir(abs))
+	if cached, ok := serverConfigByDir[dir]; ok {
+		return cached
 	}
-	return configForServerURL(serverURL, repoRoot)
+
+	config := twingConfig{}
+	if serverURL, repoRoot, ok := readCoordinatorServerURL(dir); ok {
+		config = configForServerURL(serverURL, repoRoot)
+	}
+	serverConfigByDir[dir] = config
+	return config
 }
+
+// serverConfigByDir memoizes resolveServerConfigForFile. Correct to hold for
+// the life of the process and no longer: a hook process handles exactly one
+// event, so nothing it caches can outlive the tool call it is answering.
+var serverConfigByDir = map[string]twingConfig{}
 
 // nearestExistingDir walks up from dir to the first directory that exists.
 //

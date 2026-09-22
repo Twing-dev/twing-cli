@@ -47,12 +47,22 @@ export interface TwingHookPayload {
  * nothing goes in that could carry a secret -- never `process.env` wholesale,
  * never the hook payload, never anything a user could have put a token in.
  * `XDG_DATA_HOME` is a directory path that the user's own shell profile set,
- * and nothing else qualifies today.
+ * and `directory` is the session's own working directory, which OpenCode
+ * handed this plugin. Nothing else qualifies today.
+ *
+ * `directory` is here because a patch names its files relative to it, and the
+ * daemon cannot work that out: it is one process serving every repo on the
+ * machine, so a relative path reaching it resolves against *its* working
+ * directory and attributes the edit to whatever repo it happened to start in.
+ * The capture side knew to resolve them and had nothing to resolve against --
+ * the fix was inert in production until this key existed, which an external
+ * review caught.
  */
-function openCodeSourceDescriptor(sessionID: string): TwingHookPayload["twing_source"] {
+function openCodeSourceDescriptor(sessionID: string, directory?: string): TwingHookPayload["twing_source"] {
   const values: Record<string, string> = { sessionId: sessionID };
   const xdgDataHome = process.env.XDG_DATA_HOME;
   if (xdgDataHome && xdgDataHome.trim() !== "") values.xdgDataHome = xdgDataHome;
+  if (directory && directory.trim() !== "") values.directory = directory;
   return { kind: "opencode-sqlite", values };
 }
 
@@ -160,14 +170,27 @@ function stringField(args: Record<string, unknown>, ...names: string[]): string 
   return undefined;
 }
 
-/** Extracts every target named by OpenCode's apply_patch format. */
+/**
+ * Extracts every target named by OpenCode's apply_patch format.
+ *
+ * `+++ path` is accepted as well, for a patch produced by some other
+ * generator -- but only while no `***` header has been seen, because the two
+ * formats disagree about that line. Inside a Codex-style envelope an added
+ * line whose content begins `++ ` is written `+++ `, and reading it as a
+ * header invents a file the patch never named: a phantom target to gate, and
+ * a phantom path in the capture. The Go parser (`hook/codex.go`) makes the
+ * same distinction; this is the copy that three callers share -- the OpenCode
+ * gate translation and both harnesses' capture -- so it has to agree.
+ */
 export function patchPaths(patchText: string): string[] {
   const found = new Set<string>();
+  let codexEnvelope = false;
   for (const line of patchText.split(/\r?\n/)) {
+    if (line.startsWith("***")) codexEnvelope = true;
     const marker = line.match(/^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$/);
     const move = line.match(/^\*\*\* Move to:\s*(.+?)\s*$/);
-    const unified = line.match(/^\+\+\+\s+(?:b\/)?(.+?)\s*$/);
-    const candidate = marker?.[1] ?? move?.[1] ?? unified?.[1];
+    const unified = codexEnvelope ? undefined : line.match(/^\+\+\+\s+(?:b\/)?(.+?)\s*$/)?.[1];
+    const candidate = marker?.[1] ?? move?.[1] ?? unified;
     if (candidate && candidate !== "/dev/null") found.add(candidate);
   }
   return [...found];
@@ -381,7 +404,7 @@ export function createOpenCodePlugin(runHook: HookRunner = (payload) => runTwing
       // on every event. The capture path is watermark-based and stateless
       // per event, so there is no "first" event to attach this to -- and a
       // session whose SessionStart was missed must still capture.
-      twing_source: openCodeSourceDescriptor(sessionID),
+      twing_source: openCodeSourceDescriptor(sessionID, sessionCwd(sessionID)),
     });
 
     return {

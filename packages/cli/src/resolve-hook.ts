@@ -29,6 +29,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getCliVersion } from "./version.js";
 import {
   readClaudeSettings,
   writeClaudeSettings,
@@ -74,6 +75,22 @@ ${RESOLVER_MARKER}
 
 twing_event="\$1"
 hook_bin="\$HOME/.twing/bin/twing-hook"
+hook_stamp="\$HOME/.twing/bin/twing-hook.version"
+twing_upgrade_dir="\$HOME/.twing/bin/upgrade-attempts"
+
+# The version of the CLI that generated this script. The binary beside it
+# records which CLI installed *it* (install-hook.ts's stamp), and the two
+# disagreeing means an upgrade replaced the CLI, this resolver and the Codex
+# launcher while leaving the binary they hand events to behind.
+#
+# That is not hypothetical: it was found on a real machine running a 1.2.1
+# CLI with a binary from eight days earlier, where every Codex edit was
+# silently allowed because that binary has no case for \`apply_patch\`. Claude
+# Code repairs itself there -- its edits reach the gate, the gate sees a
+# version mismatch and recovers -- but the Codex path cannot, because the
+# case it is missing *is* the gate path. So the check has to happen before
+# the binary runs, which is here.
+twing_expected_version="${getCliVersion()}"
 
 # This repo commits its own twing hook and Claude Code has loaded it, so that
 # entry is already handling this event. Claude Code runs every matching hook
@@ -99,9 +116,37 @@ fi
 # Steady state: hand the event over with cwd untouched, so the binary resolves
 # the coordinator from the file being edited rather than from where Claude
 # happened to start.
-if [ -x "\$hook_bin" ]; then
+#
+# \`read\` rather than \`cat\`: a builtin, so the common path still costs no
+# subprocess.
+twing_installed_version=""
+if [ -f "\$hook_stamp" ]; then
+  read -r twing_installed_version < "\$hook_stamp" 2>/dev/null || twing_installed_version=""
+fi
+
+twing_stale=""
+if [ -x "\$hook_bin" ] && [ "\$twing_installed_version" != "\$twing_expected_version" ]; then
+  twing_stale=1
+fi
+
+if [ -x "\$hook_bin" ] && [ -z "\$twing_stale" ]; then
   exec "\$hook_bin"
 fi
+
+# Either nothing is installed, or what is installed is older than this
+# script. Both are handled by the install branch below -- and both fall back
+# to running whatever binary *is* there (twing_fallback), because a stale
+# hook still gates Claude Code correctly and refusing to run it would trade
+# one silent gap for a wider one.
+twing_fallback() {
+  if [ -x "\$hook_bin" ]; then
+    if [ -n "\$payload_saved" ]; then
+      exec "\$hook_bin" <&3
+    fi
+    exec "\$hook_bin"
+  fi
+  exit 0
+}
 
 # Nothing installed yet. Only these two events may install: Claude Code lowers
 # the hook timeout to 30s on UserPromptSubmit and *discards* the output of a
@@ -109,7 +154,7 @@ fi
 # nothing. SessionStart and PreToolUse keep the 600s default.
 case "\$twing_event" in
   SessionStart|PreToolUse) ;;
-  *) exit 0 ;;
+  *) twing_fallback ;;
 esac
 
 # Where to start looking for the repo to install *for*.
@@ -122,7 +167,12 @@ esac
 # silently, for the life of the session.
 #
 # On PreToolUse the payload names the file about to be edited, and that is the
-# one anchor pointing *into* the repo. It costs a buffer of the whole payload,
+# one anchor pointing *into* the repo. Two spellings of that anchor: Claude
+# Code (and OpenCode, through twing's adapter) send \`tool_input.file_path\`,
+# while Codex sends \`tool_input.command\` holding an apply_patch envelope
+# whose targets are named inside it. Reading only the first meant a Codex
+# session started outside a repo installed nothing and stayed ungated for its
+# whole life -- exactly the failure this extraction exists to prevent. It costs a buffer of the whole payload,
 # so it happens here and only here: after the steady-state exec above (every
 # event once installed, stdin untouched), and only for the event that both
 # carries a path and is allowed to install.
@@ -143,12 +193,42 @@ if [ "\$twing_event" = "PreToolUse" ] && command -v node >/dev/null 2>&1; then
     # the text \`"file_path":\` (editing a file that mentions it -- this script,
     # for one), and a pattern match cannot tell the field from the body.
     # Parsing costs nothing new here: the install below needs node anyway.
-    edited_dir=\$(node -e 'let d="";try{const p=JSON.parse(require("fs").readFileSync(0,"utf8"));const f=p&&p.tool_input&&p.tool_input.file_path;if(typeof f==="string"&&f!==""){d=require("path").dirname(require("path").resolve(f));}}catch(e){}process.stdout.write(d);' < "\$payload_file" 2>/dev/null)
+    edited_dirs=\$(node -e 'const out=[];const add=(f)=>{if(typeof f==="string"&&f!==""){out.push(require("path").dirname(require("path").resolve(f)));}};try{const p=JSON.parse(require("fs").readFileSync(0,"utf8"));const i=(p&&p.tool_input)||{};add(i.file_path);if(typeof i.command==="string"){let env=false;for(const line of i.command.split("\\n")){if(line.startsWith("***"))env=true;for(const mk of ["*** Add File:","*** Update File:","*** Delete File:","*** Move to:"]){if(line.startsWith(mk)){add(line.slice(mk.length).trim());}}if(!env&&line.startsWith("+++ ")){add(line.slice(4).replace(/^b\\//,"").trim());}}}}catch(e){}process.stdout.write(out.join("\\n"));' < "\$payload_file" 2>/dev/null)
+    twing_session=\$(node -e 'let s="";try{const p=JSON.parse(require("fs").readFileSync(0,"utf8"));if(typeof p.session_id==="string")s=p.session_id.replace(/[^A-Za-z0-9._-]/g,"_");}catch(e){}process.stdout.write(s);' < "\$payload_file" 2>/dev/null)
     exec 3< "\$payload_file"
     rm -f "\$payload_file"
     payload_saved=1
-    [ -n "\$edited_dir" ] && start_dir="\$edited_dir"
+    [ -n "\$edited_dirs" ] && start_dir="\$edited_dirs"
   fi
+fi
+
+# A stale binary gets at most one upgrade attempt per session on the edit
+# path.
+#
+# It cannot be SessionStart-only, which is where this started: a session
+# opened outside any repo (\`cd ~/work && codex\`) identifies no repo at
+# SessionStart, so a restriction to that event means the upgrade never
+# happens at all, and under Codex a pre-\`apply_patch\` binary then silently
+# allows every edit of that session -- the exact failure this check exists to
+# catch. The repo only becomes identifiable when an edit names a file, so the
+# attempt has to be allowed here.
+#
+# It also cannot be *every* edit: on an offline machine, or one whose
+# coordinator is down, that pays the installer's timeout before every edit
+# for the life of the session. So the session id -- which the payload above
+# just gave us -- bounds it to one attempt, after which this session gates
+# with the binary it has. A session twing cannot identify does not attempt at
+# all; SessionStart remains its route.
+#
+# One file per session rather than one file naming the last session: two
+# sessions editing in turn would otherwise overwrite each other's marker and
+# both retry on every edit, which is the cost this bound exists to avoid.
+# Nothing accumulates in practice -- the moment an upgrade succeeds the stamp
+# matches and this branch is never reached again, so the directory only grows
+# while a machine is both stale and failing to fix itself.
+if [ -n "\$twing_stale" ] && [ "\$twing_event" = "PreToolUse" ]; then
+  [ -n "\$twing_session" ] || twing_fallback
+  [ -f "\$twing_upgrade_dir/\$twing_session" ] && twing_fallback
 fi
 
 # Find a twing repo to install *for*: the coordinator decides which version to
@@ -156,17 +236,46 @@ fi
 # than asking git -- cheaper, and it works the same in a worktree. A directory
 # that does not exist yet (a Write creating one) simply matches nothing on the
 # way up.
+#
+# Every candidate the payload named, in the order it named them, until one is
+# inside a twing repo. One is not enough: a Codex patch can add a file
+# somewhere unmanaged while updating a managed repo in the same call, and
+# stopping at the first target would resolve no coordinator and install
+# nothing -- letting the whole patch through ungated. Caught in review before
+# it shipped.
 repo_root=""
-_d="\$start_dir"
-while : ; do
-  if [ -f "\$_d/.twing/twing.yml" ]; then
-    repo_root="\$_d"
-    break
-  fi
-  [ "\$_d" = "/" ] && break
-  _d=\$(dirname "\$_d")
+twing_old_ifs=\$IFS
+IFS='
+'
+for _cand in \$start_dir; do
+  IFS=\$twing_old_ifs
+  [ -n "\$_cand" ] || continue
+  _d="\$_cand"
+  while : ; do
+    if [ -f "\$_d/.twing/twing.yml" ]; then
+      repo_root="\$_d"
+      break
+    fi
+    [ "\$_d" = "/" ] && break
+    _d=\$(dirname "\$_d")
+  done
+  [ -n "\$repo_root" ] && break
+  IFS='
+'
 done
-[ -n "\$repo_root" ] || exit 0
+IFS=\$twing_old_ifs
+[ -n "\$repo_root" ] || twing_fallback
+
+# Now, and not before: the attempt is recorded once there is something to
+# install *for*. Recording it earlier spent the session's one attempt on an
+# edit that named no managed repo -- a scratch file in /tmp, say -- and the
+# next edit, the one actually inside a twing repo, fell straight through to
+# the stale binary. Which is the failure this whole branch exists to prevent,
+# reintroduced one line too early. Caught in review.
+if [ -n "\$twing_stale" ] && [ "\$twing_event" = "PreToolUse" ] && [ -n "\$twing_session" ]; then
+  mkdir -p "\$twing_upgrade_dir" 2>/dev/null || true
+  : > "\$twing_upgrade_dir/\$twing_session" 2>/dev/null || true
+fi
 ${coordinatorInstallShell()}
 
 # A repo that wants twing, on a machine that cannot run it.
@@ -179,19 +288,13 @@ ${coordinatorInstallShell()}
 # anywhere, which is the failure this whole script exists to prevent.
 if ! twing_node_ok; then
   twing_node_unusable
-  exit 0
+  twing_fallback
 fi
 
 twing_install_for_repo "\$repo_root"
 
-if [ -x "\$hook_bin" ]; then
-  # <&3 only when we consumed stdin above; otherwise it is still the payload.
-  if [ -n "\$payload_saved" ]; then
-    exec "\$hook_bin" <&3
-  fi
-  exec "\$hook_bin"
-fi
-exit 0
+# <&3 only when we consumed stdin above; otherwise it is still the payload.
+twing_fallback
 `;
 }
 

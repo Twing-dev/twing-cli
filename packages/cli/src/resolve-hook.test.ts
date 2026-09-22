@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { withHome } from "./test-support.js";
+import { getCliVersion } from "./version.js";
 import { MIN_NODE_MAJOR, MIN_NODE_MINOR, WIRED_HOOK_EVENTS } from "@twing/core";
 import {
   RESOLVER_MARKER,
@@ -195,9 +196,9 @@ function recordingNpm(opts: { installsHook?: boolean; nodeVersion?: string } = {
 }
 
 /** The shape Claude Code sends on a PreToolUse for an edit. */
-function editPayload(filePath: string): string {
+function editPayload(filePath: string, sessionId = "s1"): string {
   return JSON.stringify({
-    session_id: "s1",
+    session_id: sessionId,
     hook_event_name: "PreToolUse",
     tool_name: "Edit",
     tool_input: { file_path: filePath, old_string: "a", new_string: "b" },
@@ -241,6 +242,10 @@ function homeWithBinary(stdout: string): string {
   const bin = path.join(home, ".twing", "bin");
   fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(path.join(bin, "twing-hook"), `#!/bin/sh\nprintf '%s' '${stdout}'\n`, { mode: 0o755 });
+  // The stamp the CLI writes when it installs the binary. Without it the
+  // resolver treats the binary as older than itself -- which is the point of
+  // the stamp, and covered by its own tests below.
+  fs.writeFileSync(path.join(bin, "twing-hook.version"), `${getCliVersion()}\n`);
   return home;
 }
 
@@ -466,4 +471,161 @@ test("the wired entry is a no-op when the script is missing, not a block", async
 
 test("resolverScript: carries its marker, so a later version can find and replace it", () => {
   assert.ok(resolverScript().includes(RESOLVER_MARKER));
+});
+
+// --- an installed binary older than the CLI beside it -----------------------
+//
+// The failure these cover was found on a real machine: a 1.2.1 CLI, and a
+// `twing-hook` from eight days earlier that has no case for Codex's
+// `apply_patch`. Every Codex edit there was silently allowed. Claude Code
+// repairs itself in that situation -- its edits reach the gate, which sees a
+// version mismatch and recovers -- but the Codex path cannot, because the
+// case it is missing *is* the gate path. So the resolver has to notice
+// before the binary runs.
+
+/** A home whose binary predates the CLI: the stamp names an older version. */
+function homeWithStaleBinary(stdout: string): string {
+  const home = homeWithBinary(stdout);
+  fs.writeFileSync(path.join(home, ".twing", "bin", "twing-hook.version"), "0.0.1\n");
+  return home;
+}
+
+test("resolverScript: a stale binary still runs, rather than leaving the event unhandled", async () => {
+  // The upgrade is an attempt, never a precondition. Refusing to run last
+  // week's binary would trade a narrow silent gap for a total one.
+  const { stdout, status } = run({ cwd: tmpdir(), home: homeWithStaleBinary("VERDICT_FROM_STALE"), event: "PreToolUse" });
+
+  assert.equal(status, 0);
+  assert.equal(stdout, "VERDICT_FROM_STALE");
+});
+
+test("resolverScript: a stale binary is upgraded once per session, not once per edit", async () => {
+  // Both halves matter. Never attempting on an edit leaves a session started
+  // outside a repo stuck on a stale binary for its whole life (the test
+  // below). Attempting on every edit pays the installer's network timeout
+  // before each one, on a machine that may be offline. The session id bounds
+  // it to a single attempt.
+  const repo = twingRepo();
+  const home = homeWithStaleBinary("VERDICT_FROM_STALE");
+  const npm = recordingNpm();
+  const payload = editPayload(path.join(repo, "a.ts"));
+
+  run({ cwd: repo, home, event: "PreToolUse", path: npm.path, input: payload });
+  assert.equal(npm.installs(), 1, "the first edit of a session may recover");
+
+  const second = run({ cwd: repo, home, event: "PreToolUse", path: npm.path, input: payload });
+  assert.equal(npm.installs(), 1, "the second does not pay for it again");
+  assert.equal(second.stdout, "VERDICT_FROM_STALE", "and is gated by the binary that is actually there");
+});
+
+test("resolverScript: a stale binary recovers from an edit, in a session started outside any repo", async () => {
+  // The case this whole check exists for, and the one an upgrade restricted
+  // to SessionStart could never reach: `cd ~/work && codex`, then edit a file
+  // in a repo below. Nothing identifies a repo until the edit names a file,
+  // so if the edit path cannot attempt the upgrade, a pre-`apply_patch`
+  // binary silently allows every edit of that session.
+  const repo = twingRepo();
+  const outside = tmpdir();
+  const home = homeWithStaleBinary("VERDICT_FROM_STALE");
+  const npm = recordingNpm();
+
+  run({ cwd: outside, home, event: "PreToolUse", path: npm.path, input: editPayload(path.join(repo, "src", "a.ts")) });
+
+  assert.equal(npm.initCwd(), fs.realpathSync(repo), "it found the repo from the edited file and installed for it");
+});
+
+test("resolverScript: every file a patch names is considered, not just the first", async () => {
+  // A Codex patch can add a file somewhere unmanaged while updating a managed
+  // repo in the same call. Stopping at the first target resolved no
+  // coordinator, installed nothing, and let the whole patch through ungated.
+  const repo = twingRepo();
+  const scratch = tmpdir();
+  const npm = recordingNpm();
+  const patch = [
+    "*** Begin Patch",
+    `*** Add File: ${path.join(scratch, "notes.md")}`,
+    "+jotting",
+    `*** Update File: ${path.join(repo, "src", "a.ts")}`,
+    "+x",
+    "*** End Patch",
+  ].join("\n");
+
+  run({
+    cwd: scratch,
+    home: tmpdir(),
+    event: "PreToolUse",
+    path: npm.path,
+    input: JSON.stringify({ session_id: "s1", hook_event_name: "PreToolUse", tool_name: "apply_patch", tool_input: { command: patch } }),
+  });
+
+  assert.equal(npm.initCwd(), fs.realpathSync(repo), "the managed repo in the patch wins over the unmanaged file it also touches");
+});
+
+test("resolverScript: a matching binary is handed the event with no install attempt at all", async () => {
+  // The steady state, on every event, for every machine that is current:
+  // two tests and an exec, no subprocess and no network.
+  const repo = twingRepo();
+  const { stdout } = run({ cwd: repo, home: homeWithBinary("VERDICT_FROM_HOOK"), event: "SessionStart" });
+
+  assert.equal(stdout, "VERDICT_FROM_HOOK");
+});
+
+test("resolverScript: finds the repo to install for from a Codex patch, not just file_path", async () => {
+  // Codex names no `file_path` -- its targets live inside the apply_patch
+  // envelope. Reading only `file_path` meant a Codex session started outside
+  // a repo walked up from the wrong directory, installed nothing, and stayed
+  // ungated for its whole life.
+  const repo = twingRepo();
+  const outside = tmpdir();
+  const npm = recordingNpm();
+  const patch = `*** Begin Patch\n*** Update File: ${path.join(repo, "src", "a.ts")}\n+x\n*** End Patch`;
+
+  const { status } = run({
+    cwd: outside,
+    home: tmpdir(), // nothing installed, so the install branch has to run
+    event: "PreToolUse",
+    path: npm.path,
+    input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "apply_patch", tool_input: { command: patch } }),
+  });
+
+  assert.equal(status, 0);
+  assert.equal(npm.initCwd(), fs.realpathSync(repo), "installed for the repo the patch names, not the directory Codex was started in");
+});
+
+test("resolverScript: an edit outside any repo does not spend the session's recovery attempt", async () => {
+  // The bound is one attempt per session, and an edit that names no managed
+  // repo is not an attempt -- there was nothing to install for. Recording it
+  // anyway meant a scratch-file edit consumed the session's only try, and the
+  // next edit, the one actually inside a twing repo, fell through to the
+  // stale binary. Caught in review; it is the original bug one line earlier.
+  const repo = twingRepo();
+  const scratch = tmpdir();
+  const home = homeWithStaleBinary("VERDICT_FROM_STALE");
+  const npm = recordingNpm();
+
+  run({ cwd: scratch, home, event: "PreToolUse", path: npm.path, input: editPayload(path.join(scratch, "notes.md")) });
+  assert.equal(npm.installs(), 0, "nothing to install for, so nothing was attempted");
+
+  run({ cwd: scratch, home, event: "PreToolUse", path: npm.path, input: editPayload(path.join(repo, "src", "a.ts")) });
+  assert.equal(npm.installs(), 1, "and the attempt is still available for the edit that names a repo");
+});
+
+test("resolverScript: two sessions each get one attempt, and neither gets a second", async () => {
+  // A single marker holding the most recent session id let two sessions
+  // editing in turn overwrite each other's record, so both retried on every
+  // edit -- exactly the hammering the bound exists to prevent, on a machine
+  // whose install keeps failing.
+  const repo = twingRepo();
+  const home = homeWithStaleBinary("VERDICT_FROM_STALE");
+  const npm = recordingNpm();
+  const edit = (session: string) =>
+    run({ cwd: repo, home, event: "PreToolUse", path: npm.path, input: editPayload(path.join(repo, "a.ts"), session) });
+
+  edit("session-a");
+  edit("session-b");
+  assert.equal(npm.installs(), 2, "each session may try once");
+
+  edit("session-a");
+  edit("session-b");
+  assert.equal(npm.installs(), 2, "and neither tries again");
 });

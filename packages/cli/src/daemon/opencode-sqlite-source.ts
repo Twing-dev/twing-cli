@@ -42,6 +42,7 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
+import { patchPaths } from "../opencode-adapter.js";
 import { registerTranscriptSource, type Cursor, type TranscriptEntry, type TranscriptSource } from "./transcript-source.js";
 
 /**
@@ -205,22 +206,71 @@ function isComplete(message: OpenCodeMessage): boolean {
  * widening the core allowlist is the point of this layer -- `@twing/core`
  * stays Claude-Code-shaped and only this file knows a second dialect.
  *
- * `apply_patch` is a known gap: it carries its paths *inside* `patchText`
- * (`*** Update File: /abs/path`) rather than in a field, so its edits
- * attribute to no repo. Left unparsed for now because the failure is in the
- * safe direction -- an undetected touch means this session is not captured,
- * never that an unconsented repo is. In practice a `read` precedes the patch
- * and carries the consent on its own.
+ * `apply_patch` needs more than a rename: it carries its paths *inside*
+ * `patchText` (`*** Update File: /abs/path`) rather than in any field, so a
+ * key scan finds nothing and the edit attributes to no repo at all. That was
+ * left unparsed as "safe in the safe direction" -- an undetected touch means
+ * the session is not captured, never that an unconsented repo is -- on the
+ * reasoning that a `read` usually precedes the patch and carries consent on
+ * its own. "Usually" is doing too much work there: an agent that patches a
+ * file it already has in context reads nothing first, and the same envelope
+ * is now parsed on the Codex side, where it is the *only* way a session names
+ * a file. So it is parsed here too, by the same function
+ * (`opencode-adapter.ts`'s `patchPaths`), which is also the one the adapter
+ * uses to decide what to gate -- capture and the gate then agree about which
+ * files a patch touched, rather than disagreeing silently.
  */
 const OPENCODE_PATH_KEYS: Record<string, string> = { filePath: "file_path", notebookPath: "notebook_path" };
 
-function translateToolInput(input: unknown): unknown {
+function translateToolInput(input: unknown, directory?: string): unknown {
   if (!input || typeof input !== "object" || Array.isArray(input)) return input ?? {};
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
-    out[OPENCODE_PATH_KEYS[key] ?? key] = value;
+    const renamed = OPENCODE_PATH_KEYS[key] ?? key;
+    out[renamed] = PATH_VALUED_KEYS.has(renamed) && typeof value === "string" ? absolute(value, directory) : value;
+  }
+
+  // A patch names its files in its own body. `collectPaths` reads a fixed
+  // list of keys and will never look inside one, so the targets are lifted
+  // out here into the key it does read. Several files in one patch stay
+  // several entries: `collectPaths` recurses into arrays for exactly this
+  // shape (Claude's multi-edit form).
+  const patch = firstString(input as Record<string, unknown>, ["patchText", "patch_text", "patch", "input"]);
+  if (patch && patch.includes("*** ")) {
+    const targets = patchPaths(patch);
+    if (targets.length > 0) out.edits = targets.map((file) => ({ file_path: absolute(file, directory) }));
   }
   return out;
+}
+
+/** The keys `collectPaths` (`transcript-filter.ts`) reads as paths, after the
+ * rename above. */
+const PATH_VALUED_KEYS = new Set(["file_path", "notebook_path", "path"]);
+
+/**
+ * A path the capture pipeline can attribute on its own.
+ *
+ * Relative is not good enough, even though `reposForEntry` would resolve one
+ * against the entry's cwd: `transcript.ts`'s projectId pass sees only the
+ * bare string, and resolves it against the *daemon's* working directory --
+ * a process serving every repo on the machine. A session's edit then gets
+ * labelled with whichever repo the daemon happened to start in. Found on the
+ * Codex side first (`codex-rollout-source.ts` resolves for the same reason);
+ * OpenCode's patch targets had the identical shape, which an external review
+ * caught before it was shipped.
+ */
+function absolute(candidate: string, directory: string | undefined): string {
+  if (!directory || path.isAbsolute(candidate)) return candidate;
+  return path.resolve(directory, candidate);
+}
+
+/** The first of these keys holding a non-empty string. */
+function firstString(input: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = input[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
 }
 
 /**
@@ -246,7 +296,7 @@ export function toTranscriptEntryShape(message: OpenCodeMessage, parts: unknown[
       // The paths a tool call names are the only thing kept from it, which is
       // what `collectPaths` will pull out of `input`. Output, metadata and
       // timings are dropped here rather than filtered later.
-      content.push({ type: "tool_use", input: translateToolInput(p.state?.input) });
+      content.push({ type: "tool_use", input: translateToolInput(p.state?.input, directory) });
     }
   }
   const created = message.time?.created;
@@ -344,9 +394,12 @@ export class OpenCodeSqliteSource implements TranscriptSource {
   }
 }
 
-// `directory` is optional and deliberately not `required`: it only supplies
-// the entry `cwd` used to resolve relative tool paths, and OpenCode's tool
-// inputs are absolute in practice. `sessionId` is not optional -- without it
-// this would read every project's conversation out of a shared database.
+// `directory` stays optional rather than `required` even though the adapter
+// now always sends it: an adapter copy is refreshed with the package, so a
+// machine mid-upgrade has a new daemon reading descriptors from an older
+// adapter that predates the key. Absent, it degrades to exactly the old
+// behaviour -- relative paths left relative -- rather than failing to resolve
+// a source at all. `sessionId` is not optional: without it this would read
+// every project's conversation out of a shared database.
 registerTranscriptSource("opencode-sqlite", ["sessionId"], (values) =>
   new OpenCodeSqliteSource(openCodeDbPath(values.xdgDataHome), values.sessionId, openSqliteReader, values.directory));

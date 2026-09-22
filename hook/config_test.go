@@ -317,3 +317,33 @@ func TestResolveServerConfigForFile_FileOutsideAnyRepo_EmptyConfig(t *testing.T)
 		t.Errorf("resolveServerConfigForFile(...) = %+v, want empty ServerURL when the file isn't inside any repo", cfg)
 	}
 }
+
+// A Codex patch asks for the same directory once per file it touches, and
+// each answer costs a `git rev-parse` plus a manifest read. Claude Code never
+// exposed this -- one Edit is one file -- but a twenty-file patch paid it
+// twenty times before sending a single check, on the path that blocks the
+// agent.
+func TestResolveServerConfigForFile_ResolvesADirectoryOnce(t *testing.T) {
+	repo := initTempGitRepo(t)
+	writeTwingYAML(t, repo, "coordinator:\n  serverUrl: https://example.invalid\n")
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	serverConfigByDir = map[string]twingConfig{}
+
+	first := resolveServerConfigForFile(repo, filepath.Join(repo, "src", "a.ts"))
+	if first.ServerURL != "https://example.invalid" {
+		t.Fatalf("ServerURL = %q, want the repo's coordinator", first.ServerURL)
+	}
+
+	// Same directory, different file: answered from the memo. Proven by
+	// removing the manifest -- a second real resolution would now fail.
+	if err := os.Remove(filepath.Join(repo, ".twing", "twing.yml")); err != nil {
+		t.Fatal(err)
+	}
+	second := resolveServerConfigForFile(repo, filepath.Join(repo, "src", "b.ts"))
+
+	if second.ServerURL != first.ServerURL {
+		t.Errorf("ServerURL = %q, want the memoized %q", second.ServerURL, first.ServerURL)
+	}
+}

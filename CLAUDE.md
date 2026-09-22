@@ -528,6 +528,18 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `~/.twing/opencode/adapter.mjs`, which spawns the resolver with
   `TWING_HARNESS=opencode`), the Codex block (`codex-hooks.ts`, below) and
   `~/.twing/auto-managed`, nothing installed.
+  `install-hook.ts` writes `~/.twing/bin/twing-hook.version` beside the binary
+  whenever it installs one, and `twing-resolve` reads it before handing over
+  an event: a binary older than the CLI that generated the resolver is
+  upgraded (at `SessionStart` only -- a stale binary still works, so paying a
+  failed install's timeout on every edit would be the worse trade) rather than
+  run. Without it an upgrade replaces the CLI, the resolver and the Codex
+  launcher while leaving the binary they feed behind, and Codex's
+  `apply_patch` reaches a binary with no case for it: every edit silently
+  allowed. Claude Code recovers from that on its own -- its edits reach the
+  gate, which sees the version mismatch and self-heals -- but the Codex path
+  cannot, because the case it is missing *is* the gate path. Found live on a
+  machine running a 1.2.1 CLI beside a binary from eight days earlier.
   `codex-hooks.ts` (2026-09-21) is the third harness, and the
   only one whose wiring goes into a file twing does not own: Codex reads
   `$CODEX_HOME/config.toml` (else `~/.codex/config.toml`), which is TOML
@@ -556,6 +568,37 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   `WIRED_EVENTS` reaches resolver machines through version recovery instead
   of needing every developer to re-run a command; everywhere else the
   refresh is a strict no-op.
+
+**Harness parity, as of 2026-09-21.** Claude Code is the reference
+implementation; the other two are measured against it, and every line below
+was verified end to end rather than reasoned about.
+
+  - *Gate on edits* — all three. Codex through `apply_patch` (one check per
+    file in the patch, first deny wins); OpenCode through its adapter's
+    translation of `edit`/`write`/`apply_patch`.
+  - *Plan-time design registration* — **Claude only** (`ExitPlanMode`).
+    Codex's `update_plan` fires no hook at all, and OpenCode has no
+    equivalent, so both fall back to the first-edit deny and its filled-in
+    `twing design register` template -- the same path a Claude session that
+    skips plan mode takes, and one a real Codex agent was observed following
+    unaided.
+  - *Session id reachable by the agent's shell* — Claude (its own env var),
+    OpenCode (the adapter exports `TWING_SESSION_ID` from `shell.env`).
+    Codex has no per-session shell environment, which is why its denies carry
+    `--session <id>` (`design_gate.go`'s `sessionScopeFlag`).
+  - *Symbol-level claims* — all three. Codex and OpenCode both get there by
+    handing `claims.ts` the patch's first added run as `new_string`.
+  - *Conversation capture* — all three, through `TranscriptSource`. Note that
+    OpenCode's never actually ran until 2026-09-21: the daemon dropped the
+    descriptor (`server.ts`) and its `apply_patch` targets were unparsed, so
+    a session that only patched named no repo and failed the consent check.
+  - *Committed repo bootstrap* (`.claude/settings.json` +
+    `.twing/bootstrap-hook.sh`) — **Claude only.** Codex reads a project's
+    `.codex/config.toml` only for a repo the user has trusted, and then still
+    refuses to run the hook until it is approved, so a committed file cannot
+    onboard an unprepared machine. OpenCode's plugin is machine-global.
+  - *Shell-driven edits* (`Bash`, `exec_command`, OpenCode's `bash`) — ungated
+    and uncaptured on all three, deliberately and identically.
 
 ### `hook/` (Go, separate module)
 

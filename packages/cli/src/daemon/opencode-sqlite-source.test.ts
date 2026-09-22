@@ -218,3 +218,46 @@ test("toTranscriptEntryShape: produces what filterTranscriptEntry reads", () => 
   assert.equal(filtered.turn?.text, "hello");
   assert.match(filtered.turn!.ts!, /^2026-/, "the epoch millisecond timestamp becomes an ISO string the filter accepts");
 });
+
+test("an apply_patch call names the files it touched, like every other harness does", () => {
+  // Left unparsed until 2026-09-21 on the reasoning that a `read` usually
+  // precedes a patch and carries consent anyway. An agent patching a file it
+  // already has in context reads nothing first -- and then the session named
+  // no repo, so capture never started. Claude Code's capture has never had
+  // that hole, and neither does Codex's.
+  const entry = toTranscriptEntryShape(
+    { role: "assistant", time: { created: 1, completed: 2 } },
+    [
+      {
+        type: "tool",
+        state: {
+          input: {
+            patchText: "*** Begin Patch\n*** Update File: /repo/src/a.ts\n+x\n*** Add File: /repo/docs/b.md\n+y\n*** End Patch",
+          },
+        },
+      },
+    ],
+    "/repo",
+  );
+
+  const filtered = filterTranscriptEntry(entry);
+  assert.deepEqual(
+    filtered.paths.filter((p) => p !== "/repo"),
+    ["/repo/src/a.ts", "/repo/docs/b.md"],
+    "every target in the patch, so consent and repo attribution see the same files the gate did",
+  );
+});
+
+test("a tool input with no patch is translated exactly as before", () => {
+  const entry = toTranscriptEntryShape(
+    { role: "assistant", time: { created: 1, completed: 2 } },
+    [{ type: "tool", state: { input: { filePath: "/repo/src/read.ts" } } }],
+    "/repo",
+  );
+
+  assert.deepEqual(
+    filterTranscriptEntry(entry).paths.filter((p) => p !== "/repo"),
+    ["/repo/src/read.ts"],
+    "OpenCode's camelCase spelling still becomes the key the filter reads",
+  );
+});

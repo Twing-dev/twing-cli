@@ -98,22 +98,27 @@ export class CodexRolloutSource implements TranscriptSource {
     return this.jsonl.exists();
   }
 
-  resume(stored: string | undefined): Promise<Cursor> {
-    return this.jsonl.resume(stored);
+  async resume(stored: string | undefined): Promise<Cursor> {
+    const { inner, cwd } = decodeCursor(stored);
+    return encodeCursor(await this.jsonl.resume(inner), cwd);
   }
 
   atEnd(cursor: Cursor): Promise<boolean> {
-    return this.jsonl.atEnd(cursor);
+    return this.jsonl.atEnd(decodeCursor(cursor).inner ?? this.jsonl.beginning);
   }
 
   async read(cursor: Cursor, onEntry: (entry: TranscriptEntry) => void): Promise<Cursor> {
-    // Read before streaming, not while: a pass that resumes mid-file never
-    // reaches the header line, and without a cwd every relative path a patch
+    const from = decodeCursor(cursor);
+    // The cwd carried by the cursor first, then the header's. A pass that
+    // resumes mid-file never reaches either the header or the `turn_context`
+    // that moved the session, and without a cwd every relative path a patch
     // names resolves to no repo at all -- which reads as "this session
-    // touched nothing" and silently captures nothing.
-    let cwd = await this.loadSessionCwd();
+    // touched nothing" and captures nothing at all.
+    let cwd = from.cwd ?? (await this.loadSessionCwd());
 
-    return this.jsonl.read(cursor, (entry) => {
+    // `read` is always handed a real cursor; the `undefined` case belongs to
+    // `resume`, which is where a stored value can be absent.
+    const inner = await this.jsonl.read(from.inner ?? this.jsonl.beginning, (entry) => {
       const line = entry.value as RolloutLine | null;
       if (!line || typeof line !== "object") return;
 
@@ -125,8 +130,9 @@ export class CodexRolloutSource implements TranscriptSource {
 
       if (line.type !== CONVERSATION_KIND) return;
       const translated = translateRolloutItem(line, cwd);
-      if (translated) onEntry({ value: translated, after: entry.after });
+      if (translated) onEntry({ value: { ...(translated as object) }, after: encodeCursor(entry.after, cwd) });
     });
+    return encodeCursor(inner, cwd);
   }
 
   /** The `session_meta` header's `cwd`, or undefined if the file is gone or
@@ -152,6 +158,37 @@ export class CodexRolloutSource implements TranscriptSource {
     }
     return this.sessionCwd;
   }
+}
+
+/**
+ * A cursor that remembers where the session was working.
+ *
+ * The position alone is not enough to resume this format. Codex declares the
+ * working directory once in the header and again in each `turn_context`, and
+ * a patch names its files relative to it -- so a pass that resumes below the
+ * last such record has no way to resolve them, and attributes the session to
+ * no repo (or, before paths were made absolute, to whichever repo the daemon
+ * was started in). The source is rebuilt for every pass, so instance state
+ * cannot carry it either.
+ *
+ * A `Cursor` is opaque to everything outside this file and persisted verbatim
+ * by `transcript.ts`, which makes it the one place this can live. A bare
+ * inner cursor still decodes -- state files written before this exist on real
+ * machines mid-session, and misreading one would re-capture a whole session.
+ */
+const CURSOR_PREFIX = "codex1|";
+
+function encodeCursor(inner: Cursor, cwd: string | undefined): Cursor {
+  return cwd ? `${CURSOR_PREFIX}${inner}|${cwd}` : inner;
+}
+
+function decodeCursor(cursor: string | undefined): { inner: string | undefined; cwd: string | undefined } {
+  if (cursor === undefined || !cursor.startsWith(CURSOR_PREFIX)) return { inner: cursor, cwd: undefined };
+  const rest = cursor.slice(CURSOR_PREFIX.length);
+  const separator = rest.indexOf("|");
+  if (separator === -1) return { inner: rest, cwd: undefined };
+  // cwd last and unsplit: a directory may legitimately contain the separator.
+  return { inner: rest.slice(0, separator), cwd: rest.slice(separator + 1) || undefined };
 }
 
 /** The working directory a `session_meta`/`turn_context` record declares. */

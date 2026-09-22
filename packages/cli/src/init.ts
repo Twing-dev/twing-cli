@@ -30,7 +30,7 @@ import {
 } from "@twing/core";
 import { ensureHookInstalled, ensureCliShim } from "./install-hook.js";
 import { wireHooks, stripLegacyRepoLocalHooks, globalSettingsPath } from "./wire-hooks.js";
-import { isCodexHooksWired, reportCodexTrust, wireCodexHooks } from "./codex-hooks.js";
+import { codexInstalled, isCodexHooksWired, reportCodexTrust, wireCodexHooks } from "./codex-hooks.js";
 import { isResolverWired, writeResolverWiring } from "./resolve-hook.js";
 import { isOpenCodePluginWired, wireOpenCodePlugin } from "./opencode-plugin.js";
 import { autoManagedMarkerPath } from "./ghuser.js";
@@ -262,20 +262,38 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   //
   // Strictly a no-op on a machine with no Codex, and on one whose entries
   // this version didn't change -- which is every run but an upgrade.
+  // Tracked so the wiring step below doesn't stamp a second time: each call
+  // starts a `codex app-server`, and on the upgrade path -- the one run where
+  // this block fires -- both would.
+  let codexTrustStamped = false;
   if (isCodexHooksWired() && wireCodexHooks().changed) {
     console.log("twing init: refreshed twing's Codex hook entries");
     await reportCodexTrust({ trust: options.trustCodexHooks });
+    codexTrustStamped = true;
   }
 
   if (!options.unattended) {
     const wired = deps.wireHooks(hookPath);
     console.log(wired ? "twing init: wired hooks into Claude and OpenCode globally (all repos on this machine)" : "twing init: hooks already wired in Claude and OpenCode global configuration");
-    // Codex, on the machines that have it. Separate from the line above
-    // because it has a second step Claude and OpenCode do not: Codex will
-    // not run an entry whose hash it has not recorded, and asking it for
-    // that hash means starting Codex, which is slow enough to be worth
-    // doing only where there is a Codex to ask.
-    if (isCodexHooksWired()) await reportCodexTrust({ trust: options.trustCodexHooks });
+  }
+
+  // Codex, on the machines that have it. Separate from the line above
+  // because it has a second step Claude and OpenCode do not: Codex will not
+  // run an entry whose hash it has not recorded, and asking for that hash
+  // means starting Codex.
+  //
+  // Deliberately outside the `!unattended` guard, unlike the wiring itself.
+  // Wiring is held back there because an unattended run is the committed
+  // bootstrap hook, which must not add global entries beside the ones already
+  // firing. Recording a hash adds nothing and fires nothing -- and this is
+  // the path that reaches a machine where Codex was wired *before* it was
+  // installed: the entries never change, so the refresh above never runs, and
+  // without this the only thing that could record the hash would be the
+  // developer answering Codex's prompt. Version recovery runs an unattended
+  // init on the first gated edit in any harness, so for anyone who also uses
+  // Claude or OpenCode the approval happens with nobody watching.
+  if (!codexTrustStamped && isCodexHooksWired() && codexInstalled()) {
+    await reportCodexTrust({ trust: options.trustCodexHooks, codexInstalled: true });
   }
 
   // Upgrade migration: a repo `init`'d before wiring went global may still

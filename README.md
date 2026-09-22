@@ -332,8 +332,19 @@ resolved from the edited file either way, once the hook binary exists.
 (`$CODEX_HOME`, else `~/.codex`), inside a marked block it regenerates
 wholesale -- everything else in that file, including your own hooks and
 comments, is left exactly as it was, and `twing uninstall` removes the block
-and nothing else. Wiring only touches machines that have Codex; install it
-later and the next `twing init` picks it up.
+and nothing else (and removes the file entirely if twing was what created it).
+
+The entries go in **whether or not Codex is installed yet**, so installing it
+next month needs nothing from you. The one part twing cannot do in advance is
+trust: Codex records a hash per hook and runs none it has not seen, and there
+is no Codex to ask for one yet. So a Codex installed later starts out wired
+but untrusted, and one of two things records the hash -- whichever happens
+first, neither of which is a command you type. twing records it itself the
+next time it updates this machine, which happens on the first gated edit in
+any harness; or, if Codex is the first thing you open, its own session asks
+you to approve twing's entries once. The gap is a machine that only ever runs
+`codex exec` non-interactively and never opens another agent: no prompt is
+shown there, so the entries stay inert.
 
 Two things about Codex are worth knowing, because twing changes both:
 

@@ -270,3 +270,66 @@ test("a rollout that is gone, or is not a rollout, degrades to nothing captured"
   fs.writeFileSync(junk, "not json at all\n");
   assert.deepEqual(await readAll(junk), []);
 });
+
+test("a session that moved keeps its new directory across capture passes", async () => {
+  // `turn_context` declares the working directory a turn runs in, and a patch
+  // names its files relative to it. A later pass resumes *below* that record
+  // -- the source is rebuilt every pass, so nothing in memory survives -- and
+  // would otherwise fall back to the header's directory and attribute the
+  // edit to the wrong repo, or to none.
+  const moved = "/home/dev/other-project";
+  const file = rolloutFile([
+    sessionMeta(),
+    message("user", "first, here"),
+    { timestamp: "t", type: "turn_context", payload: { cwd: moved } },
+    message("user", "now somewhere else"),
+    {
+      timestamp: "t",
+      type: "response_item",
+      payload: { type: "custom_tool_call", name: "apply_patch", input: "*** Update File: src/moved.ts\n+x\n" },
+    },
+  ]);
+
+  // Pass one stops after the turn that follows the move, so the `turn_context`
+  // is consumed and the patch is not.
+  const first = new CodexRolloutSource(file);
+  let cursor = first.beginning;
+  let seen = 0;
+  await first.read(first.beginning, ({ after }) => {
+    seen += 1;
+    if (seen <= 2) cursor = after;
+  });
+
+  // Pass two: a brand new source, resuming from what pass one stored.
+  const second = new CodexRolloutSource(file);
+  const values: unknown[] = [];
+  await second.read(await second.resume(cursor), ({ value }) => void values.push(value));
+
+  const patch = values.map((v) => filterTranscriptEntry(v)).find((f) => f.paths.some((p) => p.endsWith("moved.ts")));
+  assert.ok(patch, "the patch entry arrived");
+  assert.deepEqual(
+    patch.paths.filter((p) => p.endsWith("moved.ts")),
+    [`${moved}/src/moved.ts`],
+    "resolved against where the session had moved to, not where it started",
+  );
+});
+
+test("a cursor stored before it carried a directory still resumes", async () => {
+  // State files written by the version that shipped first hold a bare byte
+  // cursor. Misreading one would re-read the whole transcript and re-capture
+  // a session that was already captured.
+  const file = rolloutFile([sessionMeta(), message("user", "one"), message("assistant", "two")]);
+  const source = new CodexRolloutSource(file);
+
+  let bare: string | undefined;
+  await source.read(source.beginning, ({ after }) => {
+    // What the old encoding stored: the inner byte cursor alone.
+    bare ??= after.replace(/^codex1\|/, "").split("|")[0];
+  });
+
+  const resumed = new CodexRolloutSource(file);
+  const values: unknown[] = [];
+  await resumed.read(await resumed.resume(bare), ({ value }) => void values.push(value));
+
+  assert.deepEqual(values.map((v) => filterTranscriptEntry(v).turn?.text), ["two"], "picks up after the first turn, not from zero");
+});

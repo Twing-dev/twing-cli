@@ -30,12 +30,25 @@
  *    -- and touches no other hook's trust. See its doc comment for why that
  *    is twing's call to make and where the opt-out is.
  *
- * Wiring only happens where Codex actually is: `$CODEX_HOME`, else
- * `~/.codex`. A machine with neither is left alone entirely rather than
- * having a config file invented for a tool it does not run.
+ * Wiring happens whether or not Codex is installed yet, into `$CODEX_HOME`
+ * (else `~/.codex`), creating the file if it is not there. Waiting for Codex
+ * to exist sounds tidier and is worse: a developer who installs Codex a month
+ * after `twing init --ghuser` would have no wiring and no way to learn it,
+ * since nothing twing owns runs on that machine again unless they type a
+ * command -- which is the one thing this project promises they never have to.
+ * A config for a tool that never arrives costs one small file nobody reads.
+ *
+ * The half this cannot do ahead of time is trust: Codex records a hash for
+ * each hook and runs none it has not seen, and there is no Codex to ask for
+ * one yet. So a Codex installed later starts out wired-but-untrusted -- its
+ * first interactive session asks the user to approve twing's entries, and any
+ * later `twing init`/`--ghuser` records them without asking. `codex exec` in
+ * automation shows no prompt, so on a machine that only ever runs Codex
+ * non-interactively the entries stay inert until one of those happens. That
+ * is stated in the wiring output rather than left to be discovered.
  */
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -331,8 +344,9 @@ export type CodexTrustOutcome =
   | "skipped";
 
 export interface CodexWiring {
-  /** False when this machine has no Codex: nothing was written. */
-  present: boolean;
+  /** Whether the Codex CLI is actually on this machine. The entries are
+   * written either way; this says whether they can be trusted yet. */
+  codexInstalled: boolean;
   /** True if the config or the launcher script changed. */
   changed: boolean;
   configPath: string;
@@ -345,14 +359,26 @@ export interface CodexWiringOptions {
   configPath?: string;
   /** Defaults to `codexHookScriptPath()`. */
   scriptPath?: string;
-  /** Wire even where no Codex was found -- the tests' escape hatch, and the
-   * one a future `twing init --codex` would use. */
-  force?: boolean;
 }
 
-/** True when this machine looks like it runs Codex: it has a Codex home. */
-export function codexPresent(configPath: string = codexConfigPath()): boolean {
-  return fs.existsSync(path.dirname(configPath));
+/**
+ * Whether Codex itself is on this machine -- the question trust stamping and
+ * the wiring message need, and the only thing the old "does `~/.codex` exist"
+ * check was ever a proxy for. Now that twing creates that directory, it has
+ * to ask properly.
+ *
+ * `command -v` rather than probing paths: it answers for a shim, an alias
+ * target and a version manager's shim alike, which a directory scan does not.
+ * One subprocess, at wiring time only, never on a hook event.
+ */
+export function codexInstalled(): boolean {
+  try {
+    const lookup = process.platform === "win32" ? ["where", "codex"] : ["sh", "-c", "command -v codex"];
+    const found = execFileSync(lookup[0], lookup.slice(1), { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    return found.trim().length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function writeAtomically(target: string, contents: string, mode?: number): void {
@@ -393,10 +419,6 @@ export function wireCodexHooks(options: CodexWiringOptions = {}): CodexWiring {
   const configPath = options.configPath ?? codexConfigPath();
   const scriptPath = options.scriptPath ?? codexHookScriptPath();
 
-  if (!options.force && !codexPresent(configPath)) {
-    return { present: false, changed: false, configPath, overrodeFeatureFlag: false };
-  }
-
   const script = codexHookScript();
   let changed = false;
   if (!fs.existsSync(scriptPath) || fs.readFileSync(scriptPath, "utf8") !== script) {
@@ -423,7 +445,7 @@ export function wireCodexHooks(options: CodexWiringOptions = {}): CodexWiring {
     changed = true;
   }
 
-  return { present: true, changed, configPath, overrodeFeatureFlag: features.overrode };
+  return { codexInstalled: codexInstalled(), changed, configPath, overrodeFeatureFlag: features.overrode };
 }
 
 /** True if twing's entries are in Codex's config. */
@@ -450,6 +472,18 @@ export function unwireCodexHooks(options: { configPath?: string; scriptPath?: st
   const before = readConfig(configPath);
   if (before) {
     const after = withoutTwingBlocks(before);
+    // A file with nothing left in it is one twing created, for a Codex that
+    // was never installed. Leaving an empty `config.toml` behind would be
+    // leaving litter in a directory this machine has no other use for.
+    if (after.trim() === "") {
+      fs.rmSync(configPath, { force: true });
+      try {
+        fs.rmdirSync(path.dirname(configPath));
+      } catch {
+        /* the directory has other things in it, which is Codex's business */
+      }
+      return true;
+    }
     if (after !== before) {
       // A `features.hooks` the *user* declared is deliberately left on: it is
       // Codex's own switch, it may be why their other hooks run, and turning
@@ -468,9 +502,19 @@ export interface CodexHookEntry {
   key: string;
   command?: string;
   sourcePath: string;
+  /** Typed as required because Codex always sends it -- but it arrives as
+   * JSON from a process this code does not control, so every writer below
+   * checks it rather than trusting the type. `trusted_hash = undefined` is
+   * not valid TOML, and Codex answers an unparseable config by refusing to
+   * load *any* of it: twing would have broken the user's Codex outright. */
   currentHash: string;
   trustStatus: string;
   isManaged?: boolean;
+  /** Codex's own view of whether this hook is on. A *user* setting -- its UI
+   * writes `hooks.state."<key>".enabled` when someone toggles a hook, and
+   * that lands inside the block twing regenerates. See
+   * `renderCodexTrustBlock`. */
+  enabled?: boolean;
 }
 
 export interface CodexHooksReport {
@@ -620,7 +664,7 @@ export async function trustCodexHooks(options: {
     return {
       outcome: "unavailable",
       stamped: 0,
-      ...(report.codexHome && report.codexHome !== path.dirname(configPath) ? { otherCodexHome: report.codexHome } : {}),
+      ...(differentHome(report.codexHome, configPath) ? { otherCodexHome: report.codexHome } : {}),
     };
   }
 
@@ -632,16 +676,43 @@ export async function trustCodexHooks(options: {
   return {
     outcome: "trusted",
     stamped: ours.length,
-    ...(report.codexHome && report.codexHome !== path.dirname(configPath) ? { otherCodexHome: report.codexHome } : {}),
+    ...(differentHome(report.codexHome, configPath) ? { otherCodexHome: report.codexHome } : {}),
   };
 }
 
-/** Whether one reported hook is an entry twing wrote. Both halves matter:
- * the file it came from, and the command it runs. */
+/**
+ * Whether one reported hook is an entry twing wrote. Three things have to
+ * hold: the file it came from, the command it runs, and a hash to record.
+ *
+ * The paths are compared symlink-resolved, because Codex resolves the one it
+ * reports and twing does not: a `$HOME` or `$CODEX_HOME` reached through a
+ * symlink -- an NFS-mounted home, a container bind, `/tmp` on macOS -- then
+ * matches nothing, and trust is never stamped on a machine that looks
+ * perfectly wired. Verified against a real `hooks/list` through a symlinked
+ * CODEX_HOME, which reported the resolved path twing had never heard of.
+ */
 function isTwingHook(hook: CodexHookEntry, configPath: string): boolean {
-  if (hook.sourcePath !== configPath) return false;
+  if (realPath(hook.sourcePath) !== realPath(configPath)) return false;
+  if (!hasUsableHash(hook)) return false;
   const commands = new Set(codexHookEvents().map(({ event }) => codexHookCommand(event)));
   return typeof hook.command === "string" && commands.has(hook.command);
+}
+
+/** The path with symlinks resolved, or the path itself when it cannot be --
+ * never a throw, since this only decides whether two names mean one file. */
+function realPath(candidate: string): string {
+  try {
+    return fs.realpathSync(candidate);
+  } catch {
+    return candidate;
+  }
+}
+
+/** Whether Codex is reading a different home than the one twing wrote to --
+ * symlink-resolved, so one spelling of the same directory is never reported
+ * as a mismatch the user then goes chasing. */
+function differentHome(reported: string | undefined, configPath: string): boolean {
+  return reported !== undefined && realPath(reported) !== realPath(path.dirname(configPath));
 }
 
 /**
@@ -656,6 +727,9 @@ export async function reportCodexTrust(options: {
   configPath?: string;
   /** False for `--no-trust-codex-hooks`. */
   trust?: boolean;
+  /** Whether Codex is on this machine. Injected by the tests; resolved with
+   * `codexInstalled()` when absent. */
+  codexInstalled?: boolean;
   log?: (message: string) => void;
   bin?: string;
   query?: typeof queryCodexHooks;
@@ -669,6 +743,19 @@ export async function reportCodexTrust(options: {
         "so twing stays inactive there until you approve its entries in Codex's startup review.",
     );
     return { outcome: "skipped", stamped: 0 };
+  }
+
+  // Nothing to ask. Say what that means rather than reporting a failure: the
+  // entries are in place deliberately, ahead of a Codex that may arrive
+  // later, and the message has to tell someone who has never installed Codex
+  // something true rather than telling them to go and start it.
+  if (options.codexInstalled === false || (options.codexInstalled === undefined && !codexInstalled())) {
+    log(
+      `twing: wired Codex in ${configPath} ahead of time -- Codex isn't installed here yet. ` +
+        "When it is, its first session will ask you to approve twing's hooks once (Codex runs none it hasn't seen " +
+        "approved); after that, nothing further is needed.",
+    );
+    return { outcome: "unavailable", stamped: 0 };
   }
 
   const result = await trustCodexHooks({ configPath, bin: options.bin, query: options.query });
@@ -692,6 +779,26 @@ export async function reportCodexTrust(options: {
   return result;
 }
 
+/**
+ * The trust block, regenerated from what Codex currently reports.
+ *
+ * `enabled` is copied from Codex rather than asserted, and that is this
+ * block's one subtlety: it is a *user* setting. Turning a hook off in Codex's
+ * own UI writes `hooks.state."<key>".enabled = false`, and because that key
+ * already exists here, Codex's TOML-aware writer edits it in place rather
+ * than appending a second table. Writing `true` unconditionally would
+ * therefore mean the next `twing init` quietly switched twing's hooks back on
+ * for someone who had deliberately switched them off -- found by driving
+ * Codex's own `config/batchWrite` against a wired config.
+ *
+ * (That the writer edits in place rather than appending is also what keeps
+ * this safe at all: two `[hooks.state."<same key>"]` tables are a duplicate
+ * key, and Codex then refuses to load the entire config file.)
+ *
+ * An entry with no usable hash is skipped rather than written: there is
+ * nothing to record, and `trusted_hash = undefined` would be the config
+ * error described on `currentHash` above.
+ */
 export function renderCodexTrustBlock(hooks: CodexHookEntry[]): string {
   const lines = [
     CODEX_TRUST_START,
@@ -699,10 +806,22 @@ export function renderCodexTrustBlock(hooks: CodexHookEntry[]): string {
     "# twing's own entries, recorded by `twing init` -- no other hook in this",
     "# file is trusted by twing. Re-run `twing init` after changing them, or",
     "# delete this block to have Codex ask you about them again.",
+    "#",
+    "# `enabled` is yours: turn one off in Codex and twing leaves it off.",
   ];
-  for (const hook of hooks) {
-    lines.push("", `[hooks.state.${JSON.stringify(hook.key)}]`, "enabled = true", `trusted_hash = ${JSON.stringify(hook.currentHash)}`);
+  for (const hook of hooks.filter(hasUsableHash)) {
+    lines.push(
+      "",
+      `[hooks.state.${JSON.stringify(hook.key)}]`,
+      `enabled = ${hook.enabled === false ? "false" : "true"}`,
+      `trusted_hash = ${JSON.stringify(hook.currentHash)}`,
+    );
   }
   lines.push("", CODEX_TRUST_END, "");
   return lines.join("\n");
+}
+
+/** Whether Codex reported a hash worth recording for this entry. */
+function hasUsableHash(hook: CodexHookEntry): boolean {
+  return typeof hook.currentHash === "string" && hook.currentHash.length > 0;
 }
