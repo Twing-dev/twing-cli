@@ -29,6 +29,7 @@ import {
   type DesignChange,
 } from "@twing/core";
 import { requireRepoRoot } from "./repo-scope.js";
+import { checkSessionId } from "./session-attempts.js";
 
 interface RequiredConfig {
   serverUrl: string;
@@ -325,6 +326,14 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
         "session id; neither TWING_SESSION_ID nor CLAUDE_CODE_SESSION_ID was set in this environment).",
     );
   }
+  // A design bound to a session that does not exist is registered happily by
+  // the coordinator and matches nothing ever after -- see session-attempts.ts
+  // for the two agents that hit exactly that in one day. Only the cases we
+  // can be certain about stop the command; registering before the first edit
+  // is normal and gets a note, not a refusal.
+  const sessionCheck = checkSessionId(computeProjectId(repoRoot), session);
+  if (sessionCheck?.fatal) throw new Error(`twing design register: ${sessionCheck.message}`);
+  if (sessionCheck) console.warn(sessionCheck.message);
 
   // The only field genuinely required to make a registration meaningful --
   // found live, 2026-08-17: `register` was the one subcommand in this file
@@ -676,6 +685,11 @@ export async function runDesignResume(options: ResumeOptions): Promise<void> {
         "session id; neither TWING_SESSION_ID nor CLAUDE_CODE_SESSION_ID was set in this environment).",
     );
   }
+  // Same hazard as `register`: resuming onto a mistyped session moves the
+  // design somewhere no edit will ever be checked against.
+  const resumeCheck = checkSessionId(computeProjectId(repoRoot), session);
+  if (resumeCheck?.fatal) throw new Error(`twing design resume: ${resumeCheck.message}`);
+  if (resumeCheck) console.warn(resumeCheck.message);
 
   const resumeTouches = splitList(options.touches);
   warnIfTouchesMissing(repoRoot, resumeTouches);

@@ -2280,6 +2280,12 @@ func editWriteVerdict(payload hookPayload, filePath string) map[string]any {
 		return nil
 	}
 
+	// This session is about to be evaluated against this project, which is
+	// exactly the precondition for registering a design here. Recorded so
+	// `twing design register` can tell the session id it was handed from one
+	// that was mistyped on the way -- see session_attempts.go.
+	recordSessionAttempt(projectID, payload.SessionID)
+
 	// A Codex session whose sandbox denies the agent network access cannot run
 	// the commands every deny below hands back -- `design register`, `amend`,
 	// `resume` all reach the coordinator, from the agent's shell, inside that
