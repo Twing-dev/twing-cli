@@ -751,19 +751,19 @@ export async function reportCodexTrust(options: {
   // something true rather than telling them to go and start it.
   if (options.codexInstalled === false || (options.codexInstalled === undefined && !codexInstalled())) {
     log(
-      `twing: wired Codex in ${configPath} ahead of time -- Codex isn't installed here yet. ` +
-        "When it is, its first session will ask you to approve twing's hooks once (Codex runs none it hasn't seen " +
-        "approved); after that, nothing further is needed.",
+      "twing: Codex isn't installed here yet -- its hooks are already in place, and its first session will ask " +
+        "you to approve them once.",
     );
     return { outcome: "unavailable", stamped: 0 };
   }
 
   const result = await trustCodexHooks({ configPath, bin: options.bin, query: options.query });
   if (result.outcome === "trusted") {
-    log(
-      `twing: recorded Codex's trust hash for twing's own ${result.stamped} hook entries in ${configPath}. ` +
-        "No other hook in that file was trusted. Delete the twing-codex-trust block to have Codex ask you instead.",
-    );
+    // Silent on success. The caller's own summary already says Codex is
+    // wired, and what this used to print -- a hash count, a file path, which
+    // other hooks were *not* trusted, how to undo it -- is mechanism, at the
+    // one moment the reader has least use for it. Someone who wants it can
+    // read the block; it says the same thing in the file it applies to.
   } else {
     log(
       `twing: wired twing into ${configPath}, but couldn't ask Codex to confirm its trust hashes. ` +

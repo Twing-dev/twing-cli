@@ -42,7 +42,7 @@ import { fileURLToPath } from "node:url";
 import { githubTokenFromGhCli } from "./join.js";
 import { globalSettingsPath } from "./wire-hooks.js";
 import { wireMachine, markAutoManaged } from "./machine-setup.js";
-import { isCodexHooksWired, reportCodexTrust } from "./codex-hooks.js";
+import { codexInstalled, isCodexHooksWired, reportCodexTrust } from "./codex-hooks.js";
 
 export { autoManagedMarkerPath } from "./machine-setup.js";
 
@@ -133,8 +133,8 @@ export async function runGhUser(options: GhUserOptions = {}): Promise<boolean> {
   // The same wiring the one-step install writes (machine-setup.ts), so the two
   // can't drift: resolver entries replacing any binary-path ones, OpenCode,
   // and Codex where there is one.
-  const settings = globalSettingsPath();
   const wiring = wireMachine();
+  const agents = listWired(codexInstalled());
   const changed = wiring.claude || wiring.openCode || wiring.codex;
 
   if (globalSurvived) {
@@ -146,12 +146,16 @@ export async function runGhUser(options: GhUserOptions = {}): Promise<boolean> {
     );
   }
 
+  // Names the agents, not the file. The one file it used to name was Claude's
+  // settings path, which stopped being the whole story once OpenCode and Codex
+  // were wired here too -- and a path is the wrong unit anyway: what the
+  // reader wants to know is which of their agents twing now covers.
   console.log(
     changed
-      ? `twing init --ghuser: wired twing into ${settings}. It now works from any directory, and installs ` +
-          "itself the first time a session opens a repo that uses twing -- at whatever version that repo's " +
-          "coordinator asks for."
-      : `twing init --ghuser: already wired in ${settings}; nothing to change.`,
+      ? `twing init --ghuser: wired twing into ${agents} on this machine. It works from any directory, and ` +
+          "installs itself the first time a session opens a repo that uses twing -- at whatever version that " +
+          "repo's coordinator asks for."
+      : `twing init --ghuser: already wired into ${agents}; nothing to change.`,
   );
 
   // Codex needs one step more than the other two: it runs no hook whose hash
@@ -159,6 +163,15 @@ export async function runGhUser(options: GhUserOptions = {}): Promise<boolean> {
   // up and checking nothing there. See `trustCodexHooks`.
   if (isCodexHooksWired()) await reportCodexTrust();
   return true;
+}
+
+/** The agents twing is wired into, for the one line that reports it. Claude
+ * Code and OpenCode always; Codex only when it is actually installed --
+ * its entries are written either way, but naming it here on a machine
+ * without it reads as a contradiction two lines above the note explaining
+ * that it isn't installed yet. */
+function listWired(hasCodex: boolean): string {
+  return hasCodex ? "Claude Code, OpenCode and Codex" : "Claude Code and OpenCode";
 }
 
 /** Returns true if the global install is gone afterwards. Never throws -- a

@@ -448,9 +448,16 @@ const INSTALL_COMMAND = "curl -fsSL https://raw.githubusercontent.com/Twing-dev/
  * wired the older way (binary-path entries from a pre-resolver `twing init`)
  * or by a repo's committed bootstrap hook, both of which are fine and
  * neither of which this should second-guess.
+ *
+ * And quiet for `init`, which is the command that wires. It ran before the
+ * wiring it describes, so a fresh machine's very first `init --ghuser`
+ * opened with "not wired -- run this other installer", immediately followed
+ * by the lines saying twing had just wired Claude, Codex and OpenCode. A
+ * warning that contradicts the next two lines of its own output teaches the
+ * reader to distrust all of it.
  */
 function warnIfUnwired(command: string | undefined): void {
-  if (command === "uninstall" || command === "--version" || command === "-v") return;
+  if (command === "uninstall" || command === "init" || command === "--version" || command === "-v") return;
   try {
     if (isResolverWired(globalSettingsPath())) return;
     if (fs.existsSync(hookBinaryPath())) return;

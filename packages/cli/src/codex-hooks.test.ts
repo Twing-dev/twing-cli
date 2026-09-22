@@ -101,7 +101,7 @@ test("with no Codex to ask, trust says what will happen rather than reporting a 
   assert.equal(result.outcome, "unavailable");
   assert.equal(ws.read().includes(CODEX_TRUST_START), false, "nothing recorded for a Codex that isn't there");
   assert.match(lines.join("\n"), /isn't installed here yet/);
-  assert.match(lines.join("\n"), /approve twing's hooks once/, "and what the first session will ask");
+  assert.match(lines.join("\n"), /approve them once/, "and what the first session will ask");
 });
 
 test("the user's own config survives wiring byte for byte", () => {
