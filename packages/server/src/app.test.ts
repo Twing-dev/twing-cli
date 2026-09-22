@@ -55,7 +55,7 @@ async function waitFor(predicate: () => Promise<boolean> | boolean, timeoutMs = 
   throw new Error(`waitFor: predicate never became true within ${timeoutMs}ms`);
 }
 
-function freshApp(options: { corsOrigins?: string[]; version?: string; publicProjectIds?: string[]; githubApp?: GithubAppConfig } = {}) {
+function freshApp(options: { corsOrigins?: string[]; version?: string; publicProjectIds?: string[]; githubApp?: GithubAppConfig; noAuth?: boolean } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-app-test-"));
   // In-memory DB for speed -- these tests don't need cross-instance
   // persistence (that's design-store.test.ts/identity-store.test.ts's job).
@@ -84,6 +84,7 @@ function freshApp(options: { corsOrigins?: string[]; version?: string; publicPro
     version: options.version,
     publicProjectIds: options.publicProjectIds,
     githubApp: options.githubApp,
+    noAuth: options.noAuth,
   });
   return { app, dataDir, identities, store, designs, constraints, alignmentThreads, captures };
 }
@@ -5060,8 +5061,17 @@ test("GET /v1/version: unauthenticated, reports the configured version", async (
 
   const res = await app.request("/v1/version");
   assert.equal(res.status, 200);
-  const body = (await res.json()) as { version: string };
+  const body = (await res.json()) as { version: string; authMode: string };
   assert.equal(body.version, "9.9.9");
+  assert.equal(body.authMode, "auth");
+});
+
+test("GET /v1/version: reports no_auth so installers and monitors can verify the configured mode", async () => {
+  const { app } = freshApp({ version: "9.9.9", noAuth: true });
+
+  const res = await app.request("/v1/version");
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { version: "9.9.9", authMode: "no_auth" });
 });
 
 test("hook version-mismatch: a mismatched x-twing-hook-version denies with 426 before the auth check ever runs", async () => {

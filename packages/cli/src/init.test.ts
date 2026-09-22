@@ -14,7 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { computeProjectId } from "@twing/core";
+import { computeProjectId, getServerAuth, readConfig } from "@twing/core";
 import { runInit, resolveGithubMembership, type InitDeps } from "./init.js";
 import { tmpRepo, withHome, cacheToken, cacheNoAuth, addGithubRemote, withMockFetch, captureConsole, jsonResponse, textResponse, captureFetch, captureFetchSequence, withEnv, ghAuthOnPath } from "./test-support.js";
 
@@ -606,6 +606,21 @@ test("runInit --unattended: still installs the hook binary and starts the daemon
     // detection/notice delivery all silently no-op -- a half-working install.
     assert.equal(calls.ensureHookInstalled.length, 1, "the binary is the whole point of the bootstrap");
     assert.equal(calls.ensureDaemonRunning.length, 1, "the daemon is unprivileged and carries half the product");
+  });
+});
+
+test("runInit --unattended: discovers and caches a fresh no-auth coordinator before GitHub authentication", async () => {
+  const { fetch, calls } = routedFetch([
+    { match: /\/v1\/version$/, response: jsonResponse({ version: "1.3.0", authMode: "no_auth" }) },
+    { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) },
+  ]);
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo(SERVER_URL);
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, unattended: true }, deps)));
+
+    assert.equal(getServerAuth(readConfig(), SERVER_URL)?.noAuth, true);
+    assert.deepEqual(calls.map((url) => new URL(url).pathname), ["/v1/version", "/v1/constraints/seed"]);
   });
 });
 

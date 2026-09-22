@@ -1,5 +1,13 @@
 # deploy/
 
+For an external or production installation, use the versioned container
+lifecycle documented in [`SERVER.md`](SERVER.md). It supports authenticated and
+no-auth servers, persistent data, health-checked upgrades, and automatic backup
+and rollback.
+
+The scripts below are the older source-checkout/native deployment path. They
+remain useful for development, but are not the recommended external install.
+
 Scripts for running `twing serve` as a background process that survives
 SSH logout, with logs you can actually get to. No sudo needed for any of
 this -- run it entirely as whatever user you're SSH'd in as (e.g. an

@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_INSTALL_DIR="${HOME}/.twing/server"
+DEFAULT_IMAGE_REPOSITORY="ghcr.io/twing-dev/twing-server"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  twing-server install (--domain <domain> | --insecure-http) [options]
+  twing-server upgrade [options]
+  twing-server status [--dir <path>]
+  twing-server bootstrap-token [--dir <path>]
+  twing-server stop [--dir <path>]
+
+Install options:
+  --domain <domain>       Public HTTPS domain (required)
+  --insecure-http          Direct private-network HTTP; no TLS proxy
+  --mode auth|no-auth     Authentication mode (default: auth)
+  --version <version>     Server image version (default: latest)
+  --image <image>         Exact image reference; useful for local testing
+  --dir <path>            Installation directory (default: ~/.twing/server)
+  --port <port>           Public HTTPS port (default: 443)
+  --http-port <port>      Public HTTP port for ACME challenges (default: 80)
+  --bind <address>        HTTP bind address (default: 0.0.0.0)
+  --no-pull               Use an image already present locally
+
+Upgrade options:
+  --version <version>     Version to install (default: latest)
+  --image <image>         Exact image reference
+  --dir <path>            Existing installation directory
+  --no-pull               Use an image already present locally
+
+The generated server.env file is preserved across upgrades. Put LLM,
+GitHub App, CORS, and other server configuration there.
+EOF
+}
+
+die() {
+  echo "twing-server: $*" >&2
+  exit 1
+}
+
+absolute_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$PWD" "$1" ;;
+  esac
+}
+
+read_setting() {
+  local file="$1" key="$2"
+  sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+write_stack_env() {
+  local file="$1" image="$2" mode="$3" transport="$4" domain="$5" bind="$6" port="$7" http_port="$8" project="$9"
+  local tmp="${file}.tmp"
+  cat >"$tmp" <<EOF
+TWING_SERVER_IMAGE=$image
+TWING_AUTH_MODE=$mode
+TWING_TRANSPORT=$transport
+TWING_SERVER_DOMAIN=$domain
+TWING_BIND_ADDRESS=$bind
+TWING_PORT=$port
+TWING_HTTP_PORT=$http_port
+TWING_COMPOSE_PROJECT=$project
+EOF
+  mv "$tmp" "$file"
+}
+
+write_compose_file() {
+  local file="$1" transport="$2" bind="$3" port="$4" http_port="$5"
+  cat >"$file" <<'EOF'
+name: ${TWING_COMPOSE_PROJECT}
+
+services:
+  server:
+    image: ${TWING_SERVER_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - server.env
+    environment:
+      TWING_SERVE_DATA_DIR: /data
+      TWING_HOST: 0.0.0.0
+      TWING_AUTH_MODE: ${TWING_AUTH_MODE}
+    volumes:
+      - ./data:/data
+      - ./secrets:/run/secrets:ro
+EOF
+
+  if [[ "$transport" == "http" ]]; then
+    cat >>"$file" <<EOF
+    ports:
+      - "$bind:$port:8787"
+EOF
+  fi
+
+  cat >>"$file" <<'EOF'
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/v1/version').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+EOF
+
+  if [[ "$transport" == "http" ]]; then
+    return
+  fi
+
+  cat >>"$file" <<'EOF'
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "${TWING_HTTP_PORT}:80"
+      - "${TWING_PORT}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  caddy-data:
+  caddy-config:
+EOF
+}
+
+write_caddyfile() {
+  local file="$1" domain="$2"
+  cat >"$file" <<EOF
+$domain {
+  reverse_proxy server:8787
+}
+EOF
+}
+
+write_server_env() {
+  local file="$1"
+  cat >"$file" <<'EOF'
+# Preserved across `twing-server upgrade`.
+# Configure one optional LLM provider and any browser/GitHub integration here.
+# OPENROUTER_API_KEY=
+# TWING_SERVE_CORS_ORIGINS=https://monitor.example.com
+# TWING_GITHUB_APP_ID=
+# TWING_GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app-private-key.pem
+EOF
+  chmod 600 "$file"
+}
+
+compose() {
+  docker compose --project-directory "$install_dir" --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" "$@"
+}
+
+pull_image() {
+  local image="$1"
+  if [[ "$pull" == true ]]; then
+    echo "twing-server: pulling $image"
+    docker pull "$image"
+  else
+    docker image inspect "$image" >/dev/null 2>&1 || die "image $image is not available locally"
+  fi
+}
+
+wait_for_server() {
+  compose up -d --wait --wait-timeout 90
+}
+
+show_status() {
+  local env_file="$install_dir/.env"
+  [[ -f "$env_file" ]] || die "no server installation at $install_dir"
+  local transport domain bind port mode image scheme host
+  transport="$(read_setting "$env_file" TWING_TRANSPORT)"
+  [[ -n "$transport" ]] || transport="https"
+  domain="$(read_setting "$env_file" TWING_SERVER_DOMAIN)"
+  bind="$(read_setting "$env_file" TWING_BIND_ADDRESS)"
+  port="$(read_setting "$env_file" TWING_PORT)"
+  mode="$(read_setting "$env_file" TWING_AUTH_MODE)"
+  image="$(read_setting "$env_file" TWING_SERVER_IMAGE)"
+  compose ps
+  scheme="$transport"
+  host="$domain"
+  if [[ "$transport" == "http" ]]; then host="$bind"; fi
+  echo "twing-server: image=$image mode=$mode url=$scheme://$host:$port"
+  compose exec -T server node -e \
+    "fetch('http://127.0.0.1:8787/v1/version').then(async r=>{if(!r.ok)process.exit(1); console.log('twing-server: '+await r.text())}).catch(e=>{console.error(e.message);process.exit(1)})"
+}
+
+install_server() {
+  local mode="auth" version="latest" image="" domain="" bind="0.0.0.0" port="443" http_port="80" transport="https" port_set=false
+  pull=true
+  install_dir="$DEFAULT_INSTALL_DIR"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --mode) [[ $# -ge 2 ]] || die "--mode needs a value"; mode="$2"; shift 2 ;;
+      --domain) [[ $# -ge 2 ]] || die "--domain needs a value"; domain="$2"; shift 2 ;;
+      --insecure-http) transport="http"; shift ;;
+      --version) [[ $# -ge 2 ]] || die "--version needs a value"; version="$2"; shift 2 ;;
+      --image) [[ $# -ge 2 ]] || die "--image needs a value"; image="$2"; shift 2 ;;
+      --dir) [[ $# -ge 2 ]] || die "--dir needs a value"; install_dir="$2"; shift 2 ;;
+      --port) [[ $# -ge 2 ]] || die "--port needs a value"; port="$2"; port_set=true; shift 2 ;;
+      --http-port) [[ $# -ge 2 ]] || die "--http-port needs a value"; http_port="$2"; shift 2 ;;
+      --bind) [[ $# -ge 2 ]] || die "--bind needs a value"; bind="$2"; shift 2 ;;
+      --no-pull) pull=false; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown install option: $1" ;;
+    esac
+  done
+
+  [[ "$mode" == "auth" || "$mode" == "no-auth" ]] || die "--mode must be auth or no-auth"
+  if [[ "$transport" == "https" ]]; then
+    [[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "--domain must be a hostname"
+  else
+    [[ -z "$domain" ]] || die "--domain and --insecure-http cannot be combined"
+    [[ "$port_set" == true ]] || port="8787"
+    [[ "$bind" != *$'\n'* && "$bind" != *$'\r'* ]] || die "invalid bind address"
+  fi
+  [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) || die "--port must be between 1 and 65535"
+  [[ "$http_port" =~ ^[0-9]+$ ]] && ((http_port >= 1 && http_port <= 65535)) || die "--http-port must be between 1 and 65535"
+  [[ "$image" != *$'\n'* && "$image" != *$'\r'* ]] || die "invalid image reference"
+  install_dir="$(absolute_path "$install_dir")"
+  [[ ! -e "$install_dir/.env" ]] || die "$install_dir already contains a server installation; use upgrade"
+
+  image="${image:-${DEFAULT_IMAGE_REPOSITORY}:${version}}"
+  local runtime_mode="auth" project
+  [[ "$mode" == "no-auth" ]] && runtime_mode="no_auth"
+  project="twing-server-$(date -u +%Y%m%d%H%M%S)-$$"
+
+  pull_image "$image"
+  mkdir -p "$install_dir/data" "$install_dir/data/backups" "$install_dir/secrets"
+  write_compose_file "$install_dir/compose.yaml" "$transport" "$bind" "$port" "$http_port"
+  if [[ "$transport" == "https" ]]; then write_caddyfile "$install_dir/Caddyfile" "$domain"; fi
+  write_server_env "$install_dir/server.env"
+  write_stack_env "$install_dir/.env" "$image" "$runtime_mode" "$transport" "$domain" "$bind" "$port" "$http_port" "$project"
+
+  if ! wait_for_server; then
+    compose logs --no-color >&2 || true
+    die "server failed its startup health check"
+  fi
+
+  echo "twing-server: installed successfully"
+  show_status
+  if [[ "$mode" == "auth" ]]; then
+    echo "twing-server: bootstrap token: $0 bootstrap-token --dir '$install_dir'"
+  else
+    echo "twing-server: no-auth mode trusts every client that can reach the configured server URL"
+  fi
+}
+
+backup_database() {
+  local stamp="$1"
+  backup_name=""
+  if compose exec -T server sh -c 'test -f /data/twing.db'; then
+    backup_name="pre-upgrade-${stamp}.db"
+    compose exec -T server mkdir -p /data/backups
+    compose exec -T server sqlite3 /data/twing.db ".backup /data/backups/$backup_name"
+    echo "twing-server: database backup: $install_dir/data/backups/$backup_name"
+  fi
+}
+
+restore_database() {
+  local old_image="$1" stamp="$2"
+  [[ -n "$backup_name" ]] || return 0
+  docker run --rm -v "$install_dir/data:/data" --entrypoint sh "$old_image" -c '
+    backup="$1"
+    stamp="$2"
+    test -f "/data/backups/$backup" || exit 1
+    if test -f /data/twing.db; then mv /data/twing.db "/data/failed-upgrade-${stamp}.db"; fi
+    rm -f /data/twing.db-wal /data/twing.db-shm
+    cp "/data/backups/$backup" /data/twing.db
+  ' sh "$backup_name" "$stamp"
+}
+
+upgrade_server() {
+  local version="latest" image=""
+  pull=true
+  install_dir="$DEFAULT_INSTALL_DIR"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --version) [[ $# -ge 2 ]] || die "--version needs a value"; version="$2"; shift 2 ;;
+      --image) [[ $# -ge 2 ]] || die "--image needs a value"; image="$2"; shift 2 ;;
+      --dir) [[ $# -ge 2 ]] || die "--dir needs a value"; install_dir="$2"; shift 2 ;;
+      --no-pull) pull=false; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown upgrade option: $1" ;;
+    esac
+  done
+
+  install_dir="$(absolute_path "$install_dir")"
+  local env_file="$install_dir/.env"
+  [[ -f "$env_file" && -f "$install_dir/compose.yaml" ]] || die "no server installation at $install_dir"
+
+  local old_image new_image mode transport domain bind port http_port project stamp
+  old_image="$(read_setting "$env_file" TWING_SERVER_IMAGE)"
+  mode="$(read_setting "$env_file" TWING_AUTH_MODE)"
+  transport="$(read_setting "$env_file" TWING_TRANSPORT)"
+  [[ -n "$transport" ]] || transport="https"
+  domain="$(read_setting "$env_file" TWING_SERVER_DOMAIN)"
+  bind="$(read_setting "$env_file" TWING_BIND_ADDRESS)"
+  port="$(read_setting "$env_file" TWING_PORT)"
+  http_port="$(read_setting "$env_file" TWING_HTTP_PORT)"
+  project="$(read_setting "$env_file" TWING_COMPOSE_PROJECT)"
+  new_image="${image:-${DEFAULT_IMAGE_REPOSITORY}:${version}}"
+  [[ "$new_image" != *$'\n'* && "$new_image" != *$'\r'* ]] || die "invalid image reference"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+  pull_image "$new_image"
+  backup_database "$stamp"
+  write_compose_file "$install_dir/compose.yaml" "$transport" "$bind" "$port" "$http_port"
+  if [[ "$transport" == "https" ]]; then write_caddyfile "$install_dir/Caddyfile" "$domain"; fi
+  write_stack_env "$env_file" "$new_image" "$mode" "$transport" "$domain" "$bind" "$port" "$http_port" "$project"
+
+  if wait_for_server; then
+    echo "twing-server: upgraded $old_image -> $new_image"
+    show_status
+    return 0
+  fi
+
+  echo "twing-server: upgrade failed; restoring $old_image" >&2
+  compose logs --no-color >&2 || true
+  compose down >/dev/null 2>&1 || true
+  restore_database "$old_image" "$stamp" || echo "twing-server: WARNING: automatic database restore failed; backup remains at $install_dir/data/backups/$backup_name" >&2
+  write_stack_env "$env_file" "$old_image" "$mode" "$transport" "$domain" "$bind" "$port" "$http_port" "$project"
+  wait_for_server || die "upgrade and automatic rollback both failed"
+  die "upgrade failed; the previous server and database were restored"
+}
+
+simple_dir_option() {
+  install_dir="$DEFAULT_INSTALL_DIR"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) [[ $# -ge 2 ]] || die "--dir needs a value"; install_dir="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  install_dir="$(absolute_path "$install_dir")"
+  [[ -f "$install_dir/.env" ]] || die "no server installation at $install_dir"
+}
+
+command -v docker >/dev/null 2>&1 || die "docker is required"
+docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
+
+command="${1:-}"
+[[ -n "$command" ]] || { usage; exit 1; }
+shift || true
+
+case "$command" in
+  install) install_server "$@" ;;
+  upgrade) upgrade_server "$@" ;;
+  status) simple_dir_option "$@"; show_status ;;
+  bootstrap-token) simple_dir_option "$@"; compose exec -T server cat /data/bootstrap-token ;;
+  stop) simple_dir_option "$@"; compose down ;;
+  -h|--help|help) usage ;;
+  *) die "unknown command: $command" ;;
+esac

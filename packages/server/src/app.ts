@@ -680,7 +680,7 @@ export function createApp(options: CreateAppOptions = {}) {
 
   // Unauthenticated on purpose: a fresh install with no cached token yet
   // still needs to learn it's out of date, not hit a 401 first.
-  app.get("/v1/version", (c) => c.json({ version }));
+  app.get("/v1/version", (c) => c.json({ version, authMode: noAuth ? "no_auth" : "auth" }));
 
   // §17.10: who am I, and what am I a member of -- what `twing whoami` and
   // `twing login`'s validation step both call.

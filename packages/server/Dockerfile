@@ -22,6 +22,12 @@
 FROM node:22-bookworm AS builder
 WORKDIR /app
 COPY . .
+# npm 12 enforces the root package.json's allowScripts policy. That permits
+# better-sqlite3's required native install while blocking the unused native
+# tree-sitter grammar install (the product loads its grammars as WASM). The
+# older npm bundled in this base image ignores allowScripts; on linux/arm64 it
+# consequently tries and fails to compile tree-sitter-typescript during npm ci.
+RUN npm install -g npm@12
 RUN npm ci
 RUN npm run build
 

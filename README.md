@@ -507,6 +507,28 @@ on twing-cli itself -- most people using twing day to day can stop here.
 
 ## Self-hosting your own coordinator
 
+The supported external install is the versioned Docker image managed by
+`deploy/twing-server`. It keeps SQLite data outside the container, defaults to
+loopback-only exposure, and performs health-checked upgrades with a database
+backup and automatic rollback:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- \
+  --domain twing.example.com --mode auth
+```
+
+The domain must already point at the host and accept inbound ports 80 and 443.
+See [`deploy/SERVER.md`](deploy/SERVER.md) for bootstrap, unattended client
+onboarding, pinned versions, runtime configuration, operation, and local
+lifecycle testing.
+
+For private-network testing by IP and port, the same installer supports an
+explicit unencrypted mode: `--insecure-http --bind 0.0.0.0 --port 8787`.
+Clients then use `http://<private-ip>:8787`; never expose that port outside a
+network you trust.
+
+The source commands below remain useful when developing twing itself.
+
 Two flavors, depending on who needs to be able to reach it.
 
 ### Local, or a small trusted team (`--no-auth`)

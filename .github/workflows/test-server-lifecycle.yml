@@ -1,0 +1,34 @@
+name: test-server-lifecycle
+
+on:
+  pull_request:
+    paths:
+      - "deploy/twing-server"
+      - "deploy/install-server.sh"
+      - "deploy/test-server-lifecycle.sh"
+      - "packages/server/**"
+      - "packages/core/**"
+      - "package*.json"
+      - ".github/workflows/test-server-lifecycle.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/twing-server"
+      - "deploy/install-server.sh"
+      - "deploy/test-server-lifecycle.sh"
+      - "packages/server/**"
+      - "packages/core/**"
+      - "package*.json"
+      - ".github/workflows/test-server-lifecycle.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise auth/no-auth install and upgrade
+        run: bash deploy/test-server-lifecycle.sh

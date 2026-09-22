@@ -54,7 +54,8 @@ export interface InitOptions {
   /** §17 Phase 4: this coordinator runs with no identity verification at
    * all -- explicit and sticky (cached on the server's `ServerAuth` entry
    * so a later plain `twing init` against the same server doesn't need to
-   * repeat it), never inferred/probed for. Mutually exclusive with
+   * repeat it). Zero-touch setup also discovers this from the coordinator's
+   * public version endpoint before attempting GitHub auth. Mutually exclusive with
    * `--invite` in practice (a no_auth server never issues PATs to redeem
    * an invite into) but not cross-validated here -- `--invite` would just
    * mint a token nothing on the server side ever checks. */
@@ -175,16 +176,19 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     }
   }
 
-  // §17 Phase 4: --no-auth is explicit and sticky -- cache it on this
-  // server's ServerAuth entry now, before anything below tries to
-  // authenticate, so a later plain `twing init` (no flag) against the same
-  // server picks it back up automatically instead of erroring on "no
-  // token cached".
-  if (options.noAuth) {
+  // §17 Phase 4: --no-auth is explicit and sticky. A repo bootstrap cannot
+  // add flags to the `init --unattended` command it invokes, so a fresh
+  // machine also learns no_auth from the server's unauthenticated version
+  // endpoint before trying GitHub auth. That endpoint is already required for
+  // version recovery; this only trusts it for the deliberately opt-in
+  // private-network unattended path.
+  const configuredNoAuth = getServerAuth(readConfig(), serverUrl)?.noAuth === true;
+  const discoveredNoAuth = options.unattended && !configuredNoAuth && await isNoAuthCoordinator(serverUrl);
+  if (options.noAuth || discoveredNoAuth) {
     const config = readConfig();
     if (!getServerAuth(config, serverUrl)?.noAuth) {
       writeConfig(setServerAuth(config, serverUrl, { ...getServerAuth(config, serverUrl), noAuth: true }));
-      console.log("twing init: cached --no-auth for this server -- every request will carry a self-declared developer id instead of a token");
+      console.log("twing init: cached no-auth mode for this server -- every request will carry a self-declared developer id instead of a token");
     }
   }
 
@@ -496,6 +500,17 @@ async function resolveAuthToken(repoRoot: string, serverUrl: string, options: In
     }
   }
   return { token: await requireAuth(serverUrl, "twing init"), adminRole: false };
+}
+
+async function isNoAuthCoordinator(serverUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${serverUrl}/v1/version`);
+    if (!res.ok) return false;
+    const body = await res.json() as { authMode?: unknown };
+    return body.authMode === "no_auth";
+  } catch {
+    return false;
+  }
 }
 
 /** Removes the bootstrap's own `~/.twing/lib` copy of the CLI when this
