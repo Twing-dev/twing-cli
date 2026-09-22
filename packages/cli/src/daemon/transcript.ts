@@ -35,7 +35,7 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { captureEnabled, computeProjectId, filterTranscriptEntry, findRepoRoot, loadManifestFromFile, reposForEntry, twingConfigPath, type CapturedRecord, type RepoResolver, type TranscriptSourceDescriptor } from "@twing/core";
-import { redact } from "./redact.js";
+import { redact } from "@twing/core";
 import { resolveTranscriptSource, type Cursor, type TranscriptSource } from "./transcript-source.js";
 // Imported for its side effect: registering `opencode-sqlite` in the source
 // registry. Without this the descriptor an OpenCode session sends resolves to

@@ -6,6 +6,7 @@ export * from "./symbol-id.js";
 export * from "./manifest.js";
 export * from "./design-scope.js";
 export * from "./transcript-filter.js";
+export * from "./redact.js";
 export * from "./repo-root.js";
 export * from "./identity.js";
 export * from "./config.js";

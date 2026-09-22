@@ -14,6 +14,7 @@ import { Store } from "./store.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
 import { AlignmentThreadStore } from "./alignment-store.js";
 import { CaptureStore } from "./capture-store.js";
+import { DesignChatStore } from "./design-chat-store.js";
 
 function sha256Hex(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -74,6 +75,7 @@ function freshApp(
   // keep the DB in memory). Without this every route test would append to
   // the developer's actual server data.
   const captures = new CaptureStore(db, { capturesDir: path.join(dataDir, "captures") });
+  const designChats = new DesignChatStore(db);
   const app = createApp({
     db,
     identities,
@@ -82,6 +84,7 @@ function freshApp(
     constraints,
     alignmentThreads,
     captures,
+    designChats,
     corsOrigins: options.corsOrigins,
     version: options.version,
     publicProjectIds: options.publicProjectIds,
@@ -89,7 +92,7 @@ function freshApp(
     noAuth: options.noAuth,
     monitorUrl: options.monitorUrl,
   });
-  return { app, dataDir, identities, store, designs, constraints, alignmentThreads, captures };
+  return { app, dataDir, identities, store, designs, constraints, alignmentThreads, captures, designChats };
 }
 
 function bootstrapToken(dataDir: string): string {
@@ -6672,6 +6675,361 @@ test("answer pass: still answers normally when nothing has been escalated or res
       await waitFor(() => pending.length === 2, 2000);
       pending[1].release();
       await waitFor(async () => (await replies()).some((r) => r.authorKind === "agent"), 2000);
+    }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Design review chat (phase 2, 2026-09)
+// ---------------------------------------------------------------------------
+//
+// A reviewer's private conversation with a design, grounded in the session
+// that produced it. Two properties are load-bearing: one reviewer can never
+// reach another's thread, and no route ever returns captured text.
+
+/** Uploads a session capture the way the daemon does, so a chat has
+ * something real to be grounded in. */
+function seedCapture(captures: ReturnType<typeof freshApp>["captures"], developerId: string, sessionId: string, turns: string[], paths: string[] = []) {
+  const records: Record<string, unknown>[] = [{ type: "session", sessionId }];
+  if (paths.length > 0) records.push({ type: "paths", paths });
+  for (const text of turns) records.push({ type: "turn", role: "assistant", text });
+  captures.append({ sessionId, developerId, records, projectIds: ["p1"] });
+}
+
+test("GET /v1/designs/:id/chat: a reviewer who has asked nothing gets an empty conversation, not a 404", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+
+  const res = await app.request(`/v1/designs/${design.id}/chat`, { headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+  assert.deepEqual((await res.json()) as unknown, { messages: [] });
+});
+
+test("POST /v1/designs/:id/chat: answers synchronously and records both turns", async () => {
+  const { app, dataDir, designs, captures } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  seedCapture(captures, admin.developerId, design.sessionId, ["I tried 10s first but the gateway gave up at 31s"], ["/abs/repo/src/net/retry.ts"]);
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      async () => new Response(JSON.stringify({ choices: [{ message: { content: "Because the upstream gateway times out at 31s." } }] }), { status: 200 }),
+      async () => {
+        const res = await app.request(`/v1/designs/${design.id}/chat`, {
+          method: "POST",
+          headers: { ...bearer(admin.token), "content-type": "application/json" },
+          body: JSON.stringify({ message: "why 30s?" }),
+        });
+        assert.equal(res.status, 200);
+        const body = (await res.json()) as { answer: string; provenance: string; messages: { role: string }[] };
+        // A chat is someone waiting at a prompt -- the answer comes back in
+        // the response, not on a later poll the way a comment's does.
+        assert.match(body.answer, /times out at 31s/);
+        assert.deepEqual(
+          body.messages.map((m) => m.role),
+          ["reviewer", "agent"],
+        );
+        assert.match(body.provenance, /Grounded in 1 of 1 turns/);
+      },
+    ),
+  );
+});
+
+// The reason capture is worth reading at all: the design says *what*, the
+// session says *why*.
+test("POST /v1/designs/:id/chat: the session transcript reaches the model", async () => {
+  const { app, dataDir, designs, captures } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  seedCapture(captures, admin.developerId, design.sessionId, ["a distinctive sentence from the session"]);
+
+  let sent = "";
+  await withBedrockEnv(() =>
+    withMockFetch(async (_input, init) => {
+      sent = typeof init?.body === "string" ? init.body : "";
+      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+    }, async () => {
+      await app.request(`/v1/designs/${design.id}/chat`, {
+        method: "POST",
+        headers: { ...bearer(admin.token), "content-type": "application/json" },
+        body: JSON.stringify({ message: "why?" }),
+      });
+    }),
+  );
+  assert.match(sent, /a distinctive sentence from the session/);
+});
+
+// The privacy model in one test: grounded answers, ungrounded wire.
+test("POST /v1/designs/:id/chat: no captured text crosses the wire, only counts and a session prefix", async () => {
+  const { app, dataDir, designs, captures } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  seedCapture(captures, admin.developerId, design.sessionId, ["a distinctive sentence from the session"]);
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      async () => new Response(JSON.stringify({ choices: [{ message: { content: "an answer with none of it quoted" } }] }), { status: 200 }),
+      async () => {
+        const res = await app.request(`/v1/designs/${design.id}/chat`, {
+          method: "POST",
+          headers: { ...bearer(admin.token), "content-type": "application/json" },
+          body: JSON.stringify({ message: "why?" }),
+        });
+        const raw = JSON.stringify(await res.json());
+        assert.ok(!raw.includes("a distinctive sentence from the session"), "the transcript must not leave the server");
+        assert.match(raw, /Grounded in 1 of 1 turns/);
+      },
+    ),
+  );
+});
+
+test("design chat: a repo that never opted into capture says so rather than pretending", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  // No seedCapture -- this design's session was never captured.
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      async () => new Response(JSON.stringify({ choices: [{ message: { content: "answered from the design" } }] }), { status: 200 }),
+      async () => {
+        const res = await app.request(`/v1/designs/${design.id}/chat`, {
+          method: "POST",
+          headers: { ...bearer(admin.token), "content-type": "application/json" },
+          body: JSON.stringify({ message: "why?" }),
+        });
+        const body = (await res.json()) as { provenance: string };
+        assert.match(body.provenance, /has not opted into session capture/);
+      },
+    ),
+  );
+});
+
+// Private is enforced by shape: every route resolves the thread through the
+// caller's own identity, so there is no id with which to address another
+// person's.
+test("design chat: one reviewer's thread is invisible to another, and to an admin", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+
+  // A second member of the same project.
+  const otherPat = "bobs-pat";
+  const invite = identities.createInvite({ kind: "project", projectId: "p1" }, "member", "bob@example.com", admin.developerId);
+  await app.request(`/v1/invites/${invite.code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex(otherPat), label: "bob@example.com" }),
+  });
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      async () => new Response(JSON.stringify({ choices: [{ message: { content: "answer" } }] }), { status: 200 }),
+      async () => {
+        await app.request(`/v1/designs/${design.id}/chat`, {
+          method: "POST",
+          headers: { ...bearer(otherPat), "content-type": "application/json" },
+          body: JSON.stringify({ message: "bob's half-formed private thought" }),
+        });
+      },
+    ),
+  );
+
+  // The admin -- who also owns the design -- sees their own empty thread.
+  const adminView = await app.request(`/v1/designs/${design.id}/chat`, { headers: bearer(admin.token) });
+  assert.deepEqual((await adminView.json()) as unknown, { messages: [] }, "no admin override, deliberately");
+
+  const bobView = await app.request(`/v1/designs/${design.id}/chat`, { headers: bearer(otherPat) });
+  const bob = (await bobView.json()) as { messages: { message: string }[] };
+  assert.equal(bob.messages.length, 2);
+  assert.match(bob.messages[0].message, /half-formed private thought/);
+
+  // And it is not reachable through the project's activity feed either.
+  const feed = await app.request("/v1/activity?projectId=p1&limit=200", { headers: bearer(admin.token) });
+  const raw = JSON.stringify(await feed.json());
+  assert.ok(!raw.includes("half-formed private thought"));
+});
+
+test("design chat: a follow-up continues the same thread rather than starting a new one", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      async () => new Response(JSON.stringify({ choices: [{ message: { content: "answer" } }] }), { status: 200 }),
+      async () => {
+        for (const message of ["why 30s?", "and which upstream?"]) {
+          await app.request(`/v1/designs/${design.id}/chat`, {
+            method: "POST",
+            headers: { ...bearer(admin.token), "content-type": "application/json" },
+            body: JSON.stringify({ message }),
+          });
+        }
+      },
+    ),
+  );
+
+  const res = await app.request(`/v1/designs/${design.id}/chat`, { headers: bearer(admin.token) });
+  const body = (await res.json()) as { messages: { role: string }[] };
+  assert.deepEqual(
+    body.messages.map((m) => m.role),
+    ["reviewer", "agent", "reviewer", "agent"],
+  );
+});
+
+test("design chat: an unreachable model answers with a sentence rather than hanging or throwing", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      async () => {
+        throw new Error("network down");
+      },
+      async () => {
+        const res = await app.request(`/v1/designs/${design.id}/chat`, {
+          method: "POST",
+          headers: { ...bearer(admin.token), "content-type": "application/json" },
+          body: JSON.stringify({ message: "why?" }),
+        });
+        assert.equal(res.status, 200);
+        const body = (await res.json()) as { answer: string };
+        assert.match(body.answer, /could not reach a model/);
+        assert.match(body.answer, /leave it as a comment/, "and points at the surface that does reach the developer");
+      },
+    ),
+  );
+});
+
+test("design chat: an empty message is rejected, and an unknown design is a 404", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+
+  const empty = await app.request(`/v1/designs/${design.id}/chat`, {
+    method: "POST",
+    headers: { ...bearer(admin.token), "content-type": "application/json" },
+    body: JSON.stringify({ message: "   " }),
+  });
+  assert.equal(empty.status, 400);
+
+  const missing = await app.request("/v1/designs/nope/chat", { headers: bearer(admin.token) });
+  assert.equal(missing.status, 404);
+});
+
+test("design chat: the public viewer cannot read or write one", async () => {
+  const { app, dataDir, designs } = freshApp({ publicProjectIds: ["p1"] });
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+
+  // A synthetic unauthenticated identity has no thread of its own, and a
+  // chat attributed to nobody is not a thing this should create.
+  assert.equal((await app.request(`/v1/designs/${design.id}/chat`)).status, 403);
+  assert.equal(
+    (
+      await app.request(`/v1/designs/${design.id}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "hi" }),
+      })
+    ).status,
+    401,
+  );
+});
+
+// Found in review: the composer disables itself while a question is in
+// flight, but a second browser tab is not bound by that. Two concurrent calls
+// on one thread used to append in completion order, so a corrected question
+// could be answered first and then contradicted by the answer to the question
+// it replaced.
+test("design chat: overlapping questions on one thread answer in order, never out of it", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const { impl, pending } = deferredAnswers();
+
+  await withBedrockEnv(() =>
+    withMockFetch(impl, async () => {
+      const ask = (message: string) =>
+        app.request(`/v1/designs/${design.id}/chat`, {
+          method: "POST",
+          headers: { ...bearer(admin.token), "content-type": "application/json" },
+          body: JSON.stringify({ message }),
+        });
+
+      // Both tabs fire before either resolves.
+      const first = ask("why 30s?");
+      const second = ask("sorry -- which upstream?");
+
+      await waitFor(() => pending.length === 1, 2000);
+      // Serialized: the second question must not have started its own call.
+      assert.equal(pending.length, 1, "one model call at a time per thread");
+      pending[0].release();
+
+      await waitFor(() => pending.length === 2, 2000);
+      pending[1].release();
+      await Promise.all([first, second]);
+
+      const res = await app.request(`/v1/designs/${design.id}/chat`, { headers: bearer(admin.token) });
+      const body = (await res.json()) as { messages: { role: string; message: string }[] };
+      // Strict alternation is the property: a question, its answer, the next
+      // question, its answer. Out-of-order completion would break it.
+      assert.deepEqual(
+        body.messages.map((m) => m.role),
+        ["reviewer", "agent", "reviewer", "agent"],
+      );
+      assert.equal(body.messages[0].message, "why 30s?");
+      assert.equal(body.messages[2].message, "sorry -- which upstream?");
+      // `deferredAnswers` emits the comment answerer's JSON verdict shape;
+      // the chat answerer returns prose verbatim, so match the payload
+      // rather than the whole string. What is being asserted is which
+      // model call landed where.
+      assert.match(body.messages[1].message, /answer-1/, "the first answer belongs to the first question");
+      assert.match(body.messages[3].message, /answer-2/);
+    }),
+  );
+});
+
+// A rejected predecessor must not poison every later question on the thread.
+test("design chat: a failed question does not wedge the thread for the next one", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+
+  let call = 0;
+  const impl = (async () => {
+    call += 1;
+    if (call <= 2) throw new Error("model unreachable"); // both attempts of the first pass
+    return new Response(JSON.stringify({ choices: [{ message: { content: "recovered" } }] }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  await withBedrockEnv(() =>
+    withMockFetch(impl, async () => {
+      const ask = (message: string) =>
+        app.request(`/v1/designs/${design.id}/chat`, {
+          method: "POST",
+          headers: { ...bearer(admin.token), "content-type": "application/json" },
+          body: JSON.stringify({ message }),
+        });
+      await ask("first");
+      const second = await ask("second");
+      const body = (await second.json()) as { answer: string };
+      assert.equal(body.answer, "recovered");
     }),
   );
 });

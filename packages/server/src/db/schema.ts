@@ -469,6 +469,52 @@ export const designComments = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// Design review chats -- current-state table; messages live in activityEvents
+// ---------------------------------------------------------------------------
+
+/**
+ * One reviewer's private conversation with a registered design (design review
+ * phase 2, 2026-09).
+ *
+ * **Private is the whole point, and it is what distinguishes this from
+ * `designComments` next door.** A comment is a question asked *of the
+ * project*: everyone sees it, the agent answers in the open, and a reviewer
+ * can escalate it to the developer. A chat is a reviewer thinking -- "wait,
+ * does this handle the retry case?" -- grounded in the session that produced
+ * the design. Those are different acts, and forcing them through one surface
+ * would mean either publishing everybody's half-formed questions or hiding
+ * the review feedback that is supposed to be shared.
+ *
+ * So: one row per `(designId, reviewerId)`, and only that reviewer ever reads
+ * it. A project admin can see that a thread exists -- it is their project --
+ * but not its contents; there is no route that returns another person's
+ * messages, and none should be added.
+ *
+ * Messages are `activity_events` rows (`design_chat_message`, keyed on this
+ * row's id), the same current-state-plus-append-only-log split
+ * `alignmentThreads` and `designComments` both use.
+ */
+export const designChats = sqliteTable(
+  "design_chats",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    designId: text("design_id").notNull(),
+    /** The reviewer this fork belongs to, resolved from their token. The
+     * only identity that may ever read it. */
+    reviewerId: text("reviewer_id").notNull(),
+    createdAt: integer("created_at").notNull(),
+    lastActivityAt: integer("last_activity_at").notNull(),
+  },
+  (t) => [
+    // One fork per reviewer per design: a second question continues the same
+    // conversation rather than starting a parallel one.
+    uniqueIndex("design_chats_design_reviewer").on(t.designId, t.reviewerId),
+    index("design_chats_project_id_idx").on(t.projectId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Design roadmap -- reserved stub only, no store class/routes/CLI yet
 // ---------------------------------------------------------------------------
 

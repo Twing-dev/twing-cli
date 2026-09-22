@@ -44,7 +44,9 @@ import { enrichReviews } from "./review-enrich.js";
 import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind, type AlignmentThread } from "./alignment-store.js";
 import { CaptureStore } from "./capture-store.js";
 import { DesignCommentStore } from "./design-comment-store.js";
-import { answerDesignComment } from "./design-comment-answer.js";
+import { answerDesignComment, answerDesignChat, groundingBudgetFor } from "./design-comment-answer.js";
+import { DesignChatStore } from "./design-chat-store.js";
+import { assembleDesignContext, describeProvenance, designScopePaths, type AssembledContext } from "./design-context.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
 import { fetchRepoPermissions, fetchGithubUser, type GithubUser, type GithubRepoPermissions } from "./github-client.js";
@@ -228,6 +230,8 @@ export interface CreateAppOptions {
   /** Design review comment store (2026-09). Injected in tests for the same
    * reason every other store here is. */
   designComments?: DesignCommentStore;
+  /** Design review chat store (phase 2, 2026-09). */
+  designChats?: DesignChatStore;
   /** Where this coordinator's twing-monitor is deployed
    * (`TWING_MONITOR_URL`, wired in main.ts), published on `/v1/version` so
    * clients can mint a design's review link without configuring it
@@ -575,6 +579,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const alignmentThreads = options.alignmentThreads ?? new AlignmentThreadStore(db);
   const captures = options.captures ?? new CaptureStore(db, options.dataDir ? { capturesDir: `${options.dataDir}/captures` } : {});
   const designComments = options.designComments ?? new DesignCommentStore(db);
+  const designChats = options.designChats ?? new DesignChatStore(db);
   const activityLog = new DrizzleActivityLog(db);
   // Tightening alignment threads item 4 (2026-08-27): wired here, after
   // both `designs` and `alignmentThreads` locals exist, rather than only
@@ -1653,7 +1658,63 @@ export function createApp(options: CreateAppOptions = {}) {
    * reviewer's escalation) to move on. A durable lock would have to be
    * reconciled on boot for no benefit this path can measure.
    */
+  /**
+   * A design plus whatever survives of the session that produced it (design
+   * review phase 2, 2026-09).
+   *
+   * The one place the capture store is read. Both surfaces that ask a model
+   * about a design go through here -- the public comment answerer and a
+   * reviewer's private chat -- so neither can end up grounded differently
+   * from the other, and there is one place to look when asking what a model
+   * was shown.
+   *
+   * Never throws: an unreadable capture degrades to design-only grounding,
+   * which `assembleDesignContext` states explicitly in the prompt rather
+   * than passing off as a whole conversation. Losing grounding costs a
+   * thinner answer; failing the request costs the reviewer their question.
+   */
+  function groundDesign(design: DesignStatement, budgetChars: number): AssembledContext {
+    let slice;
+    try {
+      slice = captures.read(design.developerId, design.sessionId, { focusPaths: designScopePaths(design) });
+    } catch (err) {
+      console.warn(`twing serve: capture read failed for design ${design.id}: ${err instanceof Error ? err.message : err}`);
+    }
+    // `budgetChars` is what is left after the caller reserved room for its
+    // system prompt, the thread so far and the live question -- so the whole
+    // request fits one budget instead of each part respecting its own.
+    return assembleDesignContext(design, slice, { budgetChars });
+  }
+
   const answerPassInFlight = new Map<string, { superseded: boolean }>();
+
+  /**
+   * One chat request at a time per thread.
+   *
+   * In-memory, so it does not survive a restart and does not coordinate
+   * across processes -- which is the right scope: this guards a single
+   * reviewer's own overlapping tabs, not a distributed race, and a restart
+   * has already failed whatever was in flight.
+   *
+   * The chain is dropped once it drains so the map does not grow for the
+   * life of the process.
+   */
+  const chatQueues = new Map<string, Promise<unknown>>();
+
+  function chatQueue<T>(chatId: string, run: () => Promise<T>): Promise<T> {
+    const previous = chatQueues.get(chatId) ?? Promise.resolve();
+    // `catch` before chaining: a rejected predecessor must not poison every
+    // later question on the same thread.
+    const next = previous.then(
+      () => run(),
+      () => run(),
+    );
+    chatQueues.set(chatId, next);
+    void next.catch(() => {}).finally(() => {
+      if (chatQueues.get(chatId) === next) chatQueues.delete(chatId);
+    });
+    return next;
+  }
 
   /** Whether the agent is still allowed to speak on this comment: it exists,
    * and no human has taken it over. The single rule behind both guards in
@@ -1701,7 +1762,10 @@ export function createApp(options: CreateAppOptions = {}) {
         const design = designs.get(comment.designId);
         if (!design) return;
 
-        const result = await answerDesignComment(design, comment, designComments.replies(commentId), { model: commentAnswerModel });
+        const replies = designComments.replies(commentId);
+        const historyChars = comment.body.length + replies.reduce((n, r) => n + r.message.length, 0);
+        const grounding = groundDesign(design, groundingBudgetFor(comment.body, historyChars));
+        const result = await answerDesignComment(grounding.context, design, comment, replies, { model: commentAnswerModel });
 
         // Re-checked after the await: the comment may have been escalated,
         // resolved or deleted during the model call.
@@ -1932,6 +1996,83 @@ export function createApp(options: CreateAppOptions = {}) {
       url: buildDesignReviewUrl(monitorUrl, pending.comment.projectId, pending.comment.designId),
     }));
     return c.json({ items });
+  });
+
+  // -------------------------------------------------------------------------
+  // Design review chat (phase 2, 2026-09)
+  //
+  // A reviewer's private conversation with a design, grounded in the session
+  // that produced it. Private is the point, and it is enforced by shape
+  // rather than by a check that could be forgotten: every route here
+  // resolves the thread through `(designId, identity.developerId)`, so there
+  // is no way to address somebody else's. There is deliberately no admin
+  // override and no thread-id route.
+  //
+  // The assembled transcript never crosses the wire. These routes return the
+  // answer and a provenance line -- counts and a session prefix -- and
+  // nothing else.
+  // -------------------------------------------------------------------------
+
+  /** A reviewer's own thread on a design, if they have started one. Returns
+   * `{ messages: [] }` rather than 404 for "not started yet", since an empty
+   * conversation is the normal first state, not a missing resource. */
+  app.get("/v1/designs/:id/chat", (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    if (!design) return c.json({ error: "no such design" }, 404);
+    // Read access to the *design* is the gate; the thread itself is then
+    // addressed by this caller's own identity, so it can only ever be theirs.
+    if (!canCommentOnDesign(identity, design.projectId)) return c.json({ error: "not a member of this project" }, 403);
+
+    const chat = designChats.find(design.id, identity.developerId);
+    return c.json({ messages: chat ? designChats.messages(chat.id) : [] });
+  });
+
+  /**
+   * Ask this design a question.
+   *
+   * Answered synchronously, unlike a comment: a chat is someone waiting at a
+   * prompt for a reply, so there is nothing to gain from returning early and
+   * making them poll. A comment is different -- it is left for later, and
+   * blocking a reviewer on a model call to file one would be strange.
+   */
+  app.post("/v1/designs/:id/chat", async (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    if (!design) return c.json({ error: "no such design" }, 404);
+    if (!canCommentOnDesign(identity, design.projectId)) return c.json({ error: "not a member of this project" }, 403);
+
+    const body = await c.req.json<{ message?: unknown }>().catch(() => null);
+    const message = typeof body?.message === "string" ? body.message.trim() : "";
+    if (message.length === 0) return c.json({ error: "expected { message: string }" }, 400);
+
+    const chat = designChats.findOrCreate({ projectId: design.projectId, designId: design.id, reviewerId: identity.developerId });
+
+    // Serialized per thread. The composer disables itself while a question
+    // is in flight, but a second browser tab is not bound by that -- and two
+    // concurrent calls on one thread append in completion order, so a
+    // corrected question could be answered first and then contradicted by
+    // the answer to the question it replaced.
+    //
+    // Serialized rather than coalesced, unlike the comment pass: every chat
+    // request owes *its caller* an answer in the response, so there is no
+    // request whose result can simply be dropped. The queued one answers
+    // against the thread as it stands when it runs, which by then includes
+    // the earlier exchange.
+    return chatQueue(chat.id, async () => {
+      designChats.append(chat.id, { role: "reviewer", message, ts: Date.now() });
+
+      const history = designChats.messages(chat.id);
+      const historyChars = history.reduce((n, m) => n + m.message.length, 0);
+      const grounding = groundDesign(design, groundingBudgetFor(message, historyChars));
+      const answer = await answerDesignChat(grounding.context, history, { model: commentAnswerModel });
+      const provenance = describeProvenance(grounding.provenance);
+
+      designChats.append(chat.id, { role: "agent", message: answer, ts: Date.now(), provenance });
+      // `provenance` is a sentence of counts and a session prefix. The
+      // transcript it describes stays on this side.
+      return c.json({ answer, provenance, messages: designChats.messages(chat.id) });
+    });
   });
 
   // Multi-repo ExitPlanMode fallback (2026-08-18): extraction only, no

@@ -1,10 +1,29 @@
 /**
- * Client-side redaction, applied to every captured turn before anything is
- * written to disk. This runs on conversation text only -- tool inputs and
- * results are already dropped whole by `@twing/core`'s transcript filter --
- * but conversation text is exactly where a pasted credential ends up, and
- * transcripts in this repo have really contained PAT values and
- * `bedrock.env` contents.
+ * Redaction, applied to every captured turn before anything is written to
+ * disk -- and again on the server before any captured text reaches a model.
+ * This runs on conversation text only -- tool inputs and results are already
+ * dropped whole by the transcript filter next door -- but conversation text
+ * is exactly where a pasted credential ends up, and transcripts in this repo
+ * have really contained PAT values and `bedrock.env` contents.
+ *
+ * **Lives in core, and is run twice, on purpose** (design review phase 2,
+ * 2026-09). It was client-only while capture was a write-only sink nobody
+ * read: a miss was inert, sitting in a blob with no consumer. It stopped
+ * being inert the moment captured turns started grounding review answers
+ * that a whole project reads. So `design-context.ts` re-runs this at read
+ * time, which buys three things a single client-side pass cannot:
+ *
+ *  - **Captures already on disk** were scrubbed by whatever version of this
+ *    file was current when they were written. Re-running means an
+ *    improvement here protects every capture ever taken, not just future
+ *    ones.
+ *  - **`POST /v1/captures` accepts arbitrary records** from any
+ *    authenticated client and does no scrubbing of its own. A client that
+ *    skips redaction -- an older CLI, a hand-rolled request -- can put
+ *    anything in the store today.
+ *  - This is explicitly a **phase-1 minimum** (see below), so a second pass
+ *    at the point of disclosure is worth more than it would be if this were
+ *    a finished job.
  *
  * Four layers, in the order they run. Prior art (entire.io) ships nine, so
  * this is deliberately named as a phase-1 minimum rather than a finished

@@ -15,7 +15,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { and, eq, gt, lt, asc, desc, inArray } from "drizzle-orm";
+import { and, eq, gt, lt, asc, desc, inArray, notInArray } from "drizzle-orm";
 import type { Db } from "./db/client.js";
 import { activityEvents } from "./db/schema.js";
 
@@ -135,7 +135,34 @@ export type ActivityEventKind =
    * the escalation. Stops the session banner repeating, and is deliberately
    * *not* the same as resolving -- see `designComments.acknowledgedAt`. */
   | "design_comment_acknowledged"
-  | "design_comment_resolved";
+  | "design_comment_resolved"
+  /** Design review phase 2 (2026-09): one turn in a reviewer's private chat
+   * with a design. `relatedId` is the chat row's id, so
+   * `eventsForRelatedId` reads the conversation back the same way it reads
+   * a comment's replies.
+   *
+   * Unlike every other event here, these are **not** project-readable
+   * history: a chat belongs to one reviewer, and the only path that returns
+   * these rows checks that the caller owns the thread. The project activity
+   * feed filters them out -- see `eventsForProjectPage`'s kind allowlist. */
+  | "design_chat_message";
+
+/**
+ * Event kinds that are **never** part of a project's shared history, however
+ * a caller asks for them.
+ *
+ * Everything else in this table is a record of something that happened to
+ * the project and is readable by its members, which is the whole design of
+ * the activity log. A `design_chat_message` is the exception: it belongs to
+ * one reviewer, and the only path that may return it is the one that checks
+ * they own the thread (`DesignChatStore.messages`, which reads by
+ * `relatedId` and is called behind an ownership check).
+ *
+ * A kind added here becomes invisible to `eventsForProjectPage` and so to
+ * `GET /v1/activity`. Adding one is a deliberate act; the log's default is
+ * still that a project can see its own history.
+ */
+const PRIVATE_EVENT_KINDS: readonly ActivityEventKind[] = ["design_chat_message"];
 
 export interface ActivityEvent {
   id: string;
@@ -245,7 +272,14 @@ export class DrizzleActivityLog implements ActivityLogWriter {
     options: { before?: number; limit?: number; kinds?: ActivityEventKind[]; developerId?: string; relatedId?: string } = {},
   ): { items: ActivityEvent[]; nextBefore?: number } {
     const limit = Math.min(options.limit ?? 50, 200);
-    const conditions = [eq(activityEvents.projectId, projectId)];
+    // Excluded here rather than in the route, and unconditionally rather
+    // than by asking callers to filter: `kinds` and `relatedId` below are
+    // *caller-supplied*, so a project feed with no `?kind=` returns
+    // everything, and `?relatedId=<chatId>` reads one thread directly. A
+    // reviewer's private chat with a design must not be reachable either
+    // way, and putting the rule at the store means a future route cannot
+    // reintroduce the hole by forgetting about it.
+    const conditions = [eq(activityEvents.projectId, projectId), notInArray(activityEvents.kind, [...PRIVATE_EVENT_KINDS])];
     if (options.before !== undefined) conditions.push(lt(activityEvents.ts, options.before));
     if (options.kinds && options.kinds.length > 0) conditions.push(inArray(activityEvents.kind, options.kinds));
     if (options.developerId) conditions.push(eq(activityEvents.developerId, options.developerId));

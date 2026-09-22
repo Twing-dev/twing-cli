@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { DesignStatement, DesignComment, DesignCommentReply } from "@twing/core";
-import { answerDesignComment, buildCommentAnswerContext } from "./design-comment-answer.js";
+import { answerDesignComment, answerDesignChat, buildCommentAnswerContext, groundingBudgetFor } from "./design-comment-answer.js";
+
+/** Stands in for whatever `assembleDesignContext` produced. This module no
+ * longer renders the design or its session -- that moved to
+ * `design-context.ts` (and is tested there); what is left here is the comment
+ * thread and which turn is the live question. */
+const GROUNDING = "DESIGN SUMMARY:\nAdd a retry budget to the HTTP client";
 
 function withMockFetch<T>(impl: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
@@ -62,38 +68,25 @@ const comment: DesignComment = {
 
 // -- buildCommentAnswerContext ---------------------------------------------
 
-test("buildCommentAnswerContext: structured changes supersede the derived path lists", () => {
-  const context = buildCommentAnswerContext(design, comment, []);
-  assert.match(context, /DECLARED CHANGES:/);
-  assert.match(context, /modify src\/net\/retry\.ts::RetryPolicy\.backoff: cap exponential growth at 30s/);
-  // `creates`/`touches` are *derived* from `changes` (core's deriveScope), so
-  // printing both would spend the budget saying the same thing twice.
-  assert.doesNotMatch(context, /^TOUCHES:/m);
-});
 
-test("buildCommentAnswerContext: a design with no structured changes falls back to the path lists", () => {
-  const context = buildCommentAnswerContext({ ...design, changes: undefined }, comment, []);
-  assert.match(context, /TOUCHES: src\/net\/retry\.ts/);
-  assert.doesNotMatch(context, /DECLARED CHANGES:/);
-});
 
 test("buildCommentAnswerContext: an anchored comment names the specific change it is about", () => {
-  const context = buildCommentAnswerContext(design, { ...comment, targetChangeId: "c1" }, []);
+  const context = buildCommentAnswerContext(GROUNDING, { ...comment, targetChangeId: "c1" }, [], design);
   assert.match(context, /THE REVIEWER IS ASKING ABOUT THIS SPECIFIC CHANGE:/);
 });
 
 // An amendment can drop the change a comment was anchored to. Losing the
 // anchor must never lose the question.
 test("buildCommentAnswerContext: an unresolvable anchor still shows the comment, just unanchored", () => {
-  const context = buildCommentAnswerContext(design, { ...comment, targetChangeId: "gone" }, []);
+  const context = buildCommentAnswerContext(GROUNDING, { ...comment, targetChangeId: "gone" }, [], design);
   assert.doesNotMatch(context, /THE REVIEWER IS ASKING ABOUT THIS SPECIFIC CHANGE:/);
   assert.match(context, /why 30s and not 10s\?/);
 });
 
 test("buildCommentAnswerContext: with no replies, the opening comment is the live question", () => {
-  const context = buildCommentAnswerContext(design, comment, []);
+  const context = buildCommentAnswerContext(GROUNDING, comment, [], design);
   assert.match(context, /THE REVIEWER IS NOW ASKING:\nwhy 30s and not 10s\?/);
-  assert.doesNotMatch(context, /CONVERSATION SO FAR:/);
+  assert.doesNotMatch(context, /COMMENT THREAD SO FAR:/);
 });
 
 // The question to answer is the latest human turn, not the one that opened
@@ -106,10 +99,10 @@ test("buildCommentAnswerContext: a follow-up becomes the live question, with eve
     { commentId: "cm1", authorKind: "agent", message: "it matches the upstream timeout", ts: 1 },
     { commentId: "cm1", authorKind: "human", authorId: "dev@example.com", message: "which upstream?", ts: 2 },
   ];
-  const context = buildCommentAnswerContext(design, comment, replies);
+  const context = buildCommentAnswerContext(GROUNDING, comment, replies, design);
 
   assert.match(context, /THE REVIEWER IS NOW ASKING:\nwhich upstream\?/);
-  assert.match(context, /CONVERSATION SO FAR:/);
+  assert.match(context, /COMMENT THREAD SO FAR:/, "labelled as the comment thread, not confusable with the session transcript above it");
   assert.match(context, /REVIEWER: why 30s and not 10s\?/, "the opening comment becomes history");
   assert.match(context, /AGENT: it matches the upstream timeout/);
   // The live question must appear once, as the question -- not also inside
@@ -122,7 +115,7 @@ test("buildCommentAnswerContext: a trailing agent reply doesn't displace the rev
     { commentId: "cm1", authorKind: "human", authorId: "dev@example.com", message: "which upstream?", ts: 1 },
     { commentId: "cm1", authorKind: "agent", message: "the gateway", ts: 2 },
   ];
-  const context = buildCommentAnswerContext(design, comment, replies);
+  const context = buildCommentAnswerContext(GROUNDING, comment, replies, design);
   assert.match(context, /THE REVIEWER IS NOW ASKING:\nwhich upstream\?/);
   assert.match(context, /AGENT: the gateway/);
 });
@@ -133,7 +126,7 @@ test("answerDesignComment: a well-formed answer is returned as-is", async () => 
   const result = await withBedrockEnv(() =>
     withMockFetch(
       async () => llmResponse({ answer: "30s matches the upstream gateway timeout.", needsEscalation: false, escalationReason: "", confidence: "high" }),
-      () => answerDesignComment(design, comment, [], { model: "test-model" }),
+      () => answerDesignComment(GROUNDING, design, comment, [], { model: "test-model" }),
     ),
   );
   assert.equal(result.needsEscalation, false);
@@ -145,7 +138,7 @@ test("answerDesignComment: a fenced JSON response still parses", async () => {
   const result = await withBedrockEnv(() =>
     withMockFetch(
       async () => llmResponse('```json\n{"answer":"because of the gateway","needsEscalation":false,"escalationReason":"","confidence":"high"}\n```'),
-      () => answerDesignComment(design, comment, [], { model: "test-model" }),
+      () => answerDesignComment(GROUNDING, design, comment, [], { model: "test-model" }),
     ),
   );
   assert.equal(result.answer, "because of the gateway");
@@ -162,7 +155,7 @@ test("answerDesignComment: an unreachable model escalates rather than falling si
       async () => {
         throw new Error("network down");
       },
-      () => answerDesignComment(design, comment, [], { model: "test-model" }),
+      () => answerDesignComment(GROUNDING, design, comment, [], { model: "test-model" }),
     ),
   );
   assert.equal(result.needsEscalation, true);
@@ -178,7 +171,7 @@ test("answerDesignComment: unparseable JSON escalates after exhausting its retri
         calls += 1;
         return llmResponse("I think the answer is probably fine actually");
       },
-      () => answerDesignComment(design, comment, [], { model: "test-model" }),
+      () => answerDesignComment(GROUNDING, design, comment, [], { model: "test-model" }),
     ),
   );
   assert.equal(calls, 2, "one retry, matching the semantic comparator");
@@ -192,7 +185,7 @@ test("answerDesignComment: an empty answer escalates whatever the model claimed 
   const result = await withBedrockEnv(() =>
     withMockFetch(
       async () => llmResponse({ answer: "   ", needsEscalation: false, escalationReason: "", confidence: "high" }),
-      () => answerDesignComment(design, comment, [], { model: "test-model" }),
+      () => answerDesignComment(GROUNDING, design, comment, [], { model: "test-model" }),
     ),
   );
   assert.equal(result.needsEscalation, true);
@@ -203,7 +196,7 @@ test("answerDesignComment: escalating forces confidence to low even if the model
   const result = await withBedrockEnv(() =>
     withMockFetch(
       async () => llmResponse({ answer: "I would be guessing at the author's intent.", needsEscalation: true, escalationReason: "intent is not stated", confidence: "high" }),
-      () => answerDesignComment(design, comment, [], { model: "test-model" }),
+      () => answerDesignComment(GROUNDING, design, comment, [], { model: "test-model" }),
     ),
   );
   assert.equal(result.confidence, "low", "a confident escalation is a contradiction");
@@ -214,7 +207,7 @@ test("answerDesignComment: a missing escalationReason gets a real one rather tha
   const result = await withBedrockEnv(() =>
     withMockFetch(
       async () => llmResponse({ answer: "not sure", needsEscalation: true }),
-      () => answerDesignComment(design, comment, [], { model: "test-model" }),
+      () => answerDesignComment(GROUNDING, design, comment, [], { model: "test-model" }),
     ),
   );
   assert.equal(result.needsEscalation, true);
@@ -238,12 +231,12 @@ function longThread(count: number, chars = 10_000): DesignCommentReply[] {
 }
 
 test("buildCommentAnswerContext: a 100-message thread is bounded, not a million characters", () => {
-  const context = buildCommentAnswerContext(design, comment, longThread(100));
+  const context = buildCommentAnswerContext(GROUNDING, comment, longThread(100), design);
   assert.ok(context.length <= 48_000, `expected <= 48000 chars, got ${context.length}`);
 });
 
 test("buildCommentAnswerContext: the elision is stated, never silent", () => {
-  const context = buildCommentAnswerContext(design, comment, longThread(100));
+  const context = buildCommentAnswerContext(GROUNDING, comment, longThread(100), design);
   // A model that cannot see a conversation was cut will answer as though it
   // has the whole thing.
   assert.match(context, /\[… \d+ earlier messages elided …\]/);
@@ -251,7 +244,7 @@ test("buildCommentAnswerContext: the elision is stated, never silent", () => {
 
 test("buildCommentAnswerContext: keeps both ends of a long thread, not just one", () => {
   const replies = longThread(100);
-  const context = buildCommentAnswerContext(design, comment, replies);
+  const context = buildCommentAnswerContext(GROUNDING, comment, replies, design);
   // The opening turns carry what the reviewer originally wanted; the closing
   // ones carry where the discussion got to. Truncating from either end alone
   // loses one of those.
@@ -263,7 +256,7 @@ test("buildCommentAnswerContext: keeps both ends of a long thread, not just one"
 // that makes the answer wrong rather than merely thinner.
 test("buildCommentAnswerContext: the live question survives a thread that fills the budget", () => {
   const replies = [...longThread(100), { commentId: "cm1", authorKind: "human" as const, message: "so which upstream is it?", ts: 999 }];
-  const context = buildCommentAnswerContext(design, comment, replies);
+  const context = buildCommentAnswerContext(GROUNDING, comment, replies, design);
   assert.ok(context.length <= 48_000);
   assert.match(context, /THE REVIEWER IS NOW ASKING:\nso which upstream is it\?/);
 });
@@ -274,7 +267,7 @@ test("buildCommentAnswerContext: one pasted log doesn't consume the whole budget
     { commentId: "cm1", authorKind: "agent", message: "the gateway", ts: 2 },
     { commentId: "cm1", authorKind: "human", message: "but why 30s?", ts: 3 },
   ];
-  const context = buildCommentAnswerContext(design, comment, replies);
+  const context = buildCommentAnswerContext(GROUNDING, comment, replies, design);
   assert.ok(context.length <= 48_000, `got ${context.length}`);
   assert.match(context, /THE REVIEWER IS NOW ASKING:\nbut why 30s\?/);
   assert.match(context, /AGENT: the gateway/, "the rest of the conversation still fits");
@@ -283,52 +276,168 @@ test("buildCommentAnswerContext: one pasted log doesn't consume the whole budget
 // A reviewer can paste a log as the question itself.
 test("buildCommentAnswerContext: an enormous live question is capped rather than blowing the budget", () => {
   const replies: DesignCommentReply[] = [{ commentId: "cm1", authorKind: "human", message: "W".repeat(500_000), ts: 1 }];
-  const context = buildCommentAnswerContext(design, comment, replies);
+  const context = buildCommentAnswerContext(GROUNDING, comment, replies, design);
   assert.ok(context.length <= 48_000, `got ${context.length}`);
   assert.match(context, /truncated/);
 });
 
-// The transcript budget can't help when the design's own fields are the
-// problem -- a design declaring hundreds of changes does it with no
-// conversation at all.
-test("buildCommentAnswerContext: a design with an enormous declaration is still bounded", () => {
-  const huge = {
-    ...design,
-    changes: Array.from({ length: 5000 }, (_, i) => ({ id: `c${i}`, action: "modify" as const, target: `src/f${i}.ts`, intent: "x".repeat(200) })),
-  };
-  const context = buildCommentAnswerContext(huge, comment, []);
-  assert.ok(context.length <= 48_000, `got ${context.length}`);
-  assert.match(context, /THE REVIEWER IS NOW ASKING:\nwhy 30s and not 10s\?/, "the question survives whatever else is dropped");
-});
 
-// Found in review: the fallback sliced to the budget and then asked
-// `truncate` to cut at that same budget, so its length test was false and the
-// marker was never appended -- a 60k design became a 48k context with nothing
-// saying so. A cut the model cannot see is one it answers straight through.
-test("buildCommentAnswerContext: an oversized design says it was cut, rather than cutting silently", () => {
-  // ~60k characters of declaration, matching the reviewer's reproduction.
-  const huge = {
-    ...design,
-    changes: Array.from({ length: 300 }, (_, i) => ({ id: `c${i}`, action: "modify" as const, target: `src/f${i}.ts`, intent: "y".repeat(180) })),
-  };
-  const context = buildCommentAnswerContext(huge, comment, []);
 
-  assert.ok(context.length <= 48_000, `got ${context.length}`);
-  assert.match(context, /too long to include/, "the elision has to be visible to the model");
-  assert.match(context, /THE REVIEWER IS NOW ASKING:\nwhy 30s and not 10s\?/, "and the question still follows it");
-});
-
-test("buildCommentAnswerContext: a design that fits carries no elision marker", () => {
-  const context = buildCommentAnswerContext(design, comment, []);
-  assert.doesNotMatch(context, /too long to include/);
-});
 
 test("buildCommentAnswerContext: a short thread is passed through whole, with no elision marker", () => {
   const replies: DesignCommentReply[] = [
     { commentId: "cm1", authorKind: "agent", message: "it matches the upstream timeout", ts: 1 },
     { commentId: "cm1", authorKind: "human", authorId: "dev@example.com", message: "which upstream?", ts: 2 },
   ];
-  const context = buildCommentAnswerContext(design, comment, replies);
+  const context = buildCommentAnswerContext(GROUNDING, comment, replies, design);
   assert.doesNotMatch(context, /elided/);
   assert.match(context, /AGENT: it matches the upstream timeout/);
+});
+
+// -- one budget across the whole prompt (found in review) -------------------
+//
+// Grounding took the whole budget and the system prompt, thread and question
+// were added on top, so the number every part respected individually was one
+// the total never did: 96,057 characters measured for a chat, 56,029 for a
+// comment, against a stated 48,000.
+
+/** What a caller actually sends: the system prompt plus the assembled user
+ * message. Captured off the wire so the assertion is about the real request,
+ * not about one part of it. */
+async function measurePrompt(run: () => Promise<unknown>): Promise<number> {
+  let chars = 0;
+  await withBedrockEnv(() =>
+    withMockFetch(async (_input, init) => {
+      const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { messages?: { content: string }[] };
+      chars = (body.messages ?? []).reduce((n, m) => n + m.content.length, 0);
+      return llmResponse({ answer: "ok", needsEscalation: false, escalationReason: "", confidence: "high" });
+    }, run),
+  );
+  return chars;
+}
+
+test("answerDesignComment: the whole request fits the budget, not just its grounding", async () => {
+  const grounding = "G".repeat(groundingBudgetFor("why?", 200_000));
+  const replies: DesignCommentReply[] = Array.from({ length: 200 }, (_, i) => ({
+    commentId: "cm1",
+    authorKind: i % 2 === 0 ? "agent" : "human",
+    message: `msg${i} ${"x".repeat(5_000)}`,
+    ts: i,
+  }));
+
+  const chars = await measurePrompt(() => answerDesignComment(grounding, design, comment, replies, { model: "test-model" }));
+  assert.ok(chars <= 48_000, `whole prompt was ${chars} chars`);
+});
+
+test("answerDesignChat: the whole request fits the budget", async () => {
+  const grounding = "G".repeat(groundingBudgetFor("why?", 200_000));
+  const history = Array.from({ length: 200 }, (_, i) => ({
+    role: (i % 2 === 0 ? "agent" : "reviewer") as "agent" | "reviewer",
+    message: `msg${i} ${"x".repeat(5_000)}`,
+  }));
+
+  let chars = 0;
+  await withBedrockEnv(() =>
+    withMockFetch(async (_input, init) => {
+      const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { messages?: { content: string }[] };
+      chars = (body.messages ?? []).reduce((n, m) => n + m.content.length, 0);
+      return llmResponse("an answer");
+    }, () => answerDesignChat(grounding, history, { model: "test-model" })),
+  );
+  assert.ok(chars <= 48_000, `whole prompt was ${chars} chars`);
+});
+
+test("groundingBudgetFor: leaves more room for grounding when the question and thread are small", () => {
+  const roomy = groundingBudgetFor("why?", 0);
+  const cramped = groundingBudgetFor("x".repeat(8_000), 100_000);
+  assert.ok(roomy > cramped);
+  assert.ok(cramped >= 8_000, "and never starves the model of the design itself");
+});
+
+test("groundingBudgetFor: an enormous question cannot drive the grounding budget negative", () => {
+  assert.ok(groundingBudgetFor("x".repeat(1_000_000), 1_000_000) >= 8_000);
+});
+
+// -- the question is never what gets cut (found in review, three times) -----
+//
+// The live question sits last in the prompt and every trim cuts from the end.
+// Each time this was fixed by correcting a reserve upstream, a different
+// unreserved section reintroduced it -- the system prompt, then the thread,
+// then a comment's anchored change. These pin the property itself rather than
+// any one reserve.
+
+/** A design whose declaration alone overruns any budget. */
+const oversizedDesign: DesignStatement = {
+  ...design,
+  changes: Array.from({ length: 4_000 }, (_, i) => ({ id: `c${i}`, action: "modify" as const, target: `src/f${i}.ts`, intent: "z".repeat(150) })),
+};
+
+test("buildCommentAnswerContext: an anchored comment on an oversized design keeps the question", () => {
+  const anchored = { ...comment, targetChangeId: "c3999", body: "is this change actually necessary?" };
+  const context = buildCommentAnswerContext("G".repeat(48_000), anchored, [], oversizedDesign);
+
+  assert.match(context, /THE REVIEWER IS NOW ASKING:/, "the heading survived");
+  assert.match(context, /is this change actually necessary\?/, "and so did the question");
+});
+
+test("buildCommentAnswerContext: what gets cut is context, and the cut is marked", () => {
+  const context = buildCommentAnswerContext("G".repeat(48_000), comment, [], design);
+  assert.match(context, /earlier context truncated to fit/);
+  assert.match(context, /why 30s and not 10s\?/);
+});
+
+test("buildCommentAnswerContext: the question survives every section competing for the budget at once", () => {
+  const anchored = { ...comment, targetChangeId: "c3999", body: "the original question" };
+  const replies: DesignCommentReply[] = [
+    ...Array.from({ length: 300 }, (_, i) => ({
+      commentId: "cm1",
+      authorKind: (i % 2 === 0 ? "agent" : "human") as "agent" | "human",
+      message: `msg${i} ${"x".repeat(4_000)}`,
+      ts: i,
+    })),
+    // The live question is the latest *human* turn, which after a long
+    // thread is a follow-up rather than the comment that opened it.
+    { commentId: "cm1", authorKind: "human" as const, message: "so which is it?", ts: 999 },
+  ];
+  const context = buildCommentAnswerContext("G".repeat(48_000), anchored, replies, oversizedDesign);
+
+  assert.ok(context.length <= 48_000, `got ${context.length}`);
+  assert.match(context, /THE REVIEWER IS NOW ASKING:\nso which is it\?/);
+});
+
+test("answerDesignComment: the question reaches the model even when everything else overruns", async () => {
+  const anchored = { ...comment, targetChangeId: "c3999", body: "a question that must not vanish" };
+  let sent = "";
+  await withBedrockEnv(() =>
+    withMockFetch(async (_input, init) => {
+      const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { messages?: { content: string }[] };
+      sent = (body.messages ?? []).map((m) => m.content).join("\n");
+      return llmResponse({ answer: "ok", needsEscalation: false, escalationReason: "", confidence: "high" });
+    }, () => answerDesignComment("G".repeat(48_000), oversizedDesign, anchored, [], { model: "test-model" })),
+  );
+  assert.match(sent, /a question that must not vanish/);
+  assert.ok(sent.length <= 48_000, `whole request was ${sent.length} chars`);
+});
+
+test("answerDesignChat: the question reaches the model even when everything else overruns", async () => {
+  const history = [
+    ...Array.from({ length: 300 }, (_, i) => ({ role: (i % 2 === 0 ? "agent" : "reviewer") as "agent" | "reviewer", message: `m${i} ${"x".repeat(4_000)}` })),
+    { role: "reviewer" as const, message: "the question that must not vanish" },
+  ];
+  let sent = "";
+  await withBedrockEnv(() =>
+    withMockFetch(async (_input, init) => {
+      const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { messages?: { content: string }[] };
+      sent = (body.messages ?? []).map((m) => m.content).join("\n");
+      return llmResponse("an answer");
+    }, () => answerDesignChat("G".repeat(48_000), history, { model: "test-model" })),
+  );
+  assert.match(sent, /the question that must not vanish/);
+  assert.ok(sent.length <= 48_000, `whole request was ${sent.length} chars`);
+});
+
+test("buildCommentAnswerContext: a prompt that already fits is left alone, with no cut marker", () => {
+  const context = buildCommentAnswerContext(GROUNDING, comment, [], design);
+  assert.doesNotMatch(context, /earlier context truncated/);
+  assert.match(context, /why 30s and not 10s\?/);
 });

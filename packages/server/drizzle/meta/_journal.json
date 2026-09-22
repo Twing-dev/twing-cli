@@ -127,6 +127,13 @@
       "when": 1790102249079,
       "tag": "0017_design-review-comments",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1790110352627,
+      "tag": "0018_design-review-chats",
+      "breakpoints": true
     }
   ]
 }
