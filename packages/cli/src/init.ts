@@ -66,6 +66,10 @@ export interface InitOptions {
    * PAT" error instead. For a headless/CI run that can't complete a device
    * flow, or anyone who'd rather use `--invite` explicitly. */
   noGithub?: boolean;
+  /** Explicitly write this repository's committed bootstrap hook after init.
+   * Useful on no-auth coordinators, which have no role to authorize the
+   * automatic GitHub-admin path. Never allowed unattended. */
+  enableEnforcement?: boolean;
   /** Zero-touch onboarding: this run was triggered by the repo-committed
    * bootstrap hook (`enforce-hooks.ts`), not by a human at a terminal.
    * Nothing may prompt, nothing may wait on a browser, and nothing may ask
@@ -116,6 +120,9 @@ export interface InitDeps {
 const defaultInitDeps: InitDeps = { ensureHookInstalled, wireHooks, stripLegacyRepoLocalHooks, enableInstallEnforcement, ensureDaemonRunning };
 
 export async function runInit(options: InitOptions, deps: InitDeps = defaultInitDeps): Promise<void> {
+  if (options.unattended && options.enableEnforcement) {
+    throw new Error("twing init: --enable-enforcement cannot be used with --unattended");
+  }
   const repoRoot = findRepoRoot(options.cwd);
   const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
 
@@ -309,18 +316,16 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     console.log(`twing init: removed legacy repo-local hook entries from ${repoRoot}/.claude/settings.json (superseded by the global wiring above)`);
   }
 
-  // Admin-driven install enforcement: fires only when this caller's
-  // resolved role for THIS project is admin -- covers both "I just founded
-  // this project" and "I'm an admin re-running init on an already-founded
-  // repo" (the backfill path for a repo founded before this feature
-  // existed, or an admin who joined after founding). Never fires for a
-  // member-role caller. Writes (never commits/pushes) a repo-local,
+  // Admin-driven install enforcement: automatic for a GitHub-resolved project
+  // admin, or explicit for any interactive setup. The latter covers no-auth
+  // coordinators, where repository write access is the authority for this
+  // local edit. Writes (never commits/pushes) a repo-local,
   // git-tracked .claude/settings.json -- twing has no way to push a repo
   // file on the caller's behalf.
   // Never on an unattended run: this writes a git-tracked file, which is an
   // admin's deliberate act, not something a teammate's first Edit should do
   // to their working tree on their behalf.
-  if (adminRole && !options.unattended) {
+  if ((adminRole || options.enableEnforcement) && !options.unattended) {
     if (deps.enableInstallEnforcement(repoRoot)) {
       console.log(
         "twing init: wrote .twing/bootstrap-hook.sh and the hook entries in .claude/settings.json " +

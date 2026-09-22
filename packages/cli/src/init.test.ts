@@ -444,6 +444,17 @@ test("runInit: --no-auth with an empty manifest still calls /v1/constraints/seed
   });
 });
 
+test("runInit: --enable-enforcement writes the bootstrap hook during no-auth setup", async () => {
+  const { fetch } = headerCapturingFetch();
+  const { deps, calls } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo();
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, noAuth: true, enableEnforcement: true }, deps)));
+    assert.equal(calls.enableInstallEnforcement.length, 1);
+    assert.equal(calls.enableInstallEnforcement[0].repoRoot, repo);
+  });
+});
+
 /** Same shape as `headerCapturingFetch` but keeps the seed call's parsed
  * body, for the `settings:` assertions below. */
 function bodyCapturingFetch(): { fetch: typeof fetch; seedBodies: Record<string, unknown>[] } {
@@ -654,6 +665,17 @@ test("runInit --unattended: throws rather than prompting when no coordinator is 
       /no coordinator configured/,
       "must fail loudly rather than hang on a prompt nobody can answer",
     );
+  });
+});
+
+test("runInit --unattended: refuses --enable-enforcement because it would write tracked files", async () => {
+  const { deps, calls } = fakeDeps();
+  await withHome(async () => {
+    await assert.rejects(
+      () => runInit({ cwd: tmpRepo(SERVER_URL), unattended: true, enableEnforcement: true }, deps),
+      /cannot be used with --unattended/,
+    );
+    assert.equal(calls.enableInstallEnforcement.length, 0);
   });
 });
 

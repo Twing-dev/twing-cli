@@ -84,7 +84,7 @@ function printUsage(): void {
       "Usage:",
       "  twing [-C <dir>] <command>                (act on the repo at <dir>, not the current one)",
       "  twing --version | -v",
-      "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--unattended] [--no-trust-codex-hooks]",
+      "  twing init [--server <url>] [--invite <code>] [--no-auth] [--no-github] [--enable-enforcement] [--unattended] [--no-trust-codex-hooks]",
       "  twing init --ghuser                       (once per machine: work from any directory)",
       "  twing uninstall [--dry-run] [--purge-server-data]",
       "  twing login [--server <url>] [--token <pat>]",
@@ -503,6 +503,7 @@ async function main(): Promise<void> {
         invite: flags.invite,
         noAuth: flags["no-auth"] === "true",
         noGithub: flags["no-github"] === "true",
+        enableEnforcement: flags["enable-enforcement"] === "true",
         unattended: flags.unattended === "true",
         // Codex refuses to run a hook whose hash it has not recorded, so
         // wiring stamps twing's own entries by default. This leaves them for
