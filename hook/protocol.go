@@ -117,8 +117,40 @@ type versionMismatchInfo struct {
 	ServerVersion string `json:"serverVersion"`
 }
 
+// escalationNotice mirrors EscalationNotice in packages/core/src/types.ts --
+// one design-review comment a reviewer escalated to this developer. Carries
+// the comment text rather than just ids on purpose: this is rendered into a
+// session banner that has to be actionable on sight, and an agent that must
+// make a network call to learn what it was told is one that will skip it.
+type escalationNotice struct {
+	CommentID     string `json:"commentId"`
+	DesignID      string `json:"designId"`
+	ProjectID     string `json:"projectId"`
+	DesignSummary string `json:"designSummary"`
+	Comment       string `json:"comment"`
+	EscalatedBy   string `json:"escalatedBy,omitempty"`
+	EscalatedAt   int64  `json:"escalatedAt"`
+	URL           string `json:"url,omitempty"`
+}
+
+// designLink mirrors DesignLink in packages/core/src/types.ts -- what an
+// agent needs to put a review link in a commit message. See main.go's
+// renderDesignLinkReminder for why this is re-delivered rather than stated
+// once at SessionStart.
+type designLink struct {
+	DesignID  string `json:"designId"`
+	ProjectID string `json:"projectId"`
+	Summary   string `json:"summary"`
+	URL       string `json:"url"`
+}
+
 type noticesMessage struct {
 	Type            string               `json:"type"`
 	Items           []noticeItem         `json:"items"`
 	VersionMismatch *versionMismatchInfo `json:"versionMismatch,omitempty"`
+	// Both optional, and absent from any daemon predating them -- a machine
+	// mid-upgrade runs a new hook against an old daemon just as often as the
+	// reverse, so neither side may require the other to have them.
+	Escalations []escalationNotice `json:"escalations,omitempty"`
+	DesignLinks []designLink       `json:"designLinks,omitempty"`
 }

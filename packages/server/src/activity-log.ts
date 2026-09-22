@@ -112,7 +112,30 @@ export type ActivityEventKind =
    * point at) and the payload carries `{ttlMs, designCount}` instead.
    * Only ever appended when something actually changed -- re-seeding an
    * unchanged value logs nothing at all. */
-  | "design_retimed";
+  | "design_retimed"
+  /** Design review (2026-09). All five carry `relatedId = <comment id>`,
+   * not the design id -- deliberately, because `eventsForRelatedId` is how
+   * a comment's reply history is read back, exactly as an alignment
+   * thread's messages are. The design id lives in the payload instead, for
+   * anyone filtering the project feed by design.
+   *
+   * `design_comment_replied` is the one that carries conversation; its
+   * payload is `{designId, commentId, authorKind, message}`. `authorKind`
+   * has to be *stored* rather than inferred from `developerId`: a developer
+   * replying through the CLI and their agent replying through the CLI
+   * authenticate with the same token, so the identity on the row cannot
+   * tell the two apart. */
+  | "design_comment_posted"
+  | "design_comment_replied"
+  /** A reviewer decided the agent's first-pass answer wasn't enough and
+   * pulled the human developer in -- the only comment event that ever
+   * reaches anyone's coding session. */
+  | "design_comment_escalated"
+  /** The design's owner (or their agent, by reading the comment) has seen
+   * the escalation. Stops the session banner repeating, and is deliberately
+   * *not* the same as resolving -- see `designComments.acknowledgedAt`. */
+  | "design_comment_acknowledged"
+  | "design_comment_resolved";
 
 export interface ActivityEvent {
   id: string;

@@ -606,3 +606,174 @@ export interface EnrichedPendingReview extends PendingReview {
   /** `overlapWaivers` and `conflictWaivers`, resolved and merged. */
   conflicts?: ReviewConflictSummary[];
 }
+
+/**
+ * Design review (2026-09) -- a human reviewer's comment on a registered
+ * design, and the reply history under it.
+ *
+ * This is the first channel in twing that runs *human -> agent*. Everything
+ * before it runs agent -> agent (`Claim`/`Finding`/`AlignmentThread`, all
+ * machine-opened about a detected collision) or agent -> human (a gate deny).
+ * The asymmetry matters for reading the types below: a comment is opened by a
+ * person, answered first by a model, and only reaches a human developer if a
+ * reviewer says the answer wasn't good enough.
+ */
+
+/** Where a reply came from. Stored, never inferred from the author's
+ * identity: a developer replying through the CLI and their agent replying
+ * through the CLI present the same token, so the identity alone cannot
+ * distinguish them. `"agent"` covers both the coordinator's own first-pass
+ * answer and a reply posted by a coding agent via `twing design comment
+ * reply`; the two are the same thing to a reader (something that is not a
+ * person said this) and separating them would be a distinction no consumer
+ * has needed. */
+export type CommentAuthorKind = "human" | "agent";
+
+/**
+ * A comment's lifecycle. Four states, on one axis: **how far has this got
+ * toward being answered?**
+ *
+ *  - `open` -- posted; the agent's first-pass answer hasn't landed yet.
+ *  - `answered` -- the agent took its pass. Terminal as far as the *agent*
+ *    is concerned; the reviewer now decides whether that was enough.
+ *  - `escalated` -- the reviewer said it wasn't, and a human developer is
+ *    needed. The only state that reaches anyone's coding session.
+ *  - `resolved` -- settled, by whoever was entitled to say so.
+ *
+ * `escalated` is not a failure state and not terminal: the developer answers
+ * and the comment moves to `resolved` like any other.
+ */
+export type DesignCommentStatus = "open" | "answered" | "escalated" | "resolved";
+
+export interface DesignComment {
+  id: string;
+  projectId: string;
+  designId: string;
+  /** Resolved from the authenticated token server-side, never client-sent. */
+  authorId: string;
+  body: string;
+  /** The `DesignChange.id` this comment anchors to, when it was left against
+   * one specific declared change rather than the design as a whole.
+   *
+   * Deliberately not guaranteed to resolve: `changes` is a JSON column and an
+   * amendment can drop a change id out from under a comment that named it. A
+   * reader that can't resolve it must show the comment unanchored rather than
+   * hide it -- losing the anchor must never lose the question. */
+  targetChangeId?: string;
+  status: DesignCommentStatus;
+  agentAnsweredAt?: number;
+  escalatedAt?: number;
+  escalatedBy?: string;
+  /** Set when the design's owner (or their agent, by reading the comment)
+   * has seen the escalation -- what stops the session banner repeating.
+   * Deliberately distinct from `resolvedAt`: acknowledging is "I have seen
+   * this", resolving is "this is settled". Conflating them would let an
+   * agent close a reviewer's open question merely by reading it. */
+  acknowledgedAt?: number;
+  resolvedAt?: number;
+  resolvedBy?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** One reply under a comment. Persisted as an `activity_events` row
+ * (`design_comment_replied`, `relatedId = commentId`), never its own table
+ * -- the same "current-state table + append-only log" split alignment-thread
+ * messages use. */
+export interface DesignCommentReply {
+  commentId: string;
+  authorKind: CommentAuthorKind;
+  /** Absent for the coordinator's own first-pass answer, which no developer
+   * authored. */
+  authorId?: string;
+  message: string;
+  ts: number;
+}
+
+/**
+ * One escalated comment, as it reaches the design owner's next coding
+ * session. Flows coordinator -> daemon -> hook -> `additionalContext`.
+ *
+ * Carries the *text* of the comment, not just ids: this is rendered into a
+ * session banner that has to be actionable on sight, and an agent that has to
+ * make a network call to find out what it was told is one that will skip it.
+ */
+export interface EscalationNotice {
+  commentId: string;
+  designId: string;
+  projectId: string;
+  /** The design's one-line summary, so the banner can say which piece of
+   * work is being asked about without a lookup. */
+  designSummary: string;
+  comment: string;
+  /** Who escalated it -- the reviewer, not the design's owner. */
+  escalatedBy?: string;
+  escalatedAt: number;
+  /** Deep link into twing-monitor, when the coordinator publishes a monitor
+   * URL (`monitorUrl`, `GET /v1/version`). Absent on a self-hosted
+   * coordinator with no dashboard deployed -- see `buildDesignReviewUrl`. */
+  url?: string;
+}
+
+/**
+ * The design-link reminder: what an agent needs to put a review link in a
+ * commit message.
+ *
+ * Exists because `git commit` is invisible to twing -- Bash is in no hook
+ * matcher, by deliberate design -- so there is no moment at which twing can
+ * add the trailer itself. The agent has to, which means it has to have been
+ * told, recently enough not to have forgotten. See `hook/main.go` for the
+ * rate-limited re-delivery this feeds.
+ */
+export interface DesignLink {
+  designId: string;
+  projectId: string;
+  summary: string;
+  url: string;
+}
+
+/** The commit trailer key an agent is asked to write. A Git trailer proper
+ * (`Key: value` in the final paragraph), so `git log --format=%(trailers)`
+ * and every forge that parses trailers pick it up for free rather than
+ * needing a bespoke parser. */
+export const DESIGN_TRAILER_KEY = "Twing-Design";
+
+/** twing's own hosted dashboard -- the default a coordinator publishes when
+ * `TWING_MONITOR_URL` says nothing, matching `coordination-server.twing.dev`
+ * being the default coordinator. */
+export const DEFAULT_MONITOR_URL = "https://monitor.twing.dev";
+
+/**
+ * A design's review page in twing-monitor.
+ *
+ * Mirrors twing-monitor's own `buildShareUrl` (`src/lib/urlState.ts`) --
+ * `?repos=<projectId>&tab=designs&focus=<designId>` -- which is the shape its
+ * router already parses, so a link minted here is the same link its own Copy
+ * Link button produces. Duplicated rather than imported because the two
+ * repositories share no code; the monitor's `urlState.test.ts` and this
+ * function's own test both pin the shape so a drift is caught on one side or
+ * the other.
+ *
+ * **Works for a closed design, and that is the normal case, not an edge
+ * case**: `handleSessionEnd` closes a session's design, and a commit
+ * routinely lands after that. The link is minted from the design *id*, which
+ * never changes, and the monitor resolves a focused design through
+ * `GET /v1/designs/:id` independently of whatever status filter the viewer
+ * has selected.
+ *
+ * Returns `undefined` when there is no monitor to link to, rather than
+ * guessing at twing's hosted one: a self-hosted coordinator with no dashboard
+ * deployed would otherwise advertise a URL that shows its users nothing, or
+ * worse, points them at an unrelated deployment.
+ */
+export function buildDesignReviewUrl(monitorUrl: string | undefined, projectId: string, designId: string): string | undefined {
+  if (!monitorUrl) return undefined;
+  // Whitespace first, then trailing slashes. A value that reaches here comes
+  // from an env var or a hand-edited YAML field, so "   " is a realistic way
+  // of saying nothing -- and stripping only slashes would turn it into a
+  // link with a leading-space origin that fails silently in a browser.
+  const trimmed = monitorUrl.trim().replace(/\/+$/, "");
+  if (trimmed.length === 0) return undefined;
+  const params = new URLSearchParams({ repos: projectId, tab: "designs", focus: designId });
+  return `${trimmed}/?${params.toString()}`;
+}

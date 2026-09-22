@@ -14,7 +14,7 @@ import { cors } from "hono/cors";
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import type { Claim, CallEdge, DesignChange, DesignStatement, DesignConstraintType, Finding, PendingReview, ClaudeSettings } from "@twing/core";
-import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS } from "@twing/core";
+import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS, buildDesignReviewUrl } from "@twing/core";
 import { computeProjectIdForGithubRepo, renderManifestWithCoordinator, bootstrapHookScript, mergeBootstrapHookEntries } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
 import { Store } from "./store.js";
@@ -43,6 +43,8 @@ import { findDesignDivergences } from "./design-divergence.js";
 import { enrichReviews } from "./review-enrich.js";
 import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind, type AlignmentThread } from "./alignment-store.js";
 import { CaptureStore } from "./capture-store.js";
+import { DesignCommentStore } from "./design-comment-store.js";
+import { answerDesignComment } from "./design-comment-answer.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
 import { fetchRepoPermissions, fetchGithubUser, type GithubUser, type GithubRepoPermissions } from "./github-client.js";
@@ -220,6 +222,24 @@ export interface CreateAppOptions {
   /** design-semantic-check.ts's model -- defaults to the model this repo's
    * own eval settled on. */
   semanticCheckModel?: string;
+  /** design-comment-answer.ts's model (design review, 2026-09) -- what takes
+   * the first pass at a reviewer's comment. Same default as the two above. */
+  commentAnswerModel?: string;
+  /** Design review comment store (2026-09). Injected in tests for the same
+   * reason every other store here is. */
+  designComments?: DesignCommentStore;
+  /** Where this coordinator's twing-monitor is deployed
+   * (`TWING_MONITOR_URL`, wired in main.ts), published on `/v1/version` so
+   * clients can mint a design's review link without configuring it
+   * per-repo.
+   *
+   * Undefined means **no monitor**, and every consumer must then omit the
+   * link rather than falling back to twing's hosted one: a self-hosted
+   * coordinator's designs do not exist on `monitor.twing.dev`, so
+   * advertising it would send its users somewhere that can only show them
+   * nothing. `DEFAULT_MONITOR_URL` is applied in `main.ts` for the hosted
+   * deployment, never here. */
+  monitorUrl?: string;
   /** §17 Phase 4: no identity verification at all -- every /v1/* request
    * must carry a self-declared X-Twing-Developer-Id header (attribution
    * only, never access control) instead of a bearer PAT, and every
@@ -344,6 +364,16 @@ function escapeHtml(s: string): string {
  * instead, exactly as if they'd run `join --github` themselves first. The
  * raw bytes are discarded immediately -- only their hash is ever stored,
  * and nothing that could reconstruct them is logged or returned. */
+/** A design summary, cut to something that reads as one line inside a
+ * session banner or a notice. Long enough to identify which piece of work is
+ * meant, short enough that a paragraph-length summary doesn't push the rest
+ * of the message off the reader's screen. */
+function truncateForNotice(summary: string): string {
+  const trimmed = summary.trim();
+  if (trimmed.length === 0) return "(no summary)";
+  return trimmed.length > 80 ? `${trimmed.slice(0, 79)}…` : trimmed;
+}
+
 function placeholderTokenHash(): string {
   return crypto.createHash("sha256").update(crypto.randomBytes(32)).digest("hex");
 }
@@ -544,6 +574,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const identities = options.identities ?? new IdentityStore(db, { dataDir: options.dataDir });
   const alignmentThreads = options.alignmentThreads ?? new AlignmentThreadStore(db);
   const captures = options.captures ?? new CaptureStore(db, options.dataDir ? { capturesDir: `${options.dataDir}/captures` } : {});
+  const designComments = options.designComments ?? new DesignCommentStore(db);
   const activityLog = new DrizzleActivityLog(db);
   // Tightening alignment threads item 4 (2026-08-27): wired here, after
   // both `designs` and `alignmentThreads` locals exist, rather than only
@@ -564,6 +595,8 @@ export function createApp(options: CreateAppOptions = {}) {
   });
   const extractModel = options.extractModel ?? "google.gemma-4-31b";
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
+  const commentAnswerModel = options.commentAnswerModel ?? "google.gemma-4-31b";
+  const monitorUrl = options.monitorUrl;
   const noAuth = options.noAuth ?? false;
   const githubClientId = options.githubClientId ?? process.env.TWING_GITHUB_CLIENT_ID ?? "Ov23liSaEt1UliMyahy6";
   const githubApp = resolveGithubAppConfig(options.githubApp);
@@ -680,7 +713,14 @@ export function createApp(options: CreateAppOptions = {}) {
 
   // Unauthenticated on purpose: a fresh install with no cached token yet
   // still needs to learn it's out of date, not hit a 401 first.
-  app.get("/v1/version", (c) => c.json({ version, authMode: noAuth ? "no_auth" : "auth" }));
+  // `monitorUrl` (design review, 2026-09) is how a client learns where this
+  // coordinator's dashboard lives without every repo having to configure it
+  // -- the operator knows whether a monitor is deployed and where, and a
+  // per-repo file would mean editing every repo to say the same thing.
+  // Omitted entirely when unset rather than defaulted here: see
+  // `CreateAppOptions.monitorUrl` for why a self-hosted coordinator must
+  // not advertise twing's hosted dashboard.
+  app.get("/v1/version", (c) => c.json({ version, authMode: noAuth ? "no_auth" : "auth", ...(monitorUrl ? { monitorUrl } : {}) }));
 
   // §17.10: who am I, and what am I a member of -- what `twing whoami` and
   // `twing login`'s validation step both call.
@@ -1524,6 +1564,376 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ status: closed?.status });
   });
 
+  // -------------------------------------------------------------------------
+  // Design review comments (2026-09)
+  //
+  // The first human-initiated channel in this system. Everything above runs
+  // agent-to-agent or agent-to-human; this runs the other way -- a reviewer
+  // reads a registered design in twing-monitor and asks about it, before any
+  // code exists. Nothing on this path blocks a tool call, ever.
+  //
+  // Authorization differs from alignment threads deliberately and in both
+  // directions: a comment is visible and answerable by the whole project
+  // (not party-only), but the public "observe" viewer gets reads only. See
+  // `canViewDesign`/`canCommentOnDesign` below.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Read access to a design's comments: any project member, or any project
+   * admin.
+   *
+   * **No `isPublicViewer` short-circuit, deliberately.** The public
+   * "observe twing getting built" identity is already constructed as a
+   * member of exactly the allowlisted projects (see the auth middleware),
+   * so `isProjectMember` grants it the public projects and refuses every
+   * other one -- which is the whole point of building the identity that
+   * way. An early `if (identity.isPublicViewer) return true` looks like the
+   * carve-out `canViewThread` uses, but it is not the same thing: that
+   * function is only ever reached *after* its route has already gated on
+   * `isProjectMember(identity, projectId)`, so its short-circuit only
+   * relaxes the finer-grained party check within an already-authorized
+   * project. Used as the entire check, the same line skips the project
+   * boundary altogether.
+   *
+   * Regression, found in review and reproduced: an anonymous request for a
+   * design in a project that was never made public got 404 from
+   * `GET /v1/designs/:id` and 200 with the full comment bodies -- and their
+   * authors' identities -- from `GET /v1/designs/:id/comments`. Project
+   * comments are meant to be readable by the project, not by the internet.
+   */
+  function canViewDesignComments(identity: ResolvedIdentity, projectId: string): boolean {
+    return isProjectMember(identity, projectId) || canManageProject(identity, projectId);
+  }
+
+  /** Write access. The public viewer is excluded explicitly rather than by
+   * omission: it is a synthetic, unauthenticated identity that *is* a member
+   * of the allowlisted projects, so `isProjectMember` alone would let it
+   * write to them. Every write here attributes to `developerId`, and
+   * attaching real project state to nobody is not something the demo should
+   * be able to do. (The middleware also never mints this identity for a
+   * non-GET, so this is defence in depth rather than the only guard.) */
+  function canCommentOnDesign(identity: ResolvedIdentity, projectId: string): boolean {
+    if (identity.isPublicViewer) return false;
+    return isProjectMember(identity, projectId) || canManageProject(identity, projectId);
+  }
+
+  /**
+   * The agent's first pass at a comment -- fire-and-forget, exactly like
+   * `runSemanticComparatorPass` above and for the same reason: the response
+   * that triggered it has already been sent, so this can take as long as a
+   * model call takes without anyone waiting on it.
+   *
+   * The reply is posted regardless of what the answer says, including the
+   * fail-soft "could not reach a model" one. That is the point of the
+   * `UNREACHABLE_RESULT` default in `design-comment-answer.ts`: a comment
+   * that sits at `open` forever, with no answer and no explanation, is
+   * indistinguishable from one that was read and found unremarkable.
+   */
+  /**
+   * Comments with an answer pass in flight, and whether the thread moved
+   * under it.
+   *
+   * Two human replies seconds apart used to start two independent model
+   * calls, and whichever finished last appended last -- so a corrected
+   * question could be answered first and then contradicted by the stale
+   * answer to the question it replaced. Found in review, reproduced.
+   *
+   * Coalesced rather than serialized. Serializing would preserve the order
+   * but still spend a model call answering a question the reviewer has
+   * already superseded, and then show them that answer. Instead: one pass
+   * at a time per comment, and a reply that lands mid-flight sets the flag
+   * so the pass runs again afterwards -- against the thread as it is *then*,
+   * which includes everything that arrived in the meantime. A burst of
+   * replies collapses into one answer to the latest question, which is what
+   * a person replying to a burst would do anyway.
+   *
+   * In-memory, so it does not survive a restart. That is the right scope: a
+   * coordinator that restarts mid-pass has dropped the in-flight call
+   * entirely, and the comment is left in `open` for the next reply (or a
+   * reviewer's escalation) to move on. A durable lock would have to be
+   * reconciled on boot for no benefit this path can measure.
+   */
+  const answerPassInFlight = new Map<string, { superseded: boolean }>();
+
+  /** Whether the agent is still allowed to speak on this comment: it exists,
+   * and no human has taken it over. The single rule behind both guards in
+   * `runCommentAnswerPass`, kept as one function so the two cannot drift. */
+  function isAnswerable(commentId: string): boolean {
+    const comment = designComments.get(commentId);
+    return !!comment && comment.status !== "escalated" && comment.status !== "resolved";
+  }
+
+  function runCommentAnswerPass(commentId: string): void {
+    const running = answerPassInFlight.get(commentId);
+    if (running) {
+      running.superseded = true;
+      return;
+    }
+    const state = { superseded: false };
+    answerPassInFlight.set(commentId, state);
+
+    void (async () => {
+      try {
+        // **The agent does not speak on a comment a human has taken
+        // ownership of.** Checked here, before any model call, and again
+        // below before anything is written -- escalation can land at either
+        // moment, and both used to leak: a queued re-run started
+        // unconditionally, and an in-flight pass posted its answer anyway on
+        // the since-abandoned reasoning that the model's words were "history
+        // worth having". They are not. Once a reviewer has asked for the
+        // developer, a model adding to that thread is precisely the
+        // interjection escalation exists to prevent, and `resolved` is the
+        // same story with the question already settled.
+        //
+        // `markAwaitingAnswer` refuses the state *change* on those comments
+        // but does not stop execution, so it is not and never was a guard.
+        if (!isAnswerable(commentId)) return;
+
+        // Every pass, not just the one the route triggers: a superseded
+        // re-run below is also a question waiting on an answer, and without
+        // this the dashboard would show "answered by the agent" (and drop to
+        // its slow poll) while the agent was demonstrably still working.
+        // No-op on a first pass, which is already `open`.
+        designComments.markAwaitingAnswer(commentId);
+
+        const comment = designComments.get(commentId);
+        if (!comment) return;
+        const design = designs.get(comment.designId);
+        if (!design) return;
+
+        const result = await answerDesignComment(design, comment, designComments.replies(commentId), { model: commentAnswerModel });
+
+        // Re-checked after the await: the comment may have been escalated,
+        // resolved or deleted during the model call.
+        if (!isAnswerable(commentId)) return;
+
+        // A reply that arrived mid-flight has superseded this question, and
+        // the re-run below will answer the thread as it stands now. Posting
+        // this answer first would show the reviewer an answer to the question
+        // they already replaced -- which is the out-of-order display this
+        // coalescing exists to prevent.
+        if (state.superseded) return;
+
+        const body = result.answer || result.escalationReason;
+        designComments.addReply({ commentId, authorKind: "agent", message: body });
+        designComments.markAnswered(commentId);
+
+        if (result.needsEscalation) {
+          // Recorded as a reply, not as an escalation. The model recommends;
+          // only a reviewer escalates (POST .../escalate). Letting a model's
+          // own confidence interrupt a developer's session would put it in
+          // charge of the one thing this whole design keeps in human hands.
+          designComments.addReply({
+            commentId,
+            authorKind: "agent",
+            message: `[needs a human] ${result.escalationReason}`,
+          });
+        }
+      } finally {
+        // In a `finally` so an early return or a throw still releases the
+        // slot -- a leaked entry would silently stop this comment ever being
+        // answered again for the life of the process.
+        answerPassInFlight.delete(commentId);
+        // `isAnswerable` again rather than just `state.superseded`: the
+        // re-run guards itself at the top, but a queued pass that fires and
+        // immediately returns reads as unconditional at this line, which is
+        // how the escalation leak got past review in the first place.
+        if (state.superseded && isAnswerable(commentId)) runCommentAnswerPass(commentId);
+      }
+    })().catch((err) => {
+      // Unawaited by construction, so an escape here would be an unhandled
+      // rejection that takes the process down in Node >= 15.
+      console.warn(`twing serve: comment answer pass failed for ${commentId}: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+
+  app.post("/v1/designs/:id/comments", async (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    if (!design) return c.json({ error: "no such design" }, 404);
+    if (!canCommentOnDesign(identity, design.projectId)) return c.json({ error: "not a member of this project" }, 403);
+
+    const body = await c.req.json<{ body?: unknown; targetChangeId?: unknown }>().catch(() => null);
+    const text = typeof body?.body === "string" ? body.body.trim() : "";
+    if (text.length === 0) return c.json({ error: "expected { body: string, targetChangeId?: string }" }, 400);
+
+    const comment = designComments.create({
+      projectId: design.projectId,
+      designId: design.id,
+      authorId: identity.developerId,
+      body: text,
+      targetChangeId: typeof body?.targetChangeId === "string" ? body.targetChangeId : undefined,
+    });
+
+    // Unawaited: the reviewer gets their comment back immediately and the
+    // UI shows it as "the agent is answering" rather than spinning on a
+    // model call.
+    runCommentAnswerPass(comment.id);
+    return c.json({ comment });
+  });
+
+  app.get("/v1/designs/:id/comments", (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    if (!design) return c.json({ error: "no such design" }, 404);
+    if (!canViewDesignComments(identity, design.projectId)) return c.json({ error: "not a member of this project" }, 403);
+    const items = designComments.listByDesign(design.id);
+    return c.json({ items, replies: designComments.repliesFor(items.map((i) => i.id)) });
+  });
+
+  /** Shared prelude for the four comment-scoped mutations: resolve the
+   * comment, then authorize against *its* project rather than anything the
+   * caller named. A comment id is the only thing these routes take, so the
+   * project has to be derived, never trusted. */
+  function loadCommentForWrite(c: { req: { param: (k: string) => string }; get: (k: "identity") => ResolvedIdentity }) {
+    const identity = c.get("identity");
+    const comment = designComments.get(c.req.param("id"));
+    if (!comment) return { error: "no such comment", status: 404 as const };
+    if (!canCommentOnDesign(identity, comment.projectId)) return { error: "not a member of this project", status: 403 as const };
+    return { comment, identity };
+  }
+
+  app.post("/v1/comments/:id/replies", async (c) => {
+    const loaded = loadCommentForWrite(c);
+    if ("error" in loaded) return c.json({ error: loaded.error }, loaded.status);
+
+    const body = await c.req.json<{ message?: unknown; authorKind?: unknown }>().catch(() => null);
+    const message = typeof body?.message === "string" ? body.message.trim() : "";
+    if (message.length === 0) return c.json({ error: "expected { message: string, authorKind?: \"human\" | \"agent\" }" }, 400);
+
+    // Client-declared, and deliberately so -- it is the one field the token
+    // genuinely cannot determine (see `CommentAuthorKind`). Defaults to
+    // "human": the failure that matters is a model's words being read as a
+    // person's, not the reverse.
+    const authorKind = body?.authorKind === "agent" ? "agent" : "human";
+    const reply = designComments.addReply({ commentId: loaded.comment.id, authorKind, authorId: loaded.identity.developerId, message });
+
+    // A follow-up gets an answer too, which is what makes this a
+    // conversation rather than a one-shot Q&A. Without it a reviewer who
+    // reads the agent's answer and asks "why?" underneath gets silence, and
+    // the only way to ask a second question is to open a second comment.
+    //
+    // Two things never trigger a pass, and both matter:
+    //
+    //  - **An agent's own reply.** Otherwise the coordinator answers itself
+    //    forever. `authorKind` is the only thing that can tell these apart
+    //    (see `CommentAuthorKind`), which is a large part of why it is
+    //    stored rather than inferred.
+    //  - **An escalated comment.** A person has taken ownership of it; a
+    //    model interjecting on a thread a human is now handling is exactly
+    //    the failure escalation exists to prevent. The developer's own reply
+    //    lands as history and the reviewer reads it, with nothing talking
+    //    over them.
+    //
+    // Fire-and-forget, same as the pass behind comment creation -- the
+    // reviewer's reply is stored and acknowledged before any model runs.
+    if (authorKind === "human" && loaded.comment.status !== "escalated" && loaded.comment.status !== "resolved") {
+      runCommentAnswerPass(loaded.comment.id);
+    }
+    return c.json({ reply });
+  });
+
+  app.post("/v1/comments/:id/escalate", async (c) => {
+    const loaded = loadCommentForWrite(c);
+    if ("error" in loaded) return c.json({ error: loaded.error }, loaded.status);
+
+    const body = await c.req.json<{ reason?: unknown }>().catch(() => null);
+    const reason = typeof body?.reason === "string" ? body.reason.trim() : undefined;
+    const escalated = designComments.escalate(loaded.comment.id, loaded.identity.developerId, reason);
+    if (!escalated) return c.json({ error: "comment is already resolved" }, 409);
+
+    // Belt and braces with `GET /v1/escalations`, not a duplicate of it.
+    // The escalation list is the durable record a session reads at startup;
+    // this notice is what reaches a developer who is *already mid-session*,
+    // on the daemon's existing poll, without waiting for their next one.
+    const design = designs.get(escalated.designId);
+    if (design) {
+      const url = buildDesignReviewUrl(monitorUrl, design.projectId, design.id);
+      store.addNotice(
+        design.developerId,
+        `twing: a reviewer escalated a comment on your design "${truncateForNotice(design.summary)}" -- run \`twing design comments ${design.id}\` to read it${url ? ` (${url})` : ""}`,
+      );
+    }
+    return c.json({ comment: escalated });
+  });
+
+  app.post("/v1/comments/:id/resolve", (c) => {
+    const loaded = loadCommentForWrite(c);
+    if ("error" in loaded) return c.json({ error: loaded.error }, loaded.status);
+    return c.json({ comment: designComments.resolve(loaded.comment.id, loaded.identity.developerId) });
+  });
+
+  /**
+   * "I have seen this" -- clears the escalation from the owner's session
+   * banner without settling the question.
+   *
+   * Restricted to the design's owner, because it is their banner and nobody
+   * else's to silence. Note this checks the *design's* `developerId`, not
+   * project membership: the whole point of the escalation is to reach
+   * whoever is building the thing.
+   */
+  app.post("/v1/comments/:id/ack", (c) => {
+    const identity = c.get("identity");
+    const comment = designComments.get(c.req.param("id"));
+    if (!comment) return c.json({ error: "no such comment" }, 404);
+    const design = designs.get(comment.designId);
+    if (!design) return c.json({ error: "no such design" }, 404);
+    if (!noAuth && design.developerId !== identity.developerId) {
+      return c.json({ error: "only the design's owner can acknowledge an escalation" }, 403);
+    }
+    return c.json({ comment: designComments.acknowledge(comment.id, identity.developerId) });
+  });
+
+  /**
+   * Every escalated, unacknowledged comment waiting on the authenticated
+   * developer -- the durable list behind the non-blocking session banner.
+   *
+   * Keyed on the *design's* `developerId` (inside `pendingEscalationsFor`),
+   * never on project membership: an escalation has to reach whoever is
+   * building the design. See that method's doc comment for why the caller's
+   * own identity is the wrong key.
+   */
+  /**
+   * How many comments each design in a project carries, and how many are
+   * still unresolved.
+   *
+   * Its own route rather than a field on `GET /v1/designs` because that
+   * response shape is read by the CLI, the Go hook and this dashboard, and
+   * widening it to serve one list-view chip would make every one of them
+   * carry the cost. Cheap enough to be a second request: one indexed scan,
+   * no joins, and the dashboard only asks for the page it is showing.
+   */
+  app.get("/v1/designs/comment-counts", (c) => {
+    const identity = c.get("identity");
+    const projectId = c.req.query("projectId");
+    if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
+    if (!canViewDesignComments(identity, projectId)) return c.json({ error: "not a member of this project" }, 403);
+    const ids = (c.req.query("designIds") ?? "").split(",").filter((id) => id.length > 0);
+    if (ids.length === 0) return c.json({ counts: {} });
+    // Scoped to the authorized project, not just authorized *against* it.
+    // Found in review: the caller supplies both `projectId` and `designIds`,
+    // and without this a member of one project could pass another project's
+    // design ids and learn how much discussion they carry. The projectId is
+    // the thing that was checked, so it has to be the thing that constrains
+    // the query.
+    return c.json({ counts: designComments.countsByDesign(ids, projectId) });
+  });
+
+  app.get("/v1/escalations", (c) => {
+    const identity = c.get("identity");
+    const items = designComments.pendingEscalationsFor(identity.developerId).map((pending) => ({
+      commentId: pending.comment.id,
+      designId: pending.comment.designId,
+      projectId: pending.comment.projectId,
+      designSummary: pending.designSummary,
+      comment: pending.comment.body,
+      escalatedBy: pending.comment.escalatedBy,
+      escalatedAt: pending.comment.escalatedAt ?? pending.comment.updatedAt,
+      url: buildDesignReviewUrl(monitorUrl, pending.comment.projectId, pending.comment.designId),
+    }));
+    return c.json({ items });
+  });
+
   // Multi-repo ExitPlanMode fallback (2026-08-18): extraction only, no
   // registration. When the hook's cwd isn't itself a git repo (a shared
   // parent of several independently-onboarded repos -- see
@@ -1802,8 +2212,16 @@ export function createApp(options: CreateAppOptions = {}) {
     // wrong-project registration -- see hook/design_gate.go's
     // `handleExitPlanModeSingle`.
     const extractedFields = body.rawPlanText ? { creates: design.creates, touches: design.touches } : {};
+    // Design review (2026-09): the design's review page, echoed back on every
+    // branch so `twing design register` can print the commit trailer at the
+    // one moment the agent is most attentive -- the design has just come into
+    // existence and the agent is reading this output anyway. Omitted entirely
+    // when this coordinator has no monitor deployed, per
+    // `CreateAppOptions.monitorUrl`; an older client ignores the field.
+    const reviewUrl = buildDesignReviewUrl(monitorUrl, design.projectId, design.id);
+    const reviewFields = reviewUrl ? { reviewUrl } : {};
     if (outcome.verdict === "clean") {
-      return c.json({ verdict: "clean", designId: design.id, groupId: design.groupId, ...extractedFields });
+      return c.json({ verdict: "clean", designId: design.id, groupId: design.groupId, ...extractedFields, ...reviewFields });
     }
     if (outcome.verdict === "constraint_violation") {
       return c.json({
@@ -1812,9 +2230,10 @@ export function createApp(options: CreateAppOptions = {}) {
         groupId: design.groupId,
         constraints: outcome.constraints,
         ...extractedFields,
+        ...reviewFields,
       });
     }
-    return c.json({ verdict: "file_overlap", designId: design.id, groupId: design.groupId, conflicts: outcome.conflicts, ...extractedFields });
+    return c.json({ verdict: "file_overlap", designId: design.id, groupId: design.groupId, conflicts: outcome.conflicts, ...extractedFields, ...reviewFields });
   });
 
   // §17.5: adopt the conflicting design (superseded), or justify diverging

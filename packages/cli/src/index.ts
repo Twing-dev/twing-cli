@@ -44,6 +44,9 @@ import {
   runDesignResume,
   runDesignList,
   runDesignReviews,
+  runDesignComments,
+  runDesignCommentReply,
+  runDesignCommentResolve,
   runDesignEnableGate,
   runDesignDisableGate,
 } from "./design.js";
@@ -76,6 +79,30 @@ function parseFlags(args: string[]): Record<string, string> {
     }
   }
   return flags;
+}
+
+/**
+ * The first bare argument in a subcommand's args -- a design id or a comment
+ * id, not a flag or a flag's value.
+ *
+ * `parseFlags` above consumes `--key value` pairs but leaves positionals
+ * where they are, so this has to skip a value that belongs to the flag
+ * before it. Without that, `twing design comment reply --message "hi" abc123`
+ * and `twing design comment reply abc123 --message "hi"` would disagree about
+ * which token is the id.
+ */
+function positionalAfter(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg.startsWith("--")) {
+      // A flag consumes the next token only when that token isn't itself a
+      // flag -- the same rule parseFlags uses, kept in step deliberately.
+      if (args[i + 1] !== undefined && !args[i + 1].startsWith("--")) i++;
+      continue;
+    }
+    return arg;
+  }
+  return undefined;
 }
 
 function printUsage(): void {
@@ -121,6 +148,9 @@ function printUsage(): void {
       "  twing design close --id <designId>",
       "  twing design list [--status open] [--mine]",
       "  twing design reviews [--decide <reviewId> --decision approve|reject]",
+      "  twing design comments [<designId>] [--session <id>] [--json]",
+      "  twing design comment reply <commentId> --message \"<text>\"",
+      "  twing design comment resolve <commentId>",
       "  twing design enable-gate",
       "  twing design disable-gate",
       "  twing constraints list [--project <id>] [--server <url>]",
@@ -190,6 +220,31 @@ async function runDesignCommand(rest: string[]): Promise<void> {
     case "reviews":
       await runDesignReviews({ cwd, server: flags.server, decide: flags.decide, decision: flags.decision === "approve" || flags.decision === "reject" ? flags.decision : undefined });
       return;
+    // Design review (2026-09). `comments` takes a bare design id as its
+    // first positional so the command a gate banner hands the agent
+    // (`twing design comments <id>`) is copy-pasteable, and works with no
+    // id at all from inside a session, which is the common case.
+    case "comments":
+      await runDesignComments({ cwd, server: flags.server, designId: positionalAfter(subArgs), session: flags.session, json: flags.json === "true" });
+      return;
+    // `comment <verb> <commentId>` rather than a flat `comment-reply`: the
+    // noun is the thing being acted on, matching `design <verb>` above.
+    case "comment": {
+      const [verb, ...verbArgs] = subArgs;
+      const verbFlags = parseFlags(verbArgs);
+      const commentId = positionalAfter(verbArgs) ?? "";
+      if (verb === "reply") {
+        await runDesignCommentReply({ cwd, server: verbFlags.server, commentId, message: verbFlags.message ?? "" });
+        return;
+      }
+      if (verb === "resolve") {
+        await runDesignCommentResolve({ cwd, server: verbFlags.server, commentId });
+        return;
+      }
+      printUsage();
+      process.exit(1);
+      return;
+    }
     case "enable-gate":
       runDesignEnableGate({ cwd });
       return;

@@ -89,6 +89,11 @@ func sendSessionEnd(sessionID, cwd, transcriptPath string, source *transcriptSou
 type cacheCheckResult struct {
 	Items           []noticeItem
 	VersionMismatch *versionMismatchInfo
+	// Design review (2026-09). Both are advisory text rendered into
+	// additionalContext alongside Items; neither can deny anything, since
+	// this whole path has no deny semantics at all.
+	Escalations []escalationNotice
+	DesignLinks []designLink
 	// DaemonUnreachable distinguishes "the daemon isn't there" from "the
 	// daemon had nothing for us" — both of which are otherwise a zero-value
 	// result. The dial below is the only liveness signal on the
@@ -131,5 +136,5 @@ func cacheCheck(sessionID, cwd, transcriptPath string, source *transcriptSource)
 	if err := readFrame(conn, &resp); err != nil {
 		return cacheCheckResult{}
 	}
-	return cacheCheckResult{Items: resp.Items, VersionMismatch: resp.VersionMismatch}
+	return cacheCheckResult{Items: resp.Items, VersionMismatch: resp.VersionMismatch, Escalations: resp.Escalations, DesignLinks: resp.DesignLinks}
 }

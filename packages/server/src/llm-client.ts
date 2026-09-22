@@ -49,14 +49,21 @@
  * no LLM provider configured still runs; it just never blocks on a
  * plan-text check. `main.ts` logs one advisory line at startup.
  *
+ * `design-comment-answer.ts` (2026-09) is the one caller that fails soft in
+ * the *other* direction -- to "escalate to a human" rather than to silence --
+ * because a review comment that looks answered when no model ever ran is
+ * worse than one that admits it needs a person. See its own header.
+ *
  * Model is chosen per provider, not globally (PR #11 review: the same model
  * has different ids on different providers, so a single top-level default
  * can't survive a provider switch). `resolveExtractModel` /
- * `resolveSemanticCheckModel` read `TWING_<PROVIDER>_EXTRACT_MODEL` /
- * `TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL` and fall back to a
+ * `resolveSemanticCheckModel` / `resolveCommentAnswerModel` read
+ * `TWING_<PROVIDER>_EXTRACT_MODEL` / `TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL` /
+ * `TWING_<PROVIDER>_COMMENT_ANSWER_MODEL` and fall back to a
  * provider-appropriate default (see `PROVIDER_MODELS`).
  *
- * Env, by provider:
+ * Env, by provider (each also takes a `..._COMMENT_ANSWER_MODEL` in the same
+ * shape, for the design-review comment answerer, 2026-09):
  *   bedrock     AWS_BEARER_TOKEN_BEDROCK, AWS_REGION / AWS_DEFAULT_REGION,
  *               TWING_BEDROCK_EXTRACT_MODEL / TWING_BEDROCK_SEMANTIC_CHECK_MODEL
  *   vertex      GOOGLE_APPLICATION_CREDENTIALS (service-account JSON path;
@@ -124,6 +131,15 @@ interface ProviderModels {
   extractDefault: string;
   semanticEnv: string;
   semanticDefault: string;
+  /** Design review (2026-09): the model that takes the first pass at a
+   * reviewer's comment. Its own knob rather than reusing the semantic
+   * check's, because it is a different *kind* of task -- the comparator
+   * emits a terse JSON verdict about two plans, while this writes prose a
+   * human will read and judge -- and an operator who wants to spend more on
+   * one than the other has no way to say so if they share a variable.
+   * Defaults to the same model, so nobody has to care until they do. */
+  commentAnswerEnv: string;
+  commentAnswerDefault: string;
 }
 
 const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
@@ -132,6 +148,8 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
     extractDefault: "google.gemma-4-31b",
     semanticEnv: "TWING_BEDROCK_SEMANTIC_CHECK_MODEL",
     semanticDefault: "google.gemma-4-31b",
+    commentAnswerEnv: "TWING_BEDROCK_COMMENT_ANSWER_MODEL",
+    commentAnswerDefault: "google.gemma-4-31b",
   },
   vertex: {
     extractEnv: "TWING_VERTEX_EXTRACT_MODEL",
@@ -142,18 +160,24 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
     extractDefault: "google/gemini-2.5-flash",
     semanticEnv: "TWING_VERTEX_SEMANTIC_CHECK_MODEL",
     semanticDefault: "google/gemini-2.5-flash",
+    commentAnswerEnv: "TWING_VERTEX_COMMENT_ANSWER_MODEL",
+    commentAnswerDefault: "google/gemini-2.5-flash",
   },
   openrouter: {
     extractEnv: "TWING_OPENROUTER_EXTRACT_MODEL",
     extractDefault: "openai/gpt-4o-mini",
     semanticEnv: "TWING_OPENROUTER_SEMANTIC_CHECK_MODEL",
     semanticDefault: "openai/gpt-4o-mini",
+    commentAnswerEnv: "TWING_OPENROUTER_COMMENT_ANSWER_MODEL",
+    commentAnswerDefault: "openai/gpt-4o-mini",
   },
   bifrost: {
     extractEnv: "TWING_BIFROST_EXTRACT_MODEL",
     extractDefault: "openai/gpt-4o-mini",
     semanticEnv: "TWING_BIFROST_SEMANTIC_CHECK_MODEL",
     semanticDefault: "openai/gpt-4o-mini",
+    commentAnswerEnv: "TWING_BIFROST_COMMENT_ANSWER_MODEL",
+    commentAnswerDefault: "openai/gpt-4o-mini",
   },
 };
 
@@ -170,6 +194,15 @@ export function resolveExtractModel(): string {
 export function resolveSemanticCheckModel(): string {
   const m = PROVIDER_MODELS[selectProvider()];
   return process.env[m.semanticEnv]?.trim() || m.semanticDefault;
+}
+
+/** The design-review comment-answer model for the active provider (2026-09):
+ * `TWING_<PROVIDER>_COMMENT_ANSWER_MODEL` if set, else the provider's default
+ * (the same model the semantic check uses). See `ProviderModels` for why it
+ * gets its own variable despite sharing a default. */
+export function resolveCommentAnswerModel(): string {
+  const m = PROVIDER_MODELS[selectProvider()];
+  return process.env[m.commentAnswerEnv]?.trim() || m.commentAnswerDefault;
 }
 
 /** One-line, secret-free description of the active provider config, for

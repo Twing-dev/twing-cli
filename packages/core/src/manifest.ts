@@ -53,6 +53,21 @@ export interface ConstraintRule {
  * hook's design-gate path. */
 export interface CoordinatorConfig {
   serverUrl?: string;
+  /** Design review (2026-09): the origin a design's twing-monitor review
+   * link is built from (`buildDesignReviewUrl`, core/types.ts).
+   *
+   * An override, not the primary source. The coordinator publishes its own
+   * dashboard's URL on `GET /v1/version`, which is the right default: the
+   * server operator is the one who knows whether a monitor is deployed and
+   * where, and a per-repo file would otherwise have to be edited in every
+   * repo to say the same thing. This exists for the case the server can't
+   * cover -- a monitor reachable at a different address from inside a
+   * network than the one the coordinator advertises.
+   *
+   * Absent means "ask the coordinator", never "use twing's hosted one":
+   * defaulting a self-hosted deployment to `monitor.twing.dev` would point
+   * its users at a dashboard that cannot show them their own designs. */
+  monitorUrl?: string;
 }
 
 /** Whether this repo's sessions get their conversation captured to local
@@ -127,6 +142,7 @@ export function parseManifest(yamlText: string): Manifest {
     })),
     coordinator: {
       serverUrl: typeof coordinator.serverUrl === "string" ? coordinator.serverUrl : undefined,
+      monitorUrl: typeof coordinator.monitorUrl === "string" ? coordinator.monitorUrl : undefined,
     },
     capture: {
       enabled: typeof capture.enabled === "boolean" ? capture.enabled : undefined,

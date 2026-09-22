@@ -27,6 +27,7 @@ import {
   pathOfTarget,
   suggestAction,
   type DesignChange,
+  DESIGN_TRAILER_KEY,
 } from "@twing/core";
 import { requireRepoRoot } from "./repo-scope.js";
 import { checkSessionId } from "./session-attempts.js";
@@ -124,6 +125,12 @@ interface DesignCheckResponseJSON {
    * 2026-08-31 -- retired, see DesignVerdict's doc comment for why.) */
   verdict?: "clean" | "file_overlap" | "constraint_violation";
   designId?: string;
+  /** Design review (2026-09): this design's page in twing-monitor, echoed by
+   * the coordinator so `register` can print the commit trailer without a
+   * second round trip. Absent when the coordinator has no monitor deployed,
+   * and on any coordinator predating this -- both mean "no link to give",
+   * and neither is an error. */
+  reviewUrl?: string;
   /** §17 design linking (2026-08) -- the design's own groupId, self-assigned
    * or caller-supplied. Copy this into a sibling repo's
    * `twing design register --group <id>` to link the two. */
@@ -160,6 +167,17 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
     // §17 design linking (2026-08): the copy-paste hint for linking a
     // sibling-repo registration to this one.
     console.log(`  group: ${result.groupId}  (registering a linked design in another repo? pass --group ${result.groupId})`);
+  }
+  if (result.reviewUrl) {
+    // Design review (2026-09). Printed here because this is the moment the
+    // design comes into existence and the agent is already reading this
+    // output -- twing cannot add the trailer itself (`git commit` runs
+    // through Bash, which no hook matcher covers), so the only thing it can
+    // do is hand over the exact line. Re-delivered periodically in session
+    // context afterwards, since one mention at registration is reliably
+    // buried by the time the first commit happens.
+    console.log(`  review: ${result.reviewUrl}`);
+    console.log(`  when you commit this work, add the trailer: ${DESIGN_TRAILER_KEY}: ${result.reviewUrl}`);
   }
   // 2026-08-26: blocking is now a static function of `verdict` alone --
   // `"file_overlap"` (renamed from `"overlap"`) is always advisory-only,
@@ -841,4 +859,195 @@ export function runDesignDisableGate(options: { cwd: string }): void {
   }
   setGateDisabled(projectId, true);
   console.log(`twing design disable-gate: disabled for this project (other repos on this machine are unaffected)`);
+}
+
+// ---------------------------------------------------------------------------
+// Design review comments (2026-09) -- the agent's side of the human review
+// channel.
+//
+// A reviewer comments on a registered design in twing-monitor, the
+// coordinator answers first, and if that answer wasn't enough the reviewer
+// escalates. The escalation reaches this developer's next session as a
+// non-blocking banner (hook/design_review.go) naming `twing design comments`,
+// and this is what that command does.
+//
+// Reading is also acknowledging. That is deliberate and it is the only reason
+// the banner ever stops: acknowledging is a coordinator round trip, not a
+// local flag, so an agent that reads its comments is recorded as having seen
+// them and one that ignores the banner keeps getting it next session.
+//
+// Note what is *not* here. There is no "accommodate this comment" command,
+// because accommodating a comment is just doing the work: widen scope with
+// `twing design amend` and edit. Adding a verb for it would imply twing
+// verifies the accommodation happened, which it does not.
+// ---------------------------------------------------------------------------
+
+export interface CommentsOptions {
+  cwd: string;
+  server?: string;
+  /** The design to read comments on. Optional: with no id, every open design
+   * for this session is read, which is what the agent almost always wants
+   * (it has one). */
+  designId?: string;
+  session?: string;
+  json?: boolean;
+}
+
+interface CommentWire {
+  id: string;
+  designId: string;
+  authorId: string;
+  body: string;
+  targetChangeId?: string;
+  status: string;
+  escalatedBy?: string;
+  acknowledgedAt?: number;
+  createdAt: number;
+}
+
+interface ReplyWire {
+  authorKind: "human" | "agent";
+  authorId?: string;
+  message: string;
+  ts: number;
+}
+
+/** Resolves which designs to read comments on: an explicit id, else every
+ * design this session has open. Returns ids only -- the caller fetches each
+ * one's comments. */
+async function resolveCommentDesignIds(
+  serverUrl: string,
+  authToken: string | undefined,
+  developerId: string,
+  projectId: string,
+  options: CommentsOptions,
+): Promise<string[]> {
+  if (options.designId) return [options.designId];
+
+  const session = options.session ?? process.env.TWING_SESSION_ID ?? process.env.CLAUDE_CODE_SESSION_ID;
+  if (!session) {
+    throw new Error(
+      "twing design comments: pass a design id, or --session <id> (this shell has no session id; neither TWING_SESSION_ID nor CLAUDE_CODE_SESSION_ID was set in this environment).",
+    );
+  }
+  const params = new URLSearchParams({ projectId, sessionId: session });
+  const res = await authFetch(`${serverUrl}/v1/designs?${params}`, {}, authToken, developerId);
+  if (!res.ok) return [];
+  const body = (await res.json()) as { items?: { id: string }[] };
+  return (body.items ?? []).map((d) => d.id);
+}
+
+export async function runDesignComments(options: CommentsOptions): Promise<void> {
+  const repoRoot = requireRepoRoot(options.cwd);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
+  const projectId = computeProjectId(repoRoot);
+
+  const designIds = await resolveCommentDesignIds(serverUrl, authToken, developerId, projectId, options);
+  const collected: { designId: string; comments: CommentWire[]; replies: Record<string, ReplyWire[]> }[] = [];
+
+  for (const designId of designIds) {
+    const res = await authFetch(`${serverUrl}/v1/designs/${designId}/comments`, {}, authToken, developerId);
+    if (res.status === 401) {
+      console.error(`twing design comments: ${UNAUTHORIZED_HINT}`);
+      return;
+    }
+    if (!res.ok) continue;
+    const body = (await res.json()) as { items?: CommentWire[]; replies?: Record<string, ReplyWire[]> };
+    collected.push({ designId, comments: body.items ?? [], replies: body.replies ?? {} });
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify(collected, null, 2));
+  } else {
+    let total = 0;
+    for (const entry of collected) {
+      for (const comment of entry.comments) {
+        total += 1;
+        console.log("");
+        console.log(`${comment.id}  [${comment.status}]  design=${comment.designId}  by ${comment.authorId}`);
+        if (comment.targetChangeId) console.log(`  on change: ${comment.targetChangeId}`);
+        console.log(`  ${comment.body}`);
+        for (const reply of entry.replies[comment.id] ?? []) {
+          console.log(`    ${reply.authorKind === "agent" ? "agent" : (reply.authorId ?? "human")}: ${reply.message}`);
+        }
+        if (comment.status === "escalated") {
+          console.log(`    -> a reviewer asked for you specifically. Reply: twing design comment reply ${comment.id} --message "..."`);
+        }
+      }
+    }
+    if (total === 0) console.log("twing design comments: no comments on this session's designs");
+  }
+
+  // Acknowledge after printing, never before: the banner must not go quiet
+  // for a read that failed halfway. Best-effort per comment -- one failure
+  // must not stop the rest, and a missed acknowledgement only costs a
+  // repeated banner next session.
+  for (const entry of collected) {
+    for (const comment of entry.comments) {
+      if (comment.status !== "escalated" || comment.acknowledgedAt) continue;
+      try {
+        await authFetch(`${serverUrl}/v1/comments/${comment.id}/ack`, { method: "POST" }, authToken, developerId);
+      } catch {
+        // See above -- a failed ack is a repeated banner, not a lost comment.
+      }
+    }
+  }
+}
+
+export interface CommentReplyOptions {
+  cwd: string;
+  server?: string;
+  commentId: string;
+  message: string;
+}
+
+export async function runDesignCommentReply(options: CommentReplyOptions): Promise<void> {
+  const repoRoot = requireRepoRoot(options.cwd);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
+  if (!options.commentId) throw new Error("twing design comment reply: <commentId> is required");
+  if (!options.message) throw new Error('twing design comment reply: --message "<text>" is required');
+
+  const res = await authFetch(
+    `${serverUrl}/v1/comments/${options.commentId}/replies`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // Always "agent": this command exists for a coding agent answering a
+      // reviewer. A human replying does it in twing-monitor, where the UI
+      // sends "human". The token cannot distinguish the two -- see
+      // CommentAuthorKind (@twing/core) -- so the caller declares it, and
+      // the caller here is by definition the agent.
+      body: JSON.stringify({ message: options.message, authorKind: "agent" }),
+    },
+    authToken,
+    developerId,
+  );
+  if (res.status === 401) {
+    console.error(`twing design comment reply: ${UNAUTHORIZED_HINT}`);
+    return;
+  }
+  if (!res.ok) {
+    console.error(`twing design comment reply: ${JSON.stringify(await parseJsonOrUnauthorized(res))}`);
+    return;
+  }
+  console.log("twing design comment reply: posted -- the reviewer sees it in twing-monitor");
+}
+
+export interface CommentResolveOptions {
+  cwd: string;
+  server?: string;
+  commentId: string;
+}
+
+export async function runDesignCommentResolve(options: CommentResolveOptions): Promise<void> {
+  const repoRoot = requireRepoRoot(options.cwd);
+  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
+  if (!options.commentId) throw new Error("twing design comment resolve: <commentId> is required");
+
+  const res = await authFetch(`${serverUrl}/v1/comments/${options.commentId}/resolve`, { method: "POST" }, authToken, developerId);
+  if (res.status === 401) {
+    console.error(`twing design comment resolve: ${UNAUTHORIZED_HINT}`);
+    return;
+  }
+  console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
 }

@@ -29,6 +29,21 @@ const STARTED_AT = Date.now();
  * the daemon below. */
 const captureUploader = new CaptureUploader();
 
+/**
+ * cwd -> the coordinator, project and developer that directory resolves to.
+ *
+ * Module-level for the same reason `captureUploader` is: `handleMessage` is
+ * a free function, not a closure over `startDaemon`'s locals. Sharing it
+ * across daemon instances is harmless -- the key is an absolute path and the
+ * answer is a property of that directory, so two daemons would compute the
+ * same thing.
+ *
+ * Memoized because resolving it shells out to git while `get_notices` fires
+ * on every prompt. Only ever *written* from the deferred half of that
+ * handler, so the git cost never lands on a path the hook is blocked on.
+ */
+const coordinatorByCwd = new Map<string, { projectId: string; serverUrl: string; developerId: string }>();
+
 export interface DaemonHandle {
   socketPath: string;
   claims: Claim[];
@@ -420,7 +435,14 @@ function handleMessage(
     // gets its notices at the same speed as before, and capture is
     // watermark-based so a dropped pass costs nothing but latency.
     startCapture({ sessionId: req.sessionId, cwd: req.cwd, transcriptPath: req.transcriptPath, sourceDescriptor: req.source });
-    const developerId = developerBySession.get(req.sessionId);
+    // `developerBySession` only learns a developer once that session has
+    // produced a claim. The memo below is the other source, populated from
+    // the session's cwd by the deferred block at the bottom of this handler
+    // -- which is what lets a session that has edited nothing yet (every
+    // SessionStart, by definition) still be identified. Falls back to the
+    // claim-derived map, which stays authoritative when both know.
+    const cached = req.cwd ? coordinatorByCwd.get(req.cwd) : undefined;
+    const developerId = developerBySession.get(req.sessionId) ?? cached?.developerId;
     // No claims from this session yet, so no developerId to look up
     // notices for -- an honest empty answer, not a lookup failure.
     const items = developerId ? syncer.noticesFor(developerId) : [];
@@ -428,7 +450,23 @@ function handleMessage(
     // daemon-wide, not per-developer, so it can surface even for a session
     // with no prior claims (see its doc comment for the one remaining gap).
     const versionMismatch = syncer.versionMismatch() ?? undefined;
-    conn.write(encodeFrame({ type: "notices", items, versionMismatch }));
+    // Both read from cache, never fetched here: the hook is blocked on this
+    // frame, and the notice pipeline's whole premise is that the daemon
+    // already knows so the answer is a local read. An empty answer on a
+    // session's very first message is expected and self-correcting -- the
+    // deferred block below warms both, and `UserPromptSubmit` fires again
+    // within seconds.
+    const escalations = developerId ? syncer.escalationsFor(developerId) : [];
+    const designLinks = syncer.cachedDesignLinksFor(req.sessionId);
+    conn.write(
+      encodeFrame({
+        type: "notices",
+        items,
+        versionMismatch,
+        ...(escalations.length > 0 ? { escalations } : {}),
+        ...(designLinks.length > 0 ? { designLinks } : {}),
+      }),
+    );
     // After the reply, never before it: this can shell out to git the first
     // time it sees a repo, and the hook is waiting on the frame above.
     // `enqueue` used to be the only thing that registered a coordinator, so
@@ -438,8 +476,19 @@ function handleMessage(
     // regardless of whether edits are landing, which is exactly what that
     // needs.
     setImmediate(() => {
-      const coordinator = req.cwd ? resolveProjectCoordinator(req.cwd) : null;
-      if (coordinator) syncer.registerProjectServer(coordinator.projectId, coordinator.serverUrl);
+      const coordinator = req.cwd ? (coordinatorByCwd.get(req.cwd) ?? resolveProjectCoordinator(req.cwd)) : null;
+      if (!coordinator) return;
+      if (req.cwd) coordinatorByCwd.set(req.cwd, coordinator);
+      // Registers the developer too, not just the project -> server
+      // mapping: without it this developer is in no poll set, and the
+      // escalation read above would stay empty forever for a session that
+      // never edits anything.
+      syncer.registerDeveloperProject(coordinator.developerId, coordinator.projectId, coordinator.serverUrl);
+      // Refreshed on every message rather than cached for the session's
+      // life: a design can be registered, amended or closed mid-session,
+      // and a reminder pointing at a design the agent has moved on from is
+      // worse than none.
+      void syncer.designLinksFor(coordinator.developerId, coordinator.projectId, req.sessionId, { refresh: true });
     });
     return;
   }

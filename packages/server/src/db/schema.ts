@@ -396,6 +396,79 @@ export const alignmentThreads = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// Design review comments -- current-state table; replies live in activityEvents
+// ---------------------------------------------------------------------------
+
+/**
+ * A human reviewer's comment on a registered design (design review, 2026-09).
+ *
+ * Same "current-state table + append-only log" split as `alignmentThreads`
+ * above, and for the same reason: the comment's *state* (who asked, what it
+ * anchors to, whether it has been answered/escalated/resolved) is queried and
+ * updated, while every reply is history that must never be rewritten -- so
+ * replies are `activity_events` rows keyed by `relatedId = <comment id>`, read
+ * back via `DrizzleActivityLog.eventsForRelatedId`. There is deliberately no
+ * `design_comment_replies` table.
+ *
+ * Distinct from `alignmentThreads` despite the shape rhyming: a thread is
+ * machine-opened between two agents about a detected conflict and is
+ * party-only; a comment is human-opened on a design and is visible to the
+ * whole project. Folding them together would mean one table whose
+ * authorization rules contradict themselves.
+ */
+export const designComments = sqliteTable(
+  "design_comments",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    designId: text("design_id").notNull(),
+    /** Resolved from the authenticated token, never a client-sent field --
+     * the rule every write in this schema follows (§17.10 hardening). */
+    authorId: text("author_id").notNull(),
+    body: text("body").notNull(),
+    /** Anchors the comment to one `DesignChange.id` inside the design's
+     * `changes` JSON, so "this specific declared change is wrong" is
+     * expressible. Nullable: a comment on the design as a whole has none,
+     * and a design registered without a structured template has no change
+     * ids to anchor to at all. Deliberately not a foreign key -- `changes`
+     * is a JSON column, and an amendment can drop a change id out from
+     * under a comment that referenced it. A reader that can't resolve the
+     * id shows the comment unanchored rather than hiding it. */
+    targetChangeId: text("target_change_id"),
+    /** "open" (posted, agent hasn't answered yet) | "answered" (the agent
+     * took its first pass) | "escalated" (a reviewer decided the answer
+     * wasn't enough and pulled the human developer in) | "resolved".
+     *
+     * `escalated` is not a terminal state and not a failure -- it is the
+     * only state that reaches the design owner's next session, which is why
+     * it is tracked here rather than inferred from the presence of a reply. */
+    status: text("status").notNull(),
+    agentAnsweredAt: integer("agent_answered_at"),
+    escalatedAt: integer("escalated_at"),
+    escalatedBy: text("escalated_by"),
+    /** Cleared by the design's owner (or by their agent reading the comment
+     * through `twing design comments`) -- what stops an escalation from
+     * re-appearing in every subsequent session banner. Separate from
+     * `resolvedAt` on purpose: acknowledging is "I have seen this", which
+     * is the developer's own bookkeeping, while resolving is "this question
+     * is settled", which is the reviewer's call. Conflating them would let
+     * an agent silently close a reviewer's open question by reading it. */
+    acknowledgedAt: integer("acknowledged_at"),
+    resolvedAt: integer("resolved_at"),
+    resolvedBy: text("resolved_by"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    index("design_comments_design_id_idx").on(t.designId),
+    // The escalation banner's query is "every unacknowledged escalated
+    // comment on designs this developer owns" -- it starts from this
+    // project/status pair, then joins to `designs` for ownership.
+    index("design_comments_project_status_idx").on(t.projectId, t.status),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Design roadmap -- reserved stub only, no store class/routes/CLI yet
 // ---------------------------------------------------------------------------
 

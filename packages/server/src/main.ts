@@ -3,7 +3,7 @@ import { createApp } from "./app.js";
 import { createDb } from "./db/client.js";
 import { ConstraintStore } from "./design-store.js";
 import { IdentityStore } from "./identity-store.js";
-import { describeLlmProvider, resolveExtractModel, resolveSemanticCheckModel } from "./llm-client.js";
+import { describeLlmProvider, resolveExtractModel, resolveSemanticCheckModel, resolveCommentAnswerModel } from "./llm-client.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const dataDirOptions = process.env.TWING_SERVE_DATA_DIR ? { dataDir: process.env.TWING_SERVE_DATA_DIR } : {};
@@ -48,9 +48,11 @@ const db = createDb(dataDirOptions);
 // path never gets far enough to use.
 let extractModel = "";
 let semanticCheckModel = "";
+let commentAnswerModel = "";
 try {
   extractModel = resolveExtractModel();
   semanticCheckModel = resolveSemanticCheckModel();
+  commentAnswerModel = resolveCommentAnswerModel();
 } catch {
   // no provider configured -- handled by the startup log + fail-soft path
 }
@@ -74,6 +76,20 @@ const publicProjectIds = process.env.TWING_PUBLIC_PROJECT_IDS?.split(",")
   .map((s) => s.trim())
   .filter((s) => s.length > 0);
 
+// Design review (2026-09): where this coordinator's twing-monitor lives, so
+// a design's review link can be minted without every repo configuring it.
+// Published on /v1/version and used to build the link in an escalation
+// notice and a commit-trailer reminder.
+//
+// **No default, deliberately.** twing's own hosted deployment sets this to
+// `DEFAULT_MONITOR_URL` (core/types.ts) in its deploy config, the same way
+// it sets TWING_PUBLIC_PROJECT_IDS. It is tempting to default it here and
+// let a self-hosted server opt out, but this process has no way to know
+// whether it *is* the hosted one -- and guessing wrong points a self-hosted
+// team's agents at monitor.twing.dev, which cannot show them their own
+// designs. Unset means no monitor, and every consumer omits the link.
+const monitorUrl = process.env.TWING_MONITOR_URL?.trim() || undefined;
+
 const app = createApp({
   db,
   // Forwarded so blob-backed state lands beside the database rather than in
@@ -84,6 +100,8 @@ const app = createApp({
   ...dataDirOptions,
   extractModel,
   semanticCheckModel,
+  commentAnswerModel,
+  monitorUrl,
   constraints: new ConstraintStore(db),
   // §17.10: per-developer PATs, not a shared password. `IdentityStore`
   // generates its own one-time bootstrap token on first run (logged once)

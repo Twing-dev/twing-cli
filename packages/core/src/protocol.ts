@@ -7,7 +7,7 @@
  * does all interpretation.
  */
 
-import type { Claim, CallEdge } from "./types.js";
+import type { Claim, CallEdge, EscalationNotice, DesignLink } from "./types.js";
 
 export type HookToolName = "Edit" | "Write" | "Read" | "Grep" | "Glob";
 
@@ -119,6 +119,45 @@ export interface NoticesMessage {
   type: "notices";
   items: NoticeItem[];
   versionMismatch?: VersionMismatchInfo;
+  /**
+   * Design review (2026-09): escalated comments awaiting this developer,
+   * rendered into the same `additionalContext` `items` feeds.
+   *
+   * Independent of `items` rather than folded into it, for the same reason
+   * `versionMismatch` is: a notice is an ephemeral hint the daemon drops
+   * after ten minutes (`NOTICE_FRESHNESS_MS`), while an escalation is
+   * durable until the developer acknowledges it server-side. Expressing one
+   * as the other would either make escalations vanish unread or make hints
+   * nag forever.
+   *
+   * Optional because hook binaries update on their own schedule (version
+   * recovery), so a machine mid-upgrade runs a new daemon against an old
+   * hook for a while -- the standing convention for every field added to
+   * this wire format.
+   */
+  escalations?: EscalationNotice[];
+  /**
+   * The session's active designs and their review URLs, for the commit
+   * trailer an agent is asked to write.
+   *
+   * Sent on the `get_notices` reply because that message already fires on
+   * every `SessionStart` *and* every `UserPromptSubmit` -- which is the only
+   * reason this works at all. `git commit` runs through Bash, which no hook
+   * matcher covers by deliberate design, so twing can never write the
+   * trailer itself and can never even observe that a commit happened. The
+   * agent has to do it, which makes "has the agent been told recently
+   * enough to still remember" the entire problem. Riding the per-prompt
+   * message means the reminder is never more than one turn stale; the hook
+   * rate-limits how often it actually renders it (see `hook/main.go`), since
+   * emitting it on literally every prompt is noise an agent learns to skip.
+   *
+   * Usually one entry. More than one means genuinely concurrent designs in
+   * the same session, and the agent is asked to pick -- twing deliberately
+   * does not guess by matching staged paths against design scope, because it
+   * cannot see the commit and would be guessing from information the agent
+   * has already superseded.
+   */
+  designLinks?: DesignLink[];
 }
 
 /** CLI -> daemon: ask a running daemon (however it was started -- foreground,

@@ -14,7 +14,7 @@
  * daemon (falls out of resolving per-cycle instead of once at construction).
  */
 
-import { readConfig, getServerAuth, authFetch, type Claim, type CallEdge, type Notice } from "@twing/core";
+import { readConfig, getServerAuth, authFetch, type Claim, type CallEdge, type Notice, type EscalationNotice, type DesignLink, buildDesignReviewUrl } from "@twing/core";
 import { getCliVersion } from "../version.js";
 import { isSelfUpdatable, performSelfUpdate, updateTarget } from "./self-update.js";
 
@@ -43,6 +43,27 @@ const POLL_INTERVAL_MS = 5_000;
 // Peeked, not consumed (see noticesFor) -- bound how long a hint stays
 // visible so it doesn't resurface on every SessionStart indefinitely.
 const NOTICE_FRESHNESS_MS = 10 * 60 * 1000;
+
+/**
+ * Escalations and design links are deliberately **not** subject to
+ * `NOTICE_FRESHNESS_MS`, and the difference is the whole reason they are
+ * separate caches rather than synthesized notices.
+ *
+ * A notice is an ephemeral hint: it was true ten minutes ago and re-showing
+ * it forever would be nagging. An escalation is durable state on the
+ * coordinator -- a reviewer is waiting for an answer -- and it stops being
+ * shown when the developer *acknowledges* it, not when it gets old. Ageing
+ * one out would silently drop review feedback, which is the exact failure
+ * this whole feature exists to prevent.
+ *
+ * Both caches are instead replaced wholesale on each poll, so the server's
+ * answer is always the truth and an acknowledged escalation disappears on
+ * the next cycle without any local bookkeeping.
+ */
+interface CachedEscalations {
+  items: EscalationNotice[];
+  fetchedAt: number;
+}
 
 interface PendingBatch {
   claims: Claim[];
@@ -75,6 +96,18 @@ export class Syncer {
   private pendingByProject = new Map<string, PendingBatch>();
   private sinceByDeveloperServer = new Map<string, number>();
   private noticesByDeveloperServer = new Map<string, CachedNotice[]>();
+  // Replaced wholesale each poll rather than appended to -- see
+  // CachedEscalations' doc comment.
+  private escalationsByDeveloperServer = new Map<string, CachedEscalations>();
+  // projectId -> the monitor origin that project's coordinator publishes on
+  // /v1/version. Per *project* rather than per server only because that is
+  // how callers ask ("what is the review link for this design"), and a
+  // design always names its project.
+  private monitorUrlByServer = new Map<string, string>();
+  // sessionId -> the design links last fetched for it. Keyed on session
+  // because a design belongs to a session, and the agent must be pointed at
+  // its own design rather than whatever else is open in the repo.
+  private designLinksBySession = new Map<string, DesignLink[]>();
   // serverUrl -> the version that server last reported, checked on the same
   // poll cadence rather than a new timer. Daemon-wide (every server this
   // daemon has ever seen a claim for), not scoped to one project/session --
@@ -181,7 +214,13 @@ export class Syncer {
         const requestTime = Date.now();
         const authToken = getServerAuth(readConfig(), serverUrl)?.authToken;
         try {
-          const res = await authFetch(`${serverUrl}/v1/notices?developerId=${encodeURIComponent(developerId)}&since=${since}`, {}, authToken);
+          // `developerId` goes in the header as well as the query string: a
+          // `--no-auth` coordinator requires `X-Twing-Developer-Id` on every
+          // /v1/* request and answers 400 without it, so this poll returned
+          // nothing at all on those deployments. Harmless on a full-auth
+          // server, which ignores the header -- see `authFetch`'s own doc
+          // comment for why callers don't branch on the server's mode.
+          const res = await authFetch(`${serverUrl}/v1/notices?developerId=${encodeURIComponent(developerId)}&since=${since}`, {}, authToken, developerId);
           if (!res.ok) continue;
           const body = (await res.json()) as { items: Notice[] };
           this.sinceByDeveloperServer.set(key, requestTime);
@@ -194,7 +233,36 @@ export class Syncer {
         } catch (err) {
           console.error(`twing daemon: notice poll failed for ${developerId} @ ${serverUrl}`, err);
         }
+
+        await this.pollEscalations(developerId, serverUrl, key, authToken);
       }
+    }
+  }
+
+  /**
+   * Escalated design-review comments waiting on this developer.
+   *
+   * Replaces the cached list outright instead of appending: the server's
+   * answer already excludes anything acknowledged, so a wholesale replace is
+   * what makes an acknowledgement take effect within one poll with no local
+   * state to keep in step. A failed request leaves the previous list in
+   * place rather than clearing it -- an unreachable coordinator must not
+   * look like "the reviewer withdrew their question".
+   */
+  private async pollEscalations(developerId: string, serverUrl: string, key: string, authToken: string | undefined): Promise<void> {
+    try {
+      // `developerId` as the fourth argument, not just a closure variable:
+      // a `--no-auth` coordinator answers 400 to any /v1/* request without
+      // the `X-Twing-Developer-Id` header, so omitting it meant escalations
+      // never arrived at all in that mode. See `authFetch`'s doc comment.
+      const res = await authFetch(`${serverUrl}/v1/escalations`, {}, authToken, developerId);
+      // A coordinator predating this route 404s. That is not an error worth
+      // logging every five seconds on a machine pointed at an older server.
+      if (!res.ok) return;
+      const body = (await res.json()) as { items?: EscalationNotice[] };
+      this.escalationsByDeveloperServer.set(key, { items: Array.isArray(body.items) ? body.items : [], fetchedAt: Date.now() });
+    } catch (err) {
+      console.error(`twing daemon: escalation poll failed for ${developerId} @ ${serverUrl}`, err);
     }
   }
 
@@ -208,8 +276,14 @@ export class Syncer {
       try {
         const res = await authFetch(`${serverUrl}/v1/version`, {});
         if (!res.ok) continue;
-        const body = (await res.json()) as { version?: string };
+        const body = (await res.json()) as { version?: string; monitorUrl?: string };
         if (body.version) this.serverVersions.set(serverUrl, body.version);
+        // Absent means this coordinator has no dashboard deployed, so every
+        // consumer omits the link. Deleting rather than leaving a stale
+        // value: an operator taking their monitor down has to be able to
+        // stop agents advertising a dead URL.
+        if (typeof body.monitorUrl === "string" && body.monitorUrl.length > 0) this.monitorUrlByServer.set(serverUrl, body.monitorUrl);
+        else this.monitorUrlByServer.delete(serverUrl);
       } catch (err) {
         console.error(`twing daemon: version check failed for ${serverUrl}`, err);
       }
@@ -293,5 +367,109 @@ export class Syncer {
       result.push(...fresh.map((n) => ({ message: n.message })));
     }
     return result;
+  }
+
+  /**
+   * Teaches the daemon that this developer works on this project, without
+   * waiting for a claim to prove it.
+   *
+   * `enqueue` was the only thing that ever populated `developerProjects`,
+   * which meant a session that had not yet edited anything was invisible to
+   * every poll -- and that is precisely the session an escalation banner is
+   * for. A fresh `SessionStart` has made no claims by definition, so keying
+   * the poll set on claims alone guaranteed the banner could never appear
+   * at the one moment it is meant to.
+   *
+   * Called from `get_notices` (daemon/server.ts), which can derive both
+   * values from the session's cwd.
+   */
+  registerDeveloperProject(developerId: string, projectId: string, serverUrl: string): void {
+    this.registerProjectServer(projectId, serverUrl);
+    const projects = this.developerProjects.get(developerId) ?? new Set<string>();
+    projects.add(projectId);
+    this.developerProjects.set(developerId, projects);
+  }
+
+  /** Escalated comments waiting on this developer, across every coordinator
+   * they've been seen on. Peeked, never consumed -- two concurrent sessions
+   * for the same developer (§8) must both see them, and what actually stops
+   * one repeating is the acknowledgement round trip, not a local flag. */
+  escalationsFor(developerId: string): EscalationNotice[] {
+    const result: EscalationNotice[] = [];
+    for (const serverUrl of this.serversFor(developerId)) {
+      result.push(...(this.escalationsByDeveloperServer.get(developerServerKey(developerId, serverUrl))?.items ?? []));
+    }
+    return result;
+  }
+
+  /** The monitor origin this project's coordinator publishes, if any. */
+  monitorUrlForProject(projectId: string): string | undefined {
+    const serverUrl = this.projectServers.get(projectId);
+    return serverUrl ? this.monitorUrlByServer.get(serverUrl) : undefined;
+  }
+
+  /**
+   * The design links this session should put in its commit messages.
+   *
+   * Fetched on demand rather than polled, because it is keyed on a session
+   * id the poll loop has no way to enumerate -- and because it is only ever
+   * asked for on a message the hook already sends. Cached per session so a
+   * repeated ask inside one session costs nothing; the cache is refreshed
+   * whenever the caller says the design set may have moved.
+   */
+  async designLinksFor(developerId: string, projectId: string, sessionId: string, options: { refresh?: boolean } = {}): Promise<DesignLink[]> {
+    const cached = this.designLinksBySession.get(sessionId);
+    if (cached && !options.refresh) return cached;
+
+    const serverUrl = this.projectServers.get(projectId);
+    if (!serverUrl) return cached ?? [];
+    const monitorUrl = this.monitorUrlByServer.get(serverUrl);
+    // No dashboard means no link to give, and a reminder with no link is
+    // just noise in the agent's context -- so this returns nothing at all
+    // rather than a design id the agent can do nothing with.
+    if (!monitorUrl) return [];
+
+    const authToken = getServerAuth(readConfig(), serverUrl)?.authToken;
+    try {
+      const qs = new URLSearchParams({ projectId, sessionId, status: "open" });
+      const res = await authFetch(`${serverUrl}/v1/designs?${qs}`, {}, authToken, developerId);
+      if (!res.ok) return cached ?? [];
+      const body = (await res.json()) as { items?: { id: string; projectId: string; summary: string }[] };
+      const links: DesignLink[] = [];
+      for (const design of body.items ?? []) {
+        const url = buildDesignReviewUrl(monitorUrl, design.projectId, design.id);
+        if (url) links.push({ designId: design.id, projectId: design.projectId, summary: design.summary, url });
+      }
+      this.designLinksBySession.set(sessionId, links);
+      return links;
+    } catch (err) {
+      console.error(`twing daemon: design link fetch failed for ${developerId} @ ${serverUrl}`, err);
+      return cached ?? [];
+    }
+  }
+
+  /**
+   * The design links already fetched for this session, without a network
+   * call.
+   *
+   * Separate from `designLinksFor` because the one caller on the reply path
+   * (`get_notices`, daemon/server.ts) is answering a hook that is blocked
+   * waiting for the frame -- it cannot afford an HTTP round trip, and the
+   * whole notice pipeline is built on "the daemon already knows, so the
+   * answer is a local read". An empty result on the first message of a
+   * session is expected and self-correcting: the deferred half of that same
+   * handler warms this, and `UserPromptSubmit` fires seconds later.
+   */
+  cachedDesignLinksFor(sessionId: string): DesignLink[] {
+    return this.designLinksBySession.get(sessionId) ?? [];
+  }
+
+  private serversFor(developerId: string): Set<string> {
+    const serverUrls = new Set<string>();
+    for (const projectId of this.developerProjects.get(developerId) ?? []) {
+      const serverUrl = this.projectServers.get(projectId);
+      if (serverUrl) serverUrls.add(serverUrl);
+    }
+    return serverUrls;
   }
 }

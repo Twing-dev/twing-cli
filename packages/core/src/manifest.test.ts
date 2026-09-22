@@ -13,7 +13,24 @@ test("parseManifest: coordinator.serverUrl parses when present", () => {
 
 test("parseManifest: coordinator is empty (not an error) when the file has no coordinator section", () => {
   const manifest = parseManifest("constraints:\n  - text: x\n    scope: y\n");
-  assert.deepEqual(manifest.coordinator, { serverUrl: undefined });
+  assert.deepEqual(manifest.coordinator, { serverUrl: undefined, monitorUrl: undefined });
+});
+
+test("parseManifest: coordinator.monitorUrl parses when present", () => {
+  const manifest = parseManifest("coordinator:\n  serverUrl: http://localhost:8787\n  monitorUrl: http://localhost:5173\n");
+  assert.equal(manifest.coordinator.monitorUrl, "http://localhost:5173");
+});
+
+// Absent means "ask the coordinator", never "use twing's hosted dashboard"
+// -- defaulting here would point a self-hosted team's agents at
+// monitor.twing.dev, which cannot show them their own designs.
+test("parseManifest: an absent monitorUrl stays undefined rather than defaulting", () => {
+  const manifest = parseManifest("coordinator:\n  serverUrl: http://localhost:8787\n");
+  assert.equal(manifest.coordinator.monitorUrl, undefined);
+});
+
+test("parseManifest: a non-string monitorUrl is ignored rather than coerced", () => {
+  assert.equal(parseManifest("coordinator:\n  monitorUrl: 8787\n").coordinator.monitorUrl, undefined);
 });
 
 test("loadManifestFromFile: a missing file returns an empty manifest, including an empty coordinator", () => {

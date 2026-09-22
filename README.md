@@ -430,6 +430,9 @@ meaning for it. That is a rare path, not the default one.
 | `twing design register --summary "..." --touches a,b` | Register a design before your first edit/write (or let plan mode do it automatically).                                               |
 | `twing design amend --id <designId> --touches c,d`    | Expand an already-registered design to cover more files.                                                                             |
 | `twing design close --id <designId>`                  | Close a design once its work is done -- see below.                                                                                   |
+| `twing design comments [<designId>]`                  | Read the review comments people left on your design, and the agent's own answers. Reading also acknowledges them -- see below.       |
+| `twing design comment reply <commentId> --message "..."` | Answer a reviewer. Shows up in twing monitor as an agent reply.                                                                   |
+| `twing design comment resolve <commentId>`            | Mark a comment settled.                                                                                                              |
 
 The full command list, including self-hosting/admin commands, is in
 "Modifying twing-cli itself" below.
@@ -473,6 +476,72 @@ edit. Two things worth knowing before you do:
   different from an ordinary failed tool call you're expected to just fix
   and move past silently (a typo'd path, a missing directory): this one
   represents someone else's work the gate is asking you to account for.
+
+### Design review: people can comment on a design before it's built
+
+A registered design is the cheapest possible moment to redirect an agent --
+it says what's about to be built, before a line of it exists. So designs are
+commentable in [twing monitor](https://github.com/Twing-dev/twing-monitor):
+anyone on the project can open one and ask about it, or about one specific
+declared change.
+
+**The agent answers first.** The coordinator takes a pass at every comment
+using the design itself, so most questions never reach a person at all. If
+that answer isn't good enough, the reviewer presses "Needs the developer" and
+it's escalated -- the coordinator also *recommends* whether a human is needed,
+but never acts on that alone: only the person who asked the question can judge
+whether it was answered.
+
+An escalation reaches whoever owns the design as a **non-blocking banner** at
+the start of their next Claude Code / Codex / OpenCode session. It never
+denies an edit, never interrupts mid-session, and never blocks anything --
+it's the one place in twing where a human is pulled in deliberately rather
+than by a rule firing.
+
+### For agents: read the comments on your design
+
+If a session starts with a banner saying a reviewer escalated a comment, read
+it:
+
+```sh
+twing design comments            # this session's designs
+twing design comments <designId> # one specific design
+```
+
+**Reading is also acknowledging**, and that's the only thing that stops the
+banner -- it's a coordinator round trip, not a local flag, so ignoring the
+banner means seeing it again next session. Then either answer:
+
+```sh
+twing design comment reply <commentId> --message "..."
+```
+
+or accommodate it, which is just doing the work: widen scope with `twing
+design amend` and edit. There's no separate command for that, deliberately --
+twing doesn't verify that an accommodation happened, and a verb implying it
+did would be a lie.
+
+### For agents: link your commits back to the design
+
+When you commit work covered by a design, add a Git trailer pointing at its
+review page, so a reviewer reading `git log` can open the design and comment
+on it:
+
+```
+Twing-Design: https://monitor.twing.dev/?repos=<projectId>&tab=designs&focus=<designId>
+```
+
+twing can't do this for you: `git commit` runs through `Bash`, which is in no
+hook matcher by deliberate design, so twing never sees a commit happen. It
+gives you the exact line instead -- `twing design register` prints it, and
+it's re-delivered in your session context periodically so it doesn't get lost
+in a long design discussion. If your session has more than one design open,
+twing lists them and you pick the one the commit implements; it won't guess,
+because it can't see what you're committing.
+
+The link keeps working after the design closes, which is the normal case
+rather than the exception -- `SessionEnd` closes a session's designs and
+commits routinely land after that.
 
 ### For agents: close your design when you're actually done
 

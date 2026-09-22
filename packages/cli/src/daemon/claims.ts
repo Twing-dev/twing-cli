@@ -137,11 +137,20 @@ export interface ExtractionResult {
  * Reuses `getRepoState`, so this is one git shell-out and one manifest read
  * per repo per daemon lifetime, and free on every call after that.
  */
-export function resolveProjectCoordinator(cwd: string): { projectId: string; serverUrl: string } | null {
+export function resolveProjectCoordinator(cwd: string): { projectId: string; serverUrl: string; developerId: string } | null {
   try {
-    const state = getRepoState(findRepoRoot(cwd));
+    const repoRoot = findRepoRoot(cwd);
+    const state = getRepoState(repoRoot);
     const serverUrl = state.manifest.coordinator.serverUrl;
-    return serverUrl ? { projectId: state.projectId, serverUrl } : null;
+    if (!serverUrl) return null;
+    // `developerId` (design review, 2026-09) rides along because the only
+    // other source of it in the daemon is a Claim -- and the sessions that
+    // most need identity resolved (a fresh SessionStart, nothing edited
+    // yet) are exactly the ones that have produced none. Same `git config
+    // user.email` lookup a claim's own developerId comes from, so the two
+    // agree by construction; `getRepoState` memoizes the repo, and git
+    // config reads are cheap enough not to warrant a second cache.
+    return { projectId: state.projectId, serverUrl, developerId: computeDeveloperId(repoRoot) };
   } catch {
     return null; // not a repo, unreadable manifest -- nothing to register
   }
