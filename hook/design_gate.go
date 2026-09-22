@@ -2280,6 +2280,28 @@ func editWriteVerdict(payload hookPayload, filePath string) map[string]any {
 		return nil
 	}
 
+	// A Codex session whose sandbox denies the agent network access cannot run
+	// the commands every deny below hands back -- `design register`, `amend`,
+	// `resume` all reach the coordinator, from the agent's shell, inside that
+	// sandbox. Checking here rather than decorating each deny is what keeps it
+	// to one place: every branch past this point ends in a command the session
+	// could not run.
+	//
+	// Deliberately *before* the scope check, and that is a real trade rather
+	// than an oversight: a design registered out of band -- by the developer,
+	// from their own terminal, for this session id -- would otherwise let the
+	// edit through, and this blocks it too. The simpler rule was chosen
+	// knowingly, because a session that cannot register is a session that
+	// cannot coordinate, and the fix the message gives (start a session with
+	// network access) is the same either way.
+	//
+	// After `isGateDisabled`, so every existing way of opting out still wins,
+	// and before the auth and coordinator calls, so a session that cannot act
+	// on the answer never pays for one.
+	if harnessIsCodex() && codexNetworkRestricted(payload.TranscriptPath) {
+		return denyOutput("PreToolUse", codexNetworkNotice(config))
+	}
+
 	if config.AuthToken == "" && !config.NoAuth {
 		// Fix it rather than instruct someone to: `init --unattended`
 		// resolves a GitHub token from `gh auth token` and joins this
