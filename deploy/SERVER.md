@@ -101,14 +101,17 @@ directory to recreate the server when optional runtime configuration changes.
 Upgrade to the newest stable image:
 
 ```sh
-~/.twing/server/twing-server upgrade
+curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- upgrade
 ```
 
 Or pin an exact release:
 
 ```sh
-~/.twing/server/twing-server upgrade --version 1.4.0
+curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- upgrade --version 1.4.0
 ```
+
+The installer defaults to `~/.twing/server`. Add `--dir /srv/twing-server`
+when upgrading an installation created with that custom directory.
 
 An upgrade pulls the candidate before disturbing the running server, creates a
 SQLite-safe backup under `data/backups`, recreates the container, and waits for

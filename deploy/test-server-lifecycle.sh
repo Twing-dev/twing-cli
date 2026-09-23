@@ -47,6 +47,11 @@ docker compose --project-directory "$AUTH_DIR" --env-file "$AUTH_DIR/.env" -f "$
 [[ "$(cat "$AUTH_DIR/data/upgrade-marker")" == "preserved" ]]
 find "$AUTH_DIR/data/backups" -name 'pre-upgrade-*.db' -type f | grep -q .
 
+echo "server lifecycle test: remote installer delegates an upgrade to the existing directory"
+TWING_SERVER_WRAPPER_URL="file://$REPO_DIR/deploy/twing-server" \
+  sh "$REPO_DIR/deploy/install-server.sh" upgrade --image "$IMAGE_B" --no-pull --dir "$AUTH_DIR"
+[[ "$(cat "$AUTH_DIR/data/upgrade-marker")" == "preserved" ]]
+
 echo "server lifecycle test: failed upgrade restores the previous server"
 if "$REPO_DIR/deploy/twing-server" upgrade --image "$IMAGE_BAD" --no-pull --dir "$AUTH_DIR"; then
   echo "expected unhealthy upgrade to fail" >&2
