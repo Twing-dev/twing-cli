@@ -668,6 +668,10 @@ export function createApp(options: CreateAppOptions = {}) {
     // can carry a twing bearer token -- same reasoning as the dashboard
     // sign-in immediately above.
     if (c.req.path.startsWith("/v1/github-app/")) return next();
+    // Browsers never include application headers in CORS preflight requests.
+    // The CORS middleware above validates the origin and requested headers;
+    // actual no-auth API calls still require X-Twing-Developer-Id below.
+    if (c.req.method === "OPTIONS") return next();
     if (noAuth) {
       // §17 Phase 4: no bearer token at all -- a self-declared developerId
       // is still required on every request (attribution for align/§17's

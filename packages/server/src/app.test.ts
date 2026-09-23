@@ -330,6 +330,27 @@ test("CORS: an allowed origin's preflight gets Access-Control-Allow-Origin, and 
   assert.equal(authedRes.headers.get("access-control-allow-origin"), "https://app.twing.dev");
 });
 
+test("CORS: no-auth preflight is allowed without a developer ID, while real requests still require one", async () => {
+  const { app, dataDir } = freshApp({ corsOrigins: ["https://app.twing.dev"], noAuth: true });
+  try {
+    const preflight = await app.request("/v1/auth/whoami", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://app.twing.dev",
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "X-Twing-Developer-Id",
+      },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get("access-control-allow-origin"), "https://app.twing.dev");
+
+    const request = await app.request("/v1/auth/whoami");
+    assert.equal(request.status, 400);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("CORS: disabled (no corsOrigins configured) is the default -- no CORS headers, matching every existing self-hosted deployment", async () => {
   const { app } = freshApp();
   const preflight = await app.request("/v1/projects", {
