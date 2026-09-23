@@ -23,12 +23,14 @@ Install options:
   --port <port>           Public HTTPS port (default: 443)
   --http-port <port>      Public HTTP port for ACME challenges (default: 80)
   --bind <address>        HTTP bind address (default: 0.0.0.0)
+  --monitor-url <url>     Published twing-monitor URL and browser CORS origin
   --no-pull               Use an image already present locally
 
 Upgrade options:
   --version <version>     Version to install (default: latest)
   --image <image>         Exact image reference
   --dir <path>            Existing installation directory
+  --monitor-url <url>     Update the published twing-monitor URL and CORS origin
   --no-pull               Use an image already present locally
 
 The generated server.env file is preserved across upgrades. Put LLM,
@@ -152,6 +154,44 @@ EOF
   chmod 600 "$file"
 }
 
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  printf '%s' "${value%"${value##*[![:space:]]}"}"
+}
+
+update_monitor_url() {
+  local file="$1" monitor_url="$2" old_monitor_url existing_cors cors_origins="" origin trimmed_origin
+  local -a origins=()
+  local monitor_present=false
+
+  [[ -n "$(trim "$monitor_url")" && "$monitor_url" != *$'\n'* && "$monitor_url" != *$'\r'* ]] || die "invalid monitor URL"
+  old_monitor_url="$(read_setting "$file" TWING_MONITOR_URL)"
+  existing_cors="$(read_setting "$file" TWING_SERVE_CORS_ORIGINS)"
+  IFS=',' read -r -a origins <<<"$existing_cors"
+  for origin in "${origins[@]-}"; do
+    trimmed_origin="$(trim "$origin")"
+    [[ -n "$trimmed_origin" ]] || continue
+    # Replacing a monitor URL also removes only its prior CORS entry.
+    [[ "$trimmed_origin" == "$old_monitor_url" && "$old_monitor_url" != "$monitor_url" ]] && continue
+    if [[ "$trimmed_origin" == "$monitor_url" ]]; then
+      monitor_present=true
+    fi
+    if [[ -n "$cors_origins" ]]; then cors_origins+=","; fi
+    cors_origins+="$trimmed_origin"
+  done
+  if [[ "$monitor_present" == false ]]; then
+    if [[ -n "$cors_origins" ]]; then cors_origins+=","; fi
+    cors_origins+="$monitor_url"
+  fi
+
+  local tmp="${file}.tmp"
+  sed -e '/^TWING_MONITOR_URL=/d' -e '/^TWING_SERVE_CORS_ORIGINS=/d' "$file" >"$tmp"
+  printf 'TWING_MONITOR_URL=%s\nTWING_SERVE_CORS_ORIGINS=%s\n' "$monitor_url" "$cors_origins" >>"$tmp"
+  mv "$tmp" "$file"
+  chmod 600 "$file"
+}
+
 compose() {
   docker compose --project-directory "$install_dir" --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" "$@"
 }
@@ -191,7 +231,7 @@ show_status() {
 }
 
 install_server() {
-  local mode="auth" version="latest" image="" domain="" bind="0.0.0.0" port="443" http_port="80" transport="https" port_set=false
+  local mode="auth" version="latest" image="" domain="" bind="0.0.0.0" port="443" http_port="80" transport="https" monitor_url="" port_set=false
   pull=true
   install_dir="$DEFAULT_INSTALL_DIR"
 
@@ -206,6 +246,7 @@ install_server() {
       --port) [[ $# -ge 2 ]] || die "--port needs a value"; port="$2"; port_set=true; shift 2 ;;
       --http-port) [[ $# -ge 2 ]] || die "--http-port needs a value"; http_port="$2"; shift 2 ;;
       --bind) [[ $# -ge 2 ]] || die "--bind needs a value"; bind="$2"; shift 2 ;;
+      --monitor-url) [[ $# -ge 2 ]] || die "--monitor-url needs a value"; monitor_url="$2"; shift 2 ;;
       --no-pull) pull=false; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown install option: $1" ;;
@@ -236,6 +277,7 @@ install_server() {
   write_compose_file "$install_dir/compose.yaml" "$transport" "$bind" "$port" "$http_port"
   if [[ "$transport" == "https" ]]; then write_caddyfile "$install_dir/Caddyfile" "$domain"; fi
   write_server_env "$install_dir/server.env"
+  [[ -z "$monitor_url" ]] || update_monitor_url "$install_dir/server.env" "$monitor_url"
   write_stack_env "$install_dir/.env" "$image" "$runtime_mode" "$transport" "$domain" "$bind" "$port" "$http_port" "$project"
 
   if ! wait_for_server; then
@@ -277,7 +319,7 @@ restore_database() {
 }
 
 upgrade_server() {
-  local version="latest" image=""
+  local version="latest" image="" monitor_url=""
   pull=true
   install_dir="$DEFAULT_INSTALL_DIR"
 
@@ -286,6 +328,7 @@ upgrade_server() {
       --version) [[ $# -ge 2 ]] || die "--version needs a value"; version="$2"; shift 2 ;;
       --image) [[ $# -ge 2 ]] || die "--image needs a value"; image="$2"; shift 2 ;;
       --dir) [[ $# -ge 2 ]] || die "--dir needs a value"; install_dir="$2"; shift 2 ;;
+      --monitor-url) [[ $# -ge 2 ]] || die "--monitor-url needs a value"; monitor_url="$2"; shift 2 ;;
       --no-pull) pull=false; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown upgrade option: $1" ;;
@@ -314,6 +357,7 @@ upgrade_server() {
   backup_database "$stamp"
   write_compose_file "$install_dir/compose.yaml" "$transport" "$bind" "$port" "$http_port"
   if [[ "$transport" == "https" ]]; then write_caddyfile "$install_dir/Caddyfile" "$domain"; fi
+  [[ -z "$monitor_url" ]] || update_monitor_url "$install_dir/server.env" "$monitor_url"
   write_stack_env "$env_file" "$new_image" "$mode" "$transport" "$domain" "$bind" "$port" "$http_port" "$project"
 
   if wait_for_server; then

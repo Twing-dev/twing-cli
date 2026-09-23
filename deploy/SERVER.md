@@ -21,7 +21,7 @@ Install an authenticated server without prompts:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- \
-  --domain twing.example.com --mode auth
+  --domain twing.example.com --mode auth --monitor-url https://monitor.example.com
 ```
 
 The installer saves its lifecycle command at `~/.twing/server/twing-server`.
@@ -93,6 +93,12 @@ The default installation is `~/.twing/server`. Its important contents are:
 - `.env`: lifecycle-managed image, auth mode, domain, and ports;
 - `compose.yaml` and `Caddyfile`: lifecycle-managed container and HTTPS proxy definitions.
 
+`--monitor-url` publishes the twing-monitor URL to clients for design-review
+links. It also adds that URL to `TWING_SERVE_CORS_ORIGINS` in `server.env`, so
+the monitor can call the server from a browser. Unrelated comma-separated CORS
+origins remain. Use `--monitor-url` with `upgrade` to change it; upgrades
+without the option preserve the existing monitor and CORS configuration.
+
 Edit `server.env`, then run `docker compose up -d` in the installation
 directory to recreate the server when optional runtime configuration changes.
 
@@ -108,6 +114,13 @@ Or pin an exact release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- upgrade --version 1.4.0
+```
+
+Change the monitor URL while upgrading:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- upgrade \
+  --monitor-url https://monitor.example.com
 ```
 
 The installer defaults to `~/.twing/server`. Add `--dir /srv/twing-server`
