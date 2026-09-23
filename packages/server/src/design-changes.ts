@@ -64,7 +64,21 @@ import {
  * the directory (`migrations/`, `docs/`) rather than the suffix -- and
  * `schema.ts` carries its meaning in the basename, with a suffix shared by
  * every other kind here. */
-const KIND_RULES: readonly { pattern: RegExp; kind: DesignChangeKind }[] = [
+/** A `routes?/api/controllers?/handlers?/endpoints?` folder or suffix means
+ * a backend HTTP route handler in most codebases -- but the same folder
+ * name is also how several frontend frameworks (Next.js's app router,
+ * React Router's file-based routing, Remix, SolidStart) organize page/view
+ * components, which is exactly what twing-monitor's own `src/routes/`
+ * holds. A `.tsx`/`.jsx`/`.vue`/`.svelte` file is never a backend route
+ * handler regardless of which folder it sits in, so it's excluded from the
+ * `api` rules rather than tightening the folder pattern itself (which
+ * would risk missing a real backend route file that happens to live
+ * somewhere unusual). Found live: `src/routes/WorkView.tsx`, a React view
+ * component, was tagged `api` -- "Routes, exported signatures and anything
+ * outside callers depend on" -- for a change that was neither. */
+const FRONTEND_COMPONENT_EXTENSION = /\.(tsx|jsx|vue|svelte)$/i;
+
+const KIND_RULES: readonly { pattern: RegExp; kind: DesignChangeKind; exclude?: RegExp }[] = [
   { pattern: /(^|\/)(tests?|__tests__|spec)\//i, kind: "test" },
   { pattern: /[._-](test|spec)\.[a-z]+$/i, kind: "test" },
   { pattern: /_test\.go$/i, kind: "test" },
@@ -76,8 +90,8 @@ const KIND_RULES: readonly { pattern: RegExp; kind: DesignChangeKind }[] = [
   { pattern: /(^|\/)(config|\.github)\//i, kind: "config" },
   { pattern: /\.(ya?ml|toml|ini|cfg|conf)$/i, kind: "config" },
   { pattern: /(^|\/)(package\.json|tsconfig[^/]*\.json|\.env[^/]*)$/i, kind: "config" },
-  { pattern: /(^|\/)(routes?|api|controllers?|handlers?|endpoints?)\//i, kind: "api" },
-  { pattern: /[._-](route|router|controller|handler|api)\.[a-z]+$/i, kind: "api" },
+  { pattern: /(^|\/)(routes?|api|controllers?|handlers?|endpoints?)\//i, kind: "api", exclude: FRONTEND_COMPONENT_EXTENSION },
+  { pattern: /[._-](route|router|controller|handler|api)\.[a-z]+$/i, kind: "api", exclude: FRONTEND_COMPONENT_EXTENSION },
 ];
 
 /** The kind a path is treated as when nobody said. `code` is the default
@@ -86,6 +100,7 @@ const KIND_RULES: readonly { pattern: RegExp; kind: DesignChangeKind }[] = [
 export function inferKind(target: string): DesignChangeKind {
   const path = pathOfTarget(target);
   for (const rule of KIND_RULES) {
+    if (rule.exclude?.test(path)) continue;
     if (rule.pattern.test(path)) return rule.kind;
   }
   return "code";
