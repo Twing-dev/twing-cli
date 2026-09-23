@@ -96,6 +96,38 @@ export function inferKind(target: string): DesignChangeKind {
  * detect a derived change without re-running the inference. */
 export const DERIVED_INTENT_PREFIX = "(derived from declared scope)";
 
+/**
+ * The ids in `final` whose `kind` this module guessed from the path, rather
+ * than the caller having written one down.
+ *
+ * The async re-classification pass (`design-kind-classify.ts`) is only ever
+ * allowed to touch these. An author who typed `kind: api` said something
+ * deliberate, and a model overruling it would be the same broken trade this
+ * whole module exists to avoid -- see `ensureChanges`'s "declared intent
+ * must survive verbatim" and `DERIVED_INTENT_PREFIX` above, which exist for
+ * exactly this authored-vs-derived distinction.
+ *
+ * Computed by re-reading `supplied` (the caller's raw template, in whatever
+ * shape it arrived) rather than stored on the change, because a stored
+ * provenance flag is one more field every write path could forget to set --
+ * the same failure mode that left `changes` empty for almost every design
+ * before `ensureChanges` existed. On the fully-derived path `supplied`
+ * names nothing, so every id is inferred, which is correct.
+ */
+export function pathInferredChangeIds(supplied: unknown, final: DesignChange[]): string[] {
+  const authored = new Set<string>();
+  if (Array.isArray(supplied)) {
+    for (const item of supplied) {
+      if (!isValidChange(item)) continue;
+      // Only an explicit, *valid* kind counts as authored. A bogus one was
+      // already rejected by `isValidChange`, so the row it belongs to never
+      // reached `final` under its own terms anyway.
+      if (item.kind !== undefined) authored.add(item.id);
+    }
+  }
+  return final.filter((c) => !authored.has(c.id)).map((c) => c.id);
+}
+
 function isValidChange(value: unknown): value is DesignChange {
   if (typeof value !== "object" || value === null) return false;
   const c = value as Record<string, unknown>;

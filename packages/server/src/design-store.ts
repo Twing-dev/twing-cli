@@ -16,6 +16,7 @@ import {
   DEFAULT_DESIGN_DORMANT_TTL_MS,
   type DesignStatement,
   type DesignChange,
+  type DesignChangeKind,
   type DesignConstraint,
   type DesignConstraintType,
   type DesignConflict,
@@ -505,6 +506,61 @@ export class DesignRegistry {
       }
     }
 
+    return this.get(id);
+  }
+
+  /**
+   * Corrects the `kind` label on specific declared changes (2026-09).
+   *
+   * The write half of the async classification pass
+   * (`design-kind-classify.ts`, fired fire-and-forget from app.ts). Narrow
+   * on purpose, like every other method here -- there is no generic
+   * `update(id, fields)` on this class and this isn't the excuse to add one.
+   *
+   * **Only `kind`, and only for ids named in `kindsById`.** Every other
+   * field of every change -- and every other column of the design -- is left
+   * exactly as it was. The whole `changes` column is still rewritten,
+   * because that is the only write shape a JSON column supports; the
+   * per-item selectivity is in the map above it.
+   *
+   * Deliberately **not** guarded on status. A design that went dormant or
+   * closed while the model was thinking still deserves the corrected label:
+   * nothing about `kind` feeds a gate decision, so writing it to a closed
+   * design changes no behaviour, and refusing would mean the dashboard
+   * permanently shows a guess we already know is wrong. `scopeVersion` is
+   * likewise untouched -- this is a relabel, not a scope change, and
+   * bumping it would cancel an in-flight semantic comparator pass for no
+   * reason.
+   *
+   * A no-op when nothing actually differs: no write, no activity row. The
+   * common case is the classifier agreeing with the path guess, and logging
+   * that would be noise in a feed meant to stay readable.
+   */
+  reclassifyChangeKinds(id: string, kindsById: Record<string, DesignChangeKind>): DesignStatement | undefined {
+    const existing = this.get(id);
+    if (!existing || !existing.changes) return existing;
+
+    const applied: Record<string, { from: DesignChangeKind | undefined; to: DesignChangeKind }> = {};
+    const next = existing.changes.map((change) => {
+      const to = kindsById[change.id];
+      if (to === undefined || to === change.kind) return change;
+      applied[change.id] = { from: change.kind, to };
+      return { ...change, kind: to };
+    });
+    if (Object.keys(applied).length === 0) return existing;
+
+    this.db.update(designsTable).set({ changes: JSON.stringify(next) }).where(eq(designsTable.id, id)).run();
+    this.activityLog.append({
+      projectId: existing.projectId,
+      // Absent: no human or session did this -- the classifier did, after
+      // the request that registered the design had already returned. Same
+      // shape the TTL sweep's system-generated rows use.
+      developerId: undefined,
+      kind: "design_kind_reclassified",
+      relatedId: id,
+      ts: Date.now(),
+      payload: { changes: applied },
+    });
     return this.get(id);
   }
 

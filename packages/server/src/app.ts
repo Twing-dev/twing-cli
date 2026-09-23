@@ -36,9 +36,10 @@ import {
   isDesignLive,
 } from "./design-checks.js";
 import { extractDesign } from "./design-extract.js";
-import { ensureChanges, mergeChanges } from "./design-changes.js";
+import { ensureChanges, mergeChanges, pathInferredChangeIds } from "./design-changes.js";
 import { getServerVersion } from "./version.js";
 import { checkSemanticConflict } from "./design-semantic-check.js";
+import { classifyChangeKinds } from "./design-kind-classify.js";
 import { findDesignDivergences } from "./design-divergence.js";
 import { enrichReviews } from "./review-enrich.js";
 import { AlignmentThreadStore, buildAlignmentSummary, type AlignmentSubKind, type AlignmentThread } from "./alignment-store.js";
@@ -227,6 +228,18 @@ export interface CreateAppOptions {
   /** design-comment-answer.ts's model (design review, 2026-09) -- what takes
    * the first pass at a reviewer's comment. Same default as the two above. */
   commentAnswerModel?: string;
+  /** design-kind-classify.ts's model (2026-09) -- relabels a declared
+   * change's `kind` from its stated intent.
+   *
+   * **Defaults to empty, unlike the three above, and empty means the pass
+   * never runs.** Those three have an eval-validated default worth guessing
+   * at because their absence degrades a real decision; this one only groups
+   * a dashboard tab, so a coordinator with no LLM provider should skip it
+   * outright rather than spend two doomed attempts per registration
+   * discovering that again. `main.ts` passes a resolved model whenever a
+   * provider is configured, which is the only path that matters in
+   * production. */
+  kindClassifyModel?: string;
   /** Design review comment store (2026-09). Injected in tests for the same
    * reason every other store here is. */
   designComments?: DesignCommentStore;
@@ -601,6 +614,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const extractModel = options.extractModel ?? "google.gemma-4-31b";
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
   const commentAnswerModel = options.commentAnswerModel ?? "google.gemma-4-31b";
+  const kindClassifyModel = options.kindClassifyModel ?? "";
   const monitorUrl = options.monitorUrl;
   const noAuth = options.noAuth ?? false;
   const githubClientId = options.githubClientId ?? process.env.TWING_GITHUB_CLIENT_ID ?? "Ov23liSaEt1UliMyahy6";
@@ -1120,6 +1134,40 @@ export function createApp(options: CreateAppOptions = {}) {
         maybeAutoCloseThread(thread.id);
       }
     })().catch((err) => console.error("twing serve: semantic conflict check failed", err));
+  }
+
+  /**
+   * Re-labels path-guessed change `kind`s from their stated intent, in the
+   * background (2026-09). See `design-kind-classify.ts` for why the path
+   * heuristic alone cannot get this right.
+   *
+   * Same fire-and-forget shape as `runSemanticComparatorPass` above --
+   * synchronous signature, `void (async …)()` inside -- so it never delays
+   * the response that triggered it. Unlike the comparator this one is purely
+   * cosmetic: `kind` groups the dashboard's "Design change" tab and feeds no
+   * gate decision, so it can never block an edit or flag a design.
+   *
+   * `changeIds` is the path-inferred subset only (`pathInferredChangeIds`);
+   * an author-declared `kind` is never sent, so it can never be overturned.
+   *
+   * Bails if `scopeVersion` moved while the model was thinking -- the same
+   * cooperative-cancellation check the comparator uses. It matters here
+   * because a concurrent amend rewrites the whole `changes` column, so
+   * applying a stale classification afterwards could reintroduce a kind for
+   * a change that amend had already replaced.
+   */
+  function runKindClassificationPass(designId: string, changeIds: string[]): void {
+    if (!kindClassifyModel || changeIds.length === 0) return;
+    const started = designs.get(designId);
+    if (!started) return;
+    const startVersion = started.scopeVersion;
+    void (async () => {
+      const kinds = await classifyChangeKinds(started, changeIds, { model: kindClassifyModel });
+      if (Object.keys(kinds).length === 0) return; // unreachable model, or it agreed with every guess
+      const current = designs.get(designId);
+      if (!current || current.scopeVersion !== startVersion) return; // superseded by a later amend -- drop it
+      designs.reclassifyChangeKinds(designId, kinds);
+    })().catch((err) => console.error("twing serve: change-kind classification failed", err));
   }
 
   /** Tightening alignment threads, item 3 (2026-08-27): a thread can now
@@ -2342,6 +2390,10 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     runSemanticComparatorPass(design.id, open);
+    // `body.changes` is the caller's own template (absent on the ExitPlanMode
+    // path, where extraction supplied them instead) -- whatever it declared a
+    // `kind` for is the author's word and stays out of the classifier's reach.
+    runKindClassificationPass(design.id, pathInferredChangeIds(body.changes, design.changes ?? []));
 
     // groupId (§17 design linking, 2026-08): echoed back on every branch --
     // post self-assignment, this is what lets a CLI caller that didn't pass
@@ -2706,6 +2758,15 @@ export function createApp(options: CreateAppOptions = {}) {
     const amended = designs.amend(id, delta);
     if (!amended) return c.json({ error: `design is ${design.status}, not open -- can't amend` }, 409);
 
+    // Only what this amend actually appended. `mergeChanges` keeps every
+    // already-declared item verbatim, so the rest were classified (or
+    // deliberately left alone) back when they were registered -- re-sending
+    // them would spend tokens re-deciding a settled question, and could
+    // flip-flop a label an earlier pass had already corrected.
+    const preAmendIds = new Set((design.changes ?? []).map((ch) => ch.id));
+    const addedChanges = (amended.changes ?? []).filter((ch) => !preAmendIds.has(ch.id));
+    const newlyInferredIds = pathInferredChangeIds(body?.changes, addedChanges);
+
     if (outcome.verdict !== "clean") {
       // 2026-08-26: blocking is now a static function of `verdict` alone
       // (see DesignVerdict's doc comment, core/types.ts) -- `file_overlap`
@@ -2740,11 +2801,13 @@ export function createApp(options: CreateAppOptions = {}) {
         designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
       }
       runSemanticComparatorPass(id, open);
+      runKindClassificationPass(id, newlyInferredIds);
       return c.json({ verdict: outcome.verdict, designId: id, groupId: amended.groupId, conflicts: outcome.conflicts, constraints: outcome.constraints });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} amended -> scopeVersion ${amended.scopeVersion}`);
     runSemanticComparatorPass(amended.id, open);
+    runKindClassificationPass(amended.id, newlyInferredIds);
     return c.json({ verdict: "clean", designId: amended.id, groupId: amended.groupId });
   });
 
@@ -2804,6 +2867,12 @@ export function createApp(options: CreateAppOptions = {}) {
     const resumed = designs.resume(id, { sessionId: body.sessionId, developerId: identity.developerId, delta });
     if (!resumed) return c.json({ error: `design is ${design.status}, not dormant -- can't resume` }, 409);
 
+    // Same "only what this call appended" scoping as the amend route above.
+    // Resume takes no template at all (see `delta` -- `mergeChanges` is given
+    // only paths), so everything it adds is path-inferred by construction.
+    const preResumeIds = new Set((design.changes ?? []).map((ch) => ch.id));
+    const resumeInferredIds = (resumed.changes ?? []).filter((ch) => !preResumeIds.has(ch.id)).map((ch) => ch.id);
+
     // Tightening alignment threads item 4 (2026-08-27): the symmetric
     // wake-up for maybeDormThread above -- unconditional (doesn't wait to
     // see whether this resume even comes back clean below), since the
@@ -2844,11 +2913,13 @@ export function createApp(options: CreateAppOptions = {}) {
         designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
       }
       runSemanticComparatorPass(id, open);
+      runKindClassificationPass(id, resumeInferredIds);
       return c.json({ verdict: outcome.verdict, designId: id, conflicts: outcome.conflicts, constraints: outcome.constraints });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} resumed by ${identity.developerId.slice(0, 12)}/${body.sessionId.slice(0, 12)}`);
     runSemanticComparatorPass(resumed.id, open);
+    runKindClassificationPass(resumed.id, resumeInferredIds);
     return c.json({ verdict: "clean", designId: resumed.id });
   });
 

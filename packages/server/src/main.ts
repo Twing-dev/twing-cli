@@ -3,7 +3,7 @@ import { createApp } from "./app.js";
 import { createDb } from "./db/client.js";
 import { ConstraintStore } from "./design-store.js";
 import { IdentityStore } from "./identity-store.js";
-import { describeLlmProvider, resolveExtractModel, resolveSemanticCheckModel, resolveCommentAnswerModel } from "./llm-client.js";
+import { describeLlmProvider, resolveExtractModel, resolveSemanticCheckModel, resolveCommentAnswerModel, resolveKindClassifyModel } from "./llm-client.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const dataDirOptions = process.env.TWING_SERVE_DATA_DIR ? { dataDir: process.env.TWING_SERVE_DATA_DIR } : {};
@@ -49,10 +49,12 @@ const db = createDb(dataDirOptions);
 let extractModel = "";
 let semanticCheckModel = "";
 let commentAnswerModel = "";
+let kindClassifyModel = "";
 try {
   extractModel = resolveExtractModel();
   semanticCheckModel = resolveSemanticCheckModel();
   commentAnswerModel = resolveCommentAnswerModel();
+  kindClassifyModel = resolveKindClassifyModel();
 } catch {
   // no provider configured -- handled by the startup log + fail-soft path
 }
@@ -101,6 +103,7 @@ const app = createApp({
   extractModel,
   semanticCheckModel,
   commentAnswerModel,
+  kindClassifyModel,
   monitorUrl,
   constraints: new ConstraintStore(db),
   // §17.10: per-developer PATs, not a shared password. `IdentityStore`

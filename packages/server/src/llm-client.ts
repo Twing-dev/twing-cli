@@ -140,6 +140,14 @@ interface ProviderModels {
    * Defaults to the same model, so nobody has to care until they do. */
   commentAnswerEnv: string;
   commentAnswerDefault: string;
+  /** Change-kind classification (2026-09): re-labels a declared change's
+   * `kind` from its stated intent, after `inferKind`'s path regexes have
+   * already guessed one. The cheapest of the four tasks -- it picks one word
+   * from a closed six-item list and never writes prose -- so an operator who
+   * points the others at a larger model has a reason to leave this one
+   * small. Defaults to the same model, so nobody has to care until they do. */
+  kindClassifyEnv: string;
+  kindClassifyDefault: string;
 }
 
 const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
@@ -150,6 +158,8 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
     semanticDefault: "google.gemma-4-31b",
     commentAnswerEnv: "TWING_BEDROCK_COMMENT_ANSWER_MODEL",
     commentAnswerDefault: "google.gemma-4-31b",
+    kindClassifyEnv: "TWING_BEDROCK_KIND_CLASSIFY_MODEL",
+    kindClassifyDefault: "google.gemma-4-31b",
   },
   vertex: {
     extractEnv: "TWING_VERTEX_EXTRACT_MODEL",
@@ -162,6 +172,8 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
     semanticDefault: "google/gemini-2.5-flash",
     commentAnswerEnv: "TWING_VERTEX_COMMENT_ANSWER_MODEL",
     commentAnswerDefault: "google/gemini-2.5-flash",
+    kindClassifyEnv: "TWING_VERTEX_KIND_CLASSIFY_MODEL",
+    kindClassifyDefault: "google/gemini-2.5-flash",
   },
   openrouter: {
     extractEnv: "TWING_OPENROUTER_EXTRACT_MODEL",
@@ -170,6 +182,8 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
     semanticDefault: "openai/gpt-4o-mini",
     commentAnswerEnv: "TWING_OPENROUTER_COMMENT_ANSWER_MODEL",
     commentAnswerDefault: "openai/gpt-4o-mini",
+    kindClassifyEnv: "TWING_OPENROUTER_KIND_CLASSIFY_MODEL",
+    kindClassifyDefault: "openai/gpt-4o-mini",
   },
   bifrost: {
     extractEnv: "TWING_BIFROST_EXTRACT_MODEL",
@@ -178,6 +192,8 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
     semanticDefault: "openai/gpt-4o-mini",
     commentAnswerEnv: "TWING_BIFROST_COMMENT_ANSWER_MODEL",
     commentAnswerDefault: "openai/gpt-4o-mini",
+    kindClassifyEnv: "TWING_BIFROST_KIND_CLASSIFY_MODEL",
+    kindClassifyDefault: "openai/gpt-4o-mini",
   },
 };
 
@@ -203,6 +219,15 @@ export function resolveSemanticCheckModel(): string {
 export function resolveCommentAnswerModel(): string {
   const m = PROVIDER_MODELS[selectProvider()];
   return process.env[m.commentAnswerEnv]?.trim() || m.commentAnswerDefault;
+}
+
+/** The change-kind classification model for the active provider (2026-09):
+ * `TWING_<PROVIDER>_KIND_CLASSIFY_MODEL` if set, else the provider's default
+ * (the same model the others use). See `ProviderModels` for why it gets its
+ * own variable despite sharing a default. */
+export function resolveKindClassifyModel(): string {
+  const m = PROVIDER_MODELS[selectProvider()];
+  return process.env[m.kindClassifyEnv]?.trim() || m.kindClassifyDefault;
 }
 
 /** One-line, secret-free description of the active provider config, for

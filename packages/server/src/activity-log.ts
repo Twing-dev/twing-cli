@@ -113,6 +113,22 @@ export type ActivityEventKind =
    * Only ever appended when something actually changed -- re-seeding an
    * unchanged value logs nothing at all. */
   | "design_retimed"
+  /** The async classifier corrected one or more declared changes' `kind`
+   * after registration (2026-09, `design-kind-classify.ts`). System-
+   * generated, so `developerId` is absent, exactly as the TTL sweep's rows
+   * are -- no human or session triggered it. `relatedId` is the design id,
+   * matching every other design-family event, and the payload carries
+   * `{changes: {<changeId>: {from, to}}}` so a reader can see what the path
+   * heuristic got wrong without diffing two snapshots.
+   *
+   * **One row per pass, and only when something actually changed** -- a pass
+   * that confirms every existing guess logs nothing, and a failed or
+   * unreachable model logs nothing either (it returns "change nothing").
+   * Retries are deliberately invisible here: they're an implementation
+   * detail of one attempt at one act, not separate events, and logging them
+   * would drown a feed this is meant to stay readable in. Same restraint
+   * `design_retimed` above exercises. */
+  | "design_kind_reclassified"
   /** Design review (2026-09). All five carry `relatedId = <comment id>`,
    * not the design id -- deliberately, because `eventsForRelatedId` is how
    * a comment's reply history is read back, exactly as an alignment
