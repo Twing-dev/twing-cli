@@ -15,7 +15,7 @@ The server also ensures that the agent matches its version - so once a developer
 the cli, there is no further friction; they just seamless work across many repositories
 which can be upgraded/downgraded or even changed to a different server!
 
-## For Contrbutors: Use an already-onboarded repo
+## For Contributors: Use an already-onboarded repo
 
 If the repository already has `.twing/twing.yml` and you have already run the twing
 installer at any point, you are already sorted - no additional changes are needed.
