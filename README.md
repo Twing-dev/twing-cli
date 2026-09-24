@@ -5,7 +5,8 @@ It registers designs before edits, checks configured constraints, and reports
 overlapping work. The design gate blocks edits when it needs a design or a
 resolution; claim capture and alignment findings are advisory.
 
-## Architecture
+## How it works
+
 Twing requires a coordination server - that does the coordination. You can
 [set up your own](#for-maintainersadmins-onboard-a-repository), or use our
 public server: https://coordination-server.twing.dev
