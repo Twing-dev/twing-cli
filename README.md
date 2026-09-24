@@ -1,21 +1,30 @@
 # twing-cli
 
+**Stop coding agents from silently overwriting each other's work.**
+
+Run agents across a team — or across your own parallel sessions — and sooner or
+later two of them edit the same code, or solve the same problem twice, without
+ever knowing about each other. Neither one finds out until the merge.
+
 twing coordinates concurrent coding work in Claude Code, OpenCode (Codex is WIP).
 It registers designs before edits, checks configured constraints, and reports
 overlapping work. The design gate blocks edits when it needs a design or a
 resolution; claim capture and alignment findings are advisory.
 
-## Architecture
-Twing requires a coordination server - that does the coordination. You can setup
-your own (instructions somewhere below), or use our public server: https://coordination-server.twing.dev
+## How it works
+
+Twing requires a coordination server - that does the coordination. You can use
+our public server (https://coordination-server.twing.dev), or
+[set up your own](#for-maintainersadmins-onboard-a-repository).
 
 Twing instructs your coding agent using hooks - that is how it enforces designs,
 passes informational messages around overlaps or design comments and keeps things ticking.
 The server also ensures that the agent matches its version - so once a developer installs
-the cli, there is no further friction; they just seamless work across many repositories
-which can be upgraded/downgraded or even changed to a different server!
+the cli, there is no further friction; they just work seamlessly across many
+repositories, which can be upgraded/downgraded or even changed to a different
+server.
 
-## For Contrbutors: Use an already-onboarded repo
+## For contributors: use an already-onboarded repo
 
 If the repository already has `.twing/twing.yml` and you have already run the twing
 installer at any point, you are already sorted - no additional changes are needed.
@@ -143,15 +152,17 @@ Claude Code can register one when its plan mode exits. OpenCode and Codex have
 no equivalent plan hook, so their first edit may be denied with a complete
 `twing design register` command to run.
 
-The gate checks these conditions:
+The gate checks these conditions. One rule decides who clears each: you can
+waive an overlap with a peer's work, but only an admin can waive a rule the
+project set.
 
-| Check | Result |
-| --- | --- |
-| No design, or edit outside its declared scope | Edit is denied until you register, amend, resume, or resolve the design. |
-| A configured constraint | Edit is denied. A justification creates an admin review. |
-| Symbol conflict with another open design | A later edit can be denied. The blocked developer can resolve it with a justification. |
-| Semantic conflict between designs | Checked asynchronously. The triggering edit can succeed; a later notice or edit can report or block the conflict. |
-| Declared file overlap | Advisory only. |
+| Check | Result | Who clears it |
+| --- | --- | --- |
+| No design, or edit outside its declared scope | Edit is denied until you register, amend, resume, or resolve the design. | You |
+| A configured constraint | Edit is denied. A justification creates an admin review. | A project admin |
+| Symbol conflict with another open design | A later edit can be denied. The blocked developer can resolve it with a justification. | You, immediately |
+| Semantic conflict between designs | Checked asynchronously. The triggering edit can succeed; a later notice or edit can report or block the conflict. | You, immediately |
+| Declared file overlap | Advisory only. | Nobody - it is just a signal |
 
 `Bash`, `exec_command`, and other shell-driven writes are not hooked. They
 bypass both the design gate and claim capture. Do not use them to work around a
@@ -319,3 +330,9 @@ checkout has Go available, in which case it builds the local hook source.
 
 The full design is in `docs/orchestrator-and-verification-design-doc_v1.md`.
 The local coordinator deployment guide is [`deploy/SERVER.md`](deploy/SERVER.md).
+
+## License
+
+Multi-licensed: `packages/server` is AGPL-3.0-only, the rest is dual
+MIT/Apache-2.0. Check a package's own `package.json` `license` field, and see
+[`LICENSE`](LICENSE) for which component uses which and why.
