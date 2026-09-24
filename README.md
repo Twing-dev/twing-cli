@@ -6,8 +6,9 @@ overlapping work. The design gate blocks edits when it needs a design or a
 resolution; claim capture and alignment findings are advisory.
 
 ## Architecture
-Twing requires a coordination server - that does the coordination. You can setup
-your own (instructions somewhere below), or use our public server: https://coordination-server.twing.dev
+Twing requires a coordination server - that does the coordination. You can
+[set up your own](#for-maintainersadmins-onboard-a-repository), or use our
+public server: https://coordination-server.twing.dev
 
 Twing instructs your coding agent using hooks - that is how it enforces designs,
 passes informational messages around overlaps or design comments and keeps things ticking.
