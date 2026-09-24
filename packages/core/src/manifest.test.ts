@@ -94,6 +94,17 @@ test("upsertCoordinatorServerUrl: refuses to overwrite a different already-commi
   assert.equal(reloaded.coordinator.serverUrl, "http://old-server:8787");
 });
 
+test("upsertCoordinatorServerUrl: replaces a different serverUrl only when explicitly requested", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-manifest-"));
+  const filePath = path.join(dir, ".twing", "twing.yml");
+  upsertCoordinatorServerUrl(filePath, "http://old-server:8787");
+
+  const result = upsertCoordinatorServerUrl(filePath, "http://new-server:8787", true);
+
+  assert.deepEqual(result, { written: true });
+  assert.match(fs.readFileSync(filePath, "utf8"), /http:\/\/new-server:8787/);
+});
+
 // `capture:` -- the repo-level switch for session conversation capture,
 // and the only thing that turns it on. Opt-in (see `CaptureConfig`):
 // installing an npm package must never silently start capturing

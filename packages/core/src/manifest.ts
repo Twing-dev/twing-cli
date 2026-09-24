@@ -195,18 +195,19 @@ export interface RenderManifestResult {
 /**
  * Pure counterpart to `upsertCoordinatorServerUrl`, below: given a manifest's
  * current text (or `undefined` for "doesn't exist yet"), returns the text it
- * should have with `coordinator.serverUrl` set -- no filesystem access, so a
+ * should have with `coordinator.serverUrl` set -- `replace` must be true to
+ * replace a different existing value -- no filesystem access, so a
  * caller with no local checkout to read/write (the GitHub App Setup URL
  * route, `packages/server`, writing through GitHub's Contents API instead)
  * can use the exact same rendering `upsertCoordinatorServerUrl` uses for a
  * disk write. Preserves every other section's content/comments/formatting
  * exactly (`yaml.parseDocument`, not parse+stringify).
  */
-export function renderManifestWithCoordinator(existingContent: string | undefined, serverUrl: string): RenderManifestResult {
+export function renderManifestWithCoordinator(existingContent: string | undefined, serverUrl: string, replace = false): RenderManifestResult {
   const doc = existingContent !== undefined ? parseDocument(existingContent) : new Document({});
 
   const existing = doc.getIn(["coordinator", "serverUrl"]);
-  if (typeof existing === "string" && existing !== serverUrl) {
+  if (typeof existing === "string" && existing !== serverUrl && !replace) {
     return { content: existingContent ?? doc.toString(), changed: false, conflictingExisting: existing };
   }
   if (existing === serverUrl) {
@@ -220,14 +221,14 @@ export function renderManifestWithCoordinator(existingContent: string | undefine
 /**
  * Bootstraps or updates `coordinator.serverUrl` in `.twing/twing.yml` on
  * local disk. Creates the file if it doesn't exist yet. Refuses to silently
- * overwrite an already-committed *different* value -- callers (`init`) are
- * expected to warn and leave the file untouched on conflict rather than
- * repoint a whole team's coordinator without an explicit, deliberate edit.
+ * overwrite an already-committed *different* value unless `replace` is true;
+ * callers (`init`) must reserve that override for an explicit, deliberate
+ * edit rather than repoint a whole team's coordinator by default.
  */
-export function upsertCoordinatorServerUrl(filePath: string, serverUrl: string): UpsertCoordinatorResult {
+export function upsertCoordinatorServerUrl(filePath: string, serverUrl: string, replace = false): UpsertCoordinatorResult {
   const exists = fs.existsSync(filePath);
   const existingContent = exists ? fs.readFileSync(filePath, "utf8") : undefined;
-  const result = renderManifestWithCoordinator(existingContent, serverUrl);
+  const result = renderManifestWithCoordinator(existingContent, serverUrl, replace);
   if (result.conflictingExisting !== undefined) return { written: false, conflictingExisting: result.conflictingExisting };
   if (!result.changed) return { written: false };
 

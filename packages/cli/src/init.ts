@@ -50,6 +50,9 @@ export const DEFAULT_COORDINATOR_URL = "https://coordination-server.twing.dev";
 
 export interface InitOptions {
   server?: string;
+  /** Replace a conflicting committed coordinator.serverUrl. This is an
+   * interactive, deliberate repo change; unattended init must never use it. */
+  replaceServer?: boolean;
   invite?: string;
   /** §17 Phase 4: this coordinator runs with no identity verification at
    * all -- explicit and sticky (cached on the server's `ServerAuth` entry
@@ -123,6 +126,9 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   if (options.unattended && options.enableEnforcement) {
     throw new Error("twing init: --enable-enforcement cannot be used with --unattended");
   }
+  if (options.unattended && options.replaceServer) {
+    throw new Error("twing init: --replace-server cannot be used with --unattended");
+  }
   const repoRoot = findRepoRoot(options.cwd);
   const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
 
@@ -172,9 +178,9 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     if (!manifest.coordinator.serverUrl && !(await isReachableCoordinator(serverUrl))) {
       throw new Error(`twing init: couldn't reach a twing coordinator at ${serverUrl} -- check the URL and try again`);
     }
-    const result = upsertCoordinatorServerUrl(twingConfigPath(repoRoot), serverUrl);
+    const result = upsertCoordinatorServerUrl(twingConfigPath(repoRoot), serverUrl, options.replaceServer);
     if (result.written) {
-      console.log("twing init: wrote coordinator.serverUrl into .twing/twing.yml -- commit this so your team picks it up automatically");
+      console.log(`twing init: ${options.replaceServer ? "replaced" : "wrote"} coordinator.serverUrl in .twing/twing.yml -- commit this so your team picks it up automatically`);
     } else if (result.conflictingExisting) {
       console.log(
         `twing init: .twing/twing.yml already declares a different coordinator (${result.conflictingExisting}) -- left it untouched. ` +
@@ -189,8 +195,20 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // endpoint before trying GitHub auth. That endpoint is already required for
   // version recovery; this only trusts it for the deliberately opt-in
   // private-network unattended path.
-  const configuredNoAuth = getServerAuth(readConfig(), serverUrl)?.noAuth === true;
-  const discoveredNoAuth = options.unattended && !configuredNoAuth && await isNoAuthCoordinator(serverUrl);
+  const configuredAuth = getServerAuth(readConfig(), serverUrl);
+  const configuredNoAuth = configuredAuth?.noAuth === true;
+  // A cached PAT already proves this is an auth coordinator. Probe otherwise,
+  // including stale no-auth entries, so an explicit auth response can recover.
+  const discoveredAuthMode = (configuredNoAuth || (options.unattended && !configuredAuth?.authToken))
+    ? await coordinatorAuthMode(serverUrl)
+    : undefined;
+  if (configuredNoAuth && discoveredAuthMode === "auth") {
+    const config = readConfig();
+    const { noAuth: _, ...auth } = getServerAuth(config, serverUrl) ?? {};
+    writeConfig(setServerAuth(config, serverUrl, auth));
+    console.log("twing init: cleared stale cached no-auth mode for this server");
+  }
+  const discoveredNoAuth = discoveredAuthMode === "no_auth";
   if (options.noAuth || discoveredNoAuth) {
     const config = readConfig();
     if (!getServerAuth(config, serverUrl)?.noAuth) {
@@ -507,14 +525,14 @@ async function resolveAuthToken(repoRoot: string, serverUrl: string, options: In
   return { token: await requireAuth(serverUrl, "twing init"), adminRole: false };
 }
 
-async function isNoAuthCoordinator(serverUrl: string): Promise<boolean> {
+async function coordinatorAuthMode(serverUrl: string): Promise<"auth" | "no_auth" | undefined> {
   try {
     const res = await fetch(`${serverUrl}/v1/version`);
-    if (!res.ok) return false;
+    if (!res.ok) return undefined;
     const body = await res.json() as { authMode?: unknown };
-    return body.authMode === "no_auth";
+    return body.authMode === "auth" || body.authMode === "no_auth" ? body.authMode : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 

@@ -187,6 +187,18 @@ test("runInit: a conflicting already-committed coordinator is left untouched, no
   });
 });
 
+test("runInit: --replace-server updates a conflicting committed coordinator", async () => {
+  const { fetch } = captureFetch(jsonResponse({}));
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const repo = tmpRepo("http://a-different-server:1111");
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL, replaceServer: true }, deps)));
+    assert.match(fs.readFileSync(path.join(repo, ".twing", "twing.yml"), "utf8"), new RegExp(SERVER_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.ok(logs.some((l) => l.includes("replaced coordinator.serverUrl")));
+  });
+});
+
 test("runInit: seeds constraints and require_human_review rules when the manifest declares any", async () => {
   const { fetch, calls } = captureFetchSequence([jsonResponse({}), jsonResponse({ seeded: 2 })]);
   const { deps } = fakeDeps();
@@ -586,6 +598,24 @@ test("runInit: a second plain `twing init` against an already-cached no-auth ser
   });
 });
 
+test("runInit: clears stale no-auth cache when the version endpoint explicitly reports auth", async () => {
+  const { fetch, calls } = routedFetch([
+    { match: /\/v1\/version$/, response: jsonResponse({ version: "1.3.0", authMode: "auth" }) },
+  ]);
+  const { deps } = fakeDeps();
+  await withHome(async (home) => {
+    fs.mkdirSync(path.join(home, ".twing"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".twing", "config.json"), JSON.stringify({ servers: { [SERVER_URL]: { authToken: "still-valid-pat", noAuth: true } } }));
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, noGithub: true }, deps)));
+    assert.equal(getServerAuth(readConfig(), SERVER_URL)?.noAuth, undefined);
+    assert.equal(getServerAuth(readConfig(), SERVER_URL)?.authToken, "still-valid-pat");
+    assert.ok(logs.some((line) => line.includes("cleared stale cached no-auth mode")));
+    assert.ok(logs.some((line) => line.includes("twing init: done")));
+    assert.deepEqual(calls.map((url) => new URL(url).pathname), ["/v1/version"]);
+  });
+});
+
 // --- --unattended (zero-touch onboarding) -------------------------------------
 //
 // Driven by the repo-committed bootstrap hook, so nothing may prompt, wait on
@@ -676,6 +706,19 @@ test("runInit --unattended: refuses --enable-enforcement because it would write 
       /cannot be used with --unattended/,
     );
     assert.equal(calls.enableInstallEnforcement.length, 0);
+  });
+});
+
+test("runInit --unattended: refuses --replace-server because it would change tracked coordinator config", async () => {
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo("http://a-different-server:1111");
+    const before = fs.readFileSync(path.join(repo, ".twing", "twing.yml"), "utf8");
+    await assert.rejects(
+      () => runInit({ cwd: repo, server: SERVER_URL, replaceServer: true, unattended: true }, deps),
+      /--replace-server cannot be used with --unattended/,
+    );
+    assert.equal(fs.readFileSync(path.join(repo, ".twing", "twing.yml"), "utf8"), before);
   });
 });
 
