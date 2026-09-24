@@ -37,7 +37,7 @@
  * simply absent.
  */
 
-import { and, desc, eq, inArray, isNull, ne } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "./db/client.js";
 import { activityEvents, designComments, designs, notificationReads } from "./db/schema.js";
 import type { ActivityEventKind } from "./activity-log.js";
@@ -60,14 +60,39 @@ export const NOTIFYING_KINDS: readonly ActivityEventKind[] = ["design_comment_po
  * open the design. Long enough to recognise which question this is. */
 const EXCERPT_CHARS = 180;
 
-/** How many of the newest events one feed read looks at.
+/**
+ * The agent/human split, in SQL.
  *
- * The badge is exact within this window (plus every waiting escalation, which
- * is fetched separately and has no time bound). Past it the count is a floor
- * -- which the UI cannot show anyway, since the badge caps at "9+". The bound
- * matters because this runs on a poll for every signed-in dashboard user, and
- * the alternative is reading every notifying event ever written on every
- * design they have taken part in, on every tick. */
+ * It has to be applied *before* the window's `LIMIT`, not after it. Filtering
+ * in JavaScript afterwards means the window is a window of raw events, most
+ * of which are the coordinator's own answers -- and a long enough run of
+ * those pushes real human activity out of it entirely. Measured: one unread
+ * human reply behind 200 agent replies produced an empty feed and a badge of
+ * zero, with the read cursor untouched, so the notification was not merely
+ * uncounted but gone for good.
+ *
+ * `json_valid` first is not belt-and-braces: `json_extract` *raises* on
+ * malformed JSON in SQLite, so without it one bad payload row fails the whole
+ * request instead of being skipped. Guarded, an unreadable payload is simply
+ * not provably human, which matches what `parsePayload` does on the other
+ * side -- the conservative direction, since the failure mode of guessing
+ * "human" is a bell that cries wolf on every answer the coordinator gives.
+ *
+ * SQLite-specific, deliberately. `db/client.ts` ships no other driver and
+ * throws for `postgres` rather than falling back; a Postgres port rewrites
+ * this expression (`payload::jsonb ->> 'authorKind'`) along with the rest.
+ */
+const HUMAN_AUTHORED = sql`(${activityEvents.kind} <> 'design_comment_replied' OR (json_valid(${activityEvents.payload}) AND json_extract(${activityEvents.payload}, '$.authorKind') = 'human'))`;
+
+/** How many of the newest *notifying* events one feed read looks at -- real
+ * items now, since the agent replies are gone before the limit applies.
+ *
+ * The badge is exact within this window, plus every waiting escalation, which
+ * is fetched separately and has no time bound. Past 200 unread human
+ * notifications the count is a floor, which the UI cannot show anyway: the
+ * badge caps at "9+". The bound matters because this runs on a poll for every
+ * signed-in dashboard user, and the alternative is reading every notifying
+ * event ever written on every design they have taken part in, on every tick. */
 const WINDOW_ROWS = 200;
 
 const DEFAULT_LIMIT = 50;
@@ -246,7 +271,7 @@ export class NotificationStore {
       ne(activityEvents.developerId, developerId),
     );
 
-    const windowRows = this.selectFeedRows(and(inArray(activityEvents.kind, [...NOTIFYING_KINDS]), scope), Math.max(limit, WINDOW_ROWS));
+    const windowRows = this.selectFeedRows(and(inArray(activityEvents.kind, [...NOTIFYING_KINDS]), HUMAN_AUTHORED, scope), Math.max(limit, WINDOW_ROWS));
 
     // Escalations waiting on this developer, however old. Every condition of
     // "waiting on me" is in the query -- escalated, unacknowledged, and on a
@@ -300,8 +325,12 @@ export class NotificationStore {
     const items: NotificationItem[] = [];
     for (const row of rows) {
       const payload = parsePayload(row.event.payload);
-      // Rule 1: an agent's reply is not news. Every other kind here is
-      // human by construction (see NOTIFYING_KINDS).
+      // Rule 1: an agent's reply is not news. Every other kind here is human
+      // by construction (see NOTIFYING_KINDS). The window query already
+      // applies this as `HUMAN_AUTHORED`, so for those rows this is a second
+      // opinion -- kept because `toItems` is shared, and because the rule is
+      // worth being able to read in the language the rest of the file is
+      // written in.
       if (row.event.kind === "design_comment_replied" && payload.authorKind !== "human") continue;
       const actorId = row.event.developerId;
       if (!actorId) continue; // system-generated; nobody to attribute it to

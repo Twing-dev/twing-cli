@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createDb, type Db } from "./db/client.js";
-import { designs as designsTable } from "./db/schema.js";
+import { activityEvents, designs as designsTable } from "./db/schema.js";
 import { DesignCommentStore } from "./design-comment-store.js";
 import { DesignChatStore } from "./design-chat-store.js";
 import { NotificationStore } from "./notification-store.js";
@@ -358,6 +358,71 @@ test("NotificationStore: acknowledging the escalation is what lets the page forg
   assert.equal(feed.items.length, 3, "no longer pinned into the page");
   assert.equal(
     feed.items.some((i) => i.kind === "design_comment_escalated"),
+    false,
+  );
+});
+
+
+/**
+ * The boundary the window has to survive.
+ *
+ * Filtering agent replies in JavaScript *after* the query's LIMIT makes the
+ * window a window of raw events, and the coordinator answers every comment --
+ * so a long enough run of its answers pushes real human activity out of it.
+ * Measured before the fix: one unread human reply behind 200 agent replies
+ * gave an empty feed and a badge of zero, with the read cursor untouched, so
+ * the notification was not merely uncounted but unreachable for good.
+ *
+ * Deliberately more agent replies than `WINDOW_ROWS`; the 60-reply case above
+ * sits under it and passes either way.
+ */
+test("NotificationStore: a human reply survives more agent replies than the window holds", () => {
+  const { db, comments, notifications } = fresh();
+  const comment = seedDiscussion(db, comments);
+  comments.addReply({ commentId: comment.id, authorKind: "human", authorId: OTHER, message: "the one thing worth seeing" });
+  for (let i = 0; i < 250; i++) {
+    comments.addReply({ commentId: comment.id, authorKind: "agent", authorId: OWNER, message: `agent answer ${i}` });
+  }
+
+  const feed = notifications.feedFor(REVIEWER, ALL_PROJECTS, { limit: 10 });
+  assert.equal(feed.unreadCount, 1);
+  assert.deepEqual(
+    feed.items.map((i) => i.excerpt),
+    ["the one thing worth seeing"],
+  );
+});
+
+/**
+ * `json_extract` *raises* on malformed JSON in SQLite, so the `json_valid`
+ * guard in front of it is what stops one unreadable payload row from failing
+ * the whole request. An unreadable payload is not provably human, so it is
+ * excluded -- the same answer `parsePayload` gives on the JavaScript side.
+ */
+test("NotificationStore: a malformed payload is skipped, not fatal", () => {
+  const { db, comments, notifications } = fresh();
+  const comment = seedDiscussion(db, comments);
+  comments.addReply({ commentId: comment.id, authorKind: "human", authorId: OTHER, message: "a real reply" });
+
+  db.insert(activityEvents)
+    .values({
+      id: "evt-garbage",
+      projectId: PROJECT,
+      developerId: OTHER,
+      kind: "design_comment_replied",
+      relatedId: comment.id,
+      ts: Date.now() + 1000,
+      payload: "{not json at all",
+    })
+    .run();
+
+  const feed = notifications.feedFor(REVIEWER, ALL_PROJECTS);
+  assert.equal(feed.unreadCount, 1, "the good reply still counts");
+  assert.deepEqual(
+    feed.items.map((i) => i.id),
+    [feed.items[0].id],
+  );
+  assert.equal(
+    feed.items.some((i) => i.id === "evt-garbage"),
     false,
   );
 });
