@@ -1039,15 +1039,32 @@ export interface CommentResolveOptions {
   commentId: string;
 }
 
-export async function runDesignCommentResolve(options: CommentResolveOptions): Promise<void> {
-  const repoRoot = requireRepoRoot(options.cwd);
-  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
-  if (!options.commentId) throw new Error("twing design comment resolve: <commentId> is required");
-
-  const res = await authFetch(`${serverUrl}/v1/comments/${options.commentId}/resolve`, { method: "POST" }, authToken, developerId);
-  if (res.status === 401) {
-    console.error(`twing design comment resolve: ${UNAUTHORIZED_HINT}`);
-    return;
-  }
-  console.log(JSON.stringify(await parseJsonOrUnauthorized(res), null, 2));
+/**
+ * Refuses, and says what to do instead.
+ *
+ * Closing a review comment is the reviewer's call: they asked the question,
+ * so they decide it has been answered. An agent that has addressed one
+ * replies and leaves the closing to them -- otherwise a model quietly
+ * decides a person's question is settled, which is exactly the failure the
+ * escalation rules exist to prevent.
+ *
+ * **Kept as a command rather than deleted.** An agent running it from memory
+ * or from an older README gets this explanation and the command it actually
+ * wants; deleting it would produce a bare usage dump, which teaches nothing
+ * and invites a second attempt. The server refuses an agent-declared resolve
+ * too (`POST /v1/comments/:id/resolve`) -- this is the ergonomic half of
+ * that, not the enforcement.
+ */
+export function runDesignCommentResolve(options: CommentResolveOptions): void {
+  const id = options.commentId || "<commentId>";
+  console.error(
+    [
+      "twing design comment resolve: closing a comment is the reviewer's call, not yours.",
+      "",
+      "They asked the question, so they decide it has been answered. If you have addressed it, say so:",
+      `  twing design comment reply ${id} --message "<what you did about it>"`,
+      "",
+      "If it needs a change to the design, make it (twing design amend) and reply describing it.",
+    ].join("\n"),
+  );
 }

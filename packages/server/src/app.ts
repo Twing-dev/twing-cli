@@ -1614,6 +1614,29 @@ export function createApp(options: CreateAppOptions = {}) {
     return isProjectMember(identity, projectId) || canManageProject(identity, projectId);
   }
 
+  /**
+   * Who may close a comment: the reviewer who asked, or a project admin.
+   *
+   * **Membership is not enough, and that gap was real.** Every project member
+   * could close any comment, which includes the design's own author closing a
+   * reviewer's question about their own design -- marking your own homework,
+   * on the one surface built to stop exactly that. The reviewer asked the
+   * question; only they know whether it was answered.
+   *
+   * The admin carve-out is an escape hatch, not oversight: a reviewer leaves,
+   * goes on holiday, or the work is abandoned and the comment would otherwise
+   * stay open forever. `resolvedBy` records who actually closed it, so an
+   * admin doing this reads as an admin doing it rather than as the asker
+   * agreeing. That is a deliberate step past `canViewThread`'s stricter line
+   * (admins read, never act) -- a thread has two parties who can both close
+   * it, while a comment has exactly one person entitled to, and no way out if
+   * they are gone.
+   */
+  function canResolveComment(identity: ResolvedIdentity, comment: { authorId: string; projectId: string }): boolean {
+    if (noAuth) return true;
+    return identity.developerId === comment.authorId || canManageProject(identity, comment.projectId);
+  }
+
   /** Write access. The public viewer is excluded explicitly rather than by
    * omission: it is a synthetic, unauthenticated identity that *is* a member
    * of the allowlisted projects, so `isProjectMember` alone would let it
@@ -1846,7 +1869,14 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!design) return c.json({ error: "no such design" }, 404);
     if (!canViewDesignComments(identity, design.projectId)) return c.json({ error: "not a member of this project" }, 403);
     const items = designComments.listByDesign(design.id);
-    return c.json({ items, replies: designComments.repliesFor(items.map((i) => i.id)) });
+    // `canResolve` per comment, so the dashboard renders the rule instead of
+    // reimplementing it -- and cannot drift from it. The client also has no
+    // reliable way to work this out for itself: a full-auth viewer's identity
+    // lives behind their token, not in the browser.
+    return c.json({
+      items: items.map((item) => ({ ...item, canResolve: canResolveComment(identity, item) })),
+      replies: designComments.repliesFor(items.map((i) => i.id)),
+    });
   });
 
   /** Shared prelude for the four comment-scoped mutations: resolve the
@@ -1925,9 +1955,48 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ comment: escalated });
   });
 
-  app.post("/v1/comments/:id/resolve", (c) => {
+  /**
+   * Close a comment. **A person does this, not an agent.**
+   *
+   * The reviewer asked the question, so the reviewer decides it has been
+   * answered. An agent that has addressed a comment replies and leaves the
+   * closing to them; otherwise a model quietly decides that a person's
+   * question is settled, which is the same failure the escalation rules
+   * exist to prevent.
+   *
+   * Enforced the only way it can be. A developer resolving from the
+   * dashboard and their agent resolving from the CLI present the *same
+   * token*, so the server cannot tell them apart and the caller declares --
+   * exactly the reasoning behind `authorKind` on replies (see
+   * `CommentAuthorKind` in core). That relies on the caller being honest,
+   * which is why the CLI no longer offers resolving at all: the point is to
+   * remove the affordance and to refuse the honest attempt, not to pretend
+   * this is a security boundary. Absent means human, so the dashboard and
+   * anything predating this keep working.
+   *
+   * What this buys is that `resolvedBy` means what it says. Before, it named
+   * a person for a decision a model may have made.
+   */
+  app.post("/v1/comments/:id/resolve", async (c) => {
     const loaded = loadCommentForWrite(c);
     if ("error" in loaded) return c.json({ error: loaded.error }, loaded.status);
+
+    const body = await c.req.json<{ authorKind?: unknown }>().catch(() => null);
+    if (body?.authorKind === "agent") {
+      return c.json(
+        {
+          error:
+            "closing a comment is the reviewer's call, not an agent's -- reply to it instead (`twing design comment reply <id> --message \"...\"`) and let whoever asked decide it is answered",
+        },
+        403,
+      );
+    }
+    if (!canResolveComment(loaded.identity, loaded.comment)) {
+      return c.json(
+        { error: "only the reviewer who asked this can close it (or a project admin) -- reply to it instead and let them decide it is answered" },
+        403,
+      );
+    }
     return c.json({ comment: designComments.resolve(loaded.comment.id, loaded.identity.developerId) });
   });
 

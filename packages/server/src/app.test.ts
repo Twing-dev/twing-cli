@@ -7054,3 +7054,207 @@ test("design chat: a failed question does not wedge the thread for the next one"
     }),
   );
 });
+
+// Closing a comment is the reviewer's call. They asked the question, so they
+// decide it has been answered -- otherwise a model quietly settles a person's
+// question, which is the failure the escalation rules exist to prevent.
+// The token cannot tell a developer from their agent, so the caller declares,
+// exactly as it does for replies.
+test("POST /v1/comments/:id/resolve: an agent-declared resolve is refused, and named the thing to do instead", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const created = await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(admin.token), "content-type": "application/json" },
+    body: JSON.stringify({ body: "why 30s?" }),
+  });
+  const { comment } = (await created.json()) as { comment: { id: string } };
+
+  const res = await app.request(`/v1/comments/${comment.id}/resolve`, {
+    method: "POST",
+    headers: { ...bearer(admin.token), "content-type": "application/json" },
+    body: JSON.stringify({ authorKind: "agent" }),
+  });
+  assert.equal(res.status, 403);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /reviewer's call/);
+  assert.match(body.error, /reply to it instead/, "refusing without naming the alternative just invites a retry");
+
+  const after = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
+  assert.notEqual(((await after.json()) as { items: { status: string }[] }).items[0].status, "resolved");
+});
+
+test("POST /v1/comments/:id/resolve: a human resolve still works, declared or not", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+
+  for (const [label, init] of [
+    ["declared human", { body: JSON.stringify({ authorKind: "human" }) }],
+    // Absent means human, so the dashboard and anything predating this keep
+    // working.
+    ["nothing declared", {}],
+  ] as const) {
+    const created = await app.request(`/v1/designs/${design.id}/comments`, {
+      method: "POST",
+      headers: { ...bearer(admin.token), "content-type": "application/json" },
+      body: JSON.stringify({ body: `question (${label})` }),
+    });
+    const { comment } = (await created.json()) as { comment: { id: string } };
+
+    const res = await app.request(`/v1/comments/${comment.id}/resolve`, {
+      method: "POST",
+      headers: { ...bearer(admin.token), "content-type": "application/json" },
+      ...init,
+    });
+    assert.equal(res.status, 200, label);
+    assert.equal(((await res.json()) as { comment: { status: string; resolvedBy: string } }).comment.status, "resolved", label);
+  }
+});
+
+// The point of the whole change: `resolvedBy` names a person because only a
+// person can get here.
+test("POST /v1/comments/:id/resolve: resolvedBy records who decided", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const created = await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(admin.token), "content-type": "application/json" },
+    body: JSON.stringify({ body: "why?" }),
+  });
+  const { comment } = (await created.json()) as { comment: { id: string } };
+
+  const res = await app.request(`/v1/comments/${comment.id}/resolve`, { method: "POST", headers: bearer(admin.token) });
+  assert.equal(((await res.json()) as { comment: { resolvedBy: string } }).comment.resolvedBy, admin.developerId);
+});
+
+// Project membership used to be the only check, so any member could close
+// any comment -- including the design's own author closing a reviewer's
+// question about their own design, which is marking your own homework on the
+// one surface built to stop exactly that.
+
+/** Adds a second member to p1 and returns their PAT. */
+async function addMember(app: ReturnType<typeof createApp>, identities: ReturnType<typeof freshApp>["identities"], adminId: string, label: string) {
+  const pat = `${label}-pat`;
+  const invite = identities.createInvite({ kind: "project", projectId: "p1" }, "member", label, adminId);
+  await app.request(`/v1/invites/${invite.code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex(pat), label }),
+  });
+  return pat;
+}
+
+test("POST /v1/comments/:id/resolve: another project member cannot close a reviewer's question", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+
+  const reviewer = await addMember(app, identities, admin.developerId, "reviewer@example.com");
+  const other = await addMember(app, identities, admin.developerId, "other@example.com");
+
+  const created = await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(reviewer), "content-type": "application/json" },
+    body: JSON.stringify({ body: "the reviewer's question" }),
+  });
+  const { comment } = (await created.json()) as { comment: { id: string } };
+
+  const res = await app.request(`/v1/comments/${comment.id}/resolve`, { method: "POST", headers: bearer(other) });
+  assert.equal(res.status, 403);
+  assert.match(((await res.json()) as { error: string }).error, /only the reviewer who asked/);
+});
+
+// The case that matters most: the person whose design is being reviewed.
+test("POST /v1/comments/:id/resolve: the design's own author cannot close a reviewer's question about it", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const author = await addMember(app, identities, admin.developerId, "author@example.com");
+  const reviewer = await addMember(app, identities, admin.developerId, "reviewer@example.com");
+  const design = seedDesign(designs, { projectId: "p1", developerId: "author@example.com" });
+
+  const created = await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(reviewer), "content-type": "application/json" },
+    body: JSON.stringify({ body: "is this actually safe?" }),
+  });
+  const { comment } = (await created.json()) as { comment: { id: string } };
+
+  const res = await app.request(`/v1/comments/${comment.id}/resolve`, { method: "POST", headers: bearer(author) });
+  assert.equal(res.status, 403, "marking your own homework");
+});
+
+test("POST /v1/comments/:id/resolve: the reviewer who asked can close it", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const reviewer = await addMember(app, identities, admin.developerId, "reviewer@example.com");
+
+  const created = await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(reviewer), "content-type": "application/json" },
+    body: JSON.stringify({ body: "the reviewer's question" }),
+  });
+  const { comment } = (await created.json()) as { comment: { id: string } };
+
+  const res = await app.request(`/v1/comments/${comment.id}/resolve`, { method: "POST", headers: bearer(reviewer) });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { comment: { status: string; resolvedBy: string } };
+  assert.equal(body.comment.status, "resolved");
+  assert.equal(body.comment.resolvedBy, "reviewer@example.com");
+});
+
+// The escape hatch: a reviewer who has left would otherwise leave a comment
+// open forever. `resolvedBy` makes it visible that it was not the asker.
+test("POST /v1/comments/:id/resolve: a project admin can close on the reviewer's behalf, and is recorded as doing so", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const reviewer = await addMember(app, identities, admin.developerId, "reviewer@example.com");
+
+  const created = await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(reviewer), "content-type": "application/json" },
+    body: JSON.stringify({ body: "the reviewer's question" }),
+  });
+  const { comment } = (await created.json()) as { comment: { id: string } };
+
+  const res = await app.request(`/v1/comments/${comment.id}/resolve`, { method: "POST", headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+  assert.equal(((await res.json()) as { comment: { resolvedBy: string } }).comment.resolvedBy, admin.developerId);
+});
+
+// The dashboard renders the rule rather than reimplementing it -- and cannot
+// work it out itself, since a full-auth viewer's identity lives behind their
+// token, not in the browser.
+test("GET /v1/designs/:id/comments: says per comment whether this viewer may close it", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const reviewer = await addMember(app, identities, admin.developerId, "reviewer@example.com");
+  const other = await addMember(app, identities, admin.developerId, "other@example.com");
+
+  await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(reviewer), "content-type": "application/json" },
+    body: JSON.stringify({ body: "the reviewer's question" }),
+  });
+
+  const asReviewer = (await (await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(reviewer) })).json()) as { items: { canResolve: boolean }[] };
+  const asOther = (await (await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(other) })).json()) as { items: { canResolve: boolean }[] };
+  const asAdmin = (await (await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) })).json()) as { items: { canResolve: boolean }[] };
+
+  assert.equal(asReviewer.items[0].canResolve, true, "she asked it");
+  assert.equal(asOther.items[0].canResolve, false, "he did not");
+  assert.equal(asAdmin.items[0].canResolve, true, "the escape hatch");
+});

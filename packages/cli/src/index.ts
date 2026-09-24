@@ -150,7 +150,6 @@ function printUsage(): void {
       "  twing design reviews [--decide <reviewId> --decision approve|reject]",
       "  twing design comments [<designId>] [--session <id>] [--json]",
       "  twing design comment reply <commentId> --message \"<text>\"",
-      "  twing design comment resolve <commentId>",
       "  twing design enable-gate",
       "  twing design disable-gate",
       "  twing constraints list [--project <id>] [--server <url>]",
@@ -238,7 +237,11 @@ async function runDesignCommand(rest: string[]): Promise<void> {
         return;
       }
       if (verb === "resolve") {
-        await runDesignCommentResolve({ cwd, server: verbFlags.server, commentId });
+        // Deliberately still dispatched, though it only explains itself --
+        // see `runDesignCommentResolve`. Exits non-zero so a script that
+        // relied on it fails loudly rather than appearing to succeed.
+        runDesignCommentResolve({ cwd, server: verbFlags.server, commentId });
+        process.exit(1);
         return;
       }
       printUsage();

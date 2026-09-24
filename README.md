@@ -432,7 +432,6 @@ meaning for it. That is a rare path, not the default one.
 | `twing design close --id <designId>`                  | Close a design once its work is done -- see below.                                                                                   |
 | `twing design comments [<designId>]`                  | Read the review comments people left on your design, and the agent's own answers. Reading also acknowledges them -- see below.       |
 | `twing design comment reply <commentId> --message "..."` | Answer a reviewer. Shows up in twing monitor as an agent reply.                                                                   |
-| `twing design comment resolve <commentId>`            | Mark a comment settled.                                                                                                              |
 
 The full command list, including self-hosting/admin commands, is in
 "Modifying twing-cli itself" below.
@@ -520,6 +519,14 @@ or accommodate it, which is just doing the work: widen scope with `twing
 design amend` and edit. There's no separate command for that, deliberately --
 twing doesn't verify that an accommodation happened, and a verb implying it
 did would be a lie.
+
+**You don't close comments.** The reviewer who *asked* decides it's been
+answered -- not you, and not the developer whose design it is. Reply saying
+what you did and leave it open; if the author could close their own review
+feedback, the person who raised it would never know whether anyone had
+actually agreed. The coordinator enforces this (only the comment's author, or
+a project admin as an escape hatch for a reviewer who's since left) and
+refuses an agent-declared resolve besides.
 
 ### For agents: link your commits back to the design
 
