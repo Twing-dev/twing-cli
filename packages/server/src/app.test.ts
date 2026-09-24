@@ -7260,6 +7260,128 @@ test("GET /v1/designs/:id/comments: says per comment whether this viewer may clo
 });
 
 // ---------------------------------------------------------------------------
+// GET /v1/notifications -- the dashboard's bell (2026-09)
+// ---------------------------------------------------------------------------
+
+// The route's own contract, as distinct from the store's rules (those are in
+// notification-store.test.ts): it answers for whoever is holding the token,
+// and there is no parameter with which to ask about anyone else.
+test("GET /v1/notifications: answers for the caller, and takes no developerId to ask about anyone else", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const reviewer = await addMember(app, identities, admin.developerId, "reviewer@example.com");
+
+  await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(reviewer), "content-type": "application/json" },
+    body: JSON.stringify({ body: "why a new table rather than reusing threads?" }),
+  });
+
+  const ownerRes = await app.request("/v1/notifications", { headers: bearer(admin.token) });
+  const owner = (await ownerRes.json()) as { items: { kind: string; designId: string }[]; unreadCount: number };
+  assert.equal(ownerRes.status, 200);
+  assert.equal(owner.unreadCount, 1);
+  assert.equal(owner.items[0].kind, "design_comment_posted");
+  assert.equal(owner.items[0].designId, design.id);
+
+  // The reviewer asked the question, so it is not news to them.
+  const mine = (await (await app.request("/v1/notifications", { headers: bearer(reviewer) })).json()) as { unreadCount: number };
+  assert.equal(mine.unreadCount, 0);
+
+  // And a developerId in the query string changes nothing -- it is not read.
+  const spoofed = (await (await app.request(`/v1/notifications?developerId=${encodeURIComponent(admin.developerId)}`, { headers: bearer(reviewer) })).json()) as {
+    items: unknown[];
+    unreadCount: number;
+  };
+  assert.equal(spoofed.unreadCount, 0);
+  assert.deepEqual(spoofed.items, []);
+});
+
+test("GET /v1/notifications: a design in a project you are not a member of never reaches you", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const reviewer = await addMember(app, identities, admin.developerId, "reviewer@example.com");
+  await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(reviewer), "content-type": "application/json" },
+    body: JSON.stringify({ body: "a question the outsider must not see" }),
+  });
+
+  // An identity with a token but no membership in p1 at all.
+  const outsider = await makeUnrelatedDeveloper(app, admin, "outsider@example.com", "outsiders-pat");
+  const res = await app.request("/v1/notifications", { headers: bearer("outsiders-pat") });
+  const body = (await res.json()) as { items: unknown[]; unreadCount: number };
+  assert.equal(res.status, 200, "not an error -- an outsider simply has an empty bell");
+  assert.deepEqual(body.items, []);
+  assert.equal(body.unreadCount, 0);
+  void outsider;
+});
+
+test("GET /v1/notifications: an organization admin hears replies in a project they manage without direct membership", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const founderToken = await makeUnrelatedDeveloper(app, admin, "founder@example.com", "founders-pat");
+  await foundProject(app, founderToken, "p1");
+  const founderId = identities.resolveToken(founderToken)!.developerId;
+  const design = seedDesign(designs, { projectId: "p1", developerId: founderId });
+  assert.deepEqual(identities.resolveToken(admin.token)!.projects, [], "the admin has no direct membership in p1");
+  const projects = (await (await app.request("/v1/projects", { headers: bearer(admin.token) })).json()) as { items: { projectId: string; role: string }[] };
+  assert.deepEqual(projects.items.map((item) => [item.projectId, item.role]), [["p1", "admin"]], "the bell can navigate to this project");
+  assert.equal((await app.request(`/v1/designs/${design.id}`, { headers: bearer(admin.token) })).status, 200);
+  assert.equal((await app.request("/v1/designs?projectId=p1", { headers: bearer(admin.token) })).status, 200);
+
+  const posted = await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(admin.token), "content-type": "application/json" },
+    body: JSON.stringify({ body: "How does this behave on retry?" }),
+  });
+  assert.equal(posted.status, 200, "org-admin permission lets the admin join the discussion");
+  const { comment } = (await posted.json()) as { comment: { id: string } };
+  const reply = await app.request(`/v1/comments/${comment.id}/replies`, {
+    method: "POST",
+    headers: { ...bearer(founderToken), "content-type": "application/json" },
+    body: JSON.stringify({ message: "Retries keep the original budget.", authorKind: "human" }),
+  });
+  assert.equal(reply.status, 200);
+
+  const res = await app.request("/v1/notifications", { headers: bearer(admin.token) });
+  const feed = (await res.json()) as { items: { kind: string; designId: string }[]; unreadCount: number };
+  assert.equal(res.status, 200);
+  assert.equal(feed.unreadCount, 1);
+  assert.deepEqual(feed.items.map((item) => [item.kind, item.designId]), [["design_comment_replied", design.id]]);
+});
+
+test("POST /v1/notifications/seen: clears the badge and hands back the feed already updated", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const reviewer = await addMember(app, identities, admin.developerId, "reviewer@example.com");
+  await app.request(`/v1/designs/${design.id}/comments`, {
+    method: "POST",
+    headers: { ...bearer(reviewer), "content-type": "application/json" },
+    body: JSON.stringify({ body: "worth a second look" }),
+  });
+
+  const seen = (await (await app.request("/v1/notifications/seen", { method: "POST", headers: bearer(admin.token) })).json()) as {
+    items: { unread: boolean }[];
+    unreadCount: number;
+  };
+  // One round trip: the client does not have to re-fetch to learn the badge
+  // is zero.
+  assert.equal(seen.unreadCount, 0);
+  assert.equal(seen.items.length, 1, "seen is not gone");
+  assert.equal(seen.items[0].unread, false);
+
+  const after = (await (await app.request("/v1/notifications", { headers: bearer(admin.token) })).json()) as { unreadCount: number };
+  assert.equal(after.unreadCount, 0, "and it stuck");
+});
+
+// ---------------------------------------------------------------------------
 // Organization-admin project access (2026-09)
 // ---------------------------------------------------------------------------
 //

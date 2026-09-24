@@ -341,7 +341,16 @@ export const activityEvents = sqliteTable(
     ts: integer("ts").notNull(),
     payload: text("payload"), // JSON, kind-specific
   },
-  (t) => [index("activity_events_project_ts_idx").on(t.projectId, t.ts), index("activity_events_related_id_idx").on(t.relatedId), index("activity_events_kind_idx").on(t.kind)],
+  (t) => [
+    index("activity_events_project_ts_idx").on(t.projectId, t.ts),
+    index("activity_events_related_id_idx").on(t.relatedId),
+    index("activity_events_kind_idx").on(t.kind),
+    // The notification feed asks "which discussions has this developer
+    // taken part in", which filters on developerId *and* kind together.
+    // `activity_events_kind_idx` alone makes that a scan of every reply
+    // ever posted, and there is no index on developerId at all.
+    index("activity_events_developer_kind_idx").on(t.developerId, t.kind),
+  ],
 );
 
 // ---------------------------------------------------------------------------
@@ -579,3 +588,34 @@ export const captures = sqliteTable(
     developerSession: uniqueIndex("captures_developer_session").on(table.developerId, table.sessionId),
   }),
 );
+
+// ---------------------------------------------------------------------------
+// Notification read cursors -- current-state table, one row per developer
+// ---------------------------------------------------------------------------
+
+/**
+ * How far through their notification feed a developer has read (2026-09).
+ *
+ * The feed itself is not stored anywhere: it is derived on every request
+ * from `activityEvents` joined through `designComments`, because every event
+ * it shows is already written there. All this table holds is the cursor, so
+ * there is no feed to keep consistent with the log it is built from and no
+ * fan-out write on a comment that reaches twelve reviewers.
+ *
+ * Its own table rather than a column on the developer row, matching how
+ * every other concern in this schema is stored, and keyed by `developerId`
+ * alone rather than by (developer, project): a person reads their bell once,
+ * not once per repo, and the dashboard shows every repo's items in one list.
+ *
+ * `lastSeenAt` is deliberately all-or-nothing -- opening the panel marks
+ * every item seen, including ones scrolled past. A per-item read table was
+ * the alternative and buys precision nobody asked for at the cost of a row
+ * per person per event. Escalations are what make that trade safe: they are
+ * *state* rather than news and are counted regardless of this cursor, so the
+ * one thing that must not be lost to a stray click cannot be.
+ */
+export const notificationReads = sqliteTable("notification_reads", {
+  developerId: text("developer_id").primaryKey(),
+  lastSeenAt: integer("last_seen_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});

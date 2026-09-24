@@ -48,6 +48,7 @@ import { CaptureStore } from "./capture-store.js";
 import { DesignCommentStore } from "./design-comment-store.js";
 import { answerDesignComment, answerDesignChat, groundingBudgetFor } from "./design-comment-answer.js";
 import { DesignChatStore } from "./design-chat-store.js";
+import { NotificationStore } from "./notification-store.js";
 import { assembleDesignContext, describeProvenance, designScopePaths, type AssembledContext } from "./design-context.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
@@ -582,6 +583,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const captures = options.captures ?? new CaptureStore(db, options.dataDir ? { capturesDir: `${options.dataDir}/captures` } : {});
   const designComments = options.designComments ?? new DesignCommentStore(db);
   const designChats = options.designChats ?? new DesignChatStore(db);
+  const notifications = new NotificationStore(db);
   const activityLog = new DrizzleActivityLog(db);
   // Tightening alignment threads item 4 (2026-08-27): wired here, after
   // both `designs` and `alignmentThreads` locals exist, rather than only
@@ -2168,6 +2170,42 @@ export function createApp(options: CreateAppOptions = {}) {
       // transcript it describes stays on this side.
       return c.json({ answer, provenance, messages: designChats.messages(chat.id) });
     });
+  });
+
+  /**
+   * The dashboard's notification bell (2026-09): design discussions waiting
+   * on the caller, and how many of them are unread.
+   *
+   * Scoped to the caller's own identity with no `?developerId=` parameter,
+   * the same shape the chat routes above use -- there is no id with which to
+   * ask for someone else's, rather than an id that is checked. The project
+   * scope is the caller's current project membership or organization-admin
+   * access, resolved here and passed in, so participation derived from
+   * history cannot outlive the caller's permission to join the discussion.
+   */
+  function notificationProjectIds(identity: ResolvedIdentity): string[] {
+    // §17 Phase 4: a no_auth identity carries no memberships at all
+    // (`identity.projects` is always []), and there is no cross-org
+    // isolation to preserve on such a coordinator -- so every founded
+    // project is in scope, matching `GET /v1/projects`' own no_auth branch.
+    if (noAuth) return identities.listAllProjectRecords().map((r) => r.projectId);
+    return accessibleProjectIds(identity);
+  }
+
+  app.get("/v1/notifications", (c) => {
+    const identity = c.get("identity");
+    const limitParam = Number(c.req.query("limit"));
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 100) : 50;
+    return c.json(notifications.feedFor(identity.developerId, notificationProjectIds(identity), { limit }));
+  });
+
+  app.post("/v1/notifications/seen", (c) => {
+    const identity = c.get("identity");
+    notifications.markSeen(identity.developerId);
+    // The feed comes back with the cursor already applied, so the client
+    // doesn't need a second round trip to learn the badge is now zero --
+    // and an escalation still waiting on them correctly survives it.
+    return c.json(notifications.feedFor(identity.developerId, notificationProjectIds(identity), { limit: 50 }));
   });
 
   // Multi-repo ExitPlanMode fallback (2026-08-18): extraction only, no
