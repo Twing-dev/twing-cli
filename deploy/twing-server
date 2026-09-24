@@ -12,6 +12,7 @@ Usage:
   twing-server status [--dir <path>]
   twing-server bootstrap-token [--dir <path>]
   twing-server stop [--dir <path>]
+  twing-server uninstall [--dir <path>] [--purge-data]
 
 Install options:
   --domain <domain>       Public HTTPS domain (required)
@@ -32,6 +33,14 @@ Upgrade options:
   --dir <path>            Existing installation directory
   --monitor-url <url>     Update the published twing-monitor URL and CORS origin
   --no-pull               Use an image already present locally
+
+Uninstall options:
+  --dir <path>            Existing installation directory
+  --purge-data            Also remove the persistent database, captures, and backups
+
+Uninstall stops and removes the Compose deployment, wrapper, and generated
+configuration. By default it leaves persistent data in <dir>/data, so a later
+install to the same directory reuses it. --purge-data removes that data too.
 
 The generated server.env file is preserved across upgrades. Put LLM,
 GitHub App, CORS, and other server configuration there.
@@ -388,6 +397,55 @@ simple_dir_option() {
   [[ -f "$install_dir/.env" ]] || die "no server installation at $install_dir"
 }
 
+owned_installation() {
+  local env_file="$install_dir/.env" compose_file="$install_dir/compose.yaml"
+  [[ -f "$env_file" && -f "$compose_file" ]] || return 1
+  [[ "$(read_setting "$env_file" TWING_COMPOSE_PROJECT)" =~ ^twing-server-[0-9]{14}-[0-9]+$ ]] || return 1
+  [[ -n "$(read_setting "$env_file" TWING_SERVER_IMAGE)" ]] || return 1
+  [[ "$(read_setting "$env_file" TWING_AUTH_MODE)" =~ ^(auth|no_auth)$ ]] || return 1
+  [[ "$(read_setting "$env_file" TWING_TRANSPORT)" =~ ^(https|http)$ ]] || return 1
+  grep -Fqx 'name: ${TWING_COMPOSE_PROJECT}' "$compose_file" || return 1
+  grep -Fqx '      - ./data:/data' "$compose_file" || return 1
+}
+
+remove_managed_directory() {
+  local dir="$1"
+  [[ ! -L "$dir" ]] || die "refusing to remove symlink $dir"
+  [[ -d "$dir" ]] || return 0
+  rm -rf "$dir"
+}
+
+uninstall_server() {
+  local purge_data=false
+  install_dir="$DEFAULT_INSTALL_DIR"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) [[ $# -ge 2 ]] || die "--dir needs a value"; install_dir="$2"; shift 2 ;;
+      --purge-data) purge_data=true; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown uninstall option: $1" ;;
+    esac
+  done
+
+  install_dir="$(absolute_path "$install_dir")"
+  owned_installation || die "refusing to uninstall $install_dir: not a twing server installation"
+  [[ ! -L "$install_dir/data" && -d "$install_dir/data" ]] || die "refusing to remove unsafe data path $install_dir/data"
+
+  compose down --volumes --remove-orphans
+  rm -f "$install_dir/twing-server" "$install_dir/.env" "$install_dir/compose.yaml" "$install_dir/Caddyfile" "$install_dir/server.env"
+  remove_managed_directory "$install_dir/secrets"
+
+  if [[ "$purge_data" == true ]]; then
+    remove_managed_directory "$install_dir/data"
+    rmdir "$install_dir" 2>/dev/null || true
+    echo "twing-server: uninstalled and removed persistent data"
+  else
+    echo "twing-server: uninstalled; persistent data remains at $install_dir/data"
+    echo "twing-server: reinstall with --dir '$install_dir' to reuse it, or remove it with uninstall --purge-data"
+  fi
+}
+
 command -v docker >/dev/null 2>&1 || die "docker is required"
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
 
@@ -401,6 +459,7 @@ case "$command" in
   status) simple_dir_option "$@"; show_status ;;
   bootstrap-token) simple_dir_option "$@"; compose exec -T server cat /data/bootstrap-token ;;
   stop) simple_dir_option "$@"; compose down ;;
+  uninstall) uninstall_server "$@" ;;
   -h|--help|help) usage ;;
   *) die "unknown command: $command" ;;
 esac

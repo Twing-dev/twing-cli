@@ -86,4 +86,16 @@ echo "server lifecycle test: fresh no-auth install"
 grep -q '"developerId":"local-test@example.com"' <(curl -kfsS -H 'X-Twing-Developer-Id: local-test@example.com' "https://localhost:$NO_AUTH_PORT/v1/auth/whoami")
 grep -q '"authMode":"no_auth"' <(curl -kfsS "https://localhost:$NO_AUTH_PORT/v1/version")
 
+echo "server lifecycle test: uninstall preserves data but removes the deployment"
+auth_project="$(sed -n 's/^TWING_COMPOSE_PROJECT=//p' "$AUTH_DIR/.env")"
+"$REPO_DIR/deploy/twing-server" uninstall --dir "$AUTH_DIR"
+[[ "$(cat "$AUTH_DIR/data/upgrade-marker")" == "preserved" ]]
+[[ ! -e "$AUTH_DIR/twing-server" && ! -e "$AUTH_DIR/.env" && ! -e "$AUTH_DIR/compose.yaml" ]]
+[[ -z "$(docker compose -p "$auth_project" ps -q)" ]]
+
+echo "server lifecycle test: remote installer purges data"
+TWING_SERVER_WRAPPER_URL="file://$REPO_DIR/deploy/twing-server" \
+  sh "$REPO_DIR/deploy/install-server.sh" uninstall --purge-data --dir "$NO_AUTH_DIR"
+[[ ! -e "$NO_AUTH_DIR" ]]
+
 echo "server lifecycle test: PASS"

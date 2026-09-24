@@ -138,6 +138,28 @@ automatically. `server.env`, the auth mode, domain, and ports are preserved.
 ~/.twing/server/twing-server stop
 ```
 
+## Uninstall
+
+Uninstall stops and removes the Compose deployment, including its Caddy
+volumes, then removes the wrapper and generated configuration. It preserves
+the server database, captures, bootstrap token, and backups at
+`<installation-dir>/data` by default. Reinstalling to the same directory
+reuses that data.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- uninstall
+```
+
+Remove persistent data only when it is intentionally no longer needed:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- \
+  uninstall --purge-data --dir /srv/twing-server
+```
+
+Uninstall refuses directories that do not contain the generated twing `.env`
+and Compose ownership markers.
+
 From a source checkout, the integration test builds a local image and exercises
 HTTPS for authenticated and no-auth installs, a successful upgrade with
 persistent data, and an automatic rollback from an unhealthy upgrade:
