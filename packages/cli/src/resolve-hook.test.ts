@@ -167,7 +167,7 @@ test("isResolverWired / removeResolverWiring: round trip", async () => {
  * way a real install would, so tests can follow what happens *after* the
  * install -- including whether the payload still reaches the binary.
  */
-function recordingNpm(opts: { installsHook?: boolean; nodeVersion?: string } = {}): { path: string; installs: () => number; initCwd: () => string } {
+function recordingNpm(opts: { installsHook?: boolean; writesHookStamp?: boolean; nodeVersion?: string; initFails?: boolean } = {}): { path: string; installs: () => number; initCwd: () => string; inits: () => number } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-resolve-npm-"));
   const record = path.join(dir, "record.txt");
   // A real `npm install` leaves the CLI behind, which is what gates the
@@ -175,7 +175,7 @@ function recordingNpm(opts: { installsHook?: boolean; nodeVersion?: string } = {
   // test never runs.
   const plantCli = 'mkdir -p "$HOME/.twing/lib/node_modules/@twing/cli/dist"\n: > "$HOME/.twing/lib/node_modules/@twing/cli/dist/index.js"\n';
   const plantHook = opts.installsHook
-    ? 'mkdir -p "$HOME/.twing/bin"\nprintf \'#!/bin/sh\\ncat\\n\' > "$HOME/.twing/bin/twing-hook"\nchmod +x "$HOME/.twing/bin/twing-hook"\n'
+    ? `mkdir -p "$HOME/.twing/bin"\nprintf '#!/bin/sh\\ncat\\n' > "$HOME/.twing/bin/twing-hook"\nchmod +x "$HOME/.twing/bin/twing-hook"\n${opts.writesHookStamp ? `printf '${getCliVersion()}\\n' > "$HOME/.twing/bin/twing-hook.version"\n` : ""}`
     : "";
   fs.writeFileSync(path.join(dir, "npm"), `#!/bin/sh\necho "npm $*" >> ${JSON.stringify(record)}\n${plantCli}${plantHook}`, { mode: 0o755 });
   fs.writeFileSync(
@@ -184,7 +184,8 @@ function recordingNpm(opts: { installsHook?: boolean; nodeVersion?: string } = {
       // `-v` answers for real: the script checks the version before installing,
       // and a stub silent here reads as "no usable node", skipping the install.
       + `case "$1" in -v|--version) echo "${opts.nodeVersion ?? "v22.5.0"}"; exit 0 ;; esac\n`
-      + `case "$1" in -e) exec ${JSON.stringify(process.execPath)} "$@" ;; esac\n`,
+      + `case "$1" in -e) exec ${JSON.stringify(process.execPath)} "$@" ;; esac\n`
+      + (opts.initFails ? "exit 1\n" : ""),
     { mode: 0o755 },
   );
   const lines = (): string[] => (fs.existsSync(record) ? fs.readFileSync(record, "utf8").split("\n") : []);
@@ -192,6 +193,7 @@ function recordingNpm(opts: { installsHook?: boolean; nodeVersion?: string } = {
     path: `${dir}:${process.env.PATH ?? ""}`,
     installs: () => lines().filter((l) => l.startsWith("npm install")).length,
     initCwd: () => lines().find((l) => l.includes("init --unattended"))?.match(/\[pwd=(.*)\]$/)?.[1] ?? "",
+    inits: () => lines().filter((l) => l.includes("init --unattended")).length,
   };
 }
 
@@ -247,6 +249,13 @@ function homeWithBinary(stdout: string): string {
   // the stamp, and covered by its own tests below.
   fs.writeFileSync(path.join(bin, "twing-hook.version"), `${getCliVersion()}\n`);
   return home;
+}
+
+function markCoordinatorBootstrapped(home: string, server: string): void {
+  const key = execFileSync("cksum", { input: server }).toString().split(/\s+/)[0];
+  const dir = path.join(home, ".twing", "coordinator-bootstrap");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, key), `${server}\n`);
 }
 
 test("resolverScript: stands down when the project dir commits its own twing hook", async () => {
@@ -369,6 +378,35 @@ test("resolverScript: a PreToolUse editing into a repo installs for it, from a c
 
   run({ cwd: parent, home: tmpdir(), event: "PreToolUse", path: npm.path, input: editPayload(path.join(repo, "src", "a.ts")) });
   assert.equal(npm.installs(), 1, "the edited file identifies the repo even when cwd never enters it");
+});
+
+test("resolverScript: initializes a child coordinator once after SessionStart initialized its parent", async () => {
+  const parent = twingRepo();
+  const child = path.join(parent, "child");
+  fs.mkdirSync(path.join(child, ".twing"), { recursive: true });
+  fs.writeFileSync(path.join(child, ".twing", "twing.yml"), "coordinator:\n  serverUrl: http://127.0.0.1:2\n");
+  const home = tmpdir();
+  const npm = recordingNpm({ installsHook: true, writesHookStamp: true });
+
+  run({ cwd: parent, home, event: "SessionStart", path: npm.path });
+  run({ cwd: parent, home, event: "PreToolUse", path: npm.path, input: editPayload(path.join(child, "src", "a.ts")) });
+  run({ cwd: parent, home, event: "PreToolUse", path: npm.path, input: editPayload(path.join(child, "src", "b.ts")) });
+
+  assert.equal(npm.installs(), 1, "the managed CLI is installed once for both coordinators");
+  assert.equal(npm.inits(), 2, "each coordinator runs unattended init once");
+});
+
+test("resolverScript: retries a coordinator whose unattended init failed", async () => {
+  const repo = twingRepo();
+  const npm = recordingNpm({ installsHook: true, writesHookStamp: true, initFails: true });
+  const home = tmpdir();
+  const payload = editPayload(path.join(repo, "src", "a.ts"));
+
+  run({ cwd: repo, home, event: "PreToolUse", path: npm.path, input: payload });
+  run({ cwd: repo, home, event: "PreToolUse", path: npm.path, input: payload });
+
+  assert.equal(npm.installs(), 1, "a failed init does not redownload the existing CLI");
+  assert.equal(npm.inits(), 2, "a failed init leaves no coordinator success stamp");
 });
 
 test("resolverScript: the install runs `init` from the repo, not from the session's directory", async () => {
@@ -565,7 +603,9 @@ test("resolverScript: a matching binary is handed the event with no install atte
   // The steady state, on every event, for every machine that is current:
   // two tests and an exec, no subprocess and no network.
   const repo = twingRepo();
-  const { stdout } = run({ cwd: repo, home: homeWithBinary("VERDICT_FROM_HOOK"), event: "SessionStart" });
+  const home = homeWithBinary("VERDICT_FROM_HOOK");
+  markCoordinatorBootstrapped(home, "http://127.0.0.1:1");
+  const { stdout } = run({ cwd: repo, home, event: "SessionStart" });
 
   assert.equal(stdout, "VERDICT_FROM_HOOK");
 });

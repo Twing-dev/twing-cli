@@ -54,9 +54,9 @@ export function resolverPath(): string {
 /**
  * The resolver script.
  *
- * The steady-state path -- every event once twing is installed -- is two
- * `test`s, a `grep` and an `exec`, with no subprocess and no network. The
- * install branch below it runs at most once per machine.
+ * Once a coordinator has completed unattended setup, the resolver hands the
+ * event to the hook. SessionStart and PreToolUse first identify the edited
+ * coordinator, so entering a child repo cannot inherit a parent's setup.
  *
  * `$1` is the hook event, passed as an argument rather than read from the
  * payload: a `PostToolUse` payload for a `Write` carries the whole file body,
@@ -113,12 +113,8 @@ if [ -z "\${TWING_HARNESS:-}" ] && \\
   exit 0
 fi
 
-# Steady state: hand the event over with cwd untouched, so the binary resolves
-# the coordinator from the file being edited rather than from where Claude
-# happened to start.
-#
-# \`read\` rather than \`cat\`: a builtin, so the common path still costs no
-# subprocess.
+# Read the installed version before deciding whether this event needs setup.
+# \`read\` rather than \`cat\`: a builtin.
 twing_installed_version=""
 if [ -f "\$hook_stamp" ]; then
   read -r twing_installed_version < "\$hook_stamp" 2>/dev/null || twing_installed_version=""
@@ -129,15 +125,9 @@ if [ -x "\$hook_bin" ] && [ "\$twing_installed_version" != "\$twing_expected_ver
   twing_stale=1
 fi
 
-if [ -x "\$hook_bin" ] && [ -z "\$twing_stale" ]; then
-  exec "\$hook_bin"
-fi
-
-# Either nothing is installed, or what is installed is older than this
-# script. Both are handled by the install branch below -- and both fall back
-# to running whatever binary *is* there (twing_fallback), because a stale
-# hook still gates Claude Code correctly and refusing to run it would trade
-# one silent gap for a wider one.
+# Either nothing is installed, a coordinator has not completed setup, or what
+# is installed is older than this script. All paths fall back to whatever
+# binary is there, because a stale hook still gates correctly.
 twing_fallback() {
   if [ -x "\$hook_bin" ]; then
     if [ -n "\$payload_saved" ]; then
@@ -148,10 +138,9 @@ twing_fallback() {
   exit 0
 }
 
-# Nothing installed yet. Only these two events may install: Claude Code lowers
-# the hook timeout to 30s on UserPromptSubmit and *discards* the output of a
-# hook that overruns, so an npm install attempted there would silently do
-# nothing. SessionStart and PreToolUse keep the 600s default.
+# Only these two events may install or initialize a coordinator: Claude Code
+# lowers the hook timeout to 30s on UserPromptSubmit and *discards* output
+# from a hook that overruns. SessionStart and PreToolUse keep the 600s default.
 case "\$twing_event" in
   SessionStart|PreToolUse) ;;
   *) twing_fallback ;;
@@ -266,6 +255,15 @@ done
 IFS=\$twing_old_ifs
 [ -n "\$repo_root" ] || twing_fallback
 
+${coordinatorInstallShell()}
+
+# Setup succeeds per coordinator, not per machine. A SessionStart may have
+# initialized a parent coordinator, while a later edit enters a child repo
+# with another one. A failed init writes no stamp and is retried later.
+if [ -x "\$hook_bin" ] && [ -z "\$twing_stale" ] && twing_coordinator_stamp "\$repo_root"; then
+  twing_fallback
+fi
+
 # Now, and not before: the attempt is recorded once there is something to
 # install *for*. Recording it earlier spent the session's one attempt on an
 # edit that named no managed repo -- a scratch file in /tmp, say -- and the
@@ -276,8 +274,6 @@ if [ -n "\$twing_stale" ] && [ "\$twing_event" = "PreToolUse" ] && [ -n "\$twing
   mkdir -p "\$twing_upgrade_dir" 2>/dev/null || true
   : > "\$twing_upgrade_dir/\$twing_session" 2>/dev/null || true
 fi
-${coordinatorInstallShell()}
-
 # A repo that wants twing, on a machine that cannot run it.
 #
 # Distinguish this from the silent \`exit 0\`s above, which all mean "nothing
@@ -291,7 +287,7 @@ if ! twing_node_ok; then
   twing_fallback
 fi
 
-twing_install_for_repo "\$repo_root"
+twing_install_for_repo "\$repo_root" "\${twing_stale:+force}"
 
 # <&3 only when we consumed stdin above; otherwise it is still the payload.
 twing_fallback

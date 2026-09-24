@@ -25,6 +25,15 @@ test("bootstrapHookScript: carries the current marker", () => {
   assert.ok(bootstrapHookScript().includes(BOOTSTRAP_HOOK_MARKER));
 });
 
+test("bootstrapHookScript: records completed setup per coordinator and reuses an existing CLI", () => {
+  const script = bootstrapHookScript();
+  assert.match(script, /twing_coordinator_stamp\(\)/);
+  assert.match(script, /twing_mark_coordinator_bootstrapped\(\)/);
+  assert.match(script, /if \[ ! -f "\$_cli" \] \|\| \[ "\$\{2:-\}" = "force" \]; then/);
+  assert.match(script, /node "\$_cli" init --unattended .*\|\| return 1/);
+  assert.match(script, /twing_mark_coordinator_bootstrapped "\$_root"/);
+});
+
 test("mergeBootstrapHookEntries: wires every event in WIRED_HOOK_EVENTS into an empty settings object", () => {
   const settings: ClaudeSettings = {};
   const changed = mergeBootstrapHookEntries(settings);

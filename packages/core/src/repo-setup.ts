@@ -169,6 +169,31 @@ twing_fetch() {
   fi
 }
 
+# A hook binary only proves that this machine can run twing. A machine can use
+# several coordinators, each of which needs its own unattended setup. Record
+# successful setup by coordinator; failed setup leaves no record so a later
+# hook can retry.
+twing_coordinator_server() {
+  sed -n 's/^[[:space:]]*serverUrl:[[:space:]]*//p' "\$1/.twing/twing.yml" 2>/dev/null | head -1 | tr -d '"' | tr -d '\\r'
+}
+
+twing_coordinator_stamp() {
+  _server=\$(twing_coordinator_server "\$1")
+  [ -n "\$_server" ] || return 1
+  set -- \$(printf '%s' "\$_server" | cksum) || return 1
+  _stamp="\$HOME/.twing/coordinator-bootstrap/\$1"
+  [ -f "\$_stamp" ] && IFS= read -r _stamped < "\$_stamp" && [ "\$_stamped" = "\$_server" ]
+}
+
+twing_mark_coordinator_bootstrapped() {
+  _server=\$(twing_coordinator_server "\$1")
+  [ -n "\$_server" ] || return 1
+  set -- \$(printf '%s' "\$_server" | cksum) || return 1
+  _dir="\$HOME/.twing/coordinator-bootstrap"
+  mkdir -p "\$_dir" 2>/dev/null || return 1
+  printf '%s\n' "\$_server" > "\$_dir/\$1" 2>/dev/null
+}
+
 # Installs twing for the repo at \$1, pinned to that repo's coordinator.
 twing_install_for_repo() {
   _root="\$1"
@@ -187,7 +212,7 @@ twing_install_for_repo() {
   fi
 
   # coordinator.serverUrl straight out of the committed manifest.
-  _server=\$(sed -n 's/^[[:space:]]*serverUrl:[[:space:]]*//p' "\$_root/.twing/twing.yml" 2>/dev/null | head -1 | tr -d '"' | tr -d '\\r')
+  _server=\$(twing_coordinator_server "\$_root")
 
   _spec="@twing/cli@latest"
   if [ -n "\$_server" ]; then
@@ -199,7 +224,11 @@ twing_install_for_repo() {
   fi
   echo "twing: installing \$_spec (coordinator \$_server)" >> "\$_log" 2>/dev/null
 
-  npm install --prefix "\$_lib" "\$_spec" --no-fund --no-audit --loglevel=error >> "\$_log" 2>&1 </dev/null
+  # Later coordinators need their own init, but not another npm install when
+  # the managed CLI is already present.
+  if [ ! -f "\$_cli" ] || [ "\${2:-}" = "force" ]; then
+    npm install --prefix "\$_lib" "\$_spec" --no-fund --no-audit --loglevel=error >> "\$_log" 2>&1 </dev/null || return 1
+  fi
 
   # From the repo, in a subshell. \`init\` resolves the coordinator from its own
   # cwd, and the caller's cwd is not reliably inside the repo being installed
@@ -207,7 +236,9 @@ twing_install_for_repo() {
   # below) is exactly the case the resolver identifies by file path instead.
   # Installing the CLI and then failing with "no coordinator configured" left
   # the machine half-set-up -- lib present, no hook binary, nothing gated.
-  [ -f "\$_cli" ] && ( cd "\$_root" && node "\$_cli" init --unattended ) >> "\$_log" 2>&1 </dev/null
+  [ -f "\$_cli" ] || return 1
+  ( cd "\$_root" && node "\$_cli" init --unattended ) >> "\$_log" 2>&1 </dev/null || return 1
+  twing_mark_coordinator_bootstrapped "\$_root"
 }
 `;
 }
