@@ -11,12 +11,14 @@
 
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { inArray } from "drizzle-orm";
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import type { Claim, CallEdge, DesignChange, DesignStatement, DesignConstraintType, Finding, PendingReview, ClaudeSettings } from "@twing/core";
 import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS, buildDesignReviewUrl } from "@twing/core";
 import { computeProjectIdForGithubRepo, renderManifestWithCoordinator, bootstrapHookScript, mergeBootstrapHookEntries } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
+import { projectRecords } from "./db/schema.js";
 import { Store } from "./store.js";
 import { findClaimConflicts, type ClaimFindingMatch } from "./checks.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
@@ -762,12 +764,22 @@ export function createApp(options: CreateAppOptions = {}) {
       }));
       return c.json({ items });
     }
-    const items = identity.projects.map((membership) => {
-      const record = identities.getProjectRecord(membership.projectId);
+    // A membership's own `orgId`/`role` are reported verbatim where one
+    // exists. Deriving them instead (from the project record, and from
+    // `canManageProject`) quietly changed this response for every existing
+    // caller: `orgId` became nullable, since a GitHub-founded project has no
+    // org, and a member of a project whose *org* they administer started
+    // reporting as its admin. Only the entries this route did not use to
+    // return at all -- projects reachable through org admin without direct
+    // membership -- need values synthesized.
+    const membershipByProject = new Map(identity.projects.map((m) => [m.projectId, m]));
+    const items = accessibleProjectIds(identity).map((projectId) => {
+      const record = identities.getProjectRecord(projectId);
+      const membership = membershipByProject.get(projectId);
       return {
-        projectId: membership.projectId,
-        orgId: membership.orgId,
-        role: membership.role,
+        projectId,
+        orgId: membership?.orgId ?? record?.orgId ?? "",
+        role: membership?.role ?? ("admin" as const),
         foundedBy: record?.foundedBy,
         foundedAt: record?.foundedAt,
         githubOwner: record?.githubOwner,
@@ -855,6 +867,16 @@ export function createApp(options: CreateAppOptions = {}) {
     if (identity.projects.some((p) => p.projectId === projectId && p.role === "admin")) return true;
     const orgId = projectOrgId(projectId);
     return orgId !== undefined && identity.orgs.some((o) => o.orgId === orgId && o.role === "admin");
+  }
+
+  function accessibleProjectIds(identity: ResolvedIdentity): string[] {
+    const projectIds = new Set(identity.projects.map((p) => p.projectId));
+    const adminOrgIds = identity.orgs.filter((o) => o.role === "admin").map((o) => o.orgId);
+    if (adminOrgIds.length > 0) {
+      const managed = db.select({ projectId: projectRecords.projectId }).from(projectRecords).where(inArray(projectRecords.orgId, adminOrgIds)).all();
+      for (const record of managed) projectIds.add(record.projectId);
+    }
+    return [...projectIds];
   }
 
   app.post("/v1/projects/:id/invites", async (c) => {
@@ -2939,7 +2961,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
     if (!projectId) return c.json({ error: "expected ?projectId=" }, 400);
-    if (!isProjectMember(identity, projectId)) {
+    if (!isProjectMember(identity, projectId) && !canManageProject(identity, projectId)) {
       return c.json({ error: "not a member of this project" }, 403);
     }
     const status = c.req.query("status") as DesignStatement["status"] | undefined;
@@ -3133,8 +3155,8 @@ export function createApp(options: CreateAppOptions = {}) {
   app.get("/v1/designs/:id", (c) => {
     const identity = c.get("identity");
     const design = designs.get(c.req.param("id"));
-    if (!design || !isProjectMember(identity, design.projectId)) return c.json({ error: "no such design" }, 404);
-    const groupMembers = design.groupId ? designs.listByGroup(design.groupId).filter((d) => d.id !== design.id && isProjectMember(identity, d.projectId)) : [];
+    if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
+    const groupMembers = design.groupId ? designs.listByGroup(design.groupId).filter((d) => d.id !== design.id && (isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId))) : [];
     return c.json({ design, groupMembers });
   });
 

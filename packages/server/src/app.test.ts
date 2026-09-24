@@ -7258,3 +7258,74 @@ test("GET /v1/designs/:id/comments: says per comment whether this viewer may clo
   assert.equal(asOther.items[0].canResolve, false, "he did not");
   assert.equal(asAdmin.items[0].canResolve, true, "the escape hatch");
 });
+
+// ---------------------------------------------------------------------------
+// Organization-admin project access (2026-09)
+// ---------------------------------------------------------------------------
+//
+// `accessibleProjectIds` widened three routes -- GET /v1/projects, GET
+// /v1/designs and GET /v1/designs/:id -- so an org admin reaches a project
+// they manage without direct membership. It arrived with the notification
+// bell, which needs it: `canCommentOnDesign` already lets such an admin join
+// a discussion, so they can be a participant in one, and a notification that
+// linked to a design they then could not open would be a dead end.
+//
+// The positive direction is covered by the bell test above. These are the two
+// halves it does not assert: that the widening did not also change what this
+// route reports for an ordinary member, and that it did not open the routes
+// to anyone else.
+
+test("GET /v1/projects: a plain member's stored role and orgId are reported as stored, not derived", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const member = await addMember(app, identities, admin.developerId, "member@example.com");
+
+  const body = (await (await app.request("/v1/projects", { headers: bearer(member) })).json()) as {
+    items: { projectId: string; orgId: unknown; role: string }[];
+  };
+  const p1 = body.items.find((i) => i.projectId === "p1");
+  assert.ok(p1, "the member sees their own project");
+  assert.equal(p1.role, "member", "reporting the membership, not what canManageProject would answer");
+  // `orgId` is a string on every item, never absent: the monitor's
+  // ProjectSummary types it that way, and deriving it from the project
+  // record instead would make it undefined for a project that has no org.
+  assert.equal(typeof p1.orgId, "string");
+});
+
+/**
+ * The case the derivation actually changed: someone who administers the
+ * project's organization *and* holds a plain-member seat on the project
+ * itself. `canManageProject` answers "admin" for them, so computing the role
+ * from it silently promoted their own membership in this response.
+ */
+test("GET /v1/projects: an org admin's plain-member seat is still reported as member", async () => {
+  const { app, dataDir, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+
+  const invite = identities.createInvite({ kind: "project", projectId: "p1" }, "member", admin.developerId, admin.developerId);
+  identities.redeemInvite(invite.code, { developerId: admin.developerId });
+  const membership = identities.resolveToken(admin.token)!.projects.find((m) => m.projectId === "p1");
+  assert.equal(membership?.role, "member", "fixture: an org admin holding a plain-member seat");
+
+  const body = (await (await app.request("/v1/projects", { headers: bearer(admin.token) })).json()) as { items: { projectId: string; role: string }[] };
+  assert.equal(body.items.find((i) => i.projectId === "p1")?.role, "member");
+});
+
+test("GET /v1/designs/:id: still 404s for a developer who is neither a member nor an admin of the project", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const founderToken = await makeUnrelatedDeveloper(app, admin, "founder@example.com", "founders-pat");
+  await foundProject(app, founderToken, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: "founder@example.com" });
+
+  // A real identity on this coordinator, with no relationship to p1 at all.
+  await makeUnrelatedDeveloper(app, admin, "outsider@example.com", "outsiders-pat");
+  assert.equal((await app.request(`/v1/designs/${design.id}`, { headers: bearer("outsiders-pat") })).status, 404);
+  assert.equal((await app.request("/v1/designs?projectId=p1", { headers: bearer("outsiders-pat") })).status, 403);
+
+  // And the widening did not reach the public viewer either.
+  const projects = (await (await app.request("/v1/projects", { headers: bearer("outsiders-pat") })).json()) as { items: unknown[] };
+  assert.deepEqual(projects.items, [], "an outsider's project list stays empty");
+});
