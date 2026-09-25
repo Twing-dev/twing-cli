@@ -4,7 +4,7 @@
   "engines": {
     "node": ">=22.5"
   },
-  "license": "MIT OR Apache-2.0",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

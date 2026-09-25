@@ -2,7 +2,7 @@
   "name": "@twing/simulator",
   "version": "0.0.0",
   "private": true,
-  "license": "MIT OR Apache-2.0",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "twing-simulator": "./dist/index.js"

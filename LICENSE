@@ -1,34 +1,21 @@
-This repository is not single-licensed. Different components carry different
-licenses, matching their role in the project rather than a single blanket
-choice. The rule of thumb: the client/capture layer is permissive, the
-hosted-coordination layer is copyleft.
+MIT License
 
-────────────────────────────────────────────────────────────────────────────
-Component: packages/cli (including the daemon it manages), hook/ (twing-hook)
-License:   MIT OR Apache-2.0 (your choice)
-Why:       This is the "git" layer -- the more freely it spreads (bundled by
-           orchestrators, embedded anywhere, zero legal friction), the
-           better, and it isn't what's being monetized.
-────────────────────────────────────────────────────────────────────────────
-Component: packages/core (shared types, wire schemas, Tree-sitter wrapper)
-License:   MIT OR Apache-2.0 (your choice)
-Why:       Infrastructure both sides depend on; keeping it permissive means
-           the client never has any AGPL entanglement.
-────────────────────────────────────────────────────────────────────────────
-Component: packages/server (twing serve)
-License:   AGPL-3.0-only
-Why:       The one codebase that is the future managed product. The
-           network-use clause means: self-host it unmodified for your own
-           team, zero obligation -- exactly today's usage pattern. Fork it,
-           modify it, and offer it as your own hosted service to other
-           users -- the scenario that matters -- and you owe the source back.
-────────────────────────────────────────────────────────────────────────────
+Copyright (c) 2026 Twing
 
-Full license texts are at the repository root:
-  LICENSE-MIT     -- MIT License
-  LICENSE-APACHE  -- Apache License, Version 2.0
-  LICENSE-AGPL    -- GNU Affero General Public License, Version 3
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Each component directory carries its own short LICENSE file pointing back to
-the applicable text(s) above, and each package's package.json `license`
-field records the same choice as an SPDX expression.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

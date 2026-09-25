@@ -846,8 +846,4 @@ may still have a `~/Library/LaunchAgents/dev.twing.daemon.plist` or
 `~/.config/systemd/user/twing-daemon.service` from when `init` registered an
 OS-level service; `uninstallDaemonService` removes those.)
 
-License is dual MIT/Apache-2.0 for most packages, but `packages/server` is
-AGPL-3.0-only — check a package's own `package.json` `license` field before
-assuming. Full license texts (`LICENSE-MIT`, `LICENSE-APACHE`, `LICENSE-AGPL`)
-are all at the repository root; see the root `LICENSE` file for which
-component uses which and why.
+The entire repository is licensed under MIT; see the root `LICENSE` file.
