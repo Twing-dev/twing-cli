@@ -45,6 +45,12 @@ Choose a coordinator first. Then you need to `init` the repository you want
 to onboard. `init` writes `coordinator.serverUrl` to `.twing/twing.yml` when
 you provide the first server URL. Review and commit that change.
 
+You have three choices for a coordinator:
+
+- Twing's public coordinator
+- Setup your "auth" coordinator server
+- Setup your "no-auth" coordinator server
+
 ### Public coordinator for a GitHub repository
 
 For a GitHub-hosted repository, an admin or maintainer can use twing's public
@@ -95,7 +101,8 @@ git commit -m "Configure twing"
 ```
 
 `--no-auth` is cached per coordinator, so later setup does not need the flag.
-Use only a trusted private network.
+Use only a trusted private network. To enable plan and semantic conflict checks,
+see [Semantic checks require an LLM](#semantic-checks-require-an-llm).
 
 ### Self-hosted coordinator with authentication
 
@@ -117,7 +124,8 @@ git commit -m "Configure twing"
 
 The curl installer is the supported deployment path. See
 [`deploy/SERVER.md`](deploy/SERVER.md) for upgrades, monitoring, runtime
-configuration, and recovery.
+configuration, and recovery. To enable plan and semantic conflict checks, see
+[Semantic checks require an LLM](#semantic-checks-require-an-llm).
 
 <details>
 <summary>Develop the server from this checkout</summary>
@@ -260,13 +268,37 @@ capture:
 When enabled, filtered and redacted session conversation is stored locally
 under `~/.twing/sessions/` and uploaded to the repository's coordinator.
 
-### LLM-backed checks
+### Semantic checks require an LLM
 
 Plan extraction and semantic-conflict checks need an LLM provider on the
 coordinator. The server auto-detects configured credentials in this order:
 AWS Bedrock, GCP Vertex AI, OpenRouter, then Bifrost. Without a usable
 provider, those checks fail open as clean; the edit gate still requires a
 registered design.
+
+Set one provider's variables in the server's `server.env`, then run the server
+upgrade command:
+
+```sh
+# AWS Bedrock
+AWS_BEARER_TOKEN_BEDROCK=...
+AWS_REGION=us-east-1
+
+# GCP Vertex AI
+GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/vertex-service-account.json
+GOOGLE_CLOUD_PROJECT=my-project
+
+# OpenRouter
+OPENROUTER_API_KEY=...
+
+# Bifrost
+TWING_BIFROST_BASE_URL=http://bifrost.internal:8080
+TWING_BIFROST_API_KEY=...
+```
+
+Optional model overrides use `TWING_<PROVIDER>_EXTRACT_MODEL` and
+`TWING_<PROVIDER>_SEMANTIC_CHECK_MODEL`. For example,
+`TWING_OPENROUTER_EXTRACT_MODEL=openai/gpt-4o-mini`.
 
 ### Commands
 
