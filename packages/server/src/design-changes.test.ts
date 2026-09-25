@@ -108,6 +108,35 @@ test("inferKind: reads the path out of a symbol target", () => {
   assert.equal(inferKind("packages/server/src/db/schema.ts::designs"), "schema");
 });
 
+test("inferKind: a routes/ folder holding frontend view components isn't a backend API", () => {
+  // Found live: twing-monitor's own src/routes/ holds page-level React
+  // components (file-based view routing), not HTTP route handlers -- the
+  // same folder name means two different things depending on the
+  // framework, and a .tsx/.jsx/.vue/.svelte file is never the backend one.
+  const frontend: [string, string][] = [
+    ["src/routes/WorkView.tsx", "code"],
+    ["src/routes/RepoDetailLayout.tsx", "code"],
+    ["app/routes/dashboard.jsx", "code"],
+    ["src/components/UserCard.vue", "code"],
+    ["src/routes/Settings.svelte", "code"],
+  ];
+  for (const [path, expected] of frontend) {
+    assert.equal(inferKind(path), expected, `${path} should be ${expected}`);
+  }
+
+  // The rule still has to catch a real backend route handler in a
+  // non-component extension -- this is a narrower exclusion, not a
+  // disabled rule.
+  const backend: [string, string][] = [
+    ["src/routes/users.ts", "api"],
+    ["src/user.controller.ts", "api"],
+    ["api/handlers/payments.go", "api"],
+  ];
+  for (const [path, expected] of backend) {
+    assert.equal(inferKind(path), expected, `${path} should be ${expected}`);
+  }
+});
+
 test("mergeChanges: existing declarations survive an amend verbatim and stay first", () => {
   const existing = [{ id: "c1", action: "modify" as const, kind: "code" as const, target: "src/a.ts", intent: "authored" }];
   const merged = mergeChanges(existing, { touches: ["src/b.ts"], summary: "s" });
