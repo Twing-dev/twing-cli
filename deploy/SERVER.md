@@ -32,23 +32,9 @@ Caddy, which is the only container publishing ports 80 and 443.
 ~/.twing/server/twing-server status
 ```
 
-For a non-GitHub repository, claim the first twing admin identity:
-
-```sh
-token="$(~/.twing/server/twing-server bootstrap-token)"
-twing admin bootstrap --server https://twing.example.com --token "$token"
-```
-
-For GitHub-hosted repositories, no server bootstrap is needed. A repository
-admin runs this from its checkout, then teammates run the same command:
-
-```sh
-twing init --server https://twing.example.com --unattended
-```
-
-`--unattended` requires an existing GitHub CLI login (`gh auth login`) and does
-not open a browser. It sends the GitHub token once for repository-permission
-verification, then stores and uses a twing token instead.
+After installing the server, onboard repositories using the
+[top-level README](../README.md#for-maintainersadmins-onboard-a-repository).
+This guide covers server operation only.
 
 No-auth is for one developer or a trusted private network. It still uses HTTPS
 but verifies neither identity nor roles:
@@ -66,13 +52,6 @@ TLS and Caddy explicitly:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- \
   --insecure-http --bind 0.0.0.0 --port 8787 --mode auth
-```
-
-Clients then use the host's private address. Unattended GitHub onboarding
-works unchanged:
-
-```sh
-twing init --server http://10.0.0.25:8787 --unattended
 ```
 
 This mode sends twing tokens and API traffic without encryption. Use it only
@@ -144,7 +123,8 @@ Uninstall stops and removes the Compose deployment, including its Caddy
 volumes, then removes the wrapper and generated configuration. It preserves
 the server database, captures, bootstrap token, and backups at
 `<installation-dir>/data` by default. Reinstalling to the same directory
-reuses that data.
+reuses that data, provided no other files remain in the installation
+directory.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- uninstall

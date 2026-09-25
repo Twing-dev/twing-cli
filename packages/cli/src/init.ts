@@ -160,10 +160,32 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     promptedServer = true;
   }
   const serverUrl = normalizeServerUrl(rawServerUrl);
+  if (explicitServer && manifest.coordinator.serverUrl && manifest.coordinator.serverUrl !== serverUrl && !options.replaceServer) {
+    throw new Error(
+      `twing init: --server ${serverUrl} conflicts with committed coordinator.serverUrl ${manifest.coordinator.serverUrl}. ` +
+        "Use --replace-server to deliberately update .twing/twing.yml for the whole team.",
+    );
+  }
   if (serverUrl !== rawServerUrl) {
     console.log(`twing init: "${rawServerUrl}" has no scheme -- assuming ${serverUrl}`);
   }
   console.log(`twing init: server = ${serverUrl}`);
+
+  // Discover a coordinator's mode before creating a manifest or installing
+  // anything. A fresh interactive setup needs the same no-auth discovery as
+  // unattended bootstrap, while an explicit --no-auth must never configure an
+  // auth coordinator by mistake.
+  const configuredAuth = getServerAuth(readConfig(), serverUrl);
+  const configuredNoAuth = configuredAuth?.noAuth === true;
+  const discoveredAuthMode = (options.noAuth || configuredNoAuth || !configuredAuth?.authToken)
+    ? await coordinatorAuthMode(serverUrl)
+    : undefined;
+  if (options.noAuth && discoveredAuthMode !== "no_auth") {
+    if (discoveredAuthMode === "auth") {
+      throw new Error(`twing init: ${serverUrl} requires authentication; remove --no-auth and authenticate to this coordinator instead`);
+    }
+    throw new Error(`twing init: couldn't confirm that ${serverUrl} permits --no-auth from /v1/version; check the coordinator and try again`);
+  }
 
   // Bootstrap/update the repo's committed coordinator whenever the server
   // was given explicitly (flag, env, or the interactive prompt above) --
@@ -189,19 +211,10 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
     }
   }
 
-  // §17 Phase 4: --no-auth is explicit and sticky. A repo bootstrap cannot
-  // add flags to the `init --unattended` command it invokes, so a fresh
-  // machine also learns no_auth from the server's unauthenticated version
-  // endpoint before trying GitHub auth. That endpoint is already required for
-  // version recovery; this only trusts it for the deliberately opt-in
-  // private-network unattended path.
-  const configuredAuth = getServerAuth(readConfig(), serverUrl);
-  const configuredNoAuth = configuredAuth?.noAuth === true;
-  // A cached PAT already proves this is an auth coordinator. Probe otherwise,
-  // including stale no-auth entries, so an explicit auth response can recover.
-  const discoveredAuthMode = (configuredNoAuth || (options.unattended && !configuredAuth?.authToken))
-    ? await coordinatorAuthMode(serverUrl)
-    : undefined;
+  // §17 Phase 4: no-auth is sticky. Fresh interactive and unattended setup
+  // both discover it from the coordinator's public version endpoint before
+  // attempting GitHub auth. Probe stale no-auth entries too, so an explicit
+  // auth response can recover.
   if (configuredNoAuth && discoveredAuthMode === "auth") {
     const config = readConfig();
     const { noAuth: _, ...auth } = getServerAuth(config, serverUrl) ?? {};

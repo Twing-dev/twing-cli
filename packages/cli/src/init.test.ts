@@ -125,10 +125,7 @@ test("runInit: reports when legacy repo-local hook entries were found and remove
 });
 
 test("runInit: --invite redeems it (via runKeygen) instead of requiring an already-cached PAT", async () => {
-  // Two calls now: the reachability check ahead of committing a fresh
-  // coordinator.serverUrl (nothing committed yet in this tmpRepo), then the
-  // real invite redemption.
-  const { fetch, calls } = captureFetchSequence([textResponse("twing serve"), jsonResponse({ developerId: "alice@example.com" })]);
+  const { fetch, calls } = captureFetchSequence([jsonResponse({ authMode: "auth" }), textResponse("twing serve"), jsonResponse({ developerId: "alice@example.com" })]);
   const { deps } = fakeDeps();
   await withHome(async () => {
     const repo = tmpRepo();
@@ -174,16 +171,25 @@ test("runInit: an explicit --server matching twing.yml's already-committed coord
   });
 });
 
-test("runInit: a conflicting already-committed coordinator is left untouched, not silently overwritten", async () => {
-  const { fetch } = captureFetch(jsonResponse({}));
-  const { deps } = fakeDeps();
+test("runInit: a conflicting explicit --server fails before auth, hooks, daemon, config, or manifest side effects", async () => {
+  const { fetch, calls: fetchCalls } = captureFetch(jsonResponse({}));
+  const { deps, calls } = fakeDeps();
   await withHome(async () => {
     cacheToken(SERVER_URL, "already-cached-pat");
     const repo = tmpRepo("http://a-different-server:1111"); // team's real coordinator
-    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, server: SERVER_URL }, deps)));
-    const manifest = fs.readFileSync(path.join(repo, ".twing", "twing.yml"), "utf8");
-    assert.match(manifest, /a-different-server:1111/);
-    assert.ok(logs.some((l) => l.includes("already declares a different coordinator")));
+    const manifestPath = path.join(repo, ".twing", "twing.yml");
+    const manifest = fs.readFileSync(manifestPath, "utf8");
+    const config = JSON.stringify(readConfig());
+    await withMockFetch(fetch, () => assert.rejects(
+      () => runInit({ cwd: repo, server: SERVER_URL }, deps),
+      /conflicts with committed coordinator\.serverUrl.*--replace-server/,
+    ));
+    assert.equal(fs.readFileSync(manifestPath, "utf8"), manifest);
+    assert.equal(JSON.stringify(readConfig()), config);
+    assert.equal(fetchCalls.length, 0, "conflict must fail before any auth or coordinator request");
+    assert.equal(calls.ensureHookInstalled.length, 0);
+    assert.equal(calls.wireHooks.length, 0);
+    assert.equal(calls.ensureDaemonRunning.length, 0);
   });
 });
 
@@ -436,6 +442,7 @@ function headerCapturingFetch(): { fetch: typeof fetch; calls: { url: string; de
     const u = String(url);
     calls.push({ url: u, developerId: new Headers(init?.headers).get("x-twing-developer-id") });
     if (/\/$/.test(u)) return textResponse("twing serve");
+    if (/\/v1\/version$/.test(u)) return jsonResponse({ authMode: "no_auth" });
     if (/\/v1\/constraints\/seed$/.test(u)) return jsonResponse({ seeded: 0 });
     throw new Error(`headerCapturingFetch: no route for ${u}`);
   }) as typeof fetch;
@@ -474,6 +481,7 @@ function bodyCapturingFetch(): { fetch: typeof fetch; seedBodies: Record<string,
   const impl = (async (url: string | URL, init?: RequestInit) => {
     const u = String(url);
     if (/\/$/.test(u)) return textResponse("twing serve");
+    if (/\/v1\/version$/.test(u)) return jsonResponse({ authMode: "no_auth" });
     if (/\/v1\/constraints\/seed$/.test(u)) {
       seedBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
       return jsonResponse({ seeded: 0 });
@@ -613,6 +621,41 @@ test("runInit: clears stale no-auth cache when the version endpoint explicitly r
     assert.ok(logs.some((line) => line.includes("cleared stale cached no-auth mode")));
     assert.ok(logs.some((line) => line.includes("twing init: done")));
     assert.deepEqual(calls.map((url) => new URL(url).pathname), ["/v1/version"]);
+  });
+});
+
+test("runInit: fresh interactive setup discovers and caches no-auth mode before authentication", async () => {
+  const { fetch, calls } = routedFetch([
+    { match: /\/v1\/version$/, response: jsonResponse({ version: "1.3.0", authMode: "no_auth" }) },
+    { match: /\/v1\/constraints\/seed$/, response: jsonResponse({ seeded: 0 }) },
+  ]);
+  const { deps } = fakeDeps();
+  await withHome(async () => {
+    const repo = tmpRepo(SERVER_URL);
+    await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo }, deps)));
+    assert.equal(getServerAuth(readConfig(), SERVER_URL)?.noAuth, true);
+    assert.deepEqual(calls.map((url) => new URL(url).pathname), ["/v1/version", "/v1/constraints/seed"]);
+  });
+});
+
+test("runInit: explicit --no-auth rejects an auth coordinator before config, manifest, hooks, daemon, or seeding", async () => {
+  const { fetch, calls: fetchCalls } = routedFetch([
+    { match: /\/v1\/version$/, response: jsonResponse({ version: "1.3.0", authMode: "auth" }) },
+  ]);
+  const { deps, calls } = fakeDeps();
+  await withHome(async (home) => {
+    const repo = tmpRepo();
+    const manifestPath = path.join(repo, ".twing", "twing.yml");
+    await withMockFetch(fetch, () => assert.rejects(
+      () => runInit({ cwd: repo, server: SERVER_URL, noAuth: true }, deps),
+      /requires authentication; remove --no-auth/,
+    ));
+    assert.equal(fs.existsSync(manifestPath), false);
+    assert.equal(fs.existsSync(path.join(home, ".twing", "config.json")), false);
+    assert.deepEqual(fetchCalls, [`${SERVER_URL}/v1/version`]);
+    assert.equal(calls.ensureHookInstalled.length, 0);
+    assert.equal(calls.wireHooks.length, 0);
+    assert.equal(calls.ensureDaemonRunning.length, 0);
   });
 });
 

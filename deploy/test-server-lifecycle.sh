@@ -93,6 +93,18 @@ auth_project="$(sed -n 's/^TWING_COMPOSE_PROJECT=//p' "$AUTH_DIR/.env")"
 [[ ! -e "$AUTH_DIR/twing-server" && ! -e "$AUTH_DIR/.env" && ! -e "$AUTH_DIR/compose.yaml" ]]
 [[ -z "$(docker compose -p "$auth_project" ps -q)" ]]
 
+echo "server lifecycle test: reinstall accepts only preserved data"
+touch "$AUTH_DIR/unexpected"
+if "$REPO_DIR/deploy/twing-server" install --mode auth --domain localhost --image "$IMAGE_A" --no-pull --dir "$AUTH_DIR" --port "$AUTH_PORT" --http-port "$AUTH_HTTP_PORT"; then
+  echo "expected reinstall with an unexpected file to fail" >&2
+  exit 1
+fi
+rm "$AUTH_DIR/unexpected"
+TWING_SERVER_WRAPPER_URL="file://$REPO_DIR/deploy/twing-server" \
+  sh "$REPO_DIR/deploy/install-server.sh" --mode auth --domain localhost --image "$IMAGE_A" --no-pull --dir "$AUTH_DIR" --port "$AUTH_PORT" --http-port "$AUTH_HTTP_PORT"
+[[ "$(cat "$AUTH_DIR/data/upgrade-marker")" == "preserved" ]]
+[[ "$(request_status "https://localhost:$AUTH_PORT/v1/projects")" == "401" ]]
+
 echo "server lifecycle test: remote installer purges data"
 TWING_SERVER_WRAPPER_URL="file://$REPO_DIR/deploy/twing-server" \
   sh "$REPO_DIR/deploy/install-server.sh" uninstall --purge-data --dir "$NO_AUTH_DIR"

@@ -276,6 +276,27 @@ install_server() {
   install_dir="$(absolute_path "$install_dir")"
   [[ ! -e "$install_dir/.env" ]] || die "$install_dir already contains a server installation; use upgrade"
 
+  if [[ -e "$install_dir" || -L "$install_dir" ]]; then
+    [[ ! -L "$install_dir" && -d "$install_dir" ]] || die "refusing to install into unsafe directory $install_dir"
+    local path
+    shopt -s dotglob nullglob
+    for path in "$install_dir"/*; do
+      case "${path##*/}" in
+        data)
+          [[ ! -L "$path" && -d "$path" ]] || die "refusing to reuse unsafe data path $path"
+          ;;
+        # install-server.sh writes this wrapper before it delegates here.
+        twing-server)
+          [[ ! -L "$path" && -f "$path" && "$path" -ef "$0" ]] || die "refusing to reuse unsafe installer path $path"
+          ;;
+        *)
+          die "refusing to install into $install_dir: unexpected path ${path##*/}"
+          ;;
+      esac
+    done
+    shopt -u dotglob nullglob
+  fi
+
   image="${image:-${DEFAULT_IMAGE_REPOSITORY}:${version}}"
   local runtime_mode="auth" project
   [[ "$mode" == "no-auth" ]] && runtime_mode="no_auth"
