@@ -141,6 +141,22 @@ not a production deployment.
 
 </details>
 
+## See What Is Happening: twing-monitor
+
+[twing-monitor](https://github.com/Twing-dev/twing-monitor) is the dashboard
+for your coordinator: designs, reviews, activity, alignment threads, members,
+and constraints. The public coordinator uses [monitor.twing.dev](https://monitor.twing.dev).
+Install your own dashboard only when you run your own server; see the
+[monitor setup guide](https://github.com/Twing-dev/twing-monitor/blob/main/deploy/MONITOR.md).
+
+After installing your own monitor, publish its URL to the server so browser
+CORS requests are allowed:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Twing-dev/twing-cli/main/deploy/install-server.sh | sh -s -- upgrade \
+  --monitor-url https://monitor.example.com
+```
+
 ## Day-to-day behavior
 
 Commands below use `twing`. On a bootstrapped machine where it is not on
