@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { deriveScope } from "@twing/core";
-import { ensureChanges, mergeChanges, inferKind, DERIVED_INTENT_PREFIX } from "./design-changes.js";
+import { ensureChanges, mergeChanges, inferKind, pathInferredChangeIds, DERIVED_INTENT_PREFIX } from "./design-changes.js";
 
 // The invariant this module exists for. Structured templates shipped
 // reaching only `register --from`; every other path produced a design with
@@ -106,6 +106,42 @@ test("inferKind: classifies by directory and by suffix", () => {
 test("inferKind: reads the path out of a symbol target", () => {
   // `target` may be `path::Symbol.method`; the kind comes from the path.
   assert.equal(inferKind("packages/server/src/db/schema.ts::designs"), "schema");
+});
+
+test("pathInferredChangeIds: an author-declared kind is never offered for reclassification", () => {
+  // The guarantee the async classifier depends on. Someone who typed
+  // `kind: api` said something deliberate; a model must not overturn it.
+  const supplied = [
+    { id: "c1", action: "modify", kind: "api", target: "src/a.ts", intent: "authored kind" },
+    { id: "c2", action: "modify", target: "src/b.ts", intent: "no kind -- inferred from the path" },
+  ];
+  const final = ensureChanges({ changes: supplied });
+  assert.deepEqual(pathInferredChangeIds(supplied, final), ["c2"]);
+});
+
+test("pathInferredChangeIds: every change is reclassifiable on the fully-derived path", () => {
+  // Plan mode / a bare --summary/--touches registration supplies no template
+  // at all, so every kind came from `inferKind` and every one is fair game.
+  const final = ensureChanges({ creates: ["src/new.ts"], touches: ["src/old.ts"], summary: "s" });
+  assert.deepEqual(
+    pathInferredChangeIds(undefined, final).sort(),
+    final.map((c) => c.id).sort(),
+  );
+});
+
+test("pathInferredChangeIds: an invalid supplied item doesn't shield anything", () => {
+  // `isValidChange` already dropped it, so it never reached `final` on its
+  // own terms -- it must not be treated as an authored declaration either.
+  const supplied = [{ id: "c1", action: "teleport", kind: "api", target: "src/a.ts", intent: "bogus action" }];
+  const final = ensureChanges({ touches: ["src/a.ts"], summary: "s" });
+  assert.deepEqual(pathInferredChangeIds(supplied, final), final.map((c) => c.id));
+});
+
+test("pathInferredChangeIds: a non-array supplied value means nothing was authored", () => {
+  const final = ensureChanges({ touches: ["src/a.ts"], summary: "s" });
+  assert.deepEqual(pathInferredChangeIds(undefined, final), ["c1"]);
+  assert.deepEqual(pathInferredChangeIds("not an array", final), ["c1"]);
+  assert.deepEqual(pathInferredChangeIds(null, final), ["c1"]);
 });
 
 test("mergeChanges: existing declarations survive an amend verbatim and stay first", () => {

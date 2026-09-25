@@ -1104,3 +1104,110 @@ test("DesignRegistry: retimeActiveDesigns covers flagged designs too -- they're 
   assert.equal(registry.get(a.id)?.status, "flagged", "re-timing must not change status");
   registry.stop();
 });
+
+// --- reclassifyChangeKinds (async kind classification, 2026-09) ---
+
+function registryWithChanges() {
+  const registry = freshRegistry();
+  const design = registry.register({
+    projectId: "p1",
+    developerId: "d1",
+    sessionId: "s1",
+    summary: "a design",
+    creates: [],
+    touches: [],
+    dependsOn: [],
+    changes: [
+      { id: "c1", action: "modify", kind: "api", target: "src/routes/WorkView.tsx", intent: "widen the search box" },
+      { id: "c2", action: "modify", kind: "code", target: "src/db/models.py", intent: "add an orders column" },
+    ],
+  });
+  return { registry, design };
+}
+
+test("DesignRegistry.reclassifyChangeKinds: patches only the named changes", () => {
+  const { registry, design } = registryWithChanges();
+  const updated = registry.reclassifyChangeKinds(design.id, { c1: "code" });
+  assert.equal(updated?.changes?.find((c) => c.id === "c1")?.kind, "code");
+  assert.equal(updated?.changes?.find((c) => c.id === "c2")?.kind, "code", "an unnamed change keeps its own kind");
+  registry.stop();
+});
+
+test("DesignRegistry.reclassifyChangeKinds: leaves every other field of a change alone", () => {
+  const { registry, design } = registryWithChanges();
+  const before = design.changes!.find((c) => c.id === "c1")!;
+  const after = registry.reclassifyChangeKinds(design.id, { c1: "docs" })?.changes?.find((c) => c.id === "c1")!;
+  assert.deepEqual({ ...after, kind: before.kind }, before, "only `kind` may differ");
+  registry.stop();
+});
+
+test("DesignRegistry.reclassifyChangeKinds: leaves the design's own fields alone", () => {
+  const { registry, design } = registryWithChanges();
+  const updated = registry.reclassifyChangeKinds(design.id, { c1: "code" })!;
+  assert.equal(updated.scopeVersion, design.scopeVersion, "a relabel is not a scope change");
+  assert.equal(updated.status, design.status);
+  assert.equal(updated.summary, design.summary);
+  assert.equal(updated.lastActivityAt, design.lastActivityAt, "classification is not developer activity");
+  registry.stop();
+});
+
+test("DesignRegistry.reclassifyChangeKinds: no-ops when the label already matches", () => {
+  const db = createDb({ memory: true });
+  const activityLog = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db, { activityLog });
+  const design = registry.register({
+    projectId: "p1",
+    developerId: "d1",
+    sessionId: "s1",
+    summary: "a design",
+    creates: [],
+    touches: [],
+    dependsOn: [],
+    changes: [{ id: "c1", action: "modify", kind: "api", target: "src/a.ts", intent: "i" }],
+  });
+  const before = activityLog.eventsForRelatedId(design.id).length;
+  registry.reclassifyChangeKinds(design.id, { c1: "api" });
+  assert.equal(activityLog.eventsForRelatedId(design.id).length, before, "agreeing with the existing guess logs nothing");
+  registry.stop();
+});
+
+test("DesignRegistry.reclassifyChangeKinds: logs one row naming what changed", () => {
+  const db = createDb({ memory: true });
+  const activityLog = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db, { activityLog });
+  const design = registry.register({
+    projectId: "p1",
+    developerId: "d1",
+    sessionId: "s1",
+    summary: "a design",
+    creates: [],
+    touches: [],
+    dependsOn: [],
+    changes: [{ id: "c1", action: "modify", kind: "api", target: "src/routes/WorkView.tsx", intent: "i" }],
+  });
+  registry.reclassifyChangeKinds(design.id, { c1: "code" });
+  const logged = activityLog.eventsForRelatedId(design.id).filter((e) => e.kind === "design_kind_reclassified");
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].developerId, undefined, "system-generated: no human or session did this");
+  assert.deepEqual((logged[0].payload as { changes: unknown }).changes, { c1: { from: "api", to: "code" } });
+  registry.stop();
+});
+
+test("DesignRegistry.reclassifyChangeKinds: unknown ids and unknown designs are harmless", () => {
+  const { registry, design } = registryWithChanges();
+  const updated = registry.reclassifyChangeKinds(design.id, { nope: "docs" });
+  assert.deepEqual(updated?.changes, design.changes, "an id this design doesn't have changes nothing");
+  assert.equal(registry.reclassifyChangeKinds("no-such-design", { c1: "code" }), undefined);
+  registry.stop();
+});
+
+test("DesignRegistry.reclassifyChangeKinds: still applies to a closed design", () => {
+  // Deliberately unguarded on status -- `kind` feeds no gate decision, and
+  // refusing would leave the dashboard showing a guess we know is wrong.
+  const { registry, design } = registryWithChanges();
+  registry.close(design.id);
+  const updated = registry.reclassifyChangeKinds(design.id, { c1: "code" });
+  assert.equal(updated?.changes?.find((c) => c.id === "c1")?.kind, "code");
+  assert.equal(updated?.status, "closed", "closing is not undone by a relabel");
+  registry.stop();
+});
