@@ -1825,9 +1825,16 @@ func TestNoDesignReason_OffersAStructuredTemplate(t *testing.T) {
 		"design register --from - <<'YAML'",
 		"goal:",
 		// The architecture, which is what "View original plan text" shows --
-		// not the file list, which has its own view.
+		// not the file list, which has its own view. A skeleton rather than a
+		// one-line prompt, so the shape is visible to a model that has never
+		// seen twing.
 		"plan: |",
-		"not a file list",
+		"  ## Context",
+		"  ## Approach",
+		"  ## Risks and checks",
+		"not a list",
+		"indented two",
+		"one item per file",
 		"changes:",
 		"action: modify",
 		"intent:",
@@ -1835,6 +1842,21 @@ func TestNoDesignReason_OffersAStructuredTemplate(t *testing.T) {
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("deny should hand back a fillable template, missing %q in:\n%s", want, msg)
+		}
+	}
+}
+
+// OpenCode has no plan mode and Codex's fires no hook: offering "let plan
+// mode do it" there sends the agent after a step that never registers.
+func TestNoDesignReason_OffersPlanModeOnlyWhereItRegisters(t *testing.T) {
+	for harness, want := range map[string]bool{"": true, "claude": true, "opencode": false, "codex": false} {
+		t.Setenv("TWING_HARNESS", harness)
+		msg := noDesignReason("src/billing/invoice.py")
+		if got := strings.Contains(msg, "plan mode"); got != want {
+			t.Errorf("TWING_HARNESS=%q: offers plan mode = %v, want %v", harness, got, want)
+		}
+		if !strings.Contains(msg, "design register --from - <<'YAML'") {
+			t.Errorf("TWING_HARNESS=%q: the template must always be offered", harness)
 		}
 	}
 }

@@ -28,6 +28,8 @@ import {
   suggestAction,
   type DesignChange,
   DESIGN_TRAILER_KEY,
+  PLAN_GUIDANCE,
+  templateSyntaxError,
 } from "@twing/core";
 import { requireRepoRoot } from "./repo-scope.js";
 import { checkSessionId } from "./session-attempts.js";
@@ -206,6 +208,11 @@ export interface RegisterOptions {
   session?: string;
   label?: string;
   summary?: string;
+  /** `--plan`: the design's architecture text, for the flag form -- what a
+   * template's `plan:` is for `--from` (see PLAN_GUIDANCE, @twing/core).
+   * Required either way since 2026-09-29: a design with no plan gives a
+   * reviewer nothing to read but a file list. */
+  plan?: string;
   creates?: string;
   touches?: string;
   dependsOn?: string;
@@ -284,16 +291,31 @@ function buildTemplate(
   label: string,
   options: { requireGoal?: boolean },
 ): LoadedTemplate {
+  // A document that does not parse is reported as exactly that -- otherwise
+  // it reads as an empty template and the author is told to add a goal,
+  // changes and a plan they already wrote (see templateSyntaxError).
+  const syntaxError = templateSyntaxError(raw);
+  if (syntaxError) {
+    throw new Error(`twing design: ${label} isn't a valid design template -- ${syntaxError}\n\nNothing was registered.`);
+  }
   const template = parseDesignTemplate(raw);
-  const problems = validateTemplate(template, { requireGoal: options.requireGoal });
+  // Registering needs both a goal and a plan; amending needs neither (the
+  // design already has them), so one switch covers both.
+  const problems = validateTemplate(template, { requireGoal: options.requireGoal, requirePlan: options.requireGoal });
   if (problems.length > 0) {
+    // The plan problems carry PLAN_GUIDANCE in their message. Printed inline
+    // it split the ✗ list, and a per-change problem after it read as part of
+    // the plan skeleton -- so every problem is listed first and the guidance
+    // follows once, after the list.
+    const guidance = `\n\n${PLAN_GUIDANCE}`;
+    const needsGuidance = problems.some((p) => p.message.includes(guidance));
     const lines = problems.map((p) => {
       const where = p.changeId ? `  ✗ ${p.changeId}  ` : "  ✗ ";
       const suggestion = /^unknown action "(.+)"/.exec(p.message);
       const hint = suggestion ? suggestAction(suggestion[1]) : undefined;
-      return where + p.message + (hint ? `\n        did you mean \`${hint}\`?` : "");
+      return where + p.message.replace(guidance, "") + (hint ? `\n        did you mean \`${hint}\`?` : "");
     });
-    throw new Error(`twing design: ${label} isn't a valid design template.\n\n${lines.join("\n")}\n\nNothing was registered.`);
+    throw new Error(`twing design: ${label} isn't a valid design template.\n\n${lines.join("\n")}${needsGuidance ? guidance : ""}\n\nNothing was registered.`);
   }
 
   const { creates, touches } = deriveScope(template.changes);
@@ -390,8 +412,16 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
         "other sessions and human reviewers when your work overlaps theirs, so it needs to actually say what " +
         'you\'re building: e.g. --summary "Add exponential backoff with jitter to RetryPolicy so outbound HTTP ' +
         'calls survive transient failures" rather than --summary "make changes" or --summary "fix bug". ' +
-        "Or declare the work structurally instead: twing design register --from design.yml",
+        'You will also need --plan "..." (how you will build it). ' +
+        "Or declare the work structurally instead, which takes both: twing design register --from - <<'YAML' (goal:, plan: |, changes:)",
     );
+  }
+  // The flag form's counterpart of a template's required `plan:`. Checked
+  // after the summary so an agent missing both fixes them in the order the
+  // messages read; the guidance is the same text a template gets.
+  const flagPlan = options.plan?.trim();
+  if (!template && !flagPlan) {
+    throw new Error(`twing design register: --plan "..." is required -- say how you will build this.\n\n${PLAN_GUIDANCE}\n\n` + "With --plan, pass the same text as one quoted argument; for a multi-section plan the template form is easier: twing design register --from - <<'YAML' (goal:, plan: |, changes:).");
   }
 
   const projectId = computeProjectId(repoRoot);
@@ -431,7 +461,7 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
         // The server skips its own extraction whenever structured fields
         // are present (app.ts's `hasStructured` check), so this changes no
         // verdict.
-        ...(template?.plan ? { rawPlanText: template.plan } : {}),
+        ...(template?.plan ? { rawPlanText: template.plan } : flagPlan ? { rawPlanText: flagPlan } : {}),
         ...(options.group ? { groupId: options.group } : {}),
       }),
     },

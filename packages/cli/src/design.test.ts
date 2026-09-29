@@ -35,7 +35,7 @@ test("runDesignRegister: sends the right body and prints a clean verdict", async
     const repo = tmpRepo(SERVER_URL);
     const { logs } = await captureConsole(() =>
       withMockFetch(fetch, () =>
-        runDesignRegister({ cwd: repo, session: "sess1", summary: "does a thing", creates: "Foo,Bar", touches: "a.ts", dependsOn: "Baz" }),
+        runDesignRegister({ cwd: repo, session: "sess1", plan: "## Approach\nthe plan", summary: "does a thing", creates: "Foo,Bar", touches: "a.ts", dependsOn: "Baz" }),
       ),
     );
     assert.equal(calls.length, 1);
@@ -49,7 +49,23 @@ test("runDesignRegister: sends the right body and prints a clean verdict", async
     assert.deepEqual(body.creates, ["Foo", "Bar"]);
     assert.deepEqual(body.touches, ["a.ts"]);
     assert.deepEqual(body.dependsOn, ["Baz"]);
+    assert.equal(body.rawPlanText, "## Approach\nthe plan", "--plan is the design's plan text");
     assert.ok(logs.some((l) => l.includes("verdict: clean") && l.includes("d1")));
+  });
+});
+
+// Every CLI registration needs a plan. The message is read by a model that
+// hit a gate deny in some unrelated repo, so it has to say what a plan is.
+test("runDesignRegister: the flag form without --plan is refused, with what a plan is and how to write one", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    await assert.rejects(
+      () => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "does a thing", touches: "a.ts" })),
+      (err: Error) => /--plan "\.\.\." is required/.test(err.message) && /design doc a teammate reads/.test(err.message) && /--from - <<'YAML'/.test(err.message),
+    );
+    assert.equal(calls.length, 0, "nothing registered");
   });
 });
 
@@ -59,7 +75,7 @@ test("runDesignRegister: falls back to CLAUDE_CODE_SESSION_ID when --session is 
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
     await withEnv({ TWING_SESSION_ID: undefined, CLAUDE_CODE_SESSION_ID: "env-session" }, () =>
-      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, summary: "test summary" })),
+      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, plan: "## Approach\nthe plan", summary: "test summary" })),
     );
     assert.equal((calls[0].body as { sessionId: string }).sessionId, "env-session");
   });
@@ -71,7 +87,7 @@ test("runDesignRegister: uses the agent-neutral TWING_SESSION_ID when --session 
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
     await withEnv({ TWING_SESSION_ID: "opencode-session", CLAUDE_CODE_SESSION_ID: undefined }, () =>
-      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, summary: "test summary" })),
+      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, plan: "## Approach\nthe plan", summary: "test summary" })),
     );
     assert.equal((calls[0].body as { sessionId: string }).sessionId, "opencode-session");
   });
@@ -82,7 +98,7 @@ test("runDesignRegister: throws when no explicit or agent-provided session id is
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
     await withEnv({ TWING_SESSION_ID: undefined, CLAUDE_CODE_SESSION_ID: undefined }, async () => {
-      await assert.rejects(() => runDesignRegister({ cwd: repo, summary: "test summary" }), /no session id/);
+      await assert.rejects(() => runDesignRegister({ cwd: repo, plan: "## Approach\nthe plan", summary: "test summary" }), /no session id/);
     });
   });
 });
@@ -90,7 +106,7 @@ test("runDesignRegister: throws when no explicit or agent-provided session id is
 test("runDesignRegister: throws when the repo has no coordinator configured", async () => {
   await withHome(async () => {
     const repo = tmpRepo(); // no .twing/twing.yml at all
-    await assert.rejects(() => runDesignRegister({ cwd: repo, session: "s1", summary: "test summary" }), /no coordinator configured/);
+    await assert.rejects(() => runDesignRegister({ cwd: repo, session: "s1", plan: "## Approach\nthe plan", summary: "test summary" }), /no coordinator configured/);
   });
 });
 
@@ -99,7 +115,7 @@ test("runDesignRegister: a 401 response prints the unauthorized hint instead of 
   await withHome(async () => {
     cacheToken(SERVER_URL, "stale-token");
     const repo = tmpRepo(SERVER_URL);
-    const { errors } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "s1", summary: "test summary" })));
+    const { errors } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "s1", plan: "## Approach\nthe plan", summary: "test summary" })));
     assert.ok(errors.some((e) => e.includes("unauthorized") && e.includes("twing login")));
   });
 });
@@ -109,7 +125,7 @@ test("runDesignRegister: --group sends groupId in the request body", async () =>
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
-    await withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "linked half", group: "existing-group-id" }));
+    await withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", plan: "## Approach\nthe plan", summary: "linked half", group: "existing-group-id" }));
     const body = calls[0].body as Record<string, unknown>;
     assert.equal(body.groupId, "existing-group-id");
   });
@@ -120,7 +136,7 @@ test("runDesignRegister: omitting --group sends no groupId field at all", async 
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
-    await withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo" }));
+    await withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", plan: "## Approach\nthe plan", summary: "solo" }));
     const body = calls[0].body as Record<string, unknown>;
     assert.equal("groupId" in body, false, "must be omitted entirely, not sent as an explicit undefined");
   });
@@ -131,7 +147,7 @@ test("runDesignRegister: prints the groupId copy-paste hint when the response in
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
-    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo" })));
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", plan: "## Approach\nthe plan", summary: "solo" })));
     assert.ok(logs.some((l) => l.includes("group: g1") && l.includes("--group g1")));
   });
 });
@@ -141,7 +157,7 @@ test("runDesignRegister: prints no group line when the response has no groupId",
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
-    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo" })));
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", plan: "## Approach\nthe plan", summary: "solo" })));
     assert.ok(!logs.some((l) => l.includes("group:")), 'must not print "group: undefined" or similar when groupId is absent');
   });
 });
@@ -154,7 +170,7 @@ test("runDesignRegister: warns when none of --touches exist under the repo root"
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
     const { warnings } = await captureConsole(() =>
-      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo", touches: "src/does-not-exist.ts" })),
+      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", plan: "## Approach\nthe plan", summary: "solo", touches: "src/does-not-exist.ts" })),
     );
     assert.ok(warnings.some((w) => w.includes("none of the declared --touches files exist")));
     assert.ok(warnings.some((w) => w.includes("--reassign-project")));
@@ -170,7 +186,7 @@ test("runDesignRegister: stays quiet when at least one --touches path exists und
     fs.mkdirSync(path.join(repo, "src"), { recursive: true });
     fs.writeFileSync(path.join(repo, "src", "real.ts"), "");
     const { warnings } = await captureConsole(() =>
-      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", summary: "solo", touches: "src/real.ts,src/also-missing.ts" })),
+      withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", plan: "## Approach\nthe plan", summary: "solo", touches: "src/real.ts,src/also-missing.ts" })),
     );
     assert.equal(warnings.length, 0, "one real match is enough to stay quiet");
   });
@@ -321,14 +337,17 @@ test("runDesignRegister --from: sends the template's plan as the plan text, neve
   });
 });
 
-test("runDesignRegister --from: a template with no plan sends no plan text at all", async () => {
+test("runDesignRegister --from: a template with no plan is refused before anything is registered", async () => {
   const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
     const file = writeTemplate(repo, `goal: survive transient failures\n${TEMPLATE_CHANGES}`);
-    await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", from: file })));
-    assert.ok(!("rawPlanText" in (calls[0].body as object)), "the YAML is not a plan");
+    await assert.rejects(
+      () => captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", from: file }))),
+      /missing `plan:`[\s\S]*indent every plan line/,
+    );
+    assert.equal(calls.length, 0);
   });
 });
 
