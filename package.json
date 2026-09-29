@@ -14,6 +14,7 @@
     "build": "tsc -b",
     "clean": "tsc -b --clean",
     "test": "npm run test --workspaces --if-present",
+    "test:release-policy": "node --test scripts/release-policy.test.mjs",
     "test:server-lifecycle": "bash deploy/test-server-lifecycle.sh"
   },
   "devDependencies": {

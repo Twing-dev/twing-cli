@@ -1,0 +1,24 @@
+name: test-release-policy
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to validate without creating it, for example v1.3.12
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch main and release branches
+        run: git fetch --force origin '+refs/heads/main:refs/remotes/origin/main' '+refs/heads/release/*:refs/remotes/origin/release/*' --tags
+      - name: Validate without publishing
+        run: node scripts/release-policy.mjs "${{ inputs.tag }}" "${GITHUB_SHA}"

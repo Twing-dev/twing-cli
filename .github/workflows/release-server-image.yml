@@ -10,7 +10,36 @@ permissions:
   packages: write
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.policy.outputs.channel }}
+      version: ${{ steps.policy.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch release branches
+        run: git fetch --force origin '+refs/heads/main:refs/remotes/origin/main' '+refs/heads/release/*:refs/remotes/origin/release/*' --tags
+      - id: policy
+        run: node scripts/release-policy.mjs "${GITHUB_REF_NAME}" "${GITHUB_SHA}"
+
+  acceptance:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:release-policy
+      - run: npm run test:server-lifecycle
+
   publish:
+    needs: [validate, acceptance]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,9 +78,9 @@ jobs:
         with:
           images: ghcr.io/twing-dev/twing-server
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=${{ needs.validate.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.validate.outputs.channel == 'stable' }}
+            type=raw,value=latest,enable=${{ needs.validate.outputs.channel == 'stable' }}
       - uses: docker/build-push-action@v6
         with:
           context: .

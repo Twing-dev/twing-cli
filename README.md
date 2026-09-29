@@ -350,6 +350,36 @@ twing project enable-enforcement | disable-enforcement
 `twing uninstall` removes local twing state and machine wiring; it does not
 remove committed repository bootstrap files.
 
+## Release channels
+
+Experimental releases come directly from `main`. First merge the code and a
+version-only change setting `@twing/core`, `@twing/cli`, and `@twing/server`
+to the same version, for example `1.3.12-experimental.1`. Set the CLI's
+`@twing/core` dependency to `^1.3.12-experimental.1` and update
+`package-lock.json`. Then run the **create-experimental-release** GitHub
+workflow from `main`, first with dry-run enabled and then with it disabled.
+
+Experimental artifacts use npm's `experimental` tag, a GitHub prerelease, and
+an exact server image tag. They never update npm `latest`, the stable GitHub
+release, or stable server image tags.
+
+To promote an accepted experiment, create `release/<major>.<minor>` from its
+experimental tag. Its only change is the version promotion: replace the
+experimental version in the three package manifests, the CLI core dependency,
+and `package-lock.json` with the stable version. Merge that protected branch,
+then run **promote-stable-release** from it, again using dry-run first.
+
+The release policy rejects a stable tag that points at `main`, code changes
+after the accepted experimental tag, or mismatched package versions. Stable
+artifact publishing can therefore only start from the version-only promotion
+commit on the release branch. Deploy the resulting image through the normal
+server upgrade procedure in [`deploy/SERVER.md`](deploy/SERVER.md).
+
+Repository administrators must also protect `main` and `release/*` with
+pull-request-only updates and restrict `v*` tag creation to maintainers and
+the release workflows. Workflow validation prevents publication from a bad
+tag; the GitHub ruleset prevents unreviewed release-branch and tag changes.
+
 ## Develop twing-cli
 
 Requirements: Node.js 22.5 or later, git, and Go only when changing `hook/`.

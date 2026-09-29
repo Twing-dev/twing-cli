@@ -24,7 +24,36 @@ permissions:
   id-token: write # required for npm's OIDC handshake -- nothing works without this
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.policy.outputs.channel }}
+      version: ${{ steps.policy.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch release branches
+        run: git fetch --force origin '+refs/heads/main:refs/remotes/origin/main' '+refs/heads/release/*:refs/remotes/origin/release/*' --tags
+      - id: policy
+        run: node scripts/release-policy.mjs "${GITHUB_REF_NAME}" "${GITHUB_SHA}"
+
+  acceptance:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:release-policy
+      - run: npm run test:server-lifecycle
+
   publish:
+    needs: [validate, acceptance]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +66,7 @@ jobs:
       - run: npm run build
       - name: Publish @twing/core
         working-directory: packages/core
-        run: npm publish --access public --provenance
+        run: npm publish --access public --provenance ${{ needs.validate.outputs.channel == 'experimental' && '--tag experimental' || '' }}
       - name: Publish @twing/cli
         working-directory: packages/cli
-        run: npm publish --access public --provenance
+        run: npm publish --access public --provenance ${{ needs.validate.outputs.channel == 'experimental' && '--tag experimental' || '' }}
