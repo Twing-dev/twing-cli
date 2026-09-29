@@ -14,6 +14,7 @@ on:
         type: boolean
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -43,3 +44,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v${{ inputs.version }}" -m "Experimental release ${{ inputs.version }}"
           git push origin "v${{ inputs.version }}"
+      - name: Dispatch tag publication workflows
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ inputs.version }}
+        run: |
+          gh workflow run release-npm.yml --ref "$TAG"
+          gh workflow run release-hook.yml --ref "$TAG"
+          gh workflow run release-server-image.yml --ref "$TAG"
