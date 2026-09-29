@@ -1861,7 +1861,10 @@ export function createApp(options: CreateAppOptions = {}) {
    */
   app.get("/v1/review-queue", (c) => {
     const identity = c.get("identity");
-    const items = designComments.openReviewsFor(identity.developerId).map((open) => ({
+    // Scoped to the projects the caller can reach *now* (the same scope as the
+    // bell), not merely to designs they once registered -- see
+    // `openReviewsFor`.
+    const items = designComments.openReviewsFor(identity.developerId, notificationProjectIds(identity)).map((open) => ({
       ...open,
       url: buildDesignReviewUrl(monitorUrl, open.projectId, open.designId),
     }));

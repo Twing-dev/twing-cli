@@ -6036,6 +6036,26 @@ test("GET /v1/review-queue: routes on the design's owner, not on who commented",
   assert.deepEqual(list.items, [], "the admin asked it, so it is not theirs to answer");
 });
 
+// Found in review: the queue checked design ownership but not project
+// access, so an owner removed from a project kept reading its designs'
+// summaries and open-comment ids with a still-valid token, while the
+// comments endpoint itself refused them.
+test("GET /v1/review-queue: stops listing a project's designs once the owner loses access to it", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const owner = await addMember(app, identities, admin.developerId, "owner@example.com");
+  const design = seedDesign(designs, { projectId: "p1", developerId: "owner@example.com" });
+  await postComment(app, admin.token, design.id, { body: "why?" });
+
+  const before = (await (await app.request("/v1/review-queue", { headers: bearer(owner) })).json()) as { items: unknown[] };
+  assert.equal(before.items.length, 1, "a current member hears about comments on their design");
+
+  identities.removeProjectMember("p1", "owner@example.com");
+  const after = (await (await app.request("/v1/review-queue", { headers: bearer(owner) })).json()) as { items: unknown[] };
+  assert.deepEqual(after.items, []);
+});
+
 test("POST /v1/comments/:id/replies: a reply is recorded under the caller, and a resolved comment takes no more", async () => {
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);

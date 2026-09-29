@@ -254,13 +254,22 @@ export class DesignCommentStore {
    * "Unresolved" rather than "waiting on a reply", deliberately: whether a
    * reply answered the question is the asker's call, and they make it by
    * resolving. Until then the owner keeps being told.
+   *
+   * `projectIds` is the caller's *current* access and is required, ANDed
+   * into the query rather than checked afterwards -- the same call as
+   * `countsByDesign`. Ownership is history: a developer removed from a
+   * project still owns the designs they registered there, and without this
+   * their still-valid token would keep reading those designs' summaries
+   * and open-comment ids after `GET /v1/designs/:id/comments` had started
+   * refusing them. Found in review.
    */
-  openReviewsFor(developerId: string): OpenReview[] {
+  openReviewsFor(developerId: string, projectIds: string[]): OpenReview[] {
+    if (projectIds.length === 0) return [];
     const rows = this.db
       .select({ commentId: commentsTable.id, designId: commentsTable.designId, projectId: commentsTable.projectId, designSummary: designsTable.summary })
       .from(commentsTable)
       .innerJoin(designsTable, eq(commentsTable.designId, designsTable.id))
-      .where(and(eq(commentsTable.status, "open"), eq(designsTable.developerId, developerId)))
+      .where(and(eq(commentsTable.status, "open"), eq(designsTable.developerId, developerId), inArray(commentsTable.projectId, projectIds)))
       .orderBy(asc(commentsTable.createdAt))
       .all() as { commentId: string; designId: string; projectId: string; designSummary: string }[];
 

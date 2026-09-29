@@ -95,7 +95,7 @@ test("DesignCommentStore: openReviewsFor groups open comments by design, only fo
   const second = store.create({ ...baseComment, designId: "d1", body: "and the timeout?" });
   store.create({ ...baseComment, designId: "d2", body: "not yours" });
 
-  assert.deepEqual(store.openReviewsFor("owner@example.com"), [{ designId: "d1", projectId: "p1", designSummary: "retry budget", commentIds: [first.id, second.id] }]);
+  assert.deepEqual(store.openReviewsFor("owner@example.com", ["p1"]), [{ designId: "d1", projectId: "p1", designSummary: "retry budget", commentIds: [first.id, second.id] }]);
 });
 
 test("DesignCommentStore: a resolved comment leaves the review queue, and a design with none left drops out", () => {
@@ -105,10 +105,10 @@ test("DesignCommentStore: a resolved comment leaves the review queue, and a desi
   const second = store.create({ ...baseComment, body: "second" });
 
   store.resolve(first.id, "reviewer@example.com");
-  assert.deepEqual(store.openReviewsFor("owner@example.com")[0].commentIds, [second.id]);
+  assert.deepEqual(store.openReviewsFor("owner@example.com", ["p1"])[0].commentIds, [second.id]);
 
   store.resolve(second.id, "reviewer@example.com");
-  assert.deepEqual(store.openReviewsFor("owner@example.com"), []);
+  assert.deepEqual(store.openReviewsFor("owner@example.com", ["p1"]), []);
 });
 
 test("DesignCommentStore: a reply does not take a comment out of the review queue -- only resolving does", () => {
@@ -118,7 +118,7 @@ test("DesignCommentStore: a reply does not take a comment out of the review queu
   store.addReply({ commentId: comment.id, authorId: "owner@example.com", message: "answered in the design" });
 
   // Whether a reply answered the question is the asker's call.
-  assert.equal(store.openReviewsFor("owner@example.com").length, 1);
+  assert.equal(store.openReviewsFor("owner@example.com", ["p1"]).length, 1);
 });
 
 test("DesignCommentStore: a comment on a closed design still reaches its owner", () => {
@@ -126,7 +126,7 @@ test("DesignCommentStore: a comment on a closed design still reaches its owner",
   const { store, db } = freshStore();
   seedDesign(db, "d1", "owner@example.com", { status: "closed" });
   store.create(baseComment);
-  assert.equal(store.openReviewsFor("owner@example.com").length, 1);
+  assert.equal(store.openReviewsFor("owner@example.com", ["p1"]).length, 1);
 });
 
 test("DesignCommentStore: the review queue spans projects", () => {
@@ -138,11 +138,28 @@ test("DesignCommentStore: the review queue spans projects", () => {
 
   assert.deepEqual(
     store
-      .openReviewsFor("owner@example.com")
+      .openReviewsFor("owner@example.com", ["p1", "p2"])
       .map((r) => r.projectId)
       .sort(),
     ["p1", "p2"],
   );
+});
+
+// Ownership is history; access is now. A developer removed from a project
+// still owns the designs they registered there, and must stop hearing about
+// them the moment the comments endpoint starts refusing them. Found in review.
+test("DesignCommentStore: the review queue is bounded by the projects the caller can reach now", () => {
+  const { store, db } = freshStore();
+  seedDesign(db, "d1", "owner@example.com", { projectId: "p1" });
+  seedDesign(db, "d2", "owner@example.com", { projectId: "p2" });
+  store.create({ ...baseComment, designId: "d1", projectId: "p1" });
+  store.create({ ...baseComment, designId: "d2", projectId: "p2" });
+
+  assert.deepEqual(
+    store.openReviewsFor("owner@example.com", ["p1"]).map((r) => r.projectId),
+    ["p1"],
+  );
+  assert.deepEqual(store.openReviewsFor("owner@example.com", []), [], "no access means nothing, not everything");
 });
 
 test("DesignCommentStore: countsByDesign reports totals and unresolved separately", () => {
