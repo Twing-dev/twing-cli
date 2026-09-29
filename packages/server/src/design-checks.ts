@@ -435,6 +435,20 @@ export function appendSummaryUpdate(existingSummary: string, update: string): st
   return `${existingSummary}\n\nUpdate (${date}): ${update}`;
 }
 
+/**
+ * The plan-text counterpart of `appendSummaryUpdate` (2026-09-29): an
+ * amendment's architecture text (`design amend --from` with a `plan:`) is
+ * added as a dated markdown section after whatever the plan already says --
+ * never in place of it. A design with no plan text yet simply gets the
+ * update as its plan, without a heading that would imply something came
+ * before it.
+ */
+export function appendPlanUpdate(existingPlan: string | undefined, update: string): string {
+  const date = new Date().toISOString().slice(0, 10);
+  if (!existingPlan || existingPlan.trim().length === 0) return update;
+  return `${existingPlan}\n\n## Update (${date})\n\n${update}`;
+}
+
 /** Tier 1 (exact overlap) -- exported (2026-08-18) so
  * `/v1/designs/:id/resolve` can recompute the *current* set of structural
  * conflicts independently at justify-time, the same "trust current state,

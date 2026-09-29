@@ -28,6 +28,7 @@ import {
   pathInDesignScope,
   mergeDesignScope,
   appendSummaryUpdate,
+  appendPlanUpdate,
   jaccard,
   PLAN_RETRY_SIMILARITY_THRESHOLD,
   structuralOverlaps,
@@ -125,6 +126,11 @@ interface AmendRequestBody {
    * keeps the declaration current whether or not the caller knows about
    * templates. */
   changes?: DesignChange[];
+  /** Architecture text to add to the design's plan (2026-09-29), from an
+   * `amend --from` template's `plan:`. Appended as a dated section
+   * (`appendPlanUpdate`), never a replacement. Not propagated to linked
+   * siblings: a plan is written for one repo's part of the work. */
+  plan?: string;
   /** §17 design linking (2026-08): join (or move to) a different group
    * after registration -- see DesignRegistry.amend's `groupId` param doc
    * comment for the full reasoning. */
@@ -2059,9 +2065,17 @@ export function createApp(options: CreateAppOptions = {}) {
     // the first one's content the moment the second's ExitPlanMode fires.
     // openPlanModeDesignForSession narrows to a *candidate* by session id;
     // the Jaccard gate below decides whether it's actually the same plan.
+    //
+    // `!hasStructured` is what "scoped to exactly the rawPlanText path"
+    // above has to mean in code (fixed 2026-09-29). Checking only for
+    // `rawPlanText` let a structured `register --from` in -- the CLI sent its
+    // YAML as plan text -- so a second, similar template in the same session
+    // silently rewrote the first design's summary, changes and plan in place.
+    // A template's `plan:` now travels as plan text on purpose, which would
+    // only have made that likelier.
     let design: DesignStatement | undefined;
     let reregistered = false;
-    if (body.rawPlanText) {
+    if (body.rawPlanText && !hasStructured) {
       const candidate = designs.openPlanModeDesignForSession(body.projectId, body.sessionId);
       if (candidate?.rawPlanExcerpt) {
         const similarity = jaccard(candidate.rawPlanExcerpt, body.rawPlanText);
@@ -2544,7 +2558,10 @@ export function createApp(options: CreateAppOptions = {}) {
     // whole purpose is letting a *closed* design join a group. Every other
     // amend shape (any actual scope/summary change) falls through
     // unchanged to the existing open-only path.
-    const hasScopeChange = Boolean((body?.addTouches?.length ?? 0) > 0 || (body?.addCreates?.length ?? 0) > 0 || (body?.addDependsOn?.length ?? 0) > 0 || body?.summary !== undefined);
+    const planUpdate = typeof body?.plan === "string" && body.plan.trim().length > 0 ? body.plan.trim() : undefined;
+    const hasScopeChange = Boolean(
+      (body?.addTouches?.length ?? 0) > 0 || (body?.addCreates?.length ?? 0) > 0 || (body?.addDependsOn?.length ?? 0) > 0 || body?.summary !== undefined || planUpdate !== undefined,
+    );
     if (body?.groupId !== undefined && !hasScopeChange) {
       const relinked = designs.relink(id, body.groupId);
       if (!relinked) return c.json({ error: "no such design" }, 404);
@@ -2574,6 +2591,8 @@ export function createApp(options: CreateAppOptions = {}) {
       // this design's merged one. See DesignRegistry.amend's `summaryUpdate`
       // param doc comment.
       summaryUpdate: body?.summary,
+      // Same once-computed rule as `summary` above.
+      rawPlanExcerpt: planUpdate !== undefined ? appendPlanUpdate(design.rawPlanExcerpt, planUpdate) : undefined,
       groupId: body?.groupId,
       // Keeps the structured declaration in step with the scope this amend
       // merges (2026-09-15). `mergeChanges` preserves every already-declared
@@ -2588,8 +2607,8 @@ export function createApp(options: CreateAppOptions = {}) {
         summary: body?.summary ?? design.summary,
       }),
     };
-    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.groupId === undefined) {
-      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/groupId" }, 400);
+    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.rawPlanExcerpt === undefined && delta.groupId === undefined) {
+      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/plan/groupId" }, 400);
     }
 
     const { outcome, open } = checkAmendedScope(design, delta);

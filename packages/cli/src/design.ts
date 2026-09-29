@@ -237,18 +237,18 @@ export interface RegisterOptions {
  * subdirectory than a real mistake, so it warns and proceeds, exactly as
  * `warnIfTouchesMissing` already does for `--touches`.
  *
- * **The raw text travels too.** `rawPlanText` is sent verbatim alongside the
- * derived fields so a coordinator with no column for `changes` (every
- * version up to and including 0.2.25) still stores the structured
- * declaration in `rawPlanExcerpt` and can display it. The server skips its
- * own LLM extraction whenever structured fields are present, so sending both
- * costs nothing and changes no verdict.
+ * **The raw YAML does not travel.** It used to be sent as `rawPlanText` so a
+ * coordinator with no `changes` column could still display the declaration
+ * -- which made "View original plan text" in twing-monitor a list of ids and
+ * paths for every templated design. The CLI and coordinator versions now
+ * have to match exactly, so no such coordinator is left, and the plan text
+ * is reserved for what the template's own `plan:` says (2026-09-29).
  */
 function loadTemplate(
   repoRoot: string,
   filePath: string,
   options: { requireGoal?: boolean } = {},
-): { goal: string; changes: DesignChange[]; creates: string[]; touches: string[]; raw: string } {
+): LoadedTemplate {
   // `-` reads stdin, so a heredoc works with no file on disk. That is what
   // the gate's own deny messages hand back (hook/design_gate.go's
   // noDesignReason / outOfScopeReason): an agent blocked mid-edit should be
@@ -283,7 +283,7 @@ function buildTemplate(
   raw: string,
   label: string,
   options: { requireGoal?: boolean },
-): { goal: string; changes: DesignChange[]; creates: string[]; touches: string[]; raw: string } {
+): LoadedTemplate {
   const template = parseDesignTemplate(raw);
   const problems = validateTemplate(template, { requireGoal: options.requireGoal });
   if (problems.length > 0) {
@@ -315,7 +315,17 @@ function buildTemplate(
     );
   }
 
-  return { goal: template.goal, changes: template.changes, creates, touches, raw };
+  return { goal: template.goal, changes: template.changes, creates, touches, ...(template.plan ? { plan: template.plan } : {}) };
+}
+
+/** A validated template with its scope derived. `plan` is the template's
+ * own architecture text, absent when it wrote none. */
+interface LoadedTemplate {
+  goal: string;
+  changes: DesignChange[];
+  creates: string[];
+  touches: string[];
+  plan?: string;
 }
 
 /** The per-change lines printed after a successful `--from` registration --
@@ -410,21 +420,18 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
         creates,
         touches,
         dependsOn: splitList(options.dependsOn),
-        // The declaration itself, for a coordinator that has somewhere to
-        // put it. Sent alongside the derived `creates`/`touches` above
-        // rather than instead of them -- those stay the only thing the gate
-        // reads, and the server deliberately doesn't re-derive them from
-        // this (see the register route's own `changes:` note). An older
-        // coordinator ignores the field and keeps falling back to
-        // `rawPlanText` below, which is why both are still sent.
+        // The declaration itself. Sent alongside the derived
+        // `creates`/`touches` above rather than instead of them -- those
+        // stay the only thing the gate reads, and the server deliberately
+        // doesn't re-derive them from this (see the register route's own
+        // `changes:` note).
         ...(template ? { changes: template.changes } : {}),
-        // Sent alongside the structured fields, never instead of them. The
-        // server skips its own extraction whenever structured fields are
-        // present (app.ts's `hasStructured` check), so this changes no
-        // verdict -- it exists purely so a coordinator with no column for
-        // `changes` still persists the declaration, verbatim, in
-        // `rawPlanExcerpt`, where twing-monitor can show it.
-        ...(template ? { rawPlanText: template.raw } : {}),
+        // The template's architecture text, when it wrote one -- stored as
+        // the design's plan text. Never the YAML itself (see loadTemplate).
+        // The server skips its own extraction whenever structured fields
+        // are present (app.ts's `hasStructured` check), so this changes no
+        // verdict.
+        ...(template?.plan ? { rawPlanText: template.plan } : {}),
         ...(options.group ? { groupId: options.group } : {}),
       }),
     },
@@ -624,22 +631,18 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
   const addCreates = appended ? appended.creates : splitList(options.creates);
   if (!appended) warnIfTouchesMissing(repoRoot, addTouches);
 
-  // Appended items now ride as real `changes[]` (2026-09-15) -- the column
-  // exists, and the server's `mergeChanges` reconciles them against what the
-  // design already declares. Until then they were flattened into the summary
-  // text, which meant the out-of-scope deny told an agent to run
-  // `amend --from` and then showed the result everywhere *except* the
-  // structured view it was supposed to fill in.
+  // Appended items ride as real `changes[]` -- the server's `mergeChanges`
+  // reconciles them against what the design already declares, and they show
+  // in twing-monitor's Design change view.
   //
-  // The summary fold stays as a fallback for an older coordinator with no
-  // `changes` column: it ignores the new field and still files the items as
-  // a dated `Update:` entry via `appendSummaryUpdate`, so a mixed-version
-  // fleet degrades to the old behaviour instead of losing the declaration.
-  const appendedSummary = appended
-    ? appended.changes
-        .map((c) => `${c.id} ${c.action} ${c.target}${c.from ? ` (from ${c.from})` : ""} -- ${c.intent}`)
-        .join("\n")
-    : undefined;
+  // They are *not* folded into the summary any more (2026-09-29). That fold
+  // was a fallback for a coordinator with no `changes` column; versions now
+  // have to match exactly, so it only ever filled the overview with
+  // "c1 add path -- intent" lines. What reaches the overview is the
+  // template's `goal:`, when it has one -- one crisp line about what this
+  // amendment is for -- else an explicit `--summary`. A `plan:` is appended
+  // to the plan text instead.
+  const summaryUpdate = appended?.goal || options.summary || undefined;
 
   if (appended) {
     console.log(`  ✓ appending ${appended.changes.length} change(s)`);
@@ -657,7 +660,8 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
         addCreates,
         addDependsOn: splitList(options.dependsOn),
         ...(appended ? { changes: appended.changes } : {}),
-        ...(appendedSummary ? { summary: appendedSummary } : options.summary ? { summary: options.summary } : {}),
+        ...(summaryUpdate ? { summary: summaryUpdate } : {}),
+        ...(appended?.plan ? { plan: appended.plan } : {}),
         ...(options.group ? { groupId: options.group } : {}),
       }),
     },

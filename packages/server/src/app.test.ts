@@ -2978,6 +2978,49 @@ test("POST /v1/designs/:id/amend: a summary-only amendment appends an Update ent
   assert.deepEqual(amended?.touches, ["a.ts"], "amend --summary alone must not touch the existing scope");
 });
 
+// The plan text is the design's architecture ("View original plan text"). An
+// amendment's `plan` adds a dated section after what it already says -- the
+// same never-replace rule the summary follows -- and leaves the overview
+// alone unless a summary was sent too.
+test("POST /v1/designs/:id/amend: a plan update is appended to the plan text as a dated section, never replacing it", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      projectId: "proj-1",
+      sessionId: "s1",
+      summary: "retry budget",
+      creates: [],
+      touches: ["a.ts"],
+      dependsOn: [],
+      changes: [{ id: "c1", action: "modify", target: "a.ts", intent: "cap growth" }],
+      rawPlanText: "## Approach\nCap the budget.",
+    }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      (async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: false, kind: null, reason: "" }) } }] }), { status: 200 })) as typeof fetch,
+      async () => {
+        const amendRes = await app.request(`/v1/designs/${designId}/amend`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ plan: "Per host, not global." }),
+        });
+        assert.equal(amendRes.status, 200, "a plan alone is a valid amendment");
+      },
+    ),
+  );
+
+  const design = ((await (await app.request(`/v1/designs/${designId}`, { headers: bearer(admin.token) })).json()) as { design: { rawPlanExcerpt?: string; summary: string } }).design;
+  assert.match(design.rawPlanExcerpt ?? "", /^## Approach\nCap the budget\.\n\n## Update \(\d{4}-\d{2}-\d{2}\)\n\nPer host, not global\.$/);
+  assert.equal(design.summary, "retry budget", "a plan update does not touch the overview");
+});
+
 test("POST /v1/designs/:id/amend: a groupId-only body joins a group after the fact, and doesn't hit the 400 guard", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
@@ -4136,22 +4179,28 @@ test("POST /v1/designs/check: a near-identical rawPlanText retry for the same se
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
   const planText = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls.";
+  // Plan text only, exactly what the hook's ExitPlanMode sends -- the
+  // server extracts the rest. (This used to send structured fields too, a
+  // shape only `register --from` produces, which is what let a structured
+  // registration take the retry path.)
+  const register = () =>
+    withBedrockEnv(() =>
+      withMockFetch(mockBedrockExtraction({ creates: [], touches: ["src/net/retry.ts"], dependsOn: [], summary: "add retry policy" }), async () =>
+        app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText }),
+        }),
+      ),
+    );
 
-  const first = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
-  });
+  const first = await register();
   const firstBody = (await first.json()) as { designId: string; verdict: string };
   assert.equal(first.status, 200);
   assert.equal(firstBody.verdict, "clean");
 
   // A retry: same plan text, byte-identical -- the easy case.
-  const second = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
-  });
+  const second = await register();
   const secondBody = (await second.json()) as { designId: string; verdict: string };
   assert.equal(second.status, 200);
   assert.equal(secondBody.verdict, "clean", "reregistering in place must not overlap itself");
@@ -4230,6 +4279,29 @@ test("POST /v1/designs/check: a rawPlanText registration under a *different* ses
   assert.equal(secondBody.verdict, "file_overlap", "and correctly conflicts with it, same as any other pair of unrelated open designs");
 });
 
+// Found 2026-09-29: the dedup only checked for plan text, and `register
+// --from` sends plan text alongside its structured fields -- so a second,
+// similar template in the same session silently rewrote the first design
+// (summary, changes, plan) in place instead of registering a new one.
+test("POST /v1/designs/check: a structured registration that carries plan text never rewrites an earlier design in place", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const plan = "## Approach\nAdd a RetryPolicy class implementing exponential backoff with jitter for outbound HTTP calls.";
+  const register = (summary: string) =>
+    app.request("/v1/designs/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ projectId: "proj-1", sessionId: "s-cli", summary, creates: [], touches: ["src/net/retry.ts"], dependsOn: [], rawPlanText: plan }),
+    });
+
+  const first = (await (await register("task one")).json()) as { designId: string };
+  const second = (await (await register("task two")).json()) as { designId: string };
+  assert.notEqual(second.designId, first.designId, "a new row, not an in-place rewrite");
+  assert.equal(designs.get(first.designId)?.summary, "task one", "the earlier design is left exactly as it was");
+  assert.equal(designs.get(first.designId)?.scopeVersion, 1);
+  assert.equal(designs.get(second.designId)?.rawPlanExcerpt, plan, "and the plan is stored as the new design's plan text");
+});
+
 test("POST /v1/designs/check: a structured (twing design register-style) call with no rawPlanText always creates a new row, even repeated in the same session", async () => {
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
@@ -4261,12 +4333,19 @@ test("POST /v1/designs/check: a reregistered design keeps its justifiedConstrain
   const admin = await bootstrapAdmin(app, dataDir);
   constraints.add("proj-1", "review required for retry.ts", ["src/net/retry.ts"], "constraint", "seeded");
   const planText = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls.";
+  // Plan text only, as ExitPlanMode sends it -- see the retry test above.
+  const register = () =>
+    withBedrockEnv(() =>
+      withMockFetch(mockBedrockExtraction({ creates: [], touches: ["src/net/retry.ts"], dependsOn: [], summary: "add retry policy" }), async () =>
+        app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText }),
+        }),
+      ),
+    );
 
-  const first = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
-  });
+  const first = await register();
   const firstBody = (await first.json()) as { designId: string; verdict: string };
   assert.equal(firstBody.verdict, "constraint_violation");
 
@@ -4285,11 +4364,7 @@ test("POST /v1/designs/check: a reregistered design keeps its justifiedConstrain
   assert.ok(designs.get(firstBody.designId)?.justifiedConstraintIds.length, "sanity: the approval populated justifiedConstraintIds before the retry");
 
   // Retry: same plan text -- reregisters in place rather than duplicating.
-  const second = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
-  });
+  const second = await register();
   const secondBody = (await second.json()) as { designId: string; verdict: string };
   assert.equal(secondBody.designId, firstBody.designId, "same row reregistered");
   assert.equal(secondBody.verdict, "clean", "already-justified constraint must not be re-flagged after a mere retry");

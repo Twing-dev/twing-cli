@@ -286,6 +286,79 @@ test("runDesignAmend: --summary alongside --touches sends both", async () => {
   });
 });
 
+// --- templates: plan text and overview (2026-09-29) --------------------------
+//
+// "View original plan text" is for the architecture and the overview for a
+// crisp summary; the files a design touches have their own view. The CLI
+// used to send the YAML template as the plan text and fold every amended
+// change into the overview as "c1 add path -- intent" lines.
+
+function writeTemplate(repo: string, body: string): string {
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "src", "retry.ts"), "");
+  const file = path.join(repo, "design.yml");
+  fs.writeFileSync(file, body);
+  return file;
+}
+
+const TEMPLATE_CHANGES = `changes:
+  - id: c1
+    action: modify
+    target: src/retry.ts
+    intent: cap exponential growth
+`;
+
+test("runDesignRegister --from: sends the template's plan as the plan text, never the YAML", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const file = writeTemplate(repo, `goal: survive transient failures\nplan: |\n  ## Approach\n  Retry with a capped budget.\n${TEMPLATE_CHANGES}`);
+    await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", from: file })));
+    const body = calls[0].body as Record<string, unknown>;
+    assert.equal(body.rawPlanText, "## Approach\nRetry with a capped budget.");
+    assert.equal(body.summary, "survive transient failures");
+  });
+});
+
+test("runDesignRegister --from: a template with no plan sends no plan text at all", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const file = writeTemplate(repo, `goal: survive transient failures\n${TEMPLATE_CHANGES}`);
+    await captureConsole(() => withMockFetch(fetch, () => runDesignRegister({ cwd: repo, session: "sess1", from: file })));
+    assert.ok(!("rawPlanText" in (calls[0].body as object)), "the YAML is not a plan");
+  });
+});
+
+test("runDesignAmend --from: the overview gets the goal, the plan text gets the plan, and no change lines are folded in", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const file = writeTemplate(repo, `goal: also cap per host\nplan: Budget per host, not global.\n${TEMPLATE_CHANGES}`);
+    await captureConsole(() => withMockFetch(fetch, () => runDesignAmend({ cwd: repo, id: "d1", from: file })));
+    const body = calls[0].body as Record<string, unknown>;
+    assert.equal(body.summary, "also cap per host");
+    assert.equal(body.plan, "Budget per host, not global.");
+    assert.ok(Array.isArray(body.changes) && body.changes.length === 1, "the change rides as structure");
+  });
+});
+
+test("runDesignAmend --from: with no goal, the overview is left alone", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
+  await withHome(async () => {
+    cacheToken(SERVER_URL, "test-token");
+    const repo = tmpRepo(SERVER_URL);
+    const file = writeTemplate(repo, TEMPLATE_CHANGES);
+    await captureConsole(() => withMockFetch(fetch, () => runDesignAmend({ cwd: repo, id: "d1", from: file })));
+    const body = calls[0].body as Record<string, unknown>;
+    assert.ok(!("summary" in body), `no overview update, got ${JSON.stringify(body.summary)}`);
+    assert.ok(!("plan" in body));
+  });
+});
+
 test("runDesignAmend: --group alone satisfies the 'pass at least one of' guard and sends groupId", async () => {
   const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1", groupId: "anchor-id" }));
   await withHome(async () => {

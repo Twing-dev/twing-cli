@@ -397,6 +397,11 @@ export class DesignRegistry {
        * gets this *same raw text* appended onto *its own* existing summary
        * independently, via `appendSummaryUpdate`, not a shared copy. */
       summaryUpdate?: string;
+      /** The design's full plan text after this amend, already appended by
+       * the caller (app.ts's amend route, via `appendPlanUpdate`) -- a plain
+       * assignment here, like `summary`. Never fanned out to linked
+       * siblings: a plan is written for one repo's part of the work. */
+      rawPlanExcerpt?: string;
       /** §17 design linking (2026-08): join (or move to) a different
        * group after registration -- `groupId` was previously only ever
        * settable at `register()` time. Same no-existence-check trust
@@ -445,6 +450,7 @@ export class DesignRegistry {
         // calling here, so this is a plain assignment, not a merge decision
         // made at this layer.
         ...(delta.summary !== undefined ? { summary: delta.summary } : {}),
+        ...(delta.rawPlanExcerpt !== undefined ? { rawPlanExcerpt: delta.rawPlanExcerpt } : {}),
         ...(delta.groupId !== undefined ? { groupId: delta.groupId } : {}),
         scopeVersion,
         lastActivityAt: Date.now(), // §17 design lifecycle: amending is itself real activity

@@ -1345,6 +1345,12 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 				DependsOn: extracted.DependsOn,
 				Summary:   extracted.Summary,
 				GroupID:   groupID,
+				// The plan itself, as each repo's design's plan text -- what
+				// "View original plan text" shows. Without it a multi-repo
+				// plan's designs had no architecture text at all. Sent beside
+				// the structured fields, so the server neither re-extracts
+				// nor treats this as an in-place plan retry (2026-09-29).
+				RawPlanText: input.Plan,
 			}
 			result, failReason := postDesignCheck(cfg.ServerURL, cfg.AuthToken, developerID, reqBody)
 			if failReason != "" {
@@ -1586,6 +1592,8 @@ func noDesignReason(relPath string) string {
 				Block: []string{
 					"twing design register --from - <<'YAML'",
 					"goal: \"<one sentence: what changes for the user or the system>\"",
+					"plan: |",
+					"  <approach, key decisions, edge cases -- not a file list>",
 					"changes:",
 					"  - id: c1",
 					"    action: modify        # add|modify|rewrite|remove|rename|move",
@@ -1594,9 +1602,11 @@ func noDesignReason(relPath string) string {
 					"    intent: \"<what this change achieves>\"",
 					"YAML",
 				},
-				Note: "Fill in goal, action and intent -- the target is the file you just " +
+				Note: "Fill in goal, plan, action and intent -- the target is the file you just " +
 					"tried to edit. The goal is what teammates see when your work overlaps " +
-					"theirs, so describe the real objective rather than a placeholder.",
+					"theirs, and the plan is what a reviewer reads to understand how you'll " +
+					"do it (the files already have their own view), so describe the real " +
+					"work rather than a placeholder.",
 			},
 			{
 				Label:   "Or join what you already have open",

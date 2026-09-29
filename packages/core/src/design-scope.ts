@@ -66,6 +66,13 @@ export interface DesignTemplate {
    * design's `summary`. */
   goal: string;
   changes: DesignChange[];
+  /** Optional: the architecture -- the approach, key decisions, edge cases,
+   * in prose or markdown. Becomes the plan text twing-monitor shows under
+   * "View original plan text". Deliberately separate from `changes`: the
+   * files a design touches already have their own view, and a plan that is
+   * a list of paths tells a reviewer nothing they can't already see.
+   * Absent -- not "" -- when the template says nothing. */
+  plan?: string;
 }
 
 /** A single problem found in a template. `changeId` is absent for problems
@@ -165,7 +172,10 @@ export function parseDesignTemplate(yamlText: string): DesignTemplate {
     };
   });
 
-  return { goal: asTrimmedString(document.goal), changes };
+  // Trimmed at the ends only: a plan is multi-line prose or markdown, and its
+  // inner line breaks and indentation are the formatting.
+  const plan = typeof document.plan === "string" ? document.plan.trim() : "";
+  return { goal: asTrimmedString(document.goal), changes, ...(plan ? { plan } : {}) };
 }
 
 /**
@@ -197,6 +207,13 @@ export function validateTemplate(template: DesignTemplate, options: ValidateOpti
   }
   if (template.changes.length === 0) {
     problems.push({ message: "no `changes:` declared -- a template with no changes says nothing" });
+  }
+  // The gate's deny hands back a template whose `plan:` is a `<...>`
+  // prompt. Registered as-is, that prompt would become the text a reviewer
+  // opens under "View original plan text". A plan is optional, so the fix is
+  // either to write one or to drop the lines -- say both.
+  if (template.plan !== undefined && /^<[^<>]*>$/.test(template.plan)) {
+    problems.push({ message: "`plan:` is still the placeholder -- describe the approach, or delete the `plan:` lines" });
   }
 
   const seenIds = new Set<string>();

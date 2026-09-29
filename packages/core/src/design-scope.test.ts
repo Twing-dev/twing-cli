@@ -89,6 +89,34 @@ changes:
   });
 });
 
+test("parseDesignTemplate keeps a multi-line plan's formatting, and omits an absent one", () => {
+  const t = parseDesignTemplate(`
+goal: g
+plan: |
+  ## Approach
+  1. Cap the budget.
+     - per host
+changes: []
+`);
+  assert.equal(t.plan, "## Approach\n1. Cap the budget.\n   - per host");
+  assert.ok(!("plan" in parseDesignTemplate("goal: g\nchanges: []\n")), "absent, not an empty string");
+});
+
+test("validateTemplate refuses a plan that is still the deny template's placeholder", () => {
+  const t = parseDesignTemplate(`
+goal: g
+plan: |
+  <approach, key decisions, edge cases -- not a file list>
+changes:
+  - id: c1
+    action: modify
+    target: a.ts
+    intent: i
+`);
+  assert.ok(validateTemplate(t).some((p) => /plan.*placeholder/.test(p.message)));
+  assert.deepEqual(validateTemplate({ ...t, plan: "Cap the budget <per host>." }), [], "angle brackets inside real prose are fine");
+});
+
 test("parseDesignTemplate keeps `from` when present and omits it otherwise", () => {
   const t = parseDesignTemplate(`
 goal: g
