@@ -117,20 +117,18 @@ type versionMismatchInfo struct {
 	ServerVersion string `json:"serverVersion"`
 }
 
-// escalationNotice mirrors EscalationNotice in packages/core/src/types.ts --
-// one design-review comment a reviewer escalated to this developer. Carries
-// the comment text rather than just ids on purpose: this is rendered into a
-// session banner that has to be actionable on sight, and an agent that must
-// make a network call to learn what it was told is one that will skip it.
-type escalationNotice struct {
-	CommentID     string `json:"commentId"`
-	DesignID      string `json:"designId"`
-	ProjectID     string `json:"projectId"`
-	DesignSummary string `json:"designSummary"`
-	Comment       string `json:"comment"`
-	EscalatedBy   string `json:"escalatedBy,omitempty"`
-	EscalatedAt   int64  `json:"escalatedAt"`
-	URL           string `json:"url,omitempty"`
+// openReviewNotice mirrors OpenReviewNotice in packages/core/src/types.ts --
+// one design this developer owns that has unresolved review comments on it.
+// Ids and a link, never the comments' text: they are answered by a person in
+// twing-monitor, and a reviewer's words in an agent's context invite the
+// agent to start acting on them. CommentIDs exist so design_review.go can
+// tell a new comment from one this session was already told about.
+type openReviewNotice struct {
+	DesignID      string   `json:"designId"`
+	ProjectID     string   `json:"projectId"`
+	DesignSummary string   `json:"designSummary"`
+	CommentIDs    []string `json:"commentIds"`
+	URL           string   `json:"url,omitempty"`
 }
 
 // designLink mirrors DesignLink in packages/core/src/types.ts -- what an
@@ -151,6 +149,6 @@ type noticesMessage struct {
 	// Both optional, and absent from any daemon predating them -- a machine
 	// mid-upgrade runs a new hook against an old daemon just as often as the
 	// reverse, so neither side may require the other to have them.
-	Escalations []escalationNotice `json:"escalations,omitempty"`
+	OpenReviews []openReviewNotice `json:"openReviews,omitempty"`
 	DesignLinks []designLink       `json:"designLinks,omitempty"`
 }

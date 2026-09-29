@@ -113,28 +113,19 @@ export type ActivityEventKind =
    * Only ever appended when something actually changed -- re-seeding an
    * unchanged value logs nothing at all. */
   | "design_retimed"
-  /** Design review (2026-09). All five carry `relatedId = <comment id>`,
+  /** Design review (2026-09). All three carry `relatedId = <comment id>`,
    * not the design id -- deliberately, because `eventsForRelatedId` is how
    * a comment's reply history is read back, exactly as an alignment
    * thread's messages are. The design id lives in the payload instead, for
    * anyone filtering the project feed by design.
    *
    * `design_comment_replied` is the one that carries conversation; its
-   * payload is `{designId, commentId, authorKind, message}`. `authorKind`
-   * has to be *stored* rather than inferred from `developerId`: a developer
-   * replying through the CLI and their agent replying through the CLI
-   * authenticate with the same token, so the identity on the row cannot
-   * tell the two apart. */
+   * payload is `{designId, commentId, message}`. Every reply is a person's
+   * -- nothing posts one on anyone's behalf since the 2026-09-27 rework,
+   * which retired `design_comment_escalated`/`_acknowledged` along with the
+   * coordinator's own answers (drizzle/0020 deleted their rows). */
   | "design_comment_posted"
   | "design_comment_replied"
-  /** A reviewer decided the agent's first-pass answer wasn't enough and
-   * pulled the human developer in -- the only comment event that ever
-   * reaches anyone's coding session. */
-  | "design_comment_escalated"
-  /** The design's owner (or their agent, by reading the comment) has seen
-   * the escalation. Stops the session banner repeating, and is deliberately
-   * *not* the same as resolving -- see `designComments.acknowledgedAt`. */
-  | "design_comment_acknowledged"
   | "design_comment_resolved"
   /** Design review phase 2 (2026-09): one turn in a reviewer's private chat
    * with a design. `relatedId` is the chat row's id, so

@@ -222,6 +222,40 @@ func TestHandleEditWriteGate_NoAuthCached_NoTokenStillProceeds_SendsDeveloperIdH
 	}
 }
 
+// Design review (2026-09-27): open review comments on this developer's design
+// pause the first edit the gate would otherwise allow, once, and the retry
+// goes through -- the pause makes sure the user hears about the comments; it
+// is theirs to skip.
+func TestHandleEditWriteGate_OpenReviewComments_PauseOnceThenAllow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/constraints/match":
+			_, _ = w.Write([]byte(`{"matched":false}`))
+		case "/v1/designs/scope-match":
+			_, _ = w.Write([]byte(`{"state":"in_scope","designId":"d1"}`))
+		}
+	}))
+	defer server.Close()
+
+	repo := newTestRepo(t, server.URL)
+	setCachedToken(t, server.URL, "tok")
+	// What handleCacheCheck records from the daemon's notices frame.
+	renderOpenReviews(computeProjectID(repo), "sess1", []openReviewNotice{{
+		DesignID: "d1", ProjectID: computeProjectID(repo), DesignSummary: "Add a retry budget", CommentIDs: []string{"c1"},
+	}})
+
+	stdout := captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	decision, reason := decisionOf(t, stdout)
+	if decision != "deny" || !strings.Contains(reason, "tell your user") {
+		t.Fatalf("decision = %q, reason = %q, want a deny telling the agent to tell its user", decision, reason)
+	}
+
+	stdout = captureStdout(t, func() { handleEditWriteGate(editPayload(repo, "sess1")) })
+	if decision, reason := decisionOf(t, stdout); decision != "allow" {
+		t.Fatalf("retry: decision = %q, reason = %q, want allow", decision, reason)
+	}
+}
+
 func TestHandleEditWriteGate_ConstraintCheckAuthRejected_Denies(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

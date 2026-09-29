@@ -1,12 +1,11 @@
 /**
- * The dashboard's notification feed: which design discussions are waiting on
- * this developer (2026-09).
+ * The dashboard's notification feed: which design discussions have moved
+ * since this developer last looked (2026-09).
  *
- * Design review can reach someone three ways -- a comment, an escalation, a
- * reply -- and until this existed there was exactly one way to find out: a
- * banner at the start of your next coding session, and only for escalations
- * on designs you own. A reviewer who asked a question never learned it had
- * been answered.
+ * Design review reaches someone three ways -- a comment, a reply, a resolve --
+ * and the bell is how a person in the dashboard finds out. (A design's owner
+ * also hears about open comments from their coding sessions, through
+ * `GET /v1/review-queue`; the bell is the dashboard's half.)
  *
  * **Nothing here is stored.** The feed is derived on every request from
  * `activity_events` joined through `design_comments`, because every event it
@@ -16,18 +15,11 @@
  * consistent with the log it mirrors, and a comment on a design with twelve
  * reviewers is still one insert rather than thirteen.
  *
- * Two rules do the real work, and both are easy to get backwards:
- *
- * 1. **Only a human's action notifies.** Every comment automatically
- *    triggers an agent answer, and often a second `[needs a human]` reply
- *    after it, so counting agent activity would show three items on the bell
- *    where one thing actually happened -- on every single comment. The
- *    filter is `payload.authorKind === "human"` for replies;
- *    `authorKind` exists precisely because a developer and their agent
- *    authenticate with the same token and the identity on the row cannot
- *    tell them apart (see `activity-log.ts`).
- * 2. **Your own actions never notify you.** Compared on the event's
- *    `developerId`, so replying to your own thread stays silent.
+ * **Your own actions never notify you.** Compared on the event's
+ * `developerId`, so replying to your own thread stays silent. Every event
+ * that reaches this feed is a person's since the 2026-09-27 rework -- the
+ * coordinator no longer posts answers of its own -- so there is no longer an
+ * agent/human split to filter on.
  *
  * `NOTIFYING_KINDS` is an allowlist rather than a denylist, which is what
  * keeps `design_chat_message` structurally out of this. A chat belongs to
@@ -37,62 +29,26 @@
  * simply absent.
  */
 
-import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import type { Db } from "./db/client.js";
 import { activityEvents, designComments, designs, notificationReads } from "./db/schema.js";
 import type { ActivityEventKind } from "./activity-log.js";
 
-/**
- * The only event kinds that ever reach a bell.
- *
- * `design_comment_posted` needs no `authorKind` check: the CLI has no
- * comment-creation verb at all (only `comments` to read and `comment reply`
- * to answer), so a comment is always a person typing into the dashboard.
- * Replies are the mixed case, and the one filtered below.
- *
- * Deliberately absent: `design_comment_acknowledged`, which is bookkeeping
- * and is the design owner's own action, and `design_chat_message` -- see
- * this file's header.
- */
-export const NOTIFYING_KINDS: readonly ActivityEventKind[] = ["design_comment_posted", "design_comment_replied", "design_comment_escalated", "design_comment_resolved"];
+/** The only event kinds that ever reach a bell. See this file's header for
+ * why `design_chat_message` is absent. */
+export const NOTIFYING_KINDS: readonly ActivityEventKind[] = ["design_comment_posted", "design_comment_replied", "design_comment_resolved"];
 
 /** How much of a comment or reply the bell shows before the reader has to
  * open the design. Long enough to recognise which question this is. */
 const EXCERPT_CHARS = 180;
 
-/**
- * The agent/human split, in SQL.
+/** How many of the newest notifying events one feed read looks at.
  *
- * It has to be applied *before* the window's `LIMIT`, not after it. Filtering
- * in JavaScript afterwards means the window is a window of raw events, most
- * of which are the coordinator's own answers -- and a long enough run of
- * those pushes real human activity out of it entirely. Measured: one unread
- * human reply behind 200 agent replies produced an empty feed and a badge of
- * zero, with the read cursor untouched, so the notification was not merely
- * uncounted but gone for good.
- *
- * `json_valid` first is not belt-and-braces: `json_extract` *raises* on
- * malformed JSON in SQLite, so without it one bad payload row fails the whole
- * request instead of being skipped. Guarded, an unreadable payload is simply
- * not provably human, which matches what `parsePayload` does on the other
- * side -- the conservative direction, since the failure mode of guessing
- * "human" is a bell that cries wolf on every answer the coordinator gives.
- *
- * SQLite-specific, deliberately. `db/client.ts` ships no other driver and
- * throws for `postgres` rather than falling back; a Postgres port rewrites
- * this expression (`payload::jsonb ->> 'authorKind'`) along with the rest.
- */
-const HUMAN_AUTHORED = sql`(${activityEvents.kind} <> 'design_comment_replied' OR (json_valid(${activityEvents.payload}) AND json_extract(${activityEvents.payload}, '$.authorKind') = 'human'))`;
-
-/** How many of the newest *notifying* events one feed read looks at -- real
- * items now, since the agent replies are gone before the limit applies.
- *
- * The badge is exact within this window, plus every waiting escalation, which
- * is fetched separately and has no time bound. Past 200 unread human
- * notifications the count is a floor, which the UI cannot show anyway: the
- * badge caps at "9+". The bound matters because this runs on a poll for every
- * signed-in dashboard user, and the alternative is reading every notifying
- * event ever written on every design they have taken part in, on every tick. */
+ * The badge is exact within this window. Past 200 unread notifications the
+ * count is a floor, which the UI cannot show anyway: the badge caps at "9+".
+ * The bound matters because this runs on a poll for every signed-in
+ * dashboard user, and the alternative is reading every notifying event ever
+ * written on every design they have taken part in, on every tick. */
 const WINDOW_ROWS = 200;
 
 const DEFAULT_LIMIT = 50;
@@ -111,7 +67,7 @@ export interface NotificationItem {
   /** The reply's text, or the comment's, trimmed to `EXCERPT_CHARS`. */
   excerpt: string;
   /** Whether this still counts toward the badge -- newer than the read
-   * cursor, or an escalation still waiting on the caller. */
+   * cursor. */
   unread: boolean;
 }
 
@@ -121,13 +77,11 @@ export interface NotificationFeed {
   lastSeenAt: number;
 }
 
-/** One joined row behind a feed item, shared by both of `feedFor`'s
- * queries. */
+/** One joined row behind a feed item. */
 interface FeedRow {
   event: { id: string; projectId: string; developerId: string | null; kind: string; relatedId: string | null; ts: number; payload: string | null };
-  comment: { id: string; designId: string; body: string; status: string; acknowledgedAt: number | null };
+  comment: { id: string; designId: string; body: string };
   designSummary: string;
-  designOwner: string;
 }
 
 interface ReadRow {
@@ -141,18 +95,17 @@ function excerpt(text: string): string {
   return flat.length <= EXCERPT_CHARS ? flat : flat.slice(0, EXCERPT_CHARS - 1) + "…";
 }
 
-/** `design_comment_replied` carries the reply text and its author kind in
- * the payload; the other three carry no text of their own and fall back to
- * the comment being acted on. A payload that will not parse is treated as an
- * agent reply -- the conservative direction, since the failure mode of
- * guessing "human" is a bell that cries wolf on every answer. */
-function parsePayload(raw: string | null): { authorKind?: string; message?: string } {
-  if (!raw) return {};
+/** `design_comment_replied` carries the reply text in its payload; the other
+ * kinds carry no text of their own and fall back to the comment being acted
+ * on. A payload that will not parse falls back the same way. */
+function payloadMessage(raw: string | null): string | undefined {
+  if (!raw) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
-    return typeof parsed === "object" && parsed !== null ? (parsed as { authorKind?: string; message?: string }) : {};
+    const message = typeof parsed === "object" && parsed !== null ? (parsed as { message?: unknown }).message : undefined;
+    return typeof message === "string" ? message : undefined;
   } catch {
-    return {};
+    return undefined;
   }
 }
 
@@ -169,7 +122,7 @@ export class NotificationStore {
    * conversation, and nothing goes stale when a design is closed.
    *
    * Ownership is keyed on `designs.developerId` for the same reason
-   * `pendingEscalationsFor` is (`design-comment-store.ts`): a person's
+   * `openReviewsFor` is (`design-comment-store.ts`): a person's
    * dashboard-login identity can differ from the one their CLI authors
    * designs under, and the discussion has to reach whoever is building the
    * thing.
@@ -215,16 +168,6 @@ export class NotificationStore {
   /**
    * The feed itself, newest first.
    *
-   * `projectIds` is the caller's *current* membership and is required rather
-   * than optional, the same call it is at `countsByDesign`. Participation is
-   * derived from history, so a design you commented on in a project you have
-   * since left would otherwise keep notifying you forever -- the derivation
-   * alone cannot see that you left. Passing an empty array yields an empty
-   * feed, which is the correct answer for a developer who is in no projects.
-   */
-  /**
-   * The feed itself, newest first.
-   *
    * `projectIds` is the caller's *current* access -- membership, plus the
    * projects they administer through an org, which `canCommentOnDesign`
    * already lets them join a discussion in. Required rather than optional,
@@ -234,23 +177,8 @@ export class NotificationStore {
    * cannot see that you left. An empty array yields an empty feed, which is
    * the right answer for a developer who is in no projects.
    *
-   * Two queries rather than one, for two different bounds:
-   *
-   * - **A window of the most recent events** (`WINDOW_ROWS`), which is what
-   *   the panel shows and what the badge counts. Bounded because this runs
-   *   on a poll for every signed-in dashboard user; unbounded, it reads
-   *   every notifying event ever written on every design they have ever
-   *   taken part in, on each tick.
-   * - **Every escalation still waiting on this developer**, with no time
-   *   bound at all. Those are *state* rather than news and have to survive
-   *   both the read cursor and the window, and there is never a large number
-   *   of them -- the query is `status = 'escalated'` against an indexed
-   *   column, not a scan.
-   *
-   * So the count is exact within the window, plus every waiting escalation
-   * however old. That is a deliberate limit and not a hidden one: the badge
-   * renders as "9+" past nine, so an exact total beyond the window buys
-   * nothing anyone can see.
+   * Bounded to the most recent `WINDOW_ROWS` notifying events, which is what
+   * the panel shows and what the badge counts.
    */
   feedFor(developerId: string, projectIds: string[], options: { limit?: number } = {}): NotificationFeed {
     const lastSeen = this.lastSeenAt(developerId);
@@ -260,87 +188,38 @@ export class NotificationStore {
     const designIds = this.designIdsForDeveloper(developerId);
     if (designIds.length === 0) return { items: [], unreadCount: 0, lastSeenAt: lastSeen };
 
-    const scope = and(
-      inArray(designComments.designId, designIds),
-      inArray(activityEvents.projectId, projectIds),
-      // Your own actions never notify you. Applied in SQL rather than after
-      // the fact, so the window is a window of real items. A
-      // system-generated event has a NULL developerId, and `NULL <> 'me'` is
-      // NULL in SQLite, so those drop out here too -- which is right: there
-      // is nobody to attribute them to.
-      ne(activityEvents.developerId, developerId),
-    );
-
-    const windowRows = this.selectFeedRows(and(inArray(activityEvents.kind, [...NOTIFYING_KINDS]), HUMAN_AUTHORED, scope), Math.max(limit, WINDOW_ROWS));
-
-    // Escalations waiting on this developer, however old. Every condition of
-    // "waiting on me" is in the query -- escalated, unacknowledged, and on a
-    // design they own -- so every row it returns is one, and the pin below
-    // needs no second opinion about it.
-    const escalationRows = this.selectFeedRows(
-      and(
-        eq(activityEvents.kind, "design_comment_escalated"),
-        eq(designComments.status, "escalated"),
-        isNull(designComments.acknowledgedAt),
-        eq(designs.developerId, developerId),
-        scope,
-      ),
-    );
-    const waitingOnMe = new Set(escalationRows.map((row) => row.event.id));
-
-    const byId = new Map<string, NotificationItem>();
-    for (const item of this.toItems([...windowRows, ...escalationRows], developerId, lastSeen)) byId.set(item.id, item);
-    const all = [...byId.values()].sort((a, b) => b.ts - a.ts);
-
-    const unreadCount = all.filter((i) => i.unread).length;
-    const visible = new Set(all.slice(0, limit));
-    // An escalation still waiting on you stays reachable even when newer
-    // discussion has pushed it past the page -- it is the one thing here
-    // that someone is actually blocked on. Keyed on `waitingOnMe`, not on
-    // `unread`: an escalation that is merely newer than the read cursor is
-    // ordinary news and takes its chances with everything else, and pinning
-    // those too would hold a page open for items nobody is blocked on.
-    // Re-sorted rather than appended, so what the client renders is still
-    // newest-first throughout.
-    for (const item of all) {
-      if (waitingOnMe.has(item.id)) visible.add(item);
-    }
-    const items = [...visible].sort((a, b) => b.ts - a.ts);
-
-    return { items, unreadCount, lastSeenAt: lastSeen };
-  }
-
-  private selectFeedRows(where: ReturnType<typeof and>, limit?: number): FeedRow[] {
-    const query = this.db
-      .select({ event: activityEvents, comment: designComments, designSummary: designs.summary, designOwner: designs.developerId })
+    const rows = this.db
+      .select({ event: activityEvents, comment: designComments, designSummary: designs.summary })
       .from(activityEvents)
       .innerJoin(designComments, eq(activityEvents.relatedId, designComments.id))
       .innerJoin(designs, eq(designComments.designId, designs.id))
-      .where(where)
-      .orderBy(desc(activityEvents.ts));
-    return (limit === undefined ? query.all() : query.limit(limit).all()) as FeedRow[];
+      .where(
+        and(
+          inArray(activityEvents.kind, [...NOTIFYING_KINDS]),
+          inArray(designComments.designId, designIds),
+          inArray(activityEvents.projectId, projectIds),
+          // Your own actions never notify you. Applied in SQL rather than
+          // after the fact, so the window is a window of real items. A
+          // system-generated event has a NULL developerId, and `NULL <> 'me'`
+          // is NULL in SQLite, so those drop out here too -- which is right:
+          // there is nobody to attribute them to.
+          ne(activityEvents.developerId, developerId),
+        ),
+      )
+      .orderBy(desc(activityEvents.ts))
+      .limit(Math.max(limit, WINDOW_ROWS))
+      .all() as FeedRow[];
+
+    const all = this.toItems(rows, lastSeen);
+    const unreadCount = all.filter((i) => i.unread).length;
+    return { items: all.slice(0, limit), unreadCount, lastSeenAt: lastSeen };
   }
 
-  private toItems(rows: FeedRow[], developerId: string, lastSeen: number): NotificationItem[] {
+  private toItems(rows: FeedRow[], lastSeen: number): NotificationItem[] {
     const items: NotificationItem[] = [];
     for (const row of rows) {
-      const payload = parsePayload(row.event.payload);
-      // Rule 1: an agent's reply is not news. Every other kind here is human
-      // by construction (see NOTIFYING_KINDS). The window query already
-      // applies this as `HUMAN_AUTHORED`, so for those rows this is a second
-      // opinion -- kept because `toItems` is shared, and because the rule is
-      // worth being able to read in the language the rest of the file is
-      // written in.
-      if (row.event.kind === "design_comment_replied" && payload.authorKind !== "human") continue;
       const actorId = row.event.developerId;
       if (!actorId) continue; // system-generated; nobody to attribute it to
-
-      // An escalation is *state*, not news: somebody is blocked waiting for
-      // the design's owner. It keeps counting past the read cursor until it
-      // is acknowledged or resolved, so a stray click on the bell cannot
-      // bury the one thing here that is actually waiting on you.
-      const escalationWaitingOnMe = row.event.kind === "design_comment_escalated" && row.designOwner === developerId && row.comment.status === "escalated" && row.comment.acknowledgedAt === null;
-
       items.push({
         id: row.event.id,
         kind: row.event.kind as ActivityEventKind,
@@ -350,8 +229,8 @@ export class NotificationStore {
         designId: row.comment.designId,
         designSummary: row.designSummary,
         commentId: row.comment.id,
-        excerpt: excerpt(payload.message ?? row.comment.body),
-        unread: row.event.ts > lastSeen || escalationWaitingOnMe,
+        excerpt: excerpt(payloadMessage(row.event.payload) ?? row.comment.body),
+        unread: row.event.ts > lastSeen,
       });
     }
     return items;

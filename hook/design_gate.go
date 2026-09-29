@@ -2340,6 +2340,15 @@ func editWriteVerdict(payload hookPayload, filePath string) map[string]any {
 
 	switch scopeMatch.State {
 	case "in_scope":
+		// Design review (2026-09-27): unanswered review comments on this
+		// developer's designs in this repo pause the first edit that would
+		// otherwise go through, once per new batch, so the agent tells its
+		// user. Only here, on the allow path: an edit denied for any other
+		// reason gets that reason first, and the pause lands on the retry.
+		// A local read (design_review.go), never another network call.
+		if reason := reviewBlockReason(projectID, payload.SessionID); reason != "" {
+			return denyOutput("PreToolUse", reason)
+		}
 		return allowOutput("PreToolUse")
 	case "flagged":
 		return denyOutput("PreToolUse", flaggedDesignReason(scopeMatch))

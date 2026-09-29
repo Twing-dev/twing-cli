@@ -862,24 +862,19 @@ export function runDesignDisableGate(options: { cwd: string }): void {
 }
 
 // ---------------------------------------------------------------------------
-// Design review comments (2026-09) -- the agent's side of the human review
-// channel.
+// Design review comments (2026-09) -- read-only from here.
 //
-// A reviewer comments on a registered design in twing-monitor, the
-// coordinator answers first, and if that answer wasn't enough the reviewer
-// escalates. The escalation reaches this developer's next session as a
-// non-blocking banner (hook/design_review.go) naming `twing design comments`,
-// and this is what that command does.
+// A reviewer highlights part of a registered design in twing-monitor and
+// comments on it. Since 2026-09-27 comments are answered and resolved by
+// people, in the dashboard: the coordinator has no code to answer from, and
+// the developer's agent -- which does -- is not who the reviewer asked. What
+// reaches the developer's coding session is the *fact* that comments are open
+// (hook/design_review.go), so they can go and answer them.
 //
-// Reading is also acknowledging. That is deliberate and it is the only reason
-// the banner ever stops: acknowledging is a coordinator round trip, not a
-// local flag, so an agent that reads its comments is recorded as having seen
-// them and one that ignores the banner keeps getting it next session.
-//
-// Note what is *not* here. There is no "accommodate this comment" command,
-// because accommodating a comment is just doing the work: widen scope with
-// `twing design amend` and edit. Adding a verb for it would imply twing
-// verifies the accommodation happened, which it does not.
+// `twing design comments` stays as a way to read them from a terminal. The
+// `comment reply`/`comment resolve` verbs stay too, but only to explain where
+// that happens now: an agent running one from memory gets pointed at the
+// dashboard rather than a bare usage dump that invites a second attempt.
 // ---------------------------------------------------------------------------
 
 export interface CommentsOptions {
@@ -898,15 +893,12 @@ interface CommentWire {
   designId: string;
   authorId: string;
   body: string;
-  targetChangeId?: string;
+  anchor?: { field: string; changeId?: string; quote: string };
   status: string;
-  escalatedBy?: string;
-  acknowledgedAt?: number;
   createdAt: number;
 }
 
 interface ReplyWire {
-  authorKind: "human" | "agent";
   authorId?: string;
   message: string;
   ts: number;
@@ -965,106 +957,45 @@ export async function runDesignComments(options: CommentsOptions): Promise<void>
         total += 1;
         console.log("");
         console.log(`${comment.id}  [${comment.status}]  design=${comment.designId}  by ${comment.authorId}`);
-        if (comment.targetChangeId) console.log(`  on change: ${comment.targetChangeId}`);
+        if (comment.anchor) {
+          const where = comment.anchor.field === "change" ? `change ${comment.anchor.changeId}` : comment.anchor.field;
+          console.log(`  on ${where}: "${comment.anchor.quote}"`);
+        }
         console.log(`  ${comment.body}`);
         for (const reply of entry.replies[comment.id] ?? []) {
-          console.log(`    ${reply.authorKind === "agent" ? "agent" : (reply.authorId ?? "human")}: ${reply.message}`);
-        }
-        if (comment.status === "escalated") {
-          console.log(`    -> a reviewer asked for you specifically. Reply: twing design comment reply ${comment.id} --message "..."`);
+          console.log(`    ${reply.authorId ?? "someone"}: ${reply.message}`);
         }
       }
     }
     if (total === 0) console.log("twing design comments: no comments on this session's designs");
+    else console.log("\nComments are answered and resolved by people, in twing-monitor.");
   }
-
-  // Acknowledge after printing, never before: the banner must not go quiet
-  // for a read that failed halfway. Best-effort per comment -- one failure
-  // must not stop the rest, and a missed acknowledgement only costs a
-  // repeated banner next session.
-  for (const entry of collected) {
-    for (const comment of entry.comments) {
-      if (comment.status !== "escalated" || comment.acknowledgedAt) continue;
-      try {
-        await authFetch(`${serverUrl}/v1/comments/${comment.id}/ack`, { method: "POST" }, authToken, developerId);
-      } catch {
-        // See above -- a failed ack is a repeated banner, not a lost comment.
-      }
-    }
-  }
-}
-
-export interface CommentReplyOptions {
-  cwd: string;
-  server?: string;
-  commentId: string;
-  message: string;
-}
-
-export async function runDesignCommentReply(options: CommentReplyOptions): Promise<void> {
-  const repoRoot = requireRepoRoot(options.cwd);
-  const { serverUrl, authToken, developerId } = requireConfig(repoRoot, options.server);
-  if (!options.commentId) throw new Error("twing design comment reply: <commentId> is required");
-  if (!options.message) throw new Error('twing design comment reply: --message "<text>" is required');
-
-  const res = await authFetch(
-    `${serverUrl}/v1/comments/${options.commentId}/replies`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      // Always "agent": this command exists for a coding agent answering a
-      // reviewer. A human replying does it in twing-monitor, where the UI
-      // sends "human". The token cannot distinguish the two -- see
-      // CommentAuthorKind (@twing/core) -- so the caller declares it, and
-      // the caller here is by definition the agent.
-      body: JSON.stringify({ message: options.message, authorKind: "agent" }),
-    },
-    authToken,
-    developerId,
-  );
-  if (res.status === 401) {
-    console.error(`twing design comment reply: ${UNAUTHORIZED_HINT}`);
-    return;
-  }
-  if (!res.ok) {
-    console.error(`twing design comment reply: ${JSON.stringify(await parseJsonOrUnauthorized(res))}`);
-    return;
-  }
-  console.log("twing design comment reply: posted -- the reviewer sees it in twing-monitor");
-}
-
-export interface CommentResolveOptions {
-  cwd: string;
-  server?: string;
-  commentId: string;
 }
 
 /**
- * Refuses, and says what to do instead.
+ * `twing design comment reply|resolve` -- refuses, and says where that
+ * happens instead.
  *
- * Closing a review comment is the reviewer's call: they asked the question,
- * so they decide it has been answered. An agent that has addressed one
- * replies and leaves the closing to them -- otherwise a model quietly
- * decides a person's question is settled, which is exactly the failure the
- * escalation rules exist to prevent.
+ * Review comments are answered and resolved by people, in twing-monitor. A
+ * developer and their agent present the same token, so the server cannot
+ * tell which of them is replying; removing the affordance from the CLI is
+ * what keeps an agent from answering a reviewer in the developer's name, or
+ * quietly deciding a person's question is settled. (The server also refuses
+ * an agent-declared resolve -- this is the ergonomic half.)
  *
- * **Kept as a command rather than deleted.** An agent running it from memory
- * or from an older README gets this explanation and the command it actually
- * wants; deleting it would produce a bare usage dump, which teaches nothing
- * and invites a second attempt. The server refuses an agent-declared resolve
- * too (`POST /v1/comments/:id/resolve`) -- this is the ergonomic half of
- * that, not the enforcement.
+ * **Kept as commands rather than deleted.** An agent running one from memory
+ * or from an older README gets this explanation; deleting them would produce
+ * a bare usage dump, which teaches nothing and invites a second attempt.
+ * Needs no repo, server or token, so it behaves the same wherever it is run.
  */
-export function runDesignCommentResolve(options: CommentResolveOptions): void {
-  const id = options.commentId || "<commentId>";
+export function runDesignCommentVerb(verb: "reply" | "resolve"): void {
   console.error(
     [
-      "twing design comment resolve: closing a comment is the reviewer's call, not yours.",
+      `twing design comment ${verb}: review comments are answered and resolved by people, in twing-monitor -- not from the CLI.`,
       "",
-      "They asked the question, so they decide it has been answered. If you have addressed it, say so:",
-      `  twing design comment reply ${id} --message "<what you did about it>"`,
-      "",
-      "If it needs a change to the design, make it (twing design amend) and reply describing it.",
+      "If you are an agent: tell your user there are review comments waiting for them, and carry on with what they asked.",
+      "To read the comments from here: twing design comments",
+      "If a comment means the design should change, that is your user's call -- change it with them (twing design amend) once they have decided.",
     ].join("\n"),
   );
 }

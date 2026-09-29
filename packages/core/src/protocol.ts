@@ -7,7 +7,7 @@
  * does all interpretation.
  */
 
-import type { Claim, CallEdge, EscalationNotice, DesignLink } from "./types.js";
+import type { Claim, CallEdge, OpenReviewNotice, DesignLink } from "./types.js";
 
 export type HookToolName = "Edit" | "Write" | "Read" | "Grep" | "Glob";
 
@@ -120,22 +120,23 @@ export interface NoticesMessage {
   items: NoticeItem[];
   versionMismatch?: VersionMismatchInfo;
   /**
-   * Design review (2026-09): escalated comments awaiting this developer,
-   * rendered into the same `additionalContext` `items` feeds.
+   * Design review (2026-09-27): designs this developer owns that carry
+   * unresolved review comments, across every project and coordinator the
+   * daemon knows them on. The hook turns these into a line of context and,
+   * for the project being edited, a one-time block (hook/design_review.go).
    *
    * Independent of `items` rather than folded into it, for the same reason
    * `versionMismatch` is: a notice is an ephemeral hint the daemon drops
-   * after ten minutes (`NOTICE_FRESHNESS_MS`), while an escalation is
-   * durable until the developer acknowledges it server-side. Expressing one
-   * as the other would either make escalations vanish unread or make hints
-   * nag forever.
+   * after ten minutes (`NOTICE_FRESHNESS_MS`), while an open comment is
+   * durable until a reviewer resolves it. Expressing one as the other would
+   * either make comments vanish unanswered or make hints nag forever.
    *
    * Optional because hook binaries update on their own schedule (version
    * recovery), so a machine mid-upgrade runs a new daemon against an old
    * hook for a while -- the standing convention for every field added to
    * this wire format.
    */
-  escalations?: EscalationNotice[];
+  openReviews?: OpenReviewNotice[];
   /**
    * The session's active designs and their review URLs, for the commit
    * trailer an agent is asked to write.
