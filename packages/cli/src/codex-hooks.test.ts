@@ -294,6 +294,7 @@ test("a Codex that cannot be asked leaves trust alone and says so", async () => 
   const lines: string[] = [];
   const result = await reportCodexTrust({
     configPath: ws.configPath,
+    codexInstalled: true,
     query: async () => undefined,
     log: (m) => void lines.push(m),
   });
@@ -324,6 +325,7 @@ test("a Codex reporting a different home is reported, not silently wired twice",
   // directory, so the config twing just wrote is not the one Codex reads.
   await reportCodexTrust({
     configPath: ws.configPath,
+    codexInstalled: true,
     query: async () => ({ codexHome: "/home/dev/snap/codex/34", hooks: [] }),
     log: (m) => void lines.push(m),
   });
