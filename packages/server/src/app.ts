@@ -15,7 +15,7 @@ import { inArray } from "drizzle-orm";
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import type { Claim, CallEdge, DesignChange, DesignStatement, DesignConstraintType, Finding, PendingReview, ClaudeSettings } from "@twing/core";
-import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS, buildDesignReviewUrl } from "@twing/core";
+import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS, PLAN_GUIDANCE, buildDesignReviewUrl } from "@twing/core";
 import { computeProjectIdForGithubRepo, renderManifestWithCoordinator, bootstrapHookScript, mergeBootstrapHookEntries } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
 import { projectRecords } from "./db/schema.js";
@@ -2023,8 +2023,16 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!authz.ok) return c.json({ error: authz.error }, authz.status);
 
     const hasStructured = Array.isArray(body.creates) || Array.isArray(body.touches) || Array.isArray(body.dependsOn) || typeof body.summary === "string";
-    if (!body.rawPlanText && !hasStructured) {
-      return c.json({ error: "expected rawPlanText, or structured creates/touches/dependsOn/summary" }, 400);
+    // No design exists without a plan (2026-09-29). Enforced here, where a
+    // design is created, rather than trusted to each client: the plan is what
+    // a reviewer reads, and a design that is only a file list gives them
+    // nothing. Every current caller sends one -- the CLI requires `plan:` or
+    // `--plan`, and the hook sends the ExitPlanMode plan on both its
+    // single-repo and multi-repo paths. Amending stays optional
+    // (`/v1/designs/:id/amend`): a design that already has a plan can widen
+    // its files without restating it.
+    if (typeof body.rawPlanText !== "string" || body.rawPlanText.trim().length === 0) {
+      return c.json({ error: `a design needs a plan -- send it as rawPlanText, alongside the files it changes.\n\n${PLAN_GUIDANCE}` }, 400);
     }
 
     let creates = body.creates ?? [];
@@ -2274,7 +2282,10 @@ export function createApp(options: CreateAppOptions = {}) {
     // `touches` against its own local `repoRoot` and warn on a likely
     // wrong-project registration -- see hook/design_gate.go's
     // `handleExitPlanModeSingle`.
-    const extractedFields = body.rawPlanText ? { creates: design.creates, touches: design.touches } : {};
+    // Keyed on "extraction ran" (plan text and nothing structured), not on
+    // plan text alone: every registration carries a plan now, including a
+    // structured one that supplied its own files.
+    const extractedFields = body.rawPlanText && !hasStructured ? { creates: design.creates, touches: design.touches } : {};
     // Design review (2026-09): the design's review page, echoed back on every
     // branch so `twing design register` can print the commit trailer at the
     // one moment the agent is most attentive -- the design has just come into
