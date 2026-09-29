@@ -137,7 +137,7 @@ test("ensureCliShim: writes a runnable twing beside the hook binary", async () =
     // Must actually run. A symlink would inherit dist/index.js's mode, which
     // is only executable when npm installed the package -- not in a checkout.
     const version = execFileSync(shim!, ["--version"], { encoding: "utf8" }).trim();
-    assert.match(version, /^\d+\.\d+\.\d+$/, `expected a version, got ${version}`);
+    assert.match(version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, `expected a version, got ${version}`);
   });
 });
 
