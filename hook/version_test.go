@@ -27,6 +27,12 @@ func TestCompareVersions(t *testing.T) {
 		{"1.3.13-alpha", "1.3.13-alpha.1", -1, true, "fewer identifiers sort first when the rest are equal"},
 		{"1.3.13+build.5", "1.3.13", 0, true, "build metadata is ignored for ordering"},
 		{"1.3.13-", "1.3.13", 0, false, "an empty prerelease doesn't parse"},
+		// Found in review: "-1" has a hyphen, so it is alphanumeric, not minus
+		// one -- and digit runs past an int's range are still numeric.
+		{"1.0.0--1", "1.0.0-1", 1, true, "a hyphenated identifier is alphanumeric, above any numeric one"},
+		{"1.0.0-99999999999999999999", "1.0.0-100000000000000000000", -1, true, "numeric identifiers beyond int range compare by value"},
+		{"1.0.0-99999999999999999999", "1.0.0-alpha", -1, true, "an oversized number is still numeric, below alphanumeric"},
+		{"1.0.0-01", "1.0.0-1", 0, false, "a leading zero in a numeric identifier doesn't parse"},
 		{"01.3.13", "1.3.13", 0, false, "a leading zero doesn't parse"},
 	}
 	for _, c := range cases {

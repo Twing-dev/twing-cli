@@ -54,6 +54,11 @@ func parseVersion(v string) (semver, bool) {
 			if id == "" || strings.Trim(id, "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-") != "" {
 				return out, false
 			}
+			// SemVer forbids leading zeros in a numeric identifier; rejecting
+			// them is also what lets compareIdentifier order by length.
+			if isNumericIdentifier(id) && len(id) > 1 && id[0] == '0' {
+				return out, false
+			}
 			out.prerelease = append(out.prerelease, id)
 		}
 	}
@@ -115,21 +120,39 @@ func comparePrerelease(a, b []string) int {
 	return 0
 }
 
+// compareIdentifier orders two prerelease identifiers. "Numeric" means
+// digits only -- not whatever strconv.Atoi accepts, which would read "-1"
+// (an alphanumeric identifier: it has a hyphen) as minus one, and would fail
+// on a digit run longer than an int. Numeric identifiers carry no leading
+// zeros (parseVersion rejects them), so comparing by length and then
+// lexically is numeric order at any size.
 func compareIdentifier(a, b string) int {
-	na, errA := strconv.Atoi(a)
-	nb, errB := strconv.Atoi(b)
+	numA, numB := isNumericIdentifier(a), isNumericIdentifier(b)
 	switch {
-	case errA == nil && errB == nil:
-		if na < nb {
-			return -1
-		} else if na > nb {
+	case numA && numB:
+		if len(a) != len(b) {
+			if len(a) < len(b) {
+				return -1
+			}
 			return 1
 		}
-		return 0
-	case errA == nil:
+		return strings.Compare(a, b)
+	case numA:
 		return -1 // numeric identifiers sort below alphanumeric ones
-	case errB == nil:
+	case numB:
 		return 1
 	}
 	return strings.Compare(a, b)
+}
+
+func isNumericIdentifier(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
