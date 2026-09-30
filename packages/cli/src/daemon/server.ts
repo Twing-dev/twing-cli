@@ -42,7 +42,7 @@ const captureUploader = new CaptureUploader();
  * on every prompt. Only ever *written* from the deferred half of that
  * handler, so the git cost never lands on a path the hook is blocked on.
  */
-const coordinatorByCwd = new Map<string, { projectId: string; serverUrl: string; developerId: string }>();
+const coordinatorByCwd = new Map<string, { projectId: string; serverUrl: string; developerId: string; repoRoot: string }>();
 
 export interface DaemonHandle {
   socketPath: string;
@@ -449,7 +449,10 @@ function handleMessage(
     // Independent of the developerId gate above -- versionMismatch() is
     // daemon-wide, not per-developer, so it can surface even for a session
     // with no prior claims (see its doc comment for the one remaining gap).
-    const versionMismatch = syncer.versionMismatch() ?? undefined;
+    // Only the two versions go on the wire; which server mismatched is the
+    // daemon's own business (its self-update), not the hook's.
+    const mismatch = syncer.versionMismatch();
+    const versionMismatch = mismatch ? { clientVersion: mismatch.clientVersion, serverVersion: mismatch.serverVersion } : undefined;
     // Both read from cache, never fetched here: the hook is blocked on this
     // frame, and the notice pipeline's whole premise is that the daemon
     // already knows so the answer is a local read. An empty answer on a
@@ -483,7 +486,7 @@ function handleMessage(
       // mapping: without it this developer is in no poll set, and the
       // open-review read above would stay empty forever for a session that
       // never edits anything.
-      syncer.registerDeveloperProject(coordinator.developerId, coordinator.projectId, coordinator.serverUrl);
+      syncer.registerDeveloperProject(coordinator.developerId, coordinator.projectId, coordinator.serverUrl, coordinator.repoRoot);
       // Refreshed on every message rather than cached for the session's
       // life: a design can be registered, amended or closed mid-session,
       // and a reminder pointing at a design the agent has moved on from is

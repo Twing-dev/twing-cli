@@ -183,11 +183,14 @@ func attemptVersionRecovery(serverVersion string) bool {
 	if os.Getenv(noVersionRecoveryEnv) != "" {
 		return false // we are already the re-run; do not recurse
 	}
-	// Only ever act on a real published version. "unknown" is the server's
-	// sentinel for a client that sent no version header at all, and pinning
-	// an install to it would fail; "dev" means this binary came from a
-	// contributor's own `go build`, and replacing that with a release is
-	// the opposite of what they want.
+	// Only ever act on a real published version -- which includes a
+	// prerelease. "unknown" is the server's sentinel for a client that sent
+	// no version header at all, and pinning an install to it would fail;
+	// "dev" means this binary came from a contributor's own `go build`, and
+	// replacing that with a release is the opposite of what they want. Until
+	// 2026-09-30 this guard also refused anything but a plain X.Y.Z, so a
+	// coordinator on 1.3.13-experimental.1 stranded every machine: no update
+	// attempted, nothing logged, every edit denied (see parseVersion).
 	if _, ok := versionParts(serverVersion); !ok || version == "dev" {
 		return false
 	}

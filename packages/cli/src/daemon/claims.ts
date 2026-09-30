@@ -137,7 +137,7 @@ export interface ExtractionResult {
  * Reuses `getRepoState`, so this is one git shell-out and one manifest read
  * per repo per daemon lifetime, and free on every call after that.
  */
-export function resolveProjectCoordinator(cwd: string): { projectId: string; serverUrl: string; developerId: string } | null {
+export function resolveProjectCoordinator(cwd: string): { projectId: string; serverUrl: string; developerId: string; repoRoot: string } | null {
   try {
     const repoRoot = findRepoRoot(cwd);
     const state = getRepoState(repoRoot);
@@ -150,7 +150,10 @@ export function resolveProjectCoordinator(cwd: string): { projectId: string; ser
     // user.email` lookup a claim's own developerId comes from, so the two
     // agree by construction; `getRepoState` memoizes the repo, and git
     // config reads are cheap enough not to warrant a second cache.
-    return { projectId: state.projectId, serverUrl, developerId: computeDeveloperId(repoRoot) };
+    // `repoRoot` (2026-09-30) is what a self-update needs: the new CLI's
+    // `init --unattended` resolves its coordinator from the repo it runs in,
+    // and the daemon's own cwd is not one.
+    return { projectId: state.projectId, serverUrl, developerId: computeDeveloperId(repoRoot), repoRoot };
   } catch {
     return null; // not a repo, unreadable manifest -- nothing to register
   }
