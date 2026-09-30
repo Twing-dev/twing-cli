@@ -1,6 +1,6 @@
 {
   "name": "@twing/core",
-  "version": "1.3.12-experimental.1",
+  "version": "1.3.13-experimental.1",
   "engines": {
     "node": ">=22.5"
   },
