@@ -148,6 +148,13 @@
       "when": 1790562611148,
       "tag": "0020_design-review-anchored-comments",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1790742586332,
+      "tag": "0021_design-registered-via",
+      "breakpoints": true
     }
   ]
 }

@@ -72,6 +72,7 @@ interface DesignRow {
   dependsOn: string;
   changes: string | null;
   rawPlanExcerpt: string | null;
+  registeredVia: string | null;
   ttlMs: number;
   scopeVersion: number;
   lastActivityAt: number;
@@ -104,6 +105,7 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     // nothing").
     changes: row.changes ? JSON.parse(row.changes) : undefined,
     rawPlanExcerpt: row.rawPlanExcerpt ?? undefined,
+    ...(row.registeredVia === "plan_mode" || row.registeredVia === "template" ? { registeredVia: row.registeredVia } : {}),
     ttlMs: row.ttlMs,
     scopeVersion: row.scopeVersion,
     lastActivityAt: row.lastActivityAt,
@@ -233,6 +235,7 @@ export class DesignRegistry {
         dependsOn: JSON.stringify(design.dependsOn),
         changes: design.changes ? JSON.stringify(design.changes) : null,
         rawPlanExcerpt: design.rawPlanExcerpt ?? null,
+        registeredVia: design.registeredVia ?? null,
         ttlMs: design.ttlMs,
         scopeVersion: design.scopeVersion,
         lastActivityAt: design.lastActivityAt,
@@ -753,6 +756,12 @@ export class DesignRegistry {
           eq(designsTable.sessionId, sessionId),
           sql`${designsTable.status} IN ('open', 'flagged')`,
           sql`${designsTable.rawPlanExcerpt} IS NOT NULL`,
+          // Only a design plan mode itself registered (2026-09-29). Plan text
+          // used to be the signal, but every design carries one now -- so a
+          // manual registration would otherwise be a candidate, and a later
+          // ExitPlanMode with similar text would rewrite its summary, scope
+          // and declared changes in place. Found in review.
+          eq(designsTable.registeredVia, "plan_mode"),
         ),
       )
       .orderBy(sql`${designsTable.createdAt} DESC`)

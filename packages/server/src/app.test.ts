@@ -4314,6 +4314,41 @@ test("POST /v1/designs/check: a registration without a plan is refused, with wha
   assert.equal(amend.status, 200, "widening the files of a design that has a plan needs no plan");
 });
 
+// Found in review: the other half of the same hole. A manual registration
+// carries plan text now, so a later ExitPlanMode in the same session with
+// similar text found it as a "retry" candidate and rewrote its summary, scope
+// and declared changes. Only a design plan mode registered is a candidate.
+test("POST /v1/designs/check: a plan-mode request never rewrites a manual registration with the same plan text", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const planText = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls.";
+
+  const manual = (await (
+    await app.request("/v1/designs/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", rawPlanText: planText, summary: "manual retry work", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
+    })
+  ).json()) as { designId: string };
+
+  const planMode = await withBedrockEnv(() =>
+    withMockFetch(mockBedrockExtraction({ creates: [], touches: ["src/other.ts"], dependsOn: [], summary: "plan-mode work" }), async () =>
+      app.request("/v1/designs/check", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...bearer(admin.token) },
+        body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", rawPlanText: planText }),
+      }),
+    ),
+  );
+  const planModeBody = (await planMode.json()) as { designId: string };
+  assert.notEqual(planModeBody.designId, manual.designId, "a new plan-mode design, not the manual one rewritten");
+  const untouched = designs.get(manual.designId);
+  assert.equal(untouched?.summary, "manual retry work");
+  assert.deepEqual(untouched?.touches, ["src/net/retry.ts"]);
+  assert.equal(untouched?.scopeVersion, 1);
+  assert.equal(designs.get(planModeBody.designId)?.registeredVia, "plan_mode");
+});
+
 // Found 2026-09-29: the dedup only checked for plan text, and `register
 // --from` sends plan text alongside its structured fields -- so a second,
 // similar template in the same session silently rewrote the first design

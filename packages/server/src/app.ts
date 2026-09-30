@@ -2131,6 +2131,10 @@ export function createApp(options: CreateAppOptions = {}) {
       developerId: identity.developerId,
       sessionId: body.sessionId,
       agentLabel: body.agentLabel,
+      // Which path made it -- the only thing that lets a later plan-mode
+      // retry tell its own design from a manual one (see
+      // `openPlanModeDesignForSession`). Same test as the retry path above.
+      registeredVia: hasStructured ? "template" : "plan_mode",
       summary,
       creates,
       touches,

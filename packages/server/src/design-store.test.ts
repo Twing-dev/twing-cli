@@ -481,7 +481,7 @@ test("DesignRegistry: closeSession also closes dormant designs for the session",
 
 test("DesignRegistry: openPlanModeDesignForSession finds a candidate registered from rawPlanText", () => {
   const registry = freshRegistry();
-  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "the plan text" });
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], registeredVia: "plan_mode", rawPlanExcerpt: "the plan text" });
   const found = registry.openPlanModeDesignForSession("p1", "s1");
   assert.equal(found?.id, a.id);
   registry.stop();
@@ -495,9 +495,21 @@ test("DesignRegistry: openPlanModeDesignForSession ignores structured registrati
   registry.stop();
 });
 
+// Found in review: every design carries plan text now, so plan text can no
+// longer mark a plan-mode registration. A manual one with plan text must never
+// be a candidate, or a later ExitPlanMode with similar text would rewrite its
+// summary, scope and declared changes in place.
+test("DesignRegistry: openPlanModeDesignForSession never returns a manual registration, even one with plan text", () => {
+  const registry = freshRegistry();
+  registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "manual", creates: [], touches: ["a.ts"], dependsOn: [], registeredVia: "template", rawPlanExcerpt: "## Approach\nthe plan text" });
+  registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "from before the column existed", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "the plan text" });
+  assert.equal(registry.openPlanModeDesignForSession("p1", "s1"), undefined);
+  registry.stop();
+});
+
 test("DesignRegistry: openPlanModeDesignForSession ignores a different session or project", () => {
   const registry = freshRegistry();
-  registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text" });
+  registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], registeredVia: "plan_mode", rawPlanExcerpt: "text" });
   assert.equal(registry.openPlanModeDesignForSession("p1", "s2"), undefined);
   assert.equal(registry.openPlanModeDesignForSession("p2", "s1"), undefined);
   registry.stop();
@@ -505,7 +517,7 @@ test("DesignRegistry: openPlanModeDesignForSession ignores a different session o
 
 test("DesignRegistry: openPlanModeDesignForSession finds a flagged candidate too, not just open", () => {
   const registry = freshRegistry();
-  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text" });
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], registeredVia: "plan_mode", rawPlanExcerpt: "text" });
   registry.flag(a.id, "file_overlap");
   const found = registry.openPlanModeDesignForSession("p1", "s1");
   assert.equal(found?.id, a.id);
@@ -515,7 +527,7 @@ test("DesignRegistry: openPlanModeDesignForSession finds a flagged candidate too
 
 test("DesignRegistry: openPlanModeDesignForSession ignores a dormant candidate -- resume is the only explicit revival path", () => {
   const registry = freshRegistry();
-  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text", ttlMs: 10 });
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], registeredVia: "plan_mode", rawPlanExcerpt: "text", ttlMs: 10 });
   registry.sweepExpired(a.createdAt + 1000);
   assert.equal(registry.get(a.id)?.status, "dormant");
   assert.equal(registry.openPlanModeDesignForSession("p1", "s1"), undefined);
@@ -524,9 +536,9 @@ test("DesignRegistry: openPlanModeDesignForSession ignores a dormant candidate -
 
 test("DesignRegistry: openPlanModeDesignForSession returns the most recent candidate when more than one exists", () => {
   const registry = freshRegistry();
-  registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "older", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text" });
+  registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "older", creates: [], touches: [], dependsOn: [], registeredVia: "plan_mode", rawPlanExcerpt: "text" });
   registry.close(registry.openPlanModeDesignForSession("p1", "s1")!.id); // close the first so overlap isn't the point of this test
-  const b = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "newer", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text 2" });
+  const b = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "newer", creates: [], touches: [], dependsOn: [], registeredVia: "plan_mode", rawPlanExcerpt: "text 2" });
   const found = registry.openPlanModeDesignForSession("p1", "s1");
   assert.equal(found?.id, b.id);
   registry.stop();
@@ -572,7 +584,7 @@ test("DesignRegistry: reregisterFromPlan fully replaces scope, bumps scopeVersio
 
 test("DesignRegistry: reregisterFromPlan is a full replace, not an additive merge -- a dropped file must not linger", () => {
   const registry = freshRegistry();
-  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts", "b.ts"], dependsOn: [], rawPlanExcerpt: "text" });
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts", "b.ts"], dependsOn: [], registeredVia: "plan_mode", rawPlanExcerpt: "text" });
   const reregistered = registry.reregisterFromPlan(a.id, { summary: "", creates: [], touches: ["a.ts"], dependsOn: [], rawPlanExcerpt: "text 2" });
   assert.deepEqual(reregistered?.touches, ["a.ts"], "b.ts dropped out of the revised plan and must not survive a full replace");
   registry.stop();
@@ -580,7 +592,7 @@ test("DesignRegistry: reregisterFromPlan is a full replace, not an additive merg
 
 test("DesignRegistry: reregisterFromPlan preserves justifiedConstraintIds -- a prior approval survives the retry", () => {
   const registry = freshRegistry();
-  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text" });
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], registeredVia: "plan_mode", rawPlanExcerpt: "text" });
   const review = registry.addReview(a.id, "p1", "justified", ["c1"]);
   registry.decideReview(review.id, "approve");
   assert.deepEqual(registry.get(a.id)?.justifiedConstraintIds, ["c1"]);
@@ -627,7 +639,7 @@ test("DesignRegistry: decideReview approve populates justifiedConflicts from the
 
 test("DesignRegistry: reregisterFromPlan preserves justifiedOverlaps -- a prior overlap approval survives the retry", () => {
   const registry = freshRegistry();
-  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], rawPlanExcerpt: "text" });
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [], registeredVia: "plan_mode", rawPlanExcerpt: "text" });
   const b = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s2", summary: "", creates: [], touches: [], dependsOn: [] });
   const review = registry.addReview(a.id, "p1", "justified", undefined, [{ conflictingDesignId: b.id, paths: ["file1.ts"] }]);
   registry.decideReview(review.id, "approve");

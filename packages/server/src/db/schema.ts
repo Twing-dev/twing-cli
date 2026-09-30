@@ -213,6 +213,15 @@ export const designs = sqliteTable(
      * this column is never consulted by any blocking path. */
     changes: text("changes"),
     rawPlanExcerpt: text("raw_plan_excerpt"),
+    /** How the design was registered (2026-09-29): "plan_mode" for a bare
+     * ExitPlanMode plan the server extracted from, "template" for a
+     * registration that supplied its own files (CLI `register`, the hook's
+     * multi-repo path). The ExitPlanMode retry dedup rewrites a design in
+     * place, so it may only ever match a "plan_mode" row -- plan text alone
+     * no longer says anything, since every design carries one. Null on rows
+     * registered before this column, which the dedup therefore never
+     * touches. */
+    registeredVia: text("registered_via"),
     ttlMs: integer("ttl_ms").notNull(),
     /** §17 scope enforcement (2026-08): bumped on every `amend`, so the async
      * semantic-comparator loop can detect it's been superseded mid-run. */

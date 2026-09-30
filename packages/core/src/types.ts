@@ -292,6 +292,14 @@ export interface DesignStatement {
    * dashboard hides). `amend --from` with a `plan:` appends a dated section
    * (`appendPlanUpdate`), never replaces it. */
   rawPlanExcerpt?: string;
+  /** How the design was registered (2026-09-29): `plan_mode` when the server
+   * extracted it from a bare ExitPlanMode plan, `template` when the caller
+   * supplied its own files (CLI `register`, the hook's multi-repo path).
+   * Only a `plan_mode` design can be rewritten in place by a plan-mode retry
+   * (`openPlanModeDesignForSession`) -- every design carries plan text now,
+   * so plan text alone cannot tell the two apart. Absent on designs
+   * registered before this existed, which a retry never touches. */
+  registeredVia?: "plan_mode" | "template";
   /** The structured declaration this design was registered from, when it was
    * registered from one (`twing design register --from <file>`).
    *

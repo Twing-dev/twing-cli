@@ -1,0 +1,1 @@
+ALTER TABLE `designs` ADD `registered_via` text;
