@@ -409,12 +409,15 @@ export const alignmentThreads = sqliteTable(
 // ---------------------------------------------------------------------------
 
 /**
- * A human reviewer's comment on a registered design (design review, 2026-09).
+ * A person's comment on a registered design, anchored to the text they
+ * highlighted (design review, 2026-09; reshaped 2026-09-27 when the
+ * coordinator stopped answering comments itself -- the old rows were dropped
+ * rather than migrated, see drizzle/0020).
  *
  * Same "current-state table + append-only log" split as `alignmentThreads`
  * above, and for the same reason: the comment's *state* (who asked, what it
- * anchors to, whether it has been answered/escalated/resolved) is queried and
- * updated, while every reply is history that must never be rewritten -- so
+ * anchors to, whether it is resolved) is queried and updated, while every
+ * reply is history that must never be rewritten -- so
  * replies are `activity_events` rows keyed by `relatedId = <comment id>`, read
  * back via `DrizzleActivityLog.eventsForRelatedId`. There is deliberately no
  * `design_comment_replies` table.
@@ -435,34 +438,28 @@ export const designComments = sqliteTable(
      * the rule every write in this schema follows (§17.10 hardening). */
     authorId: text("author_id").notNull(),
     body: text("body").notNull(),
-    /** Anchors the comment to one `DesignChange.id` inside the design's
-     * `changes` JSON, so "this specific declared change is wrong" is
-     * expressible. Nullable: a comment on the design as a whole has none,
-     * and a design registered without a structured template has no change
-     * ids to anchor to at all. Deliberately not a foreign key -- `changes`
-     * is a JSON column, and an amendment can drop a change id out from
-     * under a comment that referenced it. A reader that can't resolve the
-     * id shows the comment unanchored rather than hiding it. */
-    targetChangeId: text("target_change_id"),
-    /** "open" (posted, agent hasn't answered yet) | "answered" (the agent
-     * took its first pass) | "escalated" (a reviewer decided the answer
-     * wasn't enough and pulled the human developer in) | "resolved".
-     *
-     * `escalated` is not a terminal state and not a failure -- it is the
-     * only state that reaches the design owner's next session, which is why
-     * it is tracked here rather than inferred from the presence of a reply. */
+    /** `CommentAnchorField` (@twing/core) -- which text the highlight was
+     * taken from. The four `anchor_*` columns are all null for a comment on
+     * the design as a whole, and all set (bar `anchor_change_id`, which only
+     * a `change` anchor has) otherwise. */
+    anchorField: text("anchor_field"),
+    /** A `DesignChange.id`. Deliberately not a foreign key -- `changes` is a
+     * JSON column, and a plan-mode re-registration can drop a change id out
+     * from under a comment that named it. A reader that can't resolve it
+     * shows the comment as outdated rather than hiding it. */
+    anchorChangeId: text("anchor_change_id"),
+    /** The highlighted words, verbatim. A quote rather than offsets, because
+     * a design is edited in place -- see `CommentAnchor`'s doc comment. */
+    anchorQuote: text("anchor_quote"),
+    anchorPrefix: text("anchor_prefix"),
+    anchorSuffix: text("anchor_suffix"),
+    /** The design's `scopeVersion` when this was posted -- how a reader
+     * learns the design changed after the comment was left. */
+    designVersion: integer("design_version").notNull(),
+    /** "open" | "resolved". Nothing sits between the two any more: nobody
+     * answers on anyone's behalf, so the replies say everything a middle
+     * state would. */
     status: text("status").notNull(),
-    agentAnsweredAt: integer("agent_answered_at"),
-    escalatedAt: integer("escalated_at"),
-    escalatedBy: text("escalated_by"),
-    /** Cleared by the design's owner (or by their agent reading the comment
-     * through `twing design comments`) -- what stops an escalation from
-     * re-appearing in every subsequent session banner. Separate from
-     * `resolvedAt` on purpose: acknowledging is "I have seen this", which
-     * is the developer's own bookkeeping, while resolving is "this question
-     * is settled", which is the reviewer's call. Conflating them would let
-     * an agent silently close a reviewer's open question by reading it. */
-    acknowledgedAt: integer("acknowledged_at"),
     resolvedAt: integer("resolved_at"),
     resolvedBy: text("resolved_by"),
     createdAt: integer("created_at").notNull(),
@@ -470,9 +467,9 @@ export const designComments = sqliteTable(
   },
   (t) => [
     index("design_comments_design_id_idx").on(t.designId),
-    // The escalation banner's query is "every unacknowledged escalated
-    // comment on designs this developer owns" -- it starts from this
-    // project/status pair, then joins to `designs` for ownership.
+    // The review queue's query is "every open comment on designs this
+    // developer owns" -- it filters on status, then joins to `designs` for
+    // ownership.
     index("design_comments_project_status_idx").on(t.projectId, t.status),
   ],
 );
@@ -610,9 +607,10 @@ export const captures = sqliteTable(
  * `lastSeenAt` is deliberately all-or-nothing -- opening the panel marks
  * every item seen, including ones scrolled past. A per-item read table was
  * the alternative and buys precision nobody asked for at the cost of a row
- * per person per event. Escalations are what make that trade safe: they are
- * *state* rather than news and are counted regardless of this cursor, so the
- * one thing that must not be lost to a stray click cannot be.
+ * per person per event. The trade is safe because the bell is not the only
+ * channel: a design's owner keeps hearing about every unresolved comment from
+ * their coding sessions (`GET /v1/review-queue`) until a reviewer resolves it,
+ * regardless of this cursor, so a stray click cannot bury one.
  */
 export const notificationReads = sqliteTable("notification_reads", {
   developerId: text("developer_id").primaryKey(),

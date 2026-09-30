@@ -456,14 +456,14 @@ function handleMessage(
     // session's very first message is expected and self-correcting -- the
     // deferred block below warms both, and `UserPromptSubmit` fires again
     // within seconds.
-    const escalations = developerId ? syncer.escalationsFor(developerId) : [];
+    const openReviews = developerId ? syncer.openReviewsFor(developerId) : [];
     const designLinks = syncer.cachedDesignLinksFor(req.sessionId);
     conn.write(
       encodeFrame({
         type: "notices",
         items,
         versionMismatch,
-        ...(escalations.length > 0 ? { escalations } : {}),
+        ...(openReviews.length > 0 ? { openReviews } : {}),
         ...(designLinks.length > 0 ? { designLinks } : {}),
       }),
     );
@@ -481,7 +481,7 @@ function handleMessage(
       if (req.cwd) coordinatorByCwd.set(req.cwd, coordinator);
       // Registers the developer too, not just the project -> server
       // mapping: without it this developer is in no poll set, and the
-      // escalation read above would stay empty forever for a session that
+      // open-review read above would stay empty forever for a session that
       // never edits anything.
       syncer.registerDeveloperProject(coordinator.developerId, coordinator.projectId, coordinator.serverUrl);
       // Refreshed on every message rather than cached for the session's

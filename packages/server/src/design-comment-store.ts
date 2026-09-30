@@ -5,9 +5,18 @@
  * Everything that came before runs agent-to-agent (`Claim`/`Finding`/
  * `AlignmentThread`, all machine-opened about a detected collision) or
  * agent-to-human (a gate deny). This one runs the other way: a reviewer reads
- * a design in twing-monitor and asks a question about it, before any code
- * exists to review. That direction is the entire point -- it is the one moment
- * where redirecting an agent is nearly free.
+ * a design in twing-monitor, highlights the part they have a question about,
+ * and comments on it, before any code exists to review. That direction is the
+ * entire point -- it is the one moment where redirecting an agent is nearly
+ * free.
+ *
+ * **People answer, nothing else does** (2026-09-27). The first version had the
+ * coordinator answer every comment with a model call, then let the reviewer
+ * escalate to the developer if that was not enough. The coordinator holds
+ * designs, not code, so those answers were guesses about a codebase it had
+ * never seen. What the system does instead is make sure the design's owner
+ * *knows* there is something waiting (`openReviewsFor`, surfaced in their
+ * coding sessions by the hook) and leaves the answering to them.
  *
  * Same "current-state table + append-only log" split as `alignment-store.ts`,
  * and for the same reason: the comment's *state* is queried and updated, while
@@ -30,7 +39,7 @@
 
 import * as crypto from "node:crypto";
 import { and, asc, eq, inArray } from "drizzle-orm";
-import type { DesignComment, DesignCommentReply, DesignCommentStatus, CommentAuthorKind } from "@twing/core";
+import type { CommentAnchor, CommentAnchorField, DesignComment, DesignCommentReply, DesignCommentStatus } from "@twing/core";
 import type { Db } from "./db/client.js";
 import { designComments as commentsTable, designs as designsTable } from "./db/schema.js";
 import { DrizzleActivityLog } from "./activity-log.js";
@@ -41,31 +50,41 @@ interface CommentRow {
   designId: string;
   authorId: string;
   body: string;
-  targetChangeId: string | null;
+  anchorField: string | null;
+  anchorChangeId: string | null;
+  anchorQuote: string | null;
+  anchorPrefix: string | null;
+  anchorSuffix: string | null;
+  designVersion: number;
   status: string;
-  agentAnsweredAt: number | null;
-  escalatedAt: number | null;
-  escalatedBy: string | null;
-  acknowledgedAt: number | null;
   resolvedAt: number | null;
   resolvedBy: string | null;
   createdAt: number;
   updatedAt: number;
 }
 
+function anchorFromRow(row: CommentRow): CommentAnchor | undefined {
+  if (!row.anchorField || row.anchorQuote === null) return undefined;
+  return {
+    field: row.anchorField as CommentAnchorField,
+    ...(row.anchorChangeId ? { changeId: row.anchorChangeId } : {}),
+    quote: row.anchorQuote,
+    ...(row.anchorPrefix ? { prefix: row.anchorPrefix } : {}),
+    ...(row.anchorSuffix ? { suffix: row.anchorSuffix } : {}),
+  };
+}
+
 function fromRow(row: CommentRow): DesignComment {
+  const anchor = anchorFromRow(row);
   return {
     id: row.id,
     projectId: row.projectId,
     designId: row.designId,
     authorId: row.authorId,
     body: row.body,
-    targetChangeId: row.targetChangeId ?? undefined,
+    ...(anchor ? { anchor } : {}),
+    designVersion: row.designVersion,
     status: row.status as DesignCommentStatus,
-    agentAnsweredAt: row.agentAnsweredAt ?? undefined,
-    escalatedAt: row.escalatedAt ?? undefined,
-    escalatedBy: row.escalatedBy ?? undefined,
-    acknowledgedAt: row.acknowledgedAt ?? undefined,
     resolvedAt: row.resolvedAt ?? undefined,
     resolvedBy: row.resolvedBy ?? undefined,
     createdAt: row.createdAt,
@@ -79,27 +98,27 @@ export interface CreateCommentInput {
   /** Resolved from the token by the route, never from the request body. */
   authorId: string;
   body: string;
-  targetChangeId?: string;
+  /** Already validated against the design by the route
+   * (`validateCommentAnchor`, design-comment-anchor.ts). */
+  anchor?: CommentAnchor;
+  /** The design's `scopeVersion` at the moment of commenting. */
+  designVersion: number;
 }
 
 export interface AddReplyInput {
   commentId: string;
-  authorKind: CommentAuthorKind;
-  /** Absent for the coordinator's own first-pass answer, which no developer
-   * authored. */
-  authorId?: string;
+  authorId: string;
   message: string;
 }
 
-/** One escalated comment joined to the design it sits on -- what the session
- * banner is rendered from. Joined here rather than by the caller because the
- * ownership test ("designs this developer owns") is what makes the query
- * correct, and leaving that to a route would be leaving an authorization
- * decision somewhere it can be forgotten. */
-export interface PendingEscalation {
-  comment: DesignComment;
+/** Every unresolved comment on one design, as its owner's coding sessions
+ * hear about it. Ids only -- see `OpenReviewNotice` in core for why the text
+ * stays out. */
+export interface OpenReview {
+  designId: string;
+  projectId: string;
   designSummary: string;
-  designStatus: string;
+  commentIds: string[];
 }
 
 export class DesignCommentStore {
@@ -123,12 +142,13 @@ export class DesignCommentStore {
       designId: input.designId,
       authorId: input.authorId,
       body: input.body,
-      targetChangeId: input.targetChangeId ?? null,
+      anchorField: input.anchor?.field ?? null,
+      anchorChangeId: input.anchor?.changeId ?? null,
+      anchorQuote: input.anchor?.quote ?? null,
+      anchorPrefix: input.anchor?.prefix ?? null,
+      anchorSuffix: input.anchor?.suffix ?? null,
+      designVersion: input.designVersion,
       status: "open",
-      agentAnsweredAt: null,
-      escalatedAt: null,
-      escalatedBy: null,
-      acknowledgedAt: null,
       resolvedAt: null,
       resolvedBy: null,
       createdAt: now,
@@ -141,7 +161,7 @@ export class DesignCommentStore {
       kind: "design_comment_posted",
       relatedId: row.id,
       ts: now,
-      payload: { designId: input.designId, commentId: row.id, targetChangeId: input.targetChangeId },
+      payload: { designId: input.designId, commentId: row.id, anchorField: input.anchor?.field },
     });
     return fromRow(row);
   }
@@ -164,13 +184,9 @@ export class DesignCommentStore {
       .eventsForRelatedId(commentId)
       .filter((event) => event.kind === "design_comment_replied")
       .map((event) => {
-        const payload = (event.payload ?? {}) as { authorKind?: unknown; message?: unknown };
+        const payload = (event.payload ?? {}) as { message?: unknown };
         return {
           commentId,
-          // An unrecognised/absent authorKind reads as "human": the failure
-          // mode that matters is a model's answer being mistaken for a
-          // person's, not the reverse.
-          authorKind: payload.authorKind === "agent" ? "agent" : ("human" as CommentAuthorKind),
           authorId: event.developerId,
           message: typeof payload.message === "string" ? payload.message : "",
           ts: event.ts,
@@ -197,113 +213,10 @@ export class DesignCommentStore {
       kind: "design_comment_replied",
       relatedId: comment.id,
       ts: now,
-      payload: { designId: comment.designId, commentId: comment.id, authorKind: input.authorKind, message: input.message },
+      payload: { designId: comment.designId, commentId: comment.id, message: input.message },
     });
     this.touch(comment.id, now);
-    return { commentId: comment.id, authorKind: input.authorKind, authorId: input.authorId, message: input.message, ts: now };
-  }
-
-  /**
-   * Records that the agent took its first pass.
-   *
-   * Only ever moves `open` -> `answered`. A comment a reviewer already
-   * escalated (or resolved) must not be dragged back by a slow model call
-   * landing afterwards: the async answer pass and a reviewer's click race by
-   * construction, and the reviewer's decision is the one that reflects a
-   * human's judgement. The reply itself is still posted either way -- it is
-   * history, and losing it would hide what the model actually said.
-   */
-  markAnswered(commentId: string): DesignComment | undefined {
-    const existing = this.get(commentId);
-    if (!existing) return undefined;
-    const now = Date.now();
-    if (existing.status !== "open") {
-      this.touch(commentId, now);
-      return this.get(commentId);
-    }
-    this.db.update(commentsTable).set({ status: "answered", agentAnsweredAt: now, updatedAt: now }).where(eq(commentsTable.id, commentId)).run();
-    return this.get(commentId);
-  }
-
-  /**
-   * A human follow-up landed, so there is an unanswered question again.
-   *
-   * Moves `answered` back to `open`, which is not a hack: `open` means
-   * "there is a human question on this thread the agent has not answered
-   * yet", and after a follow-up that is exactly true again. Reusing the
-   * existing state rather than adding a fifth one means every consumer
-   * already does the right thing -- the dashboard shows "the agent is
-   * answering…" and switches to its fast poll, `markAnswered` closes it out
-   * the same way it does a first pass, and nothing had to learn a new value.
-   *
-   * Refuses to touch `escalated` or `resolved`, mirroring `markAnswered`'s
-   * own guard in the other direction: a person owns those, and nothing the
-   * agent does should drag them back into a machine state.
-   */
-  markAwaitingAnswer(commentId: string): DesignComment | undefined {
-    const existing = this.get(commentId);
-    if (!existing) return undefined;
-    if (existing.status !== "answered") return existing;
-    const now = Date.now();
-    this.db.update(commentsTable).set({ status: "open", updatedAt: now }).where(eq(commentsTable.id, commentId)).run();
-    return this.get(commentId);
-  }
-
-  /**
-   * A reviewer decided the agent's answer wasn't enough.
-   *
-   * Deliberately allowed from `open` as well as `answered`: a reviewer who
-   * already knows this needs the human should not have to wait out a model
-   * call to say so. Refused only once `resolved` -- re-opening a settled
-   * question is a new comment, not a state change on an old one.
-   */
-  escalate(commentId: string, escalatedBy: string, reason?: string): DesignComment | undefined {
-    const existing = this.get(commentId);
-    if (!existing || existing.status === "resolved") return undefined;
-    const now = Date.now();
-    this.db
-      .update(commentsTable)
-      .set({ status: "escalated", escalatedAt: now, escalatedBy, acknowledgedAt: null, updatedAt: now })
-      .where(eq(commentsTable.id, commentId))
-      .run();
-    this.activityLog.append({
-      projectId: existing.projectId,
-      developerId: escalatedBy,
-      kind: "design_comment_escalated",
-      relatedId: commentId,
-      ts: now,
-      payload: { designId: existing.designId, commentId, reason },
-    });
-    return this.get(commentId);
-  }
-
-  /**
-   * The design's owner has seen the escalation.
-   *
-   * Clears it from their session banner and nothing else: `status` stays
-   * `escalated` until somebody actually resolves it. That separation is the
-   * point -- an agent reading a comment acknowledges it automatically (see
-   * the `twing design comments` path), and if acknowledging also resolved,
-   * an agent could silently close a reviewer's open question just by looking
-   * at it.
-   */
-  acknowledge(commentId: string, developerId: string): DesignComment | undefined {
-    const existing = this.get(commentId);
-    if (!existing) return undefined;
-    // Idempotent: the agent reads its comments on every session, and a second
-    // read is not a second event.
-    if (existing.acknowledgedAt) return existing;
-    const now = Date.now();
-    this.db.update(commentsTable).set({ acknowledgedAt: now, updatedAt: now }).where(eq(commentsTable.id, commentId)).run();
-    this.activityLog.append({
-      projectId: existing.projectId,
-      developerId,
-      kind: "design_comment_acknowledged",
-      relatedId: commentId,
-      ts: now,
-      payload: { designId: existing.designId, commentId },
-    });
-    return this.get(commentId);
+    return { commentId: comment.id, authorId: input.authorId, message: input.message, ts: now };
   }
 
   resolve(commentId: string, resolvedBy: string): DesignComment | undefined {
@@ -323,34 +236,50 @@ export class DesignCommentStore {
   }
 
   /**
-   * Every escalated, unacknowledged comment on a design this developer owns.
+   * Every design this developer owns that has an unresolved comment on it,
+   * with the ids of those comments.
    *
-   * **Keyed on the design's `developerId`, never on the caller's identity.**
-   * That is not a stylistic choice: a person's dashboard-login identity
-   * (`join-via-github`, e.g. `2063…+someuser@users.noreply.github.com`) can
-   * differ from the identity their CLI authors designs under (their
-   * git-email-derived one) -- documented live at `canViewThread` in `app.ts`,
-   * and the common case for anyone using both surfaces. The escalation has to
-   * reach whoever is *building* the design, which is the identity on the
-   * design row, so that is what this joins on.
+   * **Keyed on the design's `developerId`, never on the caller's identity
+   * alone.** A person's dashboard-login identity (`join-via-github`, e.g.
+   * `2063…+someuser@users.noreply.github.com`) can differ from the identity
+   * their CLI authors designs under (their git-email-derived one) --
+   * documented live at `canViewThread` in `app.ts`, and the common case for
+   * anyone using both surfaces. This is read by the daemon, which calls with
+   * the CLI identity, which is the one on the design row.
    *
-   * Scoped to designs in any status. A commit -- and therefore a review of it
-   * -- routinely lands after `handleSessionEnd` has already closed the
-   * design, so filtering to open designs here would silently drop exactly the
-   * escalations that arrive late, which is most of them.
+   * Scoped to designs in any status. A design closes at session end, and a
+   * review of it routinely arrives after that -- filtering to open designs
+   * would drop most of the comments this exists to surface.
+   *
+   * "Unresolved" rather than "waiting on a reply", deliberately: whether a
+   * reply answered the question is the asker's call, and they make it by
+   * resolving. Until then the owner keeps being told.
+   *
+   * `projectIds` is the caller's *current* access and is required, ANDed
+   * into the query rather than checked afterwards -- the same call as
+   * `countsByDesign`. Ownership is history: a developer removed from a
+   * project still owns the designs they registered there, and without this
+   * their still-valid token would keep reading those designs' summaries
+   * and open-comment ids after `GET /v1/designs/:id/comments` had started
+   * refusing them. Found in review.
    */
-  pendingEscalationsFor(developerId: string): PendingEscalation[] {
+  openReviewsFor(developerId: string, projectIds: string[]): OpenReview[] {
+    if (projectIds.length === 0) return [];
     const rows = this.db
-      .select({ comment: commentsTable, designSummary: designsTable.summary, designStatus: designsTable.status })
+      .select({ commentId: commentsTable.id, designId: commentsTable.designId, projectId: commentsTable.projectId, designSummary: designsTable.summary })
       .from(commentsTable)
       .innerJoin(designsTable, eq(commentsTable.designId, designsTable.id))
-      .where(and(eq(commentsTable.status, "escalated"), eq(designsTable.developerId, developerId)))
-      .orderBy(asc(commentsTable.escalatedAt))
-      .all() as { comment: CommentRow; designSummary: string; designStatus: string }[];
+      .where(and(eq(commentsTable.status, "open"), eq(designsTable.developerId, developerId), inArray(commentsTable.projectId, projectIds)))
+      .orderBy(asc(commentsTable.createdAt))
+      .all() as { commentId: string; designId: string; projectId: string; designSummary: string }[];
 
-    return rows
-      .filter((row) => row.comment.acknowledgedAt === null)
-      .map((row) => ({ comment: fromRow(row.comment), designSummary: row.designSummary, designStatus: row.designStatus }));
+    const byDesign = new Map<string, OpenReview>();
+    for (const row of rows) {
+      const entry = byDesign.get(row.designId) ?? { designId: row.designId, projectId: row.projectId, designSummary: row.designSummary, commentIds: [] };
+      entry.commentIds.push(row.commentId);
+      byDesign.set(row.designId, entry);
+    }
+    return [...byDesign.values()];
   }
 
   /**

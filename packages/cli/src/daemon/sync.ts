@@ -14,7 +14,7 @@
  * daemon (falls out of resolving per-cycle instead of once at construction).
  */
 
-import { readConfig, getServerAuth, authFetch, type Claim, type CallEdge, type Notice, type EscalationNotice, type DesignLink, buildDesignReviewUrl } from "@twing/core";
+import { readConfig, getServerAuth, authFetch, type Claim, type CallEdge, type Notice, type OpenReviewNotice, type DesignLink, buildDesignReviewUrl } from "@twing/core";
 import { getCliVersion } from "../version.js";
 import { isSelfUpdatable, performSelfUpdate, updateTarget } from "./self-update.js";
 
@@ -45,23 +45,23 @@ const POLL_INTERVAL_MS = 5_000;
 const NOTICE_FRESHNESS_MS = 10 * 60 * 1000;
 
 /**
- * Escalations and design links are deliberately **not** subject to
+ * Open reviews and design links are deliberately **not** subject to
  * `NOTICE_FRESHNESS_MS`, and the difference is the whole reason they are
  * separate caches rather than synthesized notices.
  *
  * A notice is an ephemeral hint: it was true ten minutes ago and re-showing
- * it forever would be nagging. An escalation is durable state on the
- * coordinator -- a reviewer is waiting for an answer -- and it stops being
- * shown when the developer *acknowledges* it, not when it gets old. Ageing
+ * it forever would be nagging. An open review comment is durable state on
+ * the coordinator -- a reviewer is waiting for an answer -- and it stops
+ * being shown when the reviewer *resolves* it, not when it gets old. Ageing
  * one out would silently drop review feedback, which is the exact failure
  * this whole feature exists to prevent.
  *
  * Both caches are instead replaced wholesale on each poll, so the server's
- * answer is always the truth and an acknowledged escalation disappears on
- * the next cycle without any local bookkeeping.
+ * answer is always the truth and a resolved comment disappears on the next
+ * cycle without any local bookkeeping.
  */
-interface CachedEscalations {
-  items: EscalationNotice[];
+interface CachedOpenReviews {
+  items: OpenReviewNotice[];
   fetchedAt: number;
 }
 
@@ -97,8 +97,8 @@ export class Syncer {
   private sinceByDeveloperServer = new Map<string, number>();
   private noticesByDeveloperServer = new Map<string, CachedNotice[]>();
   // Replaced wholesale each poll rather than appended to -- see
-  // CachedEscalations' doc comment.
-  private escalationsByDeveloperServer = new Map<string, CachedEscalations>();
+  // CachedOpenReviews' doc comment.
+  private openReviewsByDeveloperServer = new Map<string, CachedOpenReviews>();
   // projectId -> the monitor origin that project's coordinator publishes on
   // /v1/version. Per *project* rather than per server only because that is
   // how callers ask ("what is the review link for this design"), and a
@@ -234,35 +234,35 @@ export class Syncer {
           console.error(`twing daemon: notice poll failed for ${developerId} @ ${serverUrl}`, err);
         }
 
-        await this.pollEscalations(developerId, serverUrl, key, authToken);
+        await this.pollOpenReviews(developerId, serverUrl, key, authToken);
       }
     }
   }
 
   /**
-   * Escalated design-review comments waiting on this developer.
+   * Designs this developer owns that carry unresolved review comments.
    *
    * Replaces the cached list outright instead of appending: the server's
-   * answer already excludes anything acknowledged, so a wholesale replace is
-   * what makes an acknowledgement take effect within one poll with no local
-   * state to keep in step. A failed request leaves the previous list in
-   * place rather than clearing it -- an unreachable coordinator must not
-   * look like "the reviewer withdrew their question".
+   * answer already excludes anything resolved, so a wholesale replace is
+   * what makes a resolve take effect within one poll with no local state to
+   * keep in step. A failed request leaves the previous list in place rather
+   * than clearing it -- an unreachable coordinator must not look like "the
+   * reviewer withdrew their question".
    */
-  private async pollEscalations(developerId: string, serverUrl: string, key: string, authToken: string | undefined): Promise<void> {
+  private async pollOpenReviews(developerId: string, serverUrl: string, key: string, authToken: string | undefined): Promise<void> {
     try {
       // `developerId` as the fourth argument, not just a closure variable:
       // a `--no-auth` coordinator answers 400 to any /v1/* request without
-      // the `X-Twing-Developer-Id` header, so omitting it meant escalations
+      // the `X-Twing-Developer-Id` header, so omitting it meant the queue
       // never arrived at all in that mode. See `authFetch`'s doc comment.
-      const res = await authFetch(`${serverUrl}/v1/escalations`, {}, authToken, developerId);
+      const res = await authFetch(`${serverUrl}/v1/review-queue`, {}, authToken, developerId);
       // A coordinator predating this route 404s. That is not an error worth
       // logging every five seconds on a machine pointed at an older server.
       if (!res.ok) return;
-      const body = (await res.json()) as { items?: EscalationNotice[] };
-      this.escalationsByDeveloperServer.set(key, { items: Array.isArray(body.items) ? body.items : [], fetchedAt: Date.now() });
+      const body = (await res.json()) as { items?: OpenReviewNotice[] };
+      this.openReviewsByDeveloperServer.set(key, { items: Array.isArray(body.items) ? body.items : [], fetchedAt: Date.now() });
     } catch (err) {
-      console.error(`twing daemon: escalation poll failed for ${developerId} @ ${serverUrl}`, err);
+      console.error(`twing daemon: review-queue poll failed for ${developerId} @ ${serverUrl}`, err);
     }
   }
 
@@ -375,8 +375,8 @@ export class Syncer {
    *
    * `enqueue` was the only thing that ever populated `developerProjects`,
    * which meant a session that had not yet edited anything was invisible to
-   * every poll -- and that is precisely the session an escalation banner is
-   * for. A fresh `SessionStart` has made no claims by definition, so keying
+   * every poll -- and that is precisely the session an open-review notice
+   * is for. A fresh `SessionStart` has made no claims by definition, so keying
    * the poll set on claims alone guaranteed the banner could never appear
    * at the one moment it is meant to.
    *
@@ -390,14 +390,16 @@ export class Syncer {
     this.developerProjects.set(developerId, projects);
   }
 
-  /** Escalated comments waiting on this developer, across every coordinator
-   * they've been seen on. Peeked, never consumed -- two concurrent sessions
-   * for the same developer (§8) must both see them, and what actually stops
-   * one repeating is the acknowledgement round trip, not a local flag. */
-  escalationsFor(developerId: string): EscalationNotice[] {
-    const result: EscalationNotice[] = [];
+  /** Designs with open review comments for this developer, across every
+   * coordinator they've been seen on. Peeked, never consumed -- two
+   * concurrent sessions for the same developer (§8) must both see them;
+   * what stops the hook repeating itself within one session is its own
+   * per-session record (hook/design_review.go), and what stops it for good
+   * is a reviewer resolving the comment. */
+  openReviewsFor(developerId: string): OpenReviewNotice[] {
+    const result: OpenReviewNotice[] = [];
     for (const serverUrl of this.serversFor(developerId)) {
-      result.push(...(this.escalationsByDeveloperServer.get(developerServerKey(developerId, serverUrl))?.items ?? []));
+      result.push(...(this.openReviewsByDeveloperServer.get(developerServerKey(developerId, serverUrl))?.items ?? []));
     }
     return result;
   }

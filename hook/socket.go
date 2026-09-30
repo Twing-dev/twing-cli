@@ -90,9 +90,11 @@ type cacheCheckResult struct {
 	Items           []noticeItem
 	VersionMismatch *versionMismatchInfo
 	// Design review (2026-09). Both are advisory text rendered into
-	// additionalContext alongside Items; neither can deny anything, since
-	// this whole path has no deny semantics at all.
-	Escalations []escalationNotice
+	// additionalContext alongside Items; neither can deny anything on this
+	// path. (OpenReviews also leaves a per-session record the *gate* reads
+	// later -- design_review.go's reviewBlockReason -- which is where the one
+	// deny it can cause comes from, not here.)
+	OpenReviews []openReviewNotice
 	DesignLinks []designLink
 	// DaemonUnreachable distinguishes "the daemon isn't there" from "the
 	// daemon had nothing for us" — both of which are otherwise a zero-value
@@ -136,5 +138,5 @@ func cacheCheck(sessionID, cwd, transcriptPath string, source *transcriptSource)
 	if err := readFrame(conn, &resp); err != nil {
 		return cacheCheckResult{}
 	}
-	return cacheCheckResult{Items: resp.Items, VersionMismatch: resp.VersionMismatch, Escalations: resp.Escalations, DesignLinks: resp.DesignLinks}
+	return cacheCheckResult{Items: resp.Items, VersionMismatch: resp.VersionMismatch, OpenReviews: resp.OpenReviews, DesignLinks: resp.DesignLinks}
 }

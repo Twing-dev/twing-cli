@@ -608,42 +608,54 @@ export interface EnrichedPendingReview extends PendingReview {
 }
 
 /**
- * Design review (2026-09) -- a human reviewer's comment on a registered
- * design, and the reply history under it.
+ * Design review (2026-09, reworked 2026-09-27) -- a person's comment on a
+ * registered design, anchored to the text they highlighted, and the replies
+ * under it.
  *
- * This is the first channel in twing that runs *human -> agent*. Everything
- * before it runs agent -> agent (`Claim`/`Finding`/`AlignmentThread`, all
- * machine-opened about a detected collision) or agent -> human (a gate deny).
- * The asymmetry matters for reading the types below: a comment is opened by a
- * person, answered first by a model, and only reaches a human developer if a
- * reviewer says the answer wasn't good enough.
+ * **Only people answer.** An earlier version had the coordinator take a
+ * first pass at every comment, which was a model answering questions about
+ * code it had never seen -- the coordinator stores designs, not source. So the
+ * system now does the one thing it can do well: make sure the developer who
+ * owns the design finds out there is something waiting (see
+ * `OpenReviewNotice`), and leave the answering to them, in twing-monitor.
  */
 
-/** Where a reply came from. Stored, never inferred from the author's
- * identity: a developer replying through the CLI and their agent replying
- * through the CLI present the same token, so the identity alone cannot
- * distinguish them. `"agent"` covers both the coordinator's own first-pass
- * answer and a reply posted by a coding agent via `twing design comment
- * reply`; the two are the same thing to a reader (something that is not a
- * person said this) and separating them would be a distinction no consumer
- * has needed. */
-export type CommentAuthorKind = "human" | "agent";
+/** Which part of a design a highlight was taken from. Named for the text,
+ * not for where the dashboard happens to render it:
+ *
+ *  - `summary` -- `DesignStatement.summary`, the overview.
+ *  - `plan` -- `DesignStatement.rawPlanExcerpt`, the original plan text.
+ *  - `change` -- one declared change's `intent`/`target`, addressed by
+ *    `changeId`. */
+export type CommentAnchorField = "summary" | "plan" | "change";
 
 /**
- * A comment's lifecycle. Four states, on one axis: **how far has this got
- * toward being answered?**
+ * What a comment is attached to: the highlighted text itself, plus a little
+ * of what surrounded it.
  *
- *  - `open` -- posted; the agent's first-pass answer hasn't landed yet.
- *  - `answered` -- the agent took its pass. Terminal as far as the *agent*
- *    is concerned; the reviewer now decides whether that was enough.
- *  - `escalated` -- the reviewer said it wasn't, and a human developer is
- *    needed. The only state that reaches anyone's coding session.
- *  - `resolved` -- settled, by whoever was entitled to say so.
- *
- * `escalated` is not a failure state and not terminal: the developer answers
- * and the comment moves to `resolved` like any other.
+ * Deliberately a *quote*, not character offsets. A design is amended in
+ * place -- `amend` appends to the summary and to `changes`, and a plan-mode
+ * retry rewrites both (`reregisterFromPlan`) -- so offsets would silently
+ * point at the wrong words after the first edit. A quote either still
+ * appears in the design or it does not, and a reader can say which: found
+ * means highlight it, not found means show the comment as outdated with the
+ * words it was about. `prefix`/`suffix` only pick between several
+ * occurrences of the same quote.
  */
-export type DesignCommentStatus = "open" | "answered" | "escalated" | "resolved";
+export interface CommentAnchor {
+  field: CommentAnchorField;
+  /** Required when `field` is `change`, meaningless otherwise. */
+  changeId?: string;
+  quote: string;
+  prefix?: string;
+  suffix?: string;
+}
+
+/** `open` until the person who asked (or a project admin) says it is
+ * settled. There is no in-between state any more: nothing answers on anyone's
+ * behalf, so "answered" would only ever mean "someone replied", which the
+ * replies already say. */
+export type DesignCommentStatus = "open" | "resolved";
 
 export interface DesignComment {
   id: string;
@@ -652,24 +664,13 @@ export interface DesignComment {
   /** Resolved from the authenticated token server-side, never client-sent. */
   authorId: string;
   body: string;
-  /** The `DesignChange.id` this comment anchors to, when it was left against
-   * one specific declared change rather than the design as a whole.
-   *
-   * Deliberately not guaranteed to resolve: `changes` is a JSON column and an
-   * amendment can drop a change id out from under a comment that named it. A
-   * reader that can't resolve it must show the comment unanchored rather than
-   * hide it -- losing the anchor must never lose the question. */
-  targetChangeId?: string;
+  /** Absent for a comment on the design as a whole. */
+  anchor?: CommentAnchor;
+  /** The design's `scopeVersion` when the comment was left. A design whose
+   * version has moved on since was edited after the comment, which a reader
+   * is told -- whether or not the highlighted words survived the edit. */
+  designVersion: number;
   status: DesignCommentStatus;
-  agentAnsweredAt?: number;
-  escalatedAt?: number;
-  escalatedBy?: string;
-  /** Set when the design's owner (or their agent, by reading the comment)
-   * has seen the escalation -- what stops the session banner repeating.
-   * Deliberately distinct from `resolvedAt`: acknowledging is "I have seen
-   * this", resolving is "this is settled". Conflating them would let an
-   * agent close a reviewer's open question merely by reading it. */
-  acknowledgedAt?: number;
   resolvedAt?: number;
   resolvedBy?: string;
   createdAt: number;
@@ -682,33 +683,28 @@ export interface DesignComment {
  * messages use. */
 export interface DesignCommentReply {
   commentId: string;
-  authorKind: CommentAuthorKind;
-  /** Absent for the coordinator's own first-pass answer, which no developer
-   * authored. */
   authorId?: string;
   message: string;
   ts: number;
 }
 
 /**
- * One escalated comment, as it reaches the design owner's next coding
- * session. Flows coordinator -> daemon -> hook -> `additionalContext`.
+ * Open review comments on one design, as they reach its owner's coding
+ * sessions. Flows coordinator -> daemon -> hook.
  *
- * Carries the *text* of the comment, not just ids: this is rendered into a
- * session banner that has to be actionable on sight, and an agent that has to
- * make a network call to find out what it was told is one that will skip it.
+ * Carries the *fact* of the comments, never their text. The comments are
+ * answered by a person in twing-monitor, not by the agent, so there is
+ * nothing for the agent to act on beyond telling its user -- and putting a
+ * reviewer's words into an agent's context invites it to start acting on
+ * them. `commentIds` is there so the hook can tell a new comment from one it
+ * has already told this session about, not so anything can look them up.
  */
-export interface EscalationNotice {
-  commentId: string;
+export interface OpenReviewNotice {
   designId: string;
   projectId: string;
-  /** The design's one-line summary, so the banner can say which piece of
-   * work is being asked about without a lookup. */
+  /** So the notice can say which piece of work, without a lookup. */
   designSummary: string;
-  comment: string;
-  /** Who escalated it -- the reviewer, not the design's owner. */
-  escalatedBy?: string;
-  escalatedAt: number;
+  commentIds: string[];
   /** Deep link into twing-monitor, when the coordinator publishes a monitor
    * URL (`monitorUrl`, `GET /v1/version`). Absent on a self-hosted
    * coordinator with no dashboard deployed -- see `buildDesignReviewUrl`. */

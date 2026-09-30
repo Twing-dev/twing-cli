@@ -121,7 +121,7 @@ test("Syncer.stopAndFlush: a failing coordinator still lets the daemon exit", as
 });
 
 // ---------------------------------------------------------------------------
-// Design review (2026-09): escalations and design links
+// Design review (2026-09): open reviews and design links
 // ---------------------------------------------------------------------------
 
 /** `poll` is private for the same whitebox reason `pollVersions` above is --
@@ -130,25 +130,23 @@ function poll(syncer: Syncer): Promise<void> {
   return (syncer as unknown as { poll(): Promise<void> }).poll();
 }
 
-const escalation = {
-  commentId: "c1",
+const openReview = {
   designId: "d1",
   projectId: "proj-1",
   designSummary: "Add a retry budget",
-  comment: "why 30s?",
-  escalatedAt: 1,
+  commentIds: ["c1"],
   url: "https://monitor.example/?repos=proj-1&tab=designs&focus=d1",
 };
 
 /** Routes the three GETs a poll cycle makes. Anything unrecognised 404s, so
  * a new request appearing in the poll loop fails loudly here rather than
  * silently taking a default. */
-function pollResponder(overrides: { escalations?: unknown[]; monitorUrl?: string } = {}): typeof fetch {
+function pollResponder(overrides: { openReviews?: unknown[]; monitorUrl?: string } = {}): typeof fetch {
   return (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("/v1/version")) return jsonResponse({ version: getCliVersion(), ...(overrides.monitorUrl ? { monitorUrl: overrides.monitorUrl } : {}) });
     if (url.includes("/v1/notices")) return jsonResponse({ items: [] });
-    if (url.includes("/v1/escalations")) return jsonResponse({ items: overrides.escalations ?? [] });
+    if (url.includes("/v1/review-queue")) return jsonResponse({ items: overrides.openReviews ?? [] });
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
 }
@@ -160,11 +158,11 @@ test("Syncer.registerDeveloperProject: a session with no claims yet still joins 
     try {
       // Deliberately no `enqueue` -- that is the whole point. A fresh
       // SessionStart has produced no claims by definition, and keying the
-      // poll set on claims alone made the escalation banner impossible at
+      // poll set on claims alone made the open-review notice impossible at
       // exactly the moment it exists for.
       syncer.registerDeveloperProject("dev@example.com", "proj-1", "http://coordinator.example");
-      await withMockFetch(pollResponder({ escalations: [escalation] }), () => poll(syncer));
-      assert.equal(syncer.escalationsFor("dev@example.com").length, 1);
+      await withMockFetch(pollResponder({ openReviews: [openReview] }), () => poll(syncer));
+      assert.equal(syncer.openReviewsFor("dev@example.com").length, 1);
     } finally {
       syncer.stop();
     }
@@ -172,21 +170,21 @@ test("Syncer.registerDeveloperProject: a session with no claims yet still joins 
 });
 
 // Notices age out after NOTICE_FRESHNESS_MS because they are ephemeral
-// hints. An escalation is durable coordinator state -- a reviewer is waiting
+// hints. An open review comment is durable coordinator state -- a reviewer is waiting
 // -- and ageing one out would silently drop review feedback.
-test("Syncer.escalationsFor: not aged out the way a notice is", async () => {
+test("Syncer.openReviewsFor: not aged out the way a notice is", async () => {
   await withHome(async () => {
     cacheToken("http://coordinator.example", "test-token");
     const syncer = new Syncer();
     try {
       syncer.registerDeveloperProject("dev@example.com", "proj-1", "http://coordinator.example");
-      await withMockFetch(pollResponder({ escalations: [escalation] }), () => poll(syncer));
+      await withMockFetch(pollResponder({ openReviews: [openReview] }), () => poll(syncer));
 
       const originalNow = Date.now;
       try {
         // Well past NOTICE_FRESHNESS_MS (10 minutes).
         Date.now = () => originalNow() + 60 * 60 * 1000;
-        assert.equal(syncer.escalationsFor("dev@example.com").length, 1, "an escalation stops when acknowledged, not when it gets old");
+        assert.equal(syncer.openReviewsFor("dev@example.com").length, 1, "an open comment stops when resolved, not when it gets old");
       } finally {
         Date.now = originalNow;
       }
@@ -196,19 +194,19 @@ test("Syncer.escalationsFor: not aged out the way a notice is", async () => {
   });
 });
 
-test("Syncer.escalationsFor: an acknowledged escalation disappears on the next poll", async () => {
+test("Syncer.openReviewsFor: a resolved comment disappears on the next poll", async () => {
   await withHome(async () => {
     cacheToken("http://coordinator.example", "test-token");
     const syncer = new Syncer();
     try {
       syncer.registerDeveloperProject("dev@example.com", "proj-1", "http://coordinator.example");
-      await withMockFetch(pollResponder({ escalations: [escalation] }), () => poll(syncer));
-      assert.equal(syncer.escalationsFor("dev@example.com").length, 1);
+      await withMockFetch(pollResponder({ openReviews: [openReview] }), () => poll(syncer));
+      assert.equal(syncer.openReviewsFor("dev@example.com").length, 1);
 
       // The server now excludes it, so a wholesale replace is what makes an
-      // acknowledgement take effect with no local bookkeeping.
-      await withMockFetch(pollResponder({ escalations: [] }), () => poll(syncer));
-      assert.deepEqual(syncer.escalationsFor("dev@example.com"), []);
+      // resolve take effect with no local bookkeeping.
+      await withMockFetch(pollResponder({ openReviews: [] }), () => poll(syncer));
+      assert.deepEqual(syncer.openReviewsFor("dev@example.com"), []);
     } finally {
       syncer.stop();
     }
@@ -217,22 +215,22 @@ test("Syncer.escalationsFor: an acknowledged escalation disappears on the next p
 
 // An unreachable coordinator must not read as "the reviewer withdrew their
 // question".
-test("Syncer.escalationsFor: a failed poll keeps the previous list rather than clearing it", async () => {
+test("Syncer.openReviewsFor: a failed poll keeps the previous list rather than clearing it", async () => {
   await withHome(async () => {
     cacheToken("http://coordinator.example", "test-token");
     const syncer = new Syncer();
     try {
       syncer.registerDeveloperProject("dev@example.com", "proj-1", "http://coordinator.example");
-      await withMockFetch(pollResponder({ escalations: [escalation] }), () => poll(syncer));
+      await withMockFetch(pollResponder({ openReviews: [openReview] }), () => poll(syncer));
 
       await withMockFetch(
         (async (input: RequestInfo | URL) => {
-          if (String(input).includes("/v1/escalations")) throw new Error("network down");
+          if (String(input).includes("/v1/review-queue")) throw new Error("network down");
           return jsonResponse({ version: getCliVersion(), items: [] });
         }) as typeof fetch,
         () => poll(syncer),
       );
-      assert.equal(syncer.escalationsFor("dev@example.com").length, 1);
+      assert.equal(syncer.openReviewsFor("dev@example.com").length, 1);
     } finally {
       syncer.stop();
     }
@@ -308,7 +306,7 @@ test("Syncer.cachedDesignLinksFor: empty for a session nothing has been fetched 
 
 // Found in review: a `--no-auth` coordinator requires X-Twing-Developer-Id on
 // every /v1/* request and answers 400 without it, so omitting the header meant
-// escalations never arrived at all in that mode -- and the notices poll next
+// open reviews never arrived at all in that mode -- and the notices poll next
 // to it had the same gap already.
 test("Syncer: poll requests carry the X-Twing-Developer-Id header a --no-auth coordinator requires", async () => {
   await withHome(async () => {
@@ -327,7 +325,7 @@ test("Syncer: poll requests carry the X-Twing-Developer-Id header a --no-auth co
         () => poll(syncer),
       );
 
-      for (const path of ["/v1/notices", "/v1/escalations"]) {
+      for (const path of ["/v1/notices", "/v1/review-queue"]) {
         const call = seen.find((c) => c.url.includes(path));
         assert.ok(call, `${path} was not requested`);
         assert.equal(call.developerHeader, "dev@example.com", `${path} must identify the developer for a --no-auth coordinator`);

@@ -45,8 +45,7 @@ import {
   runDesignList,
   runDesignReviews,
   runDesignComments,
-  runDesignCommentReply,
-  runDesignCommentResolve,
+  runDesignCommentVerb,
   runDesignEnableGate,
   runDesignDisableGate,
 } from "./design.js";
@@ -149,7 +148,6 @@ function printUsage(): void {
       "  twing design list [--status open] [--mine]",
       "  twing design reviews [--decide <reviewId> --decision approve|reject]",
       "  twing design comments [<designId>] [--session <id>] [--json]",
-      "  twing design comment reply <commentId> --message \"<text>\"",
       "  twing design enable-gate",
       "  twing design disable-gate",
       "  twing constraints list [--project <id>] [--server <url>]",
@@ -226,21 +224,14 @@ async function runDesignCommand(rest: string[]): Promise<void> {
     case "comments":
       await runDesignComments({ cwd, server: flags.server, designId: positionalAfter(subArgs), session: flags.session, json: flags.json === "true" });
       return;
-    // `comment <verb> <commentId>` rather than a flat `comment-reply`: the
-    // noun is the thing being acted on, matching `design <verb>` above.
+    // `comment reply|resolve` are still dispatched, though they only explain
+    // that comments are answered in twing-monitor now -- see
+    // `runDesignCommentVerb`. Exits non-zero so a script that relied on
+    // either fails loudly rather than appearing to succeed.
     case "comment": {
-      const [verb, ...verbArgs] = subArgs;
-      const verbFlags = parseFlags(verbArgs);
-      const commentId = positionalAfter(verbArgs) ?? "";
-      if (verb === "reply") {
-        await runDesignCommentReply({ cwd, server: verbFlags.server, commentId, message: verbFlags.message ?? "" });
-        return;
-      }
-      if (verb === "resolve") {
-        // Deliberately still dispatched, though it only explains itself --
-        // see `runDesignCommentResolve`. Exits non-zero so a script that
-        // relied on it fails loudly rather than appearing to succeed.
-        runDesignCommentResolve({ cwd, server: verbFlags.server, commentId });
+      const [verb] = subArgs;
+      if (verb === "reply" || verb === "resolve") {
+        runDesignCommentVerb(verb);
         process.exit(1);
         return;
       }

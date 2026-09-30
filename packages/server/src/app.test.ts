@@ -5912,222 +5912,171 @@ function seedDesign(
   });
 }
 
-/** The answer pass is a real LLM call behind `runCommentAnswerPass`. These
- * tests are about the routes, not the model, so `fetch` is stubbed to a
- * canned completion and the env is set so `selectProvider` resolves. */
-function withStubbedAnswer<T>(answer: unknown, run: () => Promise<T>): Promise<T> {
-  return withBedrockEnv(() =>
-    withMockFetch(
-      async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(answer) } }] }), { status: 200 }),
-      run,
-    ),
-  );
+/** Posts a comment as `token` and returns it. */
+async function postComment(app: ReturnType<typeof createApp>, token: string, designId: string, payload: Record<string, unknown>) {
+  const res = await app.request(`/v1/designs/${designId}/comments`, {
+    method: "POST",
+    headers: { ...bearer(token), "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return { res, body: (await res.json()) as { comment: { id: string; status: string; anchor?: unknown; designVersion: number; canResolve: boolean }; error?: string } };
 }
 
-const cannedAnswer = { answer: "30s matches the upstream gateway timeout.", needsEscalation: false, escalationReason: "", confidence: "high" };
-
-test("POST /v1/designs/:id/comments: a project member can comment, and the agent answers without the reviewer waiting", async () => {
+// People answer comments; the coordinator does not (2026-09-27). The fetch
+// stub fails the test if anything reaches for a model.
+test("POST /v1/designs/:id/comments: a project member can comment, and no model is called", async () => {
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
   await foundProject(app, admin.token, "p1");
   const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
 
-  await withStubbedAnswer(cannedAnswer, async () => {
-    const res = await app.request(`/v1/designs/${design.id}/comments`, {
-      method: "POST",
-      headers: { ...bearer(admin.token), "content-type": "application/json" },
-      body: JSON.stringify({ body: "why 30s and not 10s?" }),
-    });
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as { comment: { id: string; status: string } };
-    // The response comes back before the model does -- that is the point of
-    // the fire-and-forget pass.
-    assert.equal(body.comment.status, "open");
+  let modelCalls = 0;
+  await withBedrockEnv(() =>
+    withMockFetch(
+      (async () => {
+        modelCalls += 1;
+        return new Response("{}", { status: 500 });
+      }) as unknown as typeof fetch,
+      async () => {
+        const { res, body } = await postComment(app, admin.token, design.id, { body: "why 30s and not 10s?" });
+        assert.equal(res.status, 200);
+        assert.equal(body.comment.status, "open");
+        assert.equal(body.comment.designVersion, design.scopeVersion, "stamped with the version it was left against");
+        assert.equal(body.comment.canResolve, true, "the author can close their own comment");
+        await new Promise((r) => setTimeout(r, 50));
+      },
+    ),
+  );
+  assert.equal(modelCalls, 0);
 
-    await waitFor(async () => {
-      const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-      const list = (await read.json()) as { items: { status: string }[] };
-      return list.items[0]?.status === "answered";
-    });
-
-    const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-    const list = (await read.json()) as { items: { id: string }[]; replies: Record<string, { authorKind: string; message: string }[]> };
-    const replies = list.replies[list.items[0].id];
-    assert.equal(replies.length, 1);
-    assert.equal(replies[0].authorKind, "agent");
-    assert.match(replies[0].message, /upstream gateway timeout/);
-  });
+  const read = (await (await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) })).json()) as { replies: Record<string, unknown[]> };
+  assert.deepEqual(Object.values(read.replies), [[]], "nobody answers on anyone's behalf");
 });
 
-// The recommendation is posted as a reply, never acted on: only a reviewer
-// moves a comment to escalated. Letting the model's own confidence interrupt
-// a developer's session would put it in charge of the one thing this design
-// deliberately keeps in human hands.
-test("POST /v1/designs/:id/comments: the agent recommends escalation but does not escalate", async () => {
+test("POST /v1/designs/:id/comments: a highlight is stored with its context and read back", async () => {
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
   await foundProject(app, admin.token, "p1");
-  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId, summary: "Add a retry budget to the HTTP client" });
 
-  await withStubbedAnswer({ answer: "I would be guessing at the author's intent.", needsEscalation: true, escalationReason: "intent is not stated", confidence: "low" }, async () => {
-    await app.request(`/v1/designs/${design.id}/comments`, {
-      method: "POST",
-      headers: { ...bearer(admin.token), "content-type": "application/json" },
-      body: JSON.stringify({ body: "why 30s?" }),
-    });
+  const anchor = { field: "summary", quote: "retry budget", prefix: "Add a ", suffix: " to the HTTP" };
+  const { res } = await postComment(app, admin.token, design.id, { body: "per host or global?", anchor });
+  assert.equal(res.status, 200);
 
-    await waitFor(async () => {
-      const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-      const list = (await read.json()) as { items: { id: string }[]; replies: Record<string, unknown[]> };
-      return (list.replies[list.items[0]?.id]?.length ?? 0) >= 2;
-    });
-
-    const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-    const list = (await read.json()) as { items: { id: string; status: string }[]; replies: Record<string, { message: string }[]> };
-    assert.equal(list.items[0].status, "answered", "the agent answered; it did not escalate");
-    assert.match(list.replies[list.items[0].id][1].message, /\[needs a human\]/);
-  });
+  const read = (await (await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) })).json()) as { items: { anchor?: unknown }[] };
+  // Context is whitespace-collapsed, so the trailing/leading spaces go.
+  assert.deepEqual(read.items[0].anchor, { field: "summary", quote: "retry budget", prefix: "Add a", suffix: "to the HTTP" });
 });
 
-test("POST /v1/comments/:id/escalate: escalating queues a notice for the design's owner and lists in GET /v1/escalations", async () => {
+// The design moved while the reviewer was reading it. Accepting the anchor
+// would store a comment that is outdated the moment it exists.
+test("POST /v1/designs/:id/comments: highlighting words the design no longer says is a 409", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId, summary: "Add a retry budget to the HTTP client" });
+
+  const { res, body } = await postComment(app, admin.token, design.id, { body: "?", anchor: { field: "summary", quote: "gRPC client" } });
+  assert.equal(res.status, 409);
+  assert.match(String(body.error), /reload/);
+});
+
+test("GET /v1/review-queue: lists the caller's designs with open comments, by id, with a link and no comment text", async () => {
   const { app, dataDir, designs } = freshApp({ monitorUrl: "https://monitor.example" });
   const admin = await bootstrapAdmin(app, dataDir);
   await foundProject(app, admin.token, "p1");
   const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId, summary: "Add a retry budget" });
 
-  const created = await app.request(`/v1/designs/${design.id}/comments`, {
-    method: "POST",
-    headers: { ...bearer(admin.token), "content-type": "application/json" },
-    body: JSON.stringify({ body: "why 30s?" }),
-  });
-  const { comment } = (await created.json()) as { comment: { id: string } };
+  const first = await postComment(app, admin.token, design.id, { body: "why 30s?" });
+  const second = await postComment(app, admin.token, design.id, { body: "and per host?" });
 
-  const escalated = await app.request(`/v1/comments/${comment.id}/escalate`, {
-    method: "POST",
-    headers: { ...bearer(admin.token), "content-type": "application/json" },
-    body: JSON.stringify({ reason: "needs the author" }),
-  });
-  assert.equal(escalated.status, 200);
-
-  const list = await app.request("/v1/escalations", { headers: bearer(admin.token) });
-  const body = (await list.json()) as { items: { commentId: string; designSummary: string; comment: string; url?: string }[] };
-  assert.equal(body.items.length, 1);
-  assert.equal(body.items[0].commentId, comment.id);
-  assert.equal(body.items[0].designSummary, "Add a retry budget");
-  assert.equal(body.items[0].comment, "why 30s?", "the banner carries the text, not just ids");
-  assert.equal(body.items[0].url, `https://monitor.example/?repos=p1&tab=designs&focus=${design.id}`);
-
-  // Belt and braces with the escalation list: this is what reaches a
-  // developer who is already mid-session, on the daemon's existing poll.
-  const notices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
-  const noticeBody = (await notices.json()) as { items: { message: string }[] };
-  assert.ok(noticeBody.items.some((n) => n.message.includes("escalated a comment")));
+  const res = await app.request("/v1/review-queue", { headers: bearer(admin.token) });
+  const body = (await res.json()) as { items: Record<string, unknown>[] };
+  assert.deepEqual(body.items, [
+    {
+      designId: design.id,
+      projectId: "p1",
+      designSummary: "Add a retry budget",
+      commentIds: [first.body.comment.id, second.body.comment.id],
+      url: `https://monitor.example/?repos=p1&tab=designs&focus=${design.id}`,
+    },
+  ]);
+  assert.ok(!JSON.stringify(body).includes("why 30s"), "the agent is told comments exist, never what they say");
 });
 
-test("GET /v1/escalations: omits the link entirely when the coordinator has no monitor deployed", async () => {
+test("GET /v1/review-queue: a reply keeps a comment in the queue, resolving takes it out", async () => {
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
   await foundProject(app, admin.token, "p1");
   const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
+  const { body } = await postComment(app, admin.token, design.id, { body: "why?" });
 
-  const created = await app.request(`/v1/designs/${design.id}/comments`, {
+  await app.request(`/v1/comments/${body.comment.id}/replies`, {
     method: "POST",
     headers: { ...bearer(admin.token), "content-type": "application/json" },
-    body: JSON.stringify({ body: "why?" }),
+    body: JSON.stringify({ message: "because" }),
   });
-  const { comment } = (await created.json()) as { comment: { id: string } };
-  await app.request(`/v1/comments/${comment.id}/escalate`, { method: "POST", headers: bearer(admin.token) });
+  const queued = (await (await app.request("/v1/review-queue", { headers: bearer(admin.token) })).json()) as { items: { url?: string }[] };
+  assert.equal(queued.items.length, 1, "whether the reply answered it is the asker's call");
+  assert.equal(queued.items[0].url, undefined, "no monitor means no link, never a guess");
 
-  const list = await app.request("/v1/escalations", { headers: bearer(admin.token) });
-  const body = (await list.json()) as { items: { url?: string }[] };
-  assert.equal(body.items[0].url, undefined, "never guess at twing's hosted dashboard for a self-hosted coordinator");
+  await app.request(`/v1/comments/${body.comment.id}/resolve`, { method: "POST", headers: bearer(admin.token) });
+  const after = (await (await app.request("/v1/review-queue", { headers: bearer(admin.token) })).json()) as { items: unknown[] };
+  assert.deepEqual(after.items, []);
 });
 
-test("POST /v1/comments/:id/ack: only the design's owner can silence their own banner", async () => {
-  const { app, dataDir, designs } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  await foundProject(app, admin.token, "p1");
-  // Owned by somebody else entirely -- the admin can see and escalate the
-  // comment, but acknowledging is the owner's own bookkeeping.
-  const design = seedDesign(designs, { projectId: "p1", developerId: "someone-else@example.com" });
-
-  const created = await app.request(`/v1/designs/${design.id}/comments`, {
-    method: "POST",
-    headers: { ...bearer(admin.token), "content-type": "application/json" },
-    body: JSON.stringify({ body: "why?" }),
-  });
-  const { comment } = (await created.json()) as { comment: { id: string } };
-  await app.request(`/v1/comments/${comment.id}/escalate`, { method: "POST", headers: bearer(admin.token) });
-
-  const res = await app.request(`/v1/comments/${comment.id}/ack`, { method: "POST", headers: bearer(admin.token) });
-  assert.equal(res.status, 403);
-});
-
-test("GET /v1/escalations: routes on the design's owner, not on who is asking", async () => {
+test("GET /v1/review-queue: routes on the design's owner, not on who commented", async () => {
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
   await foundProject(app, admin.token, "p1");
   const design = seedDesign(designs, { projectId: "p1", developerId: "someone-else@example.com" });
+  await postComment(app, admin.token, design.id, { body: "why?" });
 
-  const created = await app.request(`/v1/designs/${design.id}/comments`, {
-    method: "POST",
-    headers: { ...bearer(admin.token), "content-type": "application/json" },
-    body: JSON.stringify({ body: "why?" }),
-  });
-  const { comment } = (await created.json()) as { comment: { id: string } };
-  await app.request(`/v1/comments/${comment.id}/escalate`, { method: "POST", headers: bearer(admin.token) });
-
-  // The admin escalated it, so it is emphatically not theirs to answer.
-  const list = await app.request("/v1/escalations", { headers: bearer(admin.token) });
-  const body = (await list.json()) as { items: unknown[] };
-  assert.deepEqual(body.items, [], "an escalation reaches whoever is building the design, not whoever raised it");
+  const list = (await (await app.request("/v1/review-queue", { headers: bearer(admin.token) })).json()) as { items: unknown[] };
+  assert.deepEqual(list.items, [], "the admin asked it, so it is not theirs to answer");
 });
 
-test("POST /v1/comments/:id/replies: a human reply is recorded as human, an agent reply as agent", async () => {
+// Found in review: the queue checked design ownership but not project
+// access, so an owner removed from a project kept reading its designs'
+// summaries and open-comment ids with a still-valid token, while the
+// comments endpoint itself refused them.
+test("GET /v1/review-queue: stops listing a project's designs once the owner loses access to it", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token, "p1");
+  const owner = await addMember(app, identities, admin.developerId, "owner@example.com");
+  const design = seedDesign(designs, { projectId: "p1", developerId: "owner@example.com" });
+  await postComment(app, admin.token, design.id, { body: "why?" });
+
+  const before = (await (await app.request("/v1/review-queue", { headers: bearer(owner) })).json()) as { items: unknown[] };
+  assert.equal(before.items.length, 1, "a current member hears about comments on their design");
+
+  identities.removeProjectMember("p1", "owner@example.com");
+  const after = (await (await app.request("/v1/review-queue", { headers: bearer(owner) })).json()) as { items: unknown[] };
+  assert.deepEqual(after.items, []);
+});
+
+test("POST /v1/comments/:id/replies: a reply is recorded under the caller, and a resolved comment takes no more", async () => {
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
   await foundProject(app, admin.token, "p1");
   const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
-
-  const created = await withStubbedAnswer(cannedAnswer, async () => {
-    const res = await app.request(`/v1/designs/${design.id}/comments`, {
+  const { body } = await postComment(app, admin.token, design.id, { body: "why?" });
+  const reply = (message: string) =>
+    app.request(`/v1/comments/${body.comment.id}/replies`, {
       method: "POST",
       headers: { ...bearer(admin.token), "content-type": "application/json" },
-      body: JSON.stringify({ body: "why?" }),
+      body: JSON.stringify({ message }),
     });
-    const body = (await res.json()) as { comment: { id: string } };
-    // Settle the agent's own first-pass reply before adding ours, so the
-    // ordering below is about the two replies this test posts rather than a
-    // race with the background answer pass.
-    await waitFor(async () => {
-      const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-      const list = (await read.json()) as { replies: Record<string, unknown[]> };
-      return (list.replies[body.comment.id]?.length ?? 0) === 1;
-    });
-    return body.comment;
-  });
 
-  await app.request(`/v1/comments/${created.id}/replies`, {
-    method: "POST",
-    headers: { ...bearer(admin.token), "content-type": "application/json" },
-    body: JSON.stringify({ message: "because of the gateway", authorKind: "agent" }),
-  });
-  await app.request(`/v1/comments/${created.id}/replies`, {
-    method: "POST",
-    headers: { ...bearer(admin.token), "content-type": "application/json" },
-    body: JSON.stringify({ message: "thanks" }),
-  });
+  assert.equal((await reply("because of the gateway")).status, 200);
+  const read = (await (await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) })).json()) as {
+    replies: Record<string, { authorId?: string; message: string }[]>;
+  };
+  assert.deepEqual(read.replies[body.comment.id].map((r) => [r.authorId, r.message]), [[admin.developerId, "because of the gateway"]]);
 
-  const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-  const list = (await read.json()) as { items: { id: string }[]; replies: Record<string, { authorKind: string; message: string }[]> };
-  const replies = list.replies[created.id];
-  // [0] the agent's first pass, [1] the explicit agent reply, [2] the human
-  // reply. A fourth may follow -- the human reply triggers its own answer
-  // pass -- so this asserts on the two it posted rather than a total.
-  assert.equal(replies[1].authorKind, "agent");
-  assert.equal(replies[1].message, "because of the gateway");
-  assert.equal(replies[2].authorKind, "human", "an unstated authorKind defaults to human");
-  assert.equal(replies[2].message, "thanks");
+  await app.request(`/v1/comments/${body.comment.id}/resolve`, { method: "POST", headers: bearer(admin.token) });
+  assert.equal((await reply("one more thing")).status, 409, "a settled question is a new comment");
 });
 
 test("POST /v1/designs/:id/comments: an empty body is rejected", async () => {
@@ -6150,8 +6099,12 @@ test("comment routes: an unknown design or comment id is a 404, not a 500", asyn
 
   const comments = await app.request("/v1/designs/nope/comments", { headers: bearer(admin.token) });
   assert.equal(comments.status, 404);
-  const escalate = await app.request("/v1/comments/nope/escalate", { method: "POST", headers: bearer(admin.token) });
-  assert.equal(escalate.status, 404);
+  const reply = await app.request("/v1/comments/nope/replies", {
+    method: "POST",
+    headers: { ...bearer(admin.token), "content-type": "application/json" },
+    body: JSON.stringify({ message: "hello?" }),
+  });
+  assert.equal(reply.status, 404);
 });
 
 // Regression, found in review and reproduced: `canViewDesignComments` had an
@@ -6205,7 +6158,7 @@ test("GET /v1/designs/comment-counts: never reports on designs outside the autho
 // unauthenticated identity. It must read the discussion of an *allowlisted*
 // project (an empty panel would defeat the demo) and write none of it -- every
 // write here attributes to a developerId, and this identity is nobody.
-test("public viewer: can read a design's comments but cannot post, reply, escalate or resolve", async () => {
+test("public viewer: can read a design's comments but cannot post, reply or resolve", async () => {
   const { app, dataDir, designs } = freshApp({ publicProjectIds: ["p1"] });
   const admin = await bootstrapAdmin(app, dataDir);
   await foundProject(app, admin.token, "p1");
@@ -6231,7 +6184,6 @@ test("public viewer: can read a design's comments but cannot post, reply, escala
   for (const [path, init] of [
     [`/v1/designs/${design.id}/comments`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body: "hi" }) }],
     [`/v1/comments/${comment.id}/replies`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "hi" }) }],
-    [`/v1/comments/${comment.id}/escalate`, { method: "POST" }],
     [`/v1/comments/${comment.id}/resolve`, { method: "POST" }],
   ] as const) {
     const res = await app.request(path, init as RequestInit);
@@ -6337,368 +6289,6 @@ test("POST /v1/designs/check: omits reviewUrl entirely on a coordinator with no 
   assert.ok(!("reviewUrl" in body), "no monitor means no link, never a guess");
 });
 
-
-// Found in review: replies were stored without invoking the answerer, so a
-// reviewer who read the agent's answer and asked "why?" underneath got
-// silence -- the only way to ask a second question was to open a second
-// comment. That is a Q&A box, not the conversation this is meant to be.
-test("POST /v1/comments/:id/replies: a human follow-up gets its own agent answer", async () => {
-  const { app, dataDir, designs } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  await foundProject(app, admin.token, "p1");
-  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
-
-  await withStubbedAnswer(cannedAnswer, async () => {
-    const created = await app.request(`/v1/designs/${design.id}/comments`, {
-      method: "POST",
-      headers: { ...bearer(admin.token), "content-type": "application/json" },
-      body: JSON.stringify({ body: "why 30s?" }),
-    });
-    const { comment } = (await created.json()) as { comment: { id: string } };
-    const repliesNow = async () => {
-      const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-      return ((await read.json()) as { replies: Record<string, unknown[]> }).replies[comment.id] ?? [];
-    };
-    await waitFor(async () => (await repliesNow()).length === 1);
-
-    await app.request(`/v1/comments/${comment.id}/replies`, {
-      method: "POST",
-      headers: { ...bearer(admin.token), "content-type": "application/json" },
-      body: JSON.stringify({ message: "which upstream?" }),
-    });
-    // The reviewer's follow-up, then a fresh agent answer to it.
-    await waitFor(async () => (await repliesNow()).length === 3);
-  });
-});
-
-// Otherwise the coordinator answers itself forever. `authorKind` is the only
-// thing that can tell an agent's reply from a person's, which is a large part
-// of why it is stored rather than inferred.
-test("POST /v1/comments/:id/replies: an agent's own reply never triggers another answer", async () => {
-  const { app, dataDir, designs } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  await foundProject(app, admin.token, "p1");
-  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
-
-  await withStubbedAnswer(cannedAnswer, async () => {
-    const created = await app.request(`/v1/designs/${design.id}/comments`, {
-      method: "POST",
-      headers: { ...bearer(admin.token), "content-type": "application/json" },
-      body: JSON.stringify({ body: "why 30s?" }),
-    });
-    const { comment } = (await created.json()) as { comment: { id: string } };
-    const repliesNow = async () => {
-      const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-      return ((await read.json()) as { replies: Record<string, unknown[]> }).replies[comment.id] ?? [];
-    };
-    await waitFor(async () => (await repliesNow()).length === 1);
-
-    await app.request(`/v1/comments/${comment.id}/replies`, {
-      method: "POST",
-      headers: { ...bearer(admin.token), "content-type": "application/json" },
-      body: JSON.stringify({ message: "answered from the CLI", authorKind: "agent" }),
-    });
-    await new Promise((r) => setTimeout(r, 60));
-    assert.equal((await repliesNow()).length, 2, "the agent's reply, and nothing answering it");
-  });
-});
-
-// A person has taken ownership of an escalated comment. A model interjecting
-// on a thread a human is now handling is exactly the failure escalation
-// exists to prevent.
-test("POST /v1/comments/:id/replies: no agent answer once a comment is escalated", async () => {
-  const { app, dataDir, designs } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  await foundProject(app, admin.token, "p1");
-  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
-
-  await withStubbedAnswer(cannedAnswer, async () => {
-    const created = await app.request(`/v1/designs/${design.id}/comments`, {
-      method: "POST",
-      headers: { ...bearer(admin.token), "content-type": "application/json" },
-      body: JSON.stringify({ body: "why 30s?" }),
-    });
-    const { comment } = (await created.json()) as { comment: { id: string } };
-    const repliesNow = async () => {
-      const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-      return ((await read.json()) as { replies: Record<string, unknown[]> }).replies[comment.id] ?? [];
-    };
-    await waitFor(async () => (await repliesNow()).length === 1);
-    await app.request(`/v1/comments/${comment.id}/escalate`, { method: "POST", headers: bearer(admin.token) });
-
-    await app.request(`/v1/comments/${comment.id}/replies`, {
-      method: "POST",
-      headers: { ...bearer(admin.token), "content-type": "application/json" },
-      body: JSON.stringify({ message: "still waiting on you" }),
-    });
-    await new Promise((r) => setTimeout(r, 60));
-    assert.equal((await repliesNow()).length, 2, "the human's reply, with nothing talking over them");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Concurrent follow-ups (found in review)
-// ---------------------------------------------------------------------------
-
-/** A stub whose model calls can be released individually, so a test can hold
- * one pass open and land a second reply underneath it -- the race that
- * produced out-of-order answers. */
-function deferredAnswers() {
-  const pending: { answer: string; release: () => void }[] = [];
-  let seq = 0;
-  const impl = (async () => {
-    const answer = `answer-${++seq}`;
-    await new Promise<void>((resolve) => pending.push({ answer, release: resolve }));
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer, needsEscalation: false, escalationReason: "", confidence: "high" }) } }] }), {
-      status: 200,
-    });
-  }) as unknown as typeof fetch;
-  return { impl, pending };
-}
-
-// Two human replies seconds apart used to start two independent model calls,
-// and whichever finished last appended last -- so a corrected question could
-// be answered first and then contradicted by the stale answer to the question
-// it replaced.
-test("concurrent follow-ups: one answer pass at a time per comment, and the last answer answers the last question", async () => {
-  const { app, dataDir, designs } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  await foundProject(app, admin.token, "p1");
-  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
-  const { impl, pending } = deferredAnswers();
-
-  await withBedrockEnv(() =>
-    withMockFetch(impl, async () => {
-      const created = await app.request(`/v1/designs/${design.id}/comments`, {
-        method: "POST",
-        headers: { ...bearer(admin.token), "content-type": "application/json" },
-        body: JSON.stringify({ body: "why 30s?" }),
-      });
-      const { comment } = (await created.json()) as { comment: { id: string } };
-      const reply = (message: string) =>
-        app.request(`/v1/comments/${comment.id}/replies`, {
-          method: "POST",
-          headers: { ...bearer(admin.token), "content-type": "application/json" },
-          body: JSON.stringify({ message }),
-        });
-      const repliesNow = async () => {
-        const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-        return ((await read.json()) as { replies: Record<string, { message: string }[]> }).replies[comment.id] ?? [];
-      };
-
-      // First pass is in flight and held open.
-      await waitFor(() => pending.length === 1);
-      // Two more questions land while it runs. Only one extra pass may ever
-      // be queued, however many arrive.
-      await reply("actually, which upstream?");
-      await reply("no wait -- is it configurable?");
-      assert.equal(pending.length, 1, "a reply mid-flight must not start a second concurrent model call");
-
-      pending[0].release();
-      await waitFor(() => pending.length === 2, 2000);
-      pending[1].release();
-      await waitFor(async () => (await repliesNow()).some((r) => r.message === "answer-2"), 2000);
-
-      const agentAnswers = (await repliesNow()).filter((r) => r.message.startsWith("answer-"));
-      // The superseded first answer is dropped rather than appended after the
-      // question it answered was replaced -- exactly one answer, to the
-      // latest question.
-      assert.deepEqual(
-        agentAnswers.map((r) => r.message),
-        ["answer-2"],
-        "a burst of replies collapses into one answer to the latest question",
-      );
-    }),
-  );
-});
-
-// The dashboard reads `status` to decide between "the agent is answering…"
-// with a fast poll and "answered by the agent" with a slow one. A follow-up
-// that left the comment `answered` told the reviewer nothing was happening.
-test("concurrent follow-ups: a comment reads as unanswered while its follow-up is being worked on", async () => {
-  const { app, dataDir, designs } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  await foundProject(app, admin.token, "p1");
-  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
-  const { impl, pending } = deferredAnswers();
-
-  await withBedrockEnv(() =>
-    withMockFetch(impl, async () => {
-      const created = await app.request(`/v1/designs/${design.id}/comments`, {
-        method: "POST",
-        headers: { ...bearer(admin.token), "content-type": "application/json" },
-        body: JSON.stringify({ body: "why 30s?" }),
-      });
-      const { comment } = (await created.json()) as { comment: { id: string } };
-      const statusNow = async () => {
-        const read = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
-        return ((await read.json()) as { items: { status: string }[] }).items[0].status;
-      };
-
-      await waitFor(() => pending.length === 1);
-      pending[0].release();
-      await waitFor(async () => (await statusNow()) === "answered", 2000);
-
-      await app.request(`/v1/comments/${comment.id}/replies`, {
-        method: "POST",
-        headers: { ...bearer(admin.token), "content-type": "application/json" },
-        body: JSON.stringify({ message: "which upstream?" }),
-      });
-
-      await waitFor(() => pending.length === 2, 2000);
-      assert.equal(await statusNow(), "open", "the reviewer can see their follow-up is being handled");
-
-      pending[1].release();
-      await waitFor(async () => (await statusNow()) === "answered", 2000);
-    }),
-  );
-});
-
-// The slot is released in a `finally`, so a failed pass cannot leave a
-// comment permanently unanswerable for the life of the process.
-test("concurrent follow-ups: a failed pass releases the slot, so the next reply is still answered", async () => {
-  const { app, dataDir, designs } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  await foundProject(app, admin.token, "p1");
-  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
-
-  let calls = 0;
-  const impl = (async () => {
-    calls += 1;
-    throw new Error("model unreachable");
-  }) as unknown as typeof fetch;
-
-  await withBedrockEnv(() =>
-    withMockFetch(impl, async () => {
-      const created = await app.request(`/v1/designs/${design.id}/comments`, {
-        method: "POST",
-        headers: { ...bearer(admin.token), "content-type": "application/json" },
-        body: JSON.stringify({ body: "why 30s?" }),
-      });
-      const { comment } = (await created.json()) as { comment: { id: string } };
-      // Two attempts per pass (the retry loop), then the fail-soft reply.
-      await waitFor(() => calls === 2, 2000);
-      const after = calls;
-
-      await app.request(`/v1/comments/${comment.id}/replies`, {
-        method: "POST",
-        headers: { ...bearer(admin.token), "content-type": "application/json" },
-        body: JSON.stringify({ message: "still there?" }),
-      });
-      await waitFor(() => calls > after, 2000);
-    }),
-  );
-});
-
-// ---------------------------------------------------------------------------
-// The agent does not speak on a comment a human has taken over
-// ---------------------------------------------------------------------------
-//
-// One invariant, two moments it can be violated: escalation can land while a
-// model call is in flight, or while a superseded pass is queued behind it.
-// Both leaked -- the queued re-run started unconditionally, and the in-flight
-// pass posted its answer anyway on the reasoning that the model's words were
-// history worth keeping. They are not: once a reviewer has asked for the
-// developer, a model adding to that thread is the interjection escalation
-// exists to prevent.
-
-/** Drives a comment to the point where a model call is in flight and held
- * open, returning the handles a test needs to act underneath it. */
-async function commentWithHeldPass(app: ReturnType<typeof createApp>, token: string, designId: string, pending: { release: () => void }[]) {
-  const created = await app.request(`/v1/designs/${designId}/comments`, {
-    method: "POST",
-    headers: { ...bearer(token), "content-type": "application/json" },
-    body: JSON.stringify({ body: "why 30s?" }),
-  });
-  const { comment } = (await created.json()) as { comment: { id: string } };
-  const replies = async () => {
-    const read = await app.request(`/v1/designs/${designId}/comments`, { headers: bearer(token) });
-    return ((await read.json()) as { replies: Record<string, { authorKind: string; message: string }[]> }).replies[comment.id] ?? [];
-  };
-  await waitFor(() => pending.length === 1);
-  return { comment, replies };
-}
-
-for (const action of ["escalate", "resolve"] as const) {
-  test(`answer pass: an in-flight answer is dropped when a reviewer ${action}s mid-call`, async () => {
-    const { app, dataDir, designs } = freshApp();
-    const admin = await bootstrapAdmin(app, dataDir);
-    await foundProject(app, admin.token, "p1");
-    const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
-    const { impl, pending } = deferredAnswers();
-
-    await withBedrockEnv(() =>
-      withMockFetch(impl, async () => {
-        const { comment, replies } = await commentWithHeldPass(app, admin.token, design.id, pending);
-
-        await app.request(`/v1/comments/${comment.id}/${action}`, { method: "POST", headers: bearer(admin.token) });
-        pending[0].release();
-        // Give the pass every chance to post before asserting it didn't.
-        await new Promise((r) => setTimeout(r, 120));
-
-        assert.deepEqual(await replies(), [], "a human owns this now -- the agent says nothing");
-      }),
-    );
-  });
-
-  test(`answer pass: a queued re-run never starts once the comment is ${action}d`, async () => {
-    const { app, dataDir, designs } = freshApp();
-    const admin = await bootstrapAdmin(app, dataDir);
-    await foundProject(app, admin.token, "p1");
-    const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
-    const { impl, pending } = deferredAnswers();
-
-    await withBedrockEnv(() =>
-      withMockFetch(impl, async () => {
-        const { comment, replies } = await commentWithHeldPass(app, admin.token, design.id, pending);
-
-        // Two follow-ups while the first call is held -> one queued re-run.
-        for (const message of ["which upstream?", "no wait, is it configurable?"]) {
-          await app.request(`/v1/comments/${comment.id}/replies`, {
-            method: "POST",
-            headers: { ...bearer(admin.token), "content-type": "application/json" },
-            body: JSON.stringify({ message }),
-          });
-        }
-        // ...then the reviewer gives up on the agent before it finishes.
-        await app.request(`/v1/comments/${comment.id}/${action}`, { method: "POST", headers: bearer(admin.token) });
-
-        pending[0].release();
-        await new Promise((r) => setTimeout(r, 150));
-
-        assert.equal(pending.length, 1, "the queued re-run must not start a second model call");
-        const agentReplies = (await replies()).filter((r) => r.authorKind === "agent");
-        assert.deepEqual(agentReplies, [], "and nothing it computed may be posted");
-      }),
-    );
-  });
-}
-
-// The guard is about human ownership, not about being mid-flight: an ordinary
-// follow-up on a comment nobody has taken over still gets answered.
-test("answer pass: still answers normally when nothing has been escalated or resolved", async () => {
-  const { app, dataDir, designs } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  await foundProject(app, admin.token, "p1");
-  const design = seedDesign(designs, { projectId: "p1", developerId: admin.developerId });
-  const { impl, pending } = deferredAnswers();
-
-  await withBedrockEnv(() =>
-    withMockFetch(impl, async () => {
-      const { comment, replies } = await commentWithHeldPass(app, admin.token, design.id, pending);
-      await app.request(`/v1/comments/${comment.id}/replies`, {
-        method: "POST",
-        headers: { ...bearer(admin.token), "content-type": "application/json" },
-        body: JSON.stringify({ message: "which upstream?" }),
-      });
-
-      pending[0].release();
-      await waitFor(() => pending.length === 2, 2000);
-      pending[1].release();
-      await waitFor(async () => (await replies()).some((r) => r.authorKind === "agent"), 2000);
-    }),
-  );
-});
 
 // ---------------------------------------------------------------------------
 // Design review chat (phase 2, 2026-09)
@@ -6971,6 +6561,23 @@ test("design chat: the public viewer cannot read or write one", async () => {
   );
 });
 
+/** A stub whose model calls can be released individually, so a test can hold
+ * one call open and land a second request underneath it. Emits the retired
+ * comment answerer's JSON shape; the chat returns whatever the model says
+ * verbatim, so the chat test below matches the `answer-N` payload inside it. */
+function deferredAnswers() {
+  const pending: { answer: string; release: () => void }[] = [];
+  let seq = 0;
+  const impl = (async () => {
+    const answer = `answer-${++seq}`;
+    await new Promise<void>((resolve) => pending.push({ answer, release: resolve }));
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer, needsEscalation: false, escalationReason: "", confidence: "high" }) } }] }), {
+      status: 200,
+    });
+  }) as unknown as typeof fetch;
+  return { impl, pending };
+}
+
 // Found in review: the composer disables itself while a question is in
 // flight, but a second browser tab is not bound by that. Two concurrent calls
 // on one thread used to append in completion order, so a corrected question
@@ -7080,7 +6687,7 @@ test("POST /v1/comments/:id/resolve: an agent-declared resolve is refused, and n
   assert.equal(res.status, 403);
   const body = (await res.json()) as { error: string };
   assert.match(body.error, /reviewer's call/);
-  assert.match(body.error, /reply to it instead/, "refusing without naming the alternative just invites a retry");
+  assert.match(body.error, /twing-monitor/, "refusing without naming the alternative just invites a retry");
 
   const after = await app.request(`/v1/designs/${design.id}/comments`, { headers: bearer(admin.token) });
   assert.notEqual(((await after.json()) as { items: { status: string }[] }).items[0].status, "resolved");

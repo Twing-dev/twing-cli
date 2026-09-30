@@ -136,7 +136,9 @@ func handleCacheCheck(payload hookPayload) {
 	}
 	// Design review (2026-09). Both are plain advisory text appended to the
 	// same slice as everything else here -- this path has no deny semantics
-	// at all, so neither can block a tool call however they render. The
+	// at all, so neither can block a tool call however they render. (Open
+	// reviews also leave a per-session record that the *gate* may later
+	// pause one edit on; see design_review.go's reviewBlockReason.) The
 	// project id is resolved locally rather than taken from the daemon's
 	// reply: it is only used to key the per-session state file, and a value
 	// the daemon supplied would be one more thing for the two sides to
@@ -146,7 +148,7 @@ func handleCacheCheck(payload hookPayload) {
 	if payload.Cwd != "" {
 		reviewProjectID = computeProjectID(payload.Cwd)
 	}
-	messages = append(messages, renderEscalations(reviewProjectID, payload.SessionID, result.Escalations)...)
+	messages = append(messages, renderOpenReviews(reviewProjectID, payload.SessionID, result.OpenReviews)...)
 	messages = append(messages, renderDesignLinkReminder(reviewProjectID, payload.SessionID, result.DesignLinks)...)
 	if vm := result.VersionMismatch; vm != nil {
 		// Install type before direction, matching design_gate.go's
