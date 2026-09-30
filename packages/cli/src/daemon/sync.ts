@@ -298,6 +298,13 @@ export class Syncer {
    * is enough: the daemon is short-lived now (it exits on idle), so a
    * genuinely fixable mismatch gets another attempt soon anyway. */
   private selfUpdateAttempted = false;
+  /** A repo each coordinator governs, as seen by a session on this machine
+   * -- where a self-update's `init --unattended` has to run (2026-09-30).
+   * Found live: the daemon ran it from its own cwd, which is not a repo, so
+   * init failed on "no coordinator configured", the CLI was updated but the
+   * hook binary was not, and every edit stayed denied. Latest wins; any repo
+   * on that coordinator will do. */
+  private repoRootByServer = new Map<string, string>();
 
   /**
    * Brings this machine's install up to the coordinator's version, rather
@@ -316,9 +323,16 @@ export class Syncer {
     // cannot obtain root and should not try to work around it. Those
     // machines keep the explicit instructions.
     if (!isSelfUpdatable(import.meta.url)) return;
+    // The new CLI's init must run inside a repo on that coordinator. With
+    // none seen yet, do not start: a half-applied update (CLI replaced, hook
+    // binary not) is worse than waiting. The next session registers a repo
+    // and this tries again; meanwhile the hook's own recovery does the same
+    // update from the repo an edit is in.
+    const repoRoot = this.repoRootByServer.get(mismatch.serverUrl);
+    if (!repoRoot) return;
 
     this.selfUpdateAttempted = true;
-    if (await performSelfUpdate(mismatch.serverVersion, updateTarget(import.meta.url))) {
+    if (await performSelfUpdate(mismatch.serverVersion, updateTarget(import.meta.url), undefined, { initCwd: repoRoot })) {
       await this.onSelfUpdated();
     }
   }
@@ -338,10 +352,10 @@ export class Syncer {
    * Edit/Write regardless -- this soft notice being silent for one
    * interaction on a brand-new machine is an accepted, self-healing gap,
    * not a bug. */
-  versionMismatch(): { clientVersion: string; serverVersion: string } | null {
+  versionMismatch(): { clientVersion: string; serverVersion: string; serverUrl: string } | null {
     const clientVersion = daemonVersion;
-    for (const serverVersion of this.serverVersions.values()) {
-      if (serverVersion !== clientVersion) return { clientVersion, serverVersion };
+    for (const [serverUrl, serverVersion] of this.serverVersions) {
+      if (serverVersion !== clientVersion) return { clientVersion, serverVersion, serverUrl };
     }
     return null;
   }
@@ -383,8 +397,9 @@ export class Syncer {
    * Called from `get_notices` (daemon/server.ts), which can derive both
    * values from the session's cwd.
    */
-  registerDeveloperProject(developerId: string, projectId: string, serverUrl: string): void {
+  registerDeveloperProject(developerId: string, projectId: string, serverUrl: string, repoRoot?: string): void {
     this.registerProjectServer(projectId, serverUrl);
+    if (repoRoot) this.repoRootByServer.set(serverUrl, repoRoot);
     const projects = this.developerProjects.get(developerId) ?? new Set<string>();
     projects.add(projectId);
     this.developerProjects.set(developerId, projects);

@@ -157,6 +157,29 @@ func TestHandleCacheCheck_VersionMismatch_SelfInstalledAheadOffersDowngrade(t *t
 // unparseable value isn't known to reach this exact path today -- but
 // nothing stops a future change from doing so, and `@<garbage>` would 404
 // off npm just the same, so the same fallback guards it here too.
+// A prerelease coordinator is a real version: the command is pinned to it.
+// `@latest` there installs the newest *stable* release, which does not match
+// a prerelease coordinator -- the exact mistake a self-installed machine made
+// by following this advice before 2026-09-30.
+func TestHandleCacheCheck_VersionMismatch_PrereleaseServerIsPinnedExactly(t *testing.T) {
+	pinInstallKind(t, false)
+	fakeDaemon(t, noticesMessage{
+		Type:            "notices",
+		VersionMismatch: &versionMismatchInfo{ClientVersion: "1.3.11", ServerVersion: "1.3.13-experimental.1"},
+	})
+
+	stdout := captureStdout(t, func() {
+		handleCacheCheck(hookPayload{SessionID: "sess1", HookEventName: "SessionStart"})
+	})
+
+	if !strings.Contains(stdout, "npm install -g @twing/cli@1.3.13-experimental.1") {
+		t.Errorf("must pin the coordinator's exact prerelease: %s", stdout)
+	}
+	if strings.Contains(stdout, "@latest") {
+		t.Errorf("@latest is the newest stable release, not this coordinator's version: %s", stdout)
+	}
+}
+
 func TestHandleCacheCheck_VersionMismatch_UnparseableServerVersionFallsBackToLatest(t *testing.T) {
 	pinInstallKind(t, false)
 	fakeDaemon(t, noticesMessage{

@@ -349,6 +349,43 @@ func TestAttemptVersionRecovery_RunsInitInTheRepoTheGateResolved(t *testing.T) {
 	}
 }
 
+// Found live 2026-09-30: the coordinator moved to 1.3.13-experimental.1 and
+// recovery never ran -- the guard refused any version that was not a plain
+// X.Y.Z, silently, so every machine on 1.3.11 had every edit denied. A
+// prerelease is a real version: recovery installs exactly it.
+func TestAttemptVersionRecovery_UpdatesToAPrereleaseCoordinator(t *testing.T) {
+	home := managedHome(t)
+	calls := filepath.Join(t.TempDir(), "calls")
+	script := "#!/bin/sh\necho \"$*\" >> " + calls + "\n"
+	if err := os.WriteFile(filepath.Join(home, ".twing", "bin", "twing"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "npm"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeNode(t, pathDir, "v22.5.0")
+	t.Setenv("PATH", pathDir)
+
+	original := version
+	version = "1.3.11"
+	t.Cleanup(func() { version = original })
+	repo := t.TempDir()
+	setRepoContext(repo, repo)
+	t.Cleanup(func() { setRepoContext("", "") })
+
+	if !attemptVersionRecovery("1.3.13-experimental.1") {
+		t.Fatal("a prerelease coordinator must be updated to, not skipped")
+	}
+	recorded, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(recorded), "@twing/cli@1.3.13-experimental.1") {
+		t.Errorf("must install the coordinator's exact prerelease, got:\n%s", recorded)
+	}
+}
+
 // writeFakeNode puts a `node` on a test's PATH that reports the version given
 // and does nothing else. Recovery reads `node -v` before it will replace a
 // working install, so a test PATH without one reads as "too old to risk it".

@@ -117,7 +117,7 @@ function appendLog(line: string): void {
 }
 
 export interface SelfUpdateDeps {
-  run(command: string, args: string[]): Promise<void>;
+  run(command: string, args: string[], options?: { cwd?: string }): Promise<void>;
   /** Entry point of the CLI that was just updated -- the one whose `init`
    * must run, so the refreshed hook binary and launch marker come from the
    * new code rather than the old process doing the updating. */
@@ -126,8 +126,8 @@ export interface SelfUpdateDeps {
 }
 
 const defaultDeps: SelfUpdateDeps = {
-  run: async (command, args) => {
-    await execFileAsync(command, args, { timeout: UPDATE_TIMEOUT_MS });
+  run: async (command, args, options) => {
+    await execFileAsync(command, args, { timeout: UPDATE_TIMEOUT_MS, ...(options?.cwd ? { cwd: options.cwd } : {}) });
   },
   cliEntry: (target) => (target === "managed" ? managedCliEntry() : globalCliEntry()),
   log: appendLog,
@@ -146,7 +146,17 @@ export async function performSelfUpdate(
   targetVersion: string,
   target: "managed" | "global" = "managed",
   deps: SelfUpdateDeps = defaultDeps,
+  /** `initCwd`: a repo on the coordinator being matched. The new CLI's
+   * `init --unattended` resolves the coordinator from the repo it runs in,
+   * and the daemon's own cwd is not one -- run there, init failed on "no
+   * coordinator configured", leaving the CLI updated and the hook binary not
+   * (found live 2026-09-30). Required: without it nothing is started. */
+  options: { initCwd?: string } = {},
 ): Promise<boolean> {
+  if (!options.initCwd) {
+    deps.log(`self-update: coordinator wants ${targetVersion}, but no repo on it has been seen yet -- not starting a half update`);
+    return false;
+  }
   deps.log(`self-update: coordinator wants ${targetVersion}; updating the ${target} install`);
   // `--prefix ~/.twing/lib` for the copy twing itself installed; `-g` for a
   // global one, so the update lands where `twing` on PATH actually resolves
@@ -159,7 +169,7 @@ export async function performSelfUpdate(
   try {
     await deps.run("npm", [...installArgs, "--no-fund", "--no-audit", "--loglevel=error"]);
   } catch (err) {
-    deps.log(`self-update: npm install failed -- ${err instanceof Error ? err.message : err}`);
+    deps.log(`self-update: npm install failed -- ${describeFailure(err)}`);
     return false;
   }
 
@@ -168,12 +178,22 @@ export async function performSelfUpdate(
   // sends) and rewrites the launch marker, so the daemon that comes back
   // starts from the new code.
   try {
-    await deps.run(process.execPath, [deps.cliEntry(target), "init", "--unattended"]);
+    await deps.run(process.execPath, [deps.cliEntry(target), "init", "--unattended"], { cwd: options.initCwd });
   } catch (err) {
-    deps.log(`self-update: the updated CLI's init failed -- ${err instanceof Error ? err.message : err}`);
+    deps.log(`self-update: the updated CLI's init failed in ${options.initCwd} -- ${describeFailure(err)}`);
     return false;
   }
 
   deps.log(`self-update: updated to ${targetVersion}; restarting the daemon so it stops running the old code`);
   return true;
+}
+
+/** A failed command's own output, not just "Command failed": the stderr is
+ * where the reason is, and without it the log said nothing about why the
+ * 2026-09-30 update stalled. */
+function describeFailure(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const stderr = (err as { stderr?: unknown }).stderr;
+  const detail = typeof stderr === "string" ? stderr.trim() : Buffer.isBuffer(stderr) ? stderr.toString("utf8").trim() : "";
+  return detail ? `${err.message.split("\n")[0]}: ${detail}` : err.message;
 }
