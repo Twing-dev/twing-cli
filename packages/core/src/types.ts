@@ -281,10 +281,25 @@ export interface DesignStatement {
    * `PLAN_RETRY_SIMILARITY_THRESHOLD`, for any plan longer than 2000 chars
    * -- not worth keeping a `-Excerpt` name around for what's now the full
    * text, but renaming the field would touch every call site for no
-   * behavioral gain). Never set on a structured `twing design register`
-   * call (CLI always sends structured fields, never `rawPlanText`) -- this
-   * is the one reliable signal a design row came from `ExitPlanMode`. */
+   * behavioral gain).
+   *
+   * **The design's architecture text** -- what twing-monitor shows under
+   * "View original plan text" -- never a file list; the declared files have
+   * their own view (`changes`). Set from an `ExitPlanMode` plan, or since
+   * 2026-09-29 from a `twing design register --from` template's `plan:`
+   * (absent when the template wrote none; the CLI used to send the YAML
+   * itself here, so older rows may hold a template echo, which the
+   * dashboard hides). `amend --from` with a `plan:` appends a dated section
+   * (`appendPlanUpdate`), never replaces it. */
   rawPlanExcerpt?: string;
+  /** How the design was registered (2026-09-29): `plan_mode` when the server
+   * extracted it from a bare ExitPlanMode plan, `template` when the caller
+   * supplied its own files (CLI `register`, the hook's multi-repo path).
+   * Only a `plan_mode` design can be rewritten in place by a plan-mode retry
+   * (`openPlanModeDesignForSession`) -- every design carries plan text now,
+   * so plan text alone cannot tell the two apart. Absent on designs
+   * registered before this existed, which a retry never touches. */
+  registeredVia?: "plan_mode" | "template";
   /** The structured declaration this design was registered from, when it was
    * registered from one (`twing design register --from <file>`).
    *

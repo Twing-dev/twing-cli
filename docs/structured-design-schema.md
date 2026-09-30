@@ -237,6 +237,18 @@ a change with no verification covering it at all.
 ```yaml
 goal: "Outbound HTTP survives transient failures without thundering herd"
 
+plan: |
+  ## Context
+  Every client retries immediately and forever, so one flaky upstream turns
+  into a synchronised retry storm.
+
+  ## Approach
+  Exponential backoff capped at 30s, with full jitter so clients spread out.
+  Considered decorrelated jitter; full jitter is simpler and good enough here.
+
+  ## Risks and checks
+  A cap too low still storms: a 503-burst integration test measures spread.
+
 changes:
   - id: c1
     kind: code
@@ -291,6 +303,14 @@ verification:
 ```
 
 ### 6.1 Field reference
+
+**Document-level**
+
+| Field | Required | Notes |
+|---|---|---|
+| `goal` | yes, to register | One sentence: what changes for the user or the system. The design's overview headline. On `amend --from`, optional: appended to the overview as one dated line. |
+| `plan` | yes, to register | The design doc a reviewer reads under "View original plan text": a few short markdown sections -- why, how (key decisions, alternatives ruled out), and what could go wrong. **Not a file list** -- files are `changes`. Every line indented under `plan: \|`. A line still holding a `<...>` prompt is refused. On `amend --from`, optional: appended as a dated `## Update` section, never replacing what is there. (2026-09-29) |
+| `changes` | yes | One item per file (or symbol) you expect to change. |
 
 **Universal, on every change item**
 

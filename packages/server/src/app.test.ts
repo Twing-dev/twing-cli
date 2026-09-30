@@ -16,6 +16,10 @@ import { AlignmentThreadStore } from "./alignment-store.js";
 import { CaptureStore } from "./capture-store.js";
 import { DesignChatStore } from "./design-chat-store.js";
 
+/** Every registration needs a plan (2026-09-29); tests that are not about the
+ * plan itself send this one. */
+const TEST_PLAN = "## Approach\nA test plan.";
+
 function sha256Hex(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
@@ -393,7 +397,7 @@ test("POST /v1/reviews/:id/decide: requires the project's admin role, not mere a
   const check1 = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "first", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   assert.equal(check1.status, 200);
 
@@ -406,7 +410,7 @@ test("POST /v1/reviews/:id/decide: requires the project's admin role, not mere a
   const check2 = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "second, overlapping", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "second, overlapping", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   assert.equal(check2.status, 200);
   const check2Body = (await check2.json()) as { verdict: string; designId: string };
@@ -455,7 +459,7 @@ async function makePendingReview(app: ReturnType<typeof createApp>, token: strin
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(token) },
-    body: JSON.stringify({ projectId, sessionId: "s1", summary: "first", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId, sessionId: "s1", summary: "first", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
 
   // 2026-08-26 self-approve: a review with only a structural-overlap waiver
@@ -496,7 +500,7 @@ async function makePendingReview(app: ReturnType<typeof createApp>, token: strin
   const check2 = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId, sessionId: "s2", summary: "second, overlapping", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId, sessionId: "s2", summary: "second, overlapping", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const { designId } = (await check2.json()) as { designId: string };
   const resolveRes = await app.request(`/v1/designs/${designId}/resolve`, {
@@ -657,7 +661,7 @@ test("GET /v1/reviews/:id: returns one enriched review by id, 404 for an unknown
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-other", sessionId: "s-other", summary: "", creates: ["z.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-other", sessionId: "s-other", summary: "", creates: ["z.ts"], touches: [], dependsOn: [] }),
   });
   const outsiderPat = await addProjectMember(app, admin.token, "proj-other");
   const outsiderRes = await app.request(`/v1/reviews/${reviewId}`, { headers: bearer(outsiderPat) });
@@ -700,7 +704,7 @@ test("GET /v1/activity: newest-first, respects ?limit=, ?before= pages backward,
     await app.request("/v1/designs/check", {
       method: "POST",
       headers: { "content-type": "application/json", ...bearer(admin.token) },
-      body: JSON.stringify({ projectId: "proj-1", sessionId: `s${i}`, summary: summaries[i], creates: [`f${i}.ts`], touches: [], dependsOn: [] }),
+      body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: `s${i}`, summary: summaries[i], creates: [`f${i}.ts`], touches: [], dependsOn: [] }),
     });
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
@@ -759,7 +763,7 @@ test("GET /v1/activity: ?developerId= narrows to one developer's own events", as
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "alice-sess", summary: "alice's design", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "alice-sess", summary: "alice's design", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const inviteRes = await app.request("/v1/projects/proj-1/invites", {
     method: "POST",
@@ -775,7 +779,7 @@ test("GET /v1/activity: ?developerId= narrows to one developer's own events", as
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer("bobs-pat") },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "bob-sess", summary: "bob's design", creates: ["b.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "bob-sess", summary: "bob's design", creates: ["b.ts"], touches: [], dependsOn: [] }),
   });
 
   const bobOnly = await app.request("/v1/activity?projectId=proj-1&developerId=bob@example.com&kind=design_registered", { headers: bearer(admin.token) });
@@ -859,7 +863,7 @@ test("GET /v1/activity: design_checked/design_flagged carry the full why (confli
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({
+    body: JSON.stringify({ rawPlanText: TEST_PLAN,
       projectId: "proj-1",
       sessionId: "s1",
       summary: "adds a shared caching layer for the payments service",
@@ -879,7 +883,7 @@ test("GET /v1/activity: design_checked/design_flagged carry the full why (confli
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({
+    body: JSON.stringify({ rawPlanText: TEST_PLAN,
       projectId: "proj-1",
       sessionId: "s2",
       summary: "adds a shared caching layer for the billing service",
@@ -1046,7 +1050,7 @@ test("POST /v1/constraints/seed: a project's seeded settings.designActiveTtlMs b
   const before = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s0", summary: "before the setting", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s0", summary: "before the setting", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const beforeBody = (await before.json()) as { designId: string };
   assert.equal(designs.get(beforeBody.designId)?.ttlMs, DEFAULT_DESIGN_ACTIVE_TTL_MS, "no setting seeded yet -- the built-in default applies");
@@ -1061,7 +1065,7 @@ test("POST /v1/constraints/seed: a project's seeded settings.designActiveTtlMs b
   const after = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "after the setting", creates: ["b.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "after the setting", creates: ["b.ts"], touches: [], dependsOn: [] }),
   });
   const afterBody = (await after.json()) as { designId: string };
   assert.equal(designs.get(afterBody.designId)?.ttlMs, 36 * 60 * 60 * 1000);
@@ -1089,7 +1093,7 @@ test("POST /v1/constraints/seed: seeding a new window re-times the project's alr
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "in flight", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "in flight", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const { designId } = (await res.json()) as { designId: string };
   assert.equal(designs.get(designId)?.ttlMs, 5 * DAY);
@@ -1117,7 +1121,7 @@ test("POST /v1/constraints/seed: a rejected settings value re-times nothing -- t
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "in flight", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "in flight", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const { designId } = (await res.json()) as { designId: string };
 
@@ -1275,7 +1279,7 @@ async function fixtureWithOpenDesignAndSecondDeveloper(app: ReturnType<typeof cr
   const designRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's work on x.ts", creates: [], touches: ["src/x.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice", summary: "alice's work on x.ts", creates: [], touches: ["src/x.ts"], dependsOn: [] }),
   });
   assert.equal(designRes.status, 200, await designRes.text());
 
@@ -1381,7 +1385,7 @@ test("POST /v1/claims: a divergence finding links the claiming developer's own o
   const bobDesignRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
   });
   const bobDesignBody = (await bobDesignRes.json()) as { designId: string };
 
@@ -1550,7 +1554,7 @@ test("POST /v1/designs/check: the async semantic-conflict comparator opens an al
   const aliceDesign = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({
+    body: JSON.stringify({ rawPlanText: TEST_PLAN,
       projectId: "proj-1",
       sessionId: "s-alice",
       summary: "alice's retention sweep",
@@ -1584,7 +1588,7 @@ test("POST /v1/designs/check: the async semantic-conflict comparator opens an al
         const bobDesign = await app.request("/v1/designs/check", {
           method: "POST",
           headers: { "content-type": "application/json", ...bearer("bobs-pat") },
-          body: JSON.stringify({
+          body: JSON.stringify({ rawPlanText: TEST_PLAN,
             projectId: "proj-1",
             sessionId: "s-bob",
             summary: "bob's audit permanence work",
@@ -1661,7 +1665,7 @@ test("POST /v1/designs/check: an llm_divergence flags both designs into one shar
   const aliceRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's retention sweep", creates: [], touches: ["src/activity-log.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice", summary: "alice's retention sweep", creates: [], touches: ["src/activity-log.ts"], dependsOn: [] }),
   });
   const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
 
@@ -1688,7 +1692,7 @@ test("POST /v1/designs/check: an llm_divergence flags both designs into one shar
         const bobRes = await app.request("/v1/designs/check", {
           method: "POST",
           headers: { "content-type": "application/json", ...bearer("bobs-pat") },
-          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's audit permanence work", creates: [], touches: ["src/identity-store.ts"], dependsOn: [] }),
+          body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's audit permanence work", creates: [], touches: ["src/identity-store.ts"], dependsOn: [] }),
         });
         bobDesignId = ((await bobRes.json()) as { designId: string }).designId;
         await waitFor(async () => {
@@ -1738,7 +1742,7 @@ test("POST /v1/designs/:id/resolve: self-approving an llm_divergence block posts
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's retention sweep", creates: [], touches: ["src/activity-log.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice", summary: "alice's retention sweep", creates: [], touches: ["src/activity-log.ts"], dependsOn: [] }),
   });
 
   const inviteRes = await app.request("/v1/projects/proj-1/invites", {
@@ -1765,7 +1769,7 @@ test("POST /v1/designs/:id/resolve: self-approving an llm_divergence block posts
         const bobRes = await app.request("/v1/designs/check", {
           method: "POST",
           headers: { "content-type": "application/json", ...bearer("bobs-pat") },
-          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's audit permanence work", creates: [], touches: ["src/identity-store.ts"], dependsOn: [] }),
+          body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's audit permanence work", creates: [], touches: ["src/identity-store.ts"], dependsOn: [] }),
         });
         bobDesignId = ((await bobRes.json()) as { designId: string }).designId;
         await waitFor(async () => {
@@ -1814,7 +1818,7 @@ test("POST /v1/designs/:id/resolve: both sides independently self-approving a sh
   const aliceRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's retention sweep", creates: [], touches: ["src/activity-log.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice", summary: "alice's retention sweep", creates: [], touches: ["src/activity-log.ts"], dependsOn: [] }),
   });
   const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
 
@@ -1842,7 +1846,7 @@ test("POST /v1/designs/:id/resolve: both sides independently self-approving a sh
         const bobRes = await app.request("/v1/designs/check", {
           method: "POST",
           headers: { "content-type": "application/json", ...bearer("bobs-pat") },
-          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's audit permanence work", creates: [], touches: ["src/identity-store.ts"], dependsOn: [] }),
+          body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's audit permanence work", creates: [], touches: ["src/identity-store.ts"], dependsOn: [] }),
         });
         bobDesignId = ((await bobRes.json()) as { designId: string }).designId;
         await waitFor(async () => {
@@ -1899,7 +1903,7 @@ test("POST /v1/designs/:id/resolve: self-approving a symbol_conflict block posts
   const bobDesignRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
   });
   const { designId: bobDesignId } = (await bobDesignRes.json()) as { designId: string };
 
@@ -1962,7 +1966,7 @@ test("POST /v1/claims: a new symbol_conflict finding against the same design pai
   const bobDesignRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
   });
   const { designId: bobDesignId } = (await bobDesignRes.json()) as { designId: string };
 
@@ -2096,7 +2100,7 @@ test("POST /v1/reviews/:id/decide: rejecting a bundled constraint+llm_divergence
   const aliceRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const { designId: aliceDesignId, verdict } = (await aliceRes.json()) as { designId: string; verdict: string };
   assert.equal(verdict, "constraint_violation", "sanity: registration itself must already see the constraint hit");
@@ -2105,7 +2109,7 @@ test("POST /v1/reviews/:id/decide: rejecting a bundled constraint+llm_divergence
   const bobRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's unrelated work", creates: [], touches: ["other.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's unrelated work", creates: [], touches: ["other.ts"], dependsOn: [] }),
   });
   const { designId: bobDesignId } = (await bobRes.json()) as { designId: string };
 
@@ -2177,7 +2181,7 @@ test("PATCH /v1/designs/:id/close: closing a design instead of resolving it also
   const aliceRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
 
@@ -2185,7 +2189,7 @@ test("PATCH /v1/designs/:id/close: closing a design instead of resolving it also
   const bobRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's work", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's work", creates: [], touches: ["b.ts"], dependsOn: [] }),
   });
   const { designId: bobDesignId } = (await bobRes.json()) as { designId: string };
 
@@ -2234,7 +2238,7 @@ test("POST /v1/designs/check: the async semantic-conflict comparator produces no
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
 
   await withBedrockEnv(() =>
@@ -2244,7 +2248,7 @@ test("POST /v1/designs/check: the async semantic-conflict comparator produces no
         await app.request("/v1/designs/check", {
           method: "POST",
           headers: { "content-type": "application/json", ...bearer(admin.token) },
-          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice-2", summary: "alice's second, unrelated design", creates: [], touches: ["b.ts"], dependsOn: [] }),
+          body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice-2", summary: "alice's second, unrelated design", creates: [], touches: ["b.ts"], dependsOn: [] }),
         });
         // No predicate to poll for absence, so give the (mocked, fast)
         // background task a real chance to run before asserting nothing
@@ -2339,7 +2343,7 @@ test("designs.flag(..., 'llm_divergence', ...) persists as status 'flagged', not
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "adds retry logic for the billing client", creates: ["b.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "adds retry logic for the billing client", creates: ["b.ts"], touches: [], dependsOn: [] }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -2372,13 +2376,13 @@ test("POST /v1/designs/check: a file_overlap (tier 1 exact) verdict stays status
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first, unrelated topic entirely", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "first, unrelated topic entirely", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const otherPat = await addProjectMember(app, admin.token, "proj-1"); // same-developer pairs no longer produce a file_overlap verdict at all (2026-08-22); must come after proj-1 is founded above
   const overlapRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "second, also unrelated topic", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "second, also unrelated topic", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const overlapBody = (await overlapRes.json()) as { verdict: string; designId: string };
   assert.equal(overlapBody.verdict, "file_overlap");
@@ -2406,7 +2410,7 @@ test("GET /v1/designs: newest-first, optionally filtered by status/sessionId", a
     const res = await app.request("/v1/designs/check", {
       method: "POST",
       headers: { "content-type": "application/json", ...bearer(admin.token) },
-      body: JSON.stringify({ projectId: "proj-1", sessionId, summary: `design for ${sessionId}`, creates: [], touches, dependsOn: [] }),
+      body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId, summary: `design for ${sessionId}`, creates: [], touches, dependsOn: [] }),
     });
     return (await res.json()) as { designId: string; verdict: string };
   };
@@ -2445,7 +2449,7 @@ test("GET /v1/designs: ?limit= paginates with a nextBefore cursor, walking every
     const res = await app.request("/v1/designs/check", {
       method: "POST",
       headers: { "content-type": "application/json", ...bearer(admin.token) },
-      body: JSON.stringify({ projectId: "proj-1", sessionId, summary: sessionId, creates: [], touches: [`${sessionId}.ts`], dependsOn: [] }),
+      body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId, summary: sessionId, creates: [], touches: [`${sessionId}.ts`], dependsOn: [] }),
     });
     return ((await res.json()) as { designId: string }).designId;
   };
@@ -2493,12 +2497,12 @@ test("GET /v1/designs: ?developerId= filters server-side, so 'mine only' stays c
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "admin's", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "admin's", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "other's", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "other's", creates: [], touches: ["b.ts"], dependsOn: [] }),
   });
 
   const res = await app.request(`/v1/designs?projectId=proj-1&developerId=${admin.developerId}`, { headers: bearer(admin.token) });
@@ -2531,14 +2535,14 @@ test("GET /v1/designs/:id: returns the design plus every groupMembers sibling th
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const first = (await firstRes.json()) as { designId: string; groupId?: string };
 
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
   });
   const second = (await secondRes.json()) as { designId: string };
 
@@ -2561,7 +2565,7 @@ test("GET /v1/designs/:id: 404s for a caller who's a member of some other real p
   const checkRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const { designId } = (await checkRes.json()) as { designId: string };
 
@@ -2572,7 +2576,7 @@ test("GET /v1/designs/:id: 404s for a caller who's a member of some other real p
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-other", sessionId: "s-other", summary: "", creates: ["z.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-other", sessionId: "s-other", summary: "", creates: ["z.ts"], touches: [], dependsOn: [] }),
   });
   const outsiderPat = await addProjectMember(app, admin.token, "proj-other");
 
@@ -2591,7 +2595,7 @@ test("POST /v1/designs/check: with no groupId in the body, the response self-ass
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "x", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "x", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const body = (await res.json()) as { verdict: string; designId: string; groupId?: string };
   assert.equal(body.groupId, body.designId);
@@ -2604,7 +2608,7 @@ test("POST /v1/designs/check: a caller-supplied groupId links a registration in 
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const first = (await firstRes.json()) as { designId: string; groupId?: string };
   assert.equal(first.groupId, first.designId);
@@ -2612,7 +2616,7 @@ test("POST /v1/designs/check: a caller-supplied groupId links a registration in 
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
   });
   const second = (await secondRes.json()) as { verdict: string; designId: string; groupId?: string };
   assert.equal(second.verdict, "clean");
@@ -2627,7 +2631,7 @@ test("POST /v1/designs/check: a caller-supplied groupId links a registration in 
   const conflictRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s3", summary: "conflicting", creates: ["b.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-b", sessionId: "s3", summary: "conflicting", creates: ["b.ts"], touches: [], dependsOn: [] }),
   });
   const conflict = (await conflictRes.json()) as { verdict: string; designId: string; groupId?: string };
   assert.equal(conflict.verdict, "file_overlap");
@@ -2641,14 +2645,14 @@ test("POST /v1/designs/:id/amend: a summary update propagates to a linked siblin
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "repo-A original", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-a", sessionId: "s1", summary: "repo-A original", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const first = (await firstRes.json()) as { designId: string; groupId?: string };
 
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "repo-B original", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-b", sessionId: "s2", summary: "repo-B original", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
   });
   const second = (await secondRes.json()) as { designId: string };
 
@@ -2680,7 +2684,7 @@ test("PATCH /v1/designs/:id/close: closing one design closes its linked sibling 
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const first = (await firstRes.json()) as { designId: string; groupId?: string };
 
@@ -2693,7 +2697,7 @@ test("PATCH /v1/designs/:id/close: closing one design closes its linked sibling 
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: ["b.ts"], touches: [], dependsOn: [], groupId: first.groupId }),
   });
   const second = (await secondRes.json()) as { designId: string };
 
@@ -2713,7 +2717,7 @@ test("GET /v1/designs: items include groupId", async () => {
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "x", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "x", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const { designId } = (await res.json()) as { designId: string };
 
@@ -2733,7 +2737,7 @@ test("POST /v1/designs/check: two linked designs in different projects with over
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: [], touches: ["shared/path.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-a", sessionId: "s1", summary: "repo-A half", creates: [], touches: ["shared/path.ts"], dependsOn: [] }),
   });
   const first = (await firstRes.json()) as { designId: string; groupId?: string; verdict: string };
   assert.equal(first.verdict, "clean");
@@ -2745,7 +2749,7 @@ test("POST /v1/designs/check: two linked designs in different projects with over
     // project, linked via groupId -- if openDesigns or any overlap check
     // ever compared across projects because of the shared groupId, this
     // would come back "file_overlap" instead of "clean".
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: [], touches: ["shared/path.ts"], dependsOn: [], groupId: first.groupId }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-b", sessionId: "s2", summary: "repo-B half", creates: [], touches: ["shared/path.ts"], dependsOn: [], groupId: first.groupId }),
   });
   const second = (await secondRes.json()) as { designId: string; groupId?: string; verdict: string };
   assert.equal(second.verdict, "clean", "grouping must never suppress a real overlap, nor manufacture one across projects");
@@ -2762,7 +2766,7 @@ test("GET /v1/designs/scope-match: no_design, in_scope, out_of_scope, and flagge
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -2783,7 +2787,7 @@ test("GET /v1/designs/scope-match: no_design, in_scope, out_of_scope, and flagge
   const flaggedRegisterRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["protected.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["protected.ts"], dependsOn: [] }),
   });
   const { designId: flaggedId, verdict: flaggedVerdict } = (await flaggedRegisterRes.json()) as { designId: string; verdict: string };
   assert.equal(flaggedVerdict, "constraint_violation");
@@ -2822,14 +2826,14 @@ test("GET /v1/designs/scope-match: out_of_scope with more than one open design i
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "oldest task", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "oldest task", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId: firstId } = (await firstRes.json()) as { designId: string };
 
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "newest task", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "newest task", creates: [], touches: ["b.ts"], dependsOn: [] }),
   });
   const { designId: secondId } = (await secondRes.json()) as { designId: string };
 
@@ -2857,7 +2861,7 @@ test("GET /v1/designs/scope-match: with no ?path=, can only report no_design/fla
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const noPathInScope = await app.request(`/v1/designs/scope-match?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
   const noPathBody = (await noPathInScope.json()) as { state: string; designId?: string };
@@ -2890,12 +2894,12 @@ test("POST /v1/designs/check: a flagged design stays visible to a *third* design
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first", creates: [], touches: ["s1-only.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "first", creates: [], touches: ["s1-only.ts"], dependsOn: [] }),
   });
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "second", creates: [], touches: ["shared.ts", "constrained.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "second", creates: [], touches: ["shared.ts", "constrained.ts"], dependsOn: [] }),
   });
   const secondBody = (await secondRes.json()) as { verdict: string; designId: string };
   assert.equal(secondBody.verdict, "constraint_violation");
@@ -2903,7 +2907,7 @@ test("POST /v1/designs/check: a flagged design stays visible to a *third* design
   const thirdRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(thirdDeveloperPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s3", summary: "third, also overlapping", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s3", summary: "third, also overlapping", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const thirdBody = (await thirdRes.json()) as { verdict: string; conflicts: { conflictingDesignId: string }[] };
   assert.equal(thirdBody.verdict, "file_overlap", "a flagged design must not become invisible to new registrations' structural overlap checks");
@@ -2920,7 +2924,7 @@ test("POST /v1/designs/:id/amend: a clean amendment persists, bumps scopeVersion
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -2953,7 +2957,7 @@ test("POST /v1/designs/:id/amend: a summary-only amendment appends an Update ent
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "placeholder", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "placeholder", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -2978,6 +2982,49 @@ test("POST /v1/designs/:id/amend: a summary-only amendment appends an Update ent
   assert.deepEqual(amended?.touches, ["a.ts"], "amend --summary alone must not touch the existing scope");
 });
 
+// The plan text is the design's architecture ("View original plan text"). An
+// amendment's `plan` adds a dated section after what it already says -- the
+// same never-replace rule the summary follows -- and leaves the overview
+// alone unless a summary was sent too.
+test("POST /v1/designs/:id/amend: a plan update is appended to the plan text as a dated section, never replacing it", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+
+  const registerRes = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      projectId: "proj-1",
+      sessionId: "s1",
+      summary: "retry budget",
+      creates: [],
+      touches: ["a.ts"],
+      dependsOn: [],
+      changes: [{ id: "c1", action: "modify", target: "a.ts", intent: "cap growth" }],
+      rawPlanText: "## Approach\nCap the budget.",
+    }),
+  });
+  const { designId } = (await registerRes.json()) as { designId: string };
+
+  await withBedrockEnv(() =>
+    withMockFetch(
+      (async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ conflict: false, kind: null, reason: "" }) } }] }), { status: 200 })) as typeof fetch,
+      async () => {
+        const amendRes = await app.request(`/v1/designs/${designId}/amend`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ plan: "Per host, not global." }),
+        });
+        assert.equal(amendRes.status, 200, "a plan alone is a valid amendment");
+      },
+    ),
+  );
+
+  const design = ((await (await app.request(`/v1/designs/${designId}`, { headers: bearer(admin.token) })).json()) as { design: { rawPlanExcerpt?: string; summary: string } }).design;
+  assert.match(design.rawPlanExcerpt ?? "", /^## Approach\nCap the budget\.\n\n## Update \(\d{4}-\d{2}-\d{2}\)\n\nPer host, not global\.$/);
+  assert.equal(design.summary, "retry budget", "a plan update does not touch the overview");
+});
+
 test("POST /v1/designs/:id/amend: a groupId-only body joins a group after the fact, and doesn't hit the 400 guard", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
@@ -2985,14 +3032,14 @@ test("POST /v1/designs/:id/amend: a groupId-only body joins a group after the fa
   const anchorRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "anchor", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-a", sessionId: "s1", summary: "anchor", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const anchor = (await anchorRes.json()) as { designId: string; groupId?: string };
 
   const soloRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "was solo", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-b", sessionId: "s2", summary: "was solo", creates: [], touches: ["b.ts"], dependsOn: [] }),
   });
   const solo = (await soloRes.json()) as { designId: string; groupId?: string };
   assert.equal(solo.groupId, solo.designId, "starts as its own group of one");
@@ -3026,14 +3073,14 @@ test("POST /v1/designs/:id/amend: a groupId-only amend never touches conflict de
   const anchorRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "anchor", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-a", sessionId: "s1", summary: "anchor", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const anchor = (await anchorRes.json()) as { designId: string };
 
   const targetRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "target", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-b", sessionId: "s2", summary: "target", creates: [], touches: ["b.ts"], dependsOn: [] }),
   });
   const target = (await targetRes.json()) as { designId: string; verdict: string };
   assert.equal(target.verdict, "clean", "sanity: unrelated projects/paths, nothing to conflict with");
@@ -3060,14 +3107,14 @@ test("POST /v1/designs/:id/amend: a groupId-only body still succeeds against a C
   const anchorRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "anchor", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-a", sessionId: "s1", summary: "anchor", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const anchor = (await anchorRes.json()) as { designId: string };
 
   const targetRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-b", sessionId: "s2", summary: "target", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-b", sessionId: "s2", summary: "target", creates: [], touches: ["b.ts"], dependsOn: [] }),
   });
   const target = (await targetRes.json()) as { designId: string };
 
@@ -3098,7 +3145,7 @@ test("POST /v1/designs/:id/amend: a CLOSED design with a real scope change (not 
   const targetRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-a", sessionId: "s1", summary: "target", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-a", sessionId: "s1", summary: "target", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const target = (await targetRes.json()) as { designId: string };
   await app.request(`/v1/designs/${target.designId}/close`, { method: "PATCH", headers: bearer(admin.token) });
@@ -3122,7 +3169,7 @@ test("POST /v1/designs/:id/amend: neither a scope delta nor a summary is a 400, 
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "x", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "x", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -3155,7 +3202,7 @@ test("POST /v1/designs/:id/amend: a conflicting amendment persists the merged sc
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -3189,12 +3236,12 @@ test("POST /v1/designs/:id/amend: a file_overlap (tier 1 exact) amendment persis
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "unrelated topic", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-other", summary: "unrelated topic", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "also unrelated", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "also unrelated", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -3232,12 +3279,12 @@ test("POST /v1/designs/:id/amend: a rejected amend's proposed scope survives an 
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -3284,7 +3331,7 @@ test("POST /v1/designs/:id/amend: an approved review waives only that specific c
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["x.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["x.ts"], dependsOn: [] }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -3334,13 +3381,13 @@ test("POST /v1/designs/:id/resolve: an approved structural overlap on one path d
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["file1.ts", "file2.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["file1.ts", "file2.ts"], dependsOn: [] }),
   });
 
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["file1.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["file1.ts"], dependsOn: [] }),
   });
   const { verdict: firstVerdict, designId } = (await registerRes.json()) as { verdict: string; designId: string };
   assert.equal(firstVerdict, "file_overlap", "sanity: file1.ts overlap must be caught first");
@@ -3394,13 +3441,13 @@ test("POST /v1/designs/:id/resolve: attributes constraintId even when the design
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
 
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const { verdict, designId } = (await registerRes.json()) as { verdict: string; designId: string };
   assert.equal(verdict, "file_overlap", "sanity check: registration itself must see the overlap, not the constraint, since tier 1 wins");
@@ -3450,7 +3497,7 @@ test("GET /v1/constraints/match: an already-approved constraint stays honored ev
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -3499,12 +3546,12 @@ test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other1", summary: "", creates: [], touches: ["other1.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-other1", summary: "", creates: [], touches: ["other1.ts"], dependsOn: [] }),
   });
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-other2", summary: "", creates: [], touches: ["other2.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-other2", summary: "", creates: [], touches: ["other2.ts"], dependsOn: [] }),
   });
 
   let calls = 0;
@@ -3526,7 +3573,7 @@ test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator
         const registerRes = await app.request("/v1/designs/check", {
           method: "POST",
           headers: { "content-type": "application/json", ...bearer(admin.token) },
-          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-candidate", summary: "", creates: [], touches: ["candidate.ts"], dependsOn: [] }),
+          body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-candidate", summary: "", creates: [], touches: ["candidate.ts"], dependsOn: [] }),
         });
         const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -3571,7 +3618,7 @@ test("DesignRegistry.sweepExpired demoting a design to dormant also demotes its 
   const aliceRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
 
@@ -3579,7 +3626,7 @@ test("DesignRegistry.sweepExpired demoting a design to dormant also demotes its 
   const bobRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's work", creates: [], touches: ["b.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's work", creates: [], touches: ["b.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId: bobDesignId } = (await bobRes.json()) as { designId: string };
 
@@ -3642,7 +3689,7 @@ test("DesignRegistry.sweepExpired demoting one side to dormant leaves the thread
   const aliceRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice", summary: "alice's work", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId: aliceDesignId } = (await aliceRes.json()) as { designId: string };
 
@@ -3650,7 +3697,7 @@ test("DesignRegistry.sweepExpired demoting one side to dormant leaves the thread
   const bobRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-bob", summary: "bob's work", creates: [], touches: ["b.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's work", creates: [], touches: ["b.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId: bobDesignId } = (await bobRes.json()) as { designId: string };
 
@@ -3686,7 +3733,7 @@ test("GET /v1/designs/scope-match: dormant state end-to-end, with summary and do
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "old plan", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "old plan", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
 
@@ -3713,7 +3760,7 @@ test("GET /v1/designs/scope-match: a flagged design takes priority over a dorman
   const dormantRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "old plan", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "old plan", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId: dormantId } = (await dormantRes.json()) as { designId: string };
   designs.sweepExpired(Date.now() + 1000); // -> dormant
@@ -3726,7 +3773,7 @@ test("GET /v1/designs/scope-match: a flagged design takes priority over a dorman
   const flaggedRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "new plan", creates: [], touches: ["protected.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "new plan", creates: [], touches: ["protected.ts"], dependsOn: [] }),
   });
   const { designId: flaggedId, verdict } = (await flaggedRes.json()) as { designId: string; verdict: string };
   assert.equal(verdict, "constraint_violation");
@@ -3764,14 +3811,14 @@ test("GET /v1/designs/scope-match: with more than one flagged design, the one wh
   const olderRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "older", creates: [], touches: ["a-protected.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "older", creates: [], touches: ["a-protected.ts"], dependsOn: [] }),
   });
   const { designId: olderId } = (await olderRes.json()) as { designId: string };
 
   const newerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "newer", creates: [], touches: ["b-protected.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "newer", creates: [], touches: ["b-protected.ts"], dependsOn: [] }),
   });
   const { designId: newerId } = (await newerRes.json()) as { designId: string };
 
@@ -3794,14 +3841,14 @@ test("GET /v1/designs/scope-match: dormant fallback picks the newest dormant des
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "oldest task", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "oldest task", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId: firstId } = (await firstRes.json()) as { designId: string };
 
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "newest task", creates: [], touches: ["b.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "newest task", creates: [], touches: ["b.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId: secondId } = (await secondRes.json()) as { designId: string };
 
@@ -3821,7 +3868,7 @@ test("GET /v1/designs/scope-match: a real in_scope hit bumps the design's lastAc
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const before = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
   const beforeActivity = ((await before.json()) as { items: { lastActivityAt: number }[] }).items[0].lastActivityAt;
@@ -3842,14 +3889,14 @@ test("POST /v1/designs/check: a dormant design is excluded from a third design's
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [], ttlMs: 10 }),
   });
   designs.sweepExpired(Date.now() + 1000);
 
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const secondBody = (await secondRes.json()) as { verdict: string };
   assert.equal(secondBody.verdict, "clean", "a dormant design must not still count as a live conflict");
@@ -3862,7 +3909,7 @@ test("POST /v1/designs/:id/resume: a clean resume reassigns sessionId/developerI
     const registerRes = await app.request("/v1/designs/check", {
       method: "POST",
       headers: { "content-type": "application/json", ...bearer(admin.token) },
-      body: JSON.stringify({ projectId: "proj-1", sessionId: "s-alice", summary: "alice's paused work", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+      body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-alice", summary: "alice's paused work", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
     });
     const { designId } = (await registerRes.json()) as { designId: string };
     const inviteRes = await app.request("/v1/projects/proj-1/invites", {
@@ -3925,7 +3972,7 @@ test("POST /v1/designs/:id/resume: a conflicting resume persists (identity reass
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId } = (await firstRes.json()) as { designId: string };
   designs.sweepExpired(Date.now() + 1000); // -> dormant
@@ -3962,7 +4009,7 @@ test("POST /v1/designs/:id/resume: a file_overlap (tier 1 exact) resume persists
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "unrelated", creates: [], touches: ["shared.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "unrelated", creates: [], touches: ["shared.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId } = (await firstRes.json()) as { designId: string };
   designs.sweepExpired(Date.now() + 1000); // -> dormant
@@ -3970,7 +4017,7 @@ test("POST /v1/designs/:id/resume: a file_overlap (tier 1 exact) resume persists
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "also unrelated", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "also unrelated", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
 
   const resumeRes = await app.request(`/v1/designs/${designId}/resume`, {
@@ -4002,14 +4049,14 @@ test("POST /v1/designs/check: registering a non-overlapping design for the same 
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first task", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "first task", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId: firstId } = (await firstRes.json()) as { designId: string };
 
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "unrelated second task", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "unrelated second task", creates: [], touches: ["b.ts"], dependsOn: [] }),
   });
 
   const notices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
@@ -4028,12 +4075,12 @@ test("POST /v1/designs/check: an overlapping second design does not also fire th
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
 
   const notices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
@@ -4057,13 +4104,13 @@ test("POST /v1/designs/check: a non-overlapping design from a *different* sessio
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId: firstId } = (await firstRes.json()) as { designId: string };
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "", creates: [], touches: ["b.ts"], dependsOn: [] }),
   });
 
   const notices = await app.request("/v1/notices?since=0", { headers: bearer(admin.token) });
@@ -4081,7 +4128,7 @@ test("GET /v1/designs/scope-match: an open design takes precedence over a dorman
   const dormantRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId: dormantId } = (await dormantRes.json()) as { designId: string };
   designs.sweepExpired(Date.now() + 1000); // -> dormant
@@ -4091,7 +4138,7 @@ test("GET /v1/designs/scope-match: an open design takes precedence over a dorman
   const openRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId: openId, verdict } = (await openRes.json()) as { designId: string; verdict: string };
   assert.equal(verdict, "clean");
@@ -4110,7 +4157,7 @@ test("GET /v1/designs/scope-match: dormant state still fires even when path does
   const registerRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [], ttlMs: 10 }),
   });
   const { designId } = (await registerRes.json()) as { designId: string };
   designs.sweepExpired(Date.now() + 1000);
@@ -4136,22 +4183,28 @@ test("POST /v1/designs/check: a near-identical rawPlanText retry for the same se
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
   const planText = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls.";
+  // Plan text only, exactly what the hook's ExitPlanMode sends -- the
+  // server extracts the rest. (This used to send structured fields too, a
+  // shape only `register --from` produces, which is what let a structured
+  // registration take the retry path.)
+  const register = () =>
+    withBedrockEnv(() =>
+      withMockFetch(mockBedrockExtraction({ creates: [], touches: ["src/net/retry.ts"], dependsOn: [], summary: "add retry policy" }), async () =>
+        app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText }),
+        }),
+      ),
+    );
 
-  const first = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
-  });
+  const first = await register();
   const firstBody = (await first.json()) as { designId: string; verdict: string };
   assert.equal(first.status, 200);
   assert.equal(firstBody.verdict, "clean");
 
   // A retry: same plan text, byte-identical -- the easy case.
-  const second = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
-  });
+  const second = await register();
   const secondBody = (await second.json()) as { designId: string; verdict: string };
   assert.equal(second.status, 200);
   assert.equal(secondBody.verdict, "clean", "reregistering in place must not overlap itself");
@@ -4230,6 +4283,95 @@ test("POST /v1/designs/check: a rawPlanText registration under a *different* ses
   assert.equal(secondBody.verdict, "file_overlap", "and correctly conflicts with it, same as any other pair of unrelated open designs");
 });
 
+// No design exists without a plan -- the design doc a reviewer reads. Enforced
+// where a design is created, so no client can skip it; widening an existing
+// design's files still needs no restated plan.
+test("POST /v1/designs/check: a registration without a plan is refused, with what a plan is; amending files needs none", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const register = (extra: Record<string, unknown>) =>
+    app.request("/v1/designs/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "add retry policy", creates: [], touches: ["a.ts"], dependsOn: [], ...extra }),
+    });
+
+  for (const plan of [undefined, "", "   "]) {
+    const res = await register(plan === undefined ? {} : { rawPlanText: plan });
+    assert.equal(res.status, 400, `plan ${JSON.stringify(plan)} must be refused`);
+    const { error } = (await res.json()) as { error: string };
+    assert.match(error, /a design needs a plan/);
+    assert.match(error, /Not a list of files/);
+  }
+
+  const ok = (await (await register({ rawPlanText: "## Approach\nRetry with backoff." })).json()) as { designId: string; verdict: string };
+  assert.equal(ok.verdict, "clean");
+  const amend = await app.request(`/v1/designs/${ok.designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ addTouches: ["b.ts"] }),
+  });
+  assert.equal(amend.status, 200, "widening the files of a design that has a plan needs no plan");
+});
+
+// Found in review: the other half of the same hole. A manual registration
+// carries plan text now, so a later ExitPlanMode in the same session with
+// similar text found it as a "retry" candidate and rewrote its summary, scope
+// and declared changes. Only a design plan mode registered is a candidate.
+test("POST /v1/designs/check: a plan-mode request never rewrites a manual registration with the same plan text", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const planText = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls.";
+
+  const manual = (await (
+    await app.request("/v1/designs/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", rawPlanText: planText, summary: "manual retry work", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
+    })
+  ).json()) as { designId: string };
+
+  const planMode = await withBedrockEnv(() =>
+    withMockFetch(mockBedrockExtraction({ creates: [], touches: ["src/other.ts"], dependsOn: [], summary: "plan-mode work" }), async () =>
+      app.request("/v1/designs/check", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...bearer(admin.token) },
+        body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", rawPlanText: planText }),
+      }),
+    ),
+  );
+  const planModeBody = (await planMode.json()) as { designId: string };
+  assert.notEqual(planModeBody.designId, manual.designId, "a new plan-mode design, not the manual one rewritten");
+  const untouched = designs.get(manual.designId);
+  assert.equal(untouched?.summary, "manual retry work");
+  assert.deepEqual(untouched?.touches, ["src/net/retry.ts"]);
+  assert.equal(untouched?.scopeVersion, 1);
+  assert.equal(designs.get(planModeBody.designId)?.registeredVia, "plan_mode");
+});
+
+// Found 2026-09-29: the dedup only checked for plan text, and `register
+// --from` sends plan text alongside its structured fields -- so a second,
+// similar template in the same session silently rewrote the first design
+// (summary, changes, plan) in place instead of registering a new one.
+test("POST /v1/designs/check: a structured registration that carries plan text never rewrites an earlier design in place", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const plan = "## Approach\nAdd a RetryPolicy class implementing exponential backoff with jitter for outbound HTTP calls.";
+  const register = (summary: string) =>
+    app.request("/v1/designs/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...bearer(admin.token) },
+      body: JSON.stringify({ projectId: "proj-1", sessionId: "s-cli", summary, creates: [], touches: ["src/net/retry.ts"], dependsOn: [], rawPlanText: plan }),
+    });
+
+  const first = (await (await register("task one")).json()) as { designId: string };
+  const second = (await (await register("task two")).json()) as { designId: string };
+  assert.notEqual(second.designId, first.designId, "a new row, not an in-place rewrite");
+  assert.equal(designs.get(first.designId)?.summary, "task one", "the earlier design is left exactly as it was");
+  assert.equal(designs.get(first.designId)?.scopeVersion, 1);
+  assert.equal(designs.get(second.designId)?.rawPlanExcerpt, plan, "and the plan is stored as the new design's plan text");
+});
+
 test("POST /v1/designs/check: a structured (twing design register-style) call with no rawPlanText always creates a new row, even repeated in the same session", async () => {
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
@@ -4237,14 +4379,14 @@ test("POST /v1/designs/check: a structured (twing design register-style) call wi
   const first = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-cli", summary: "task one", creates: ["A"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-cli", summary: "task one", creates: ["A"], touches: [], dependsOn: [] }),
   });
   const firstBody = (await first.json()) as { designId: string };
 
   const second = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-cli", summary: "task one", creates: ["A"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-cli", summary: "task one", creates: ["A"], touches: [], dependsOn: [] }),
   });
   const secondBody = (await second.json()) as { designId: string; verdict: string };
   assert.equal(second.status, 200);
@@ -4261,12 +4403,19 @@ test("POST /v1/designs/check: a reregistered design keeps its justifiedConstrain
   const admin = await bootstrapAdmin(app, dataDir);
   constraints.add("proj-1", "review required for retry.ts", ["src/net/retry.ts"], "constraint", "seeded");
   const planText = "Add a RetryPolicy class to src/net/retry.ts implementing exponential backoff with jitter for outbound HTTP calls.";
+  // Plan text only, as ExitPlanMode sends it -- see the retry test above.
+  const register = () =>
+    withBedrockEnv(() =>
+      withMockFetch(mockBedrockExtraction({ creates: [], touches: ["src/net/retry.ts"], dependsOn: [], summary: "add retry policy" }), async () =>
+        app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(admin.token) },
+          body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText }),
+        }),
+      ),
+    );
 
-  const first = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
-  });
+  const first = await register();
   const firstBody = (await first.json()) as { designId: string; verdict: string };
   assert.equal(firstBody.verdict, "constraint_violation");
 
@@ -4285,11 +4434,7 @@ test("POST /v1/designs/check: a reregistered design keeps its justifiedConstrain
   assert.ok(designs.get(firstBody.designId)?.justifiedConstraintIds.length, "sanity: the approval populated justifiedConstraintIds before the retry");
 
   // Retry: same plan text -- reregisters in place rather than duplicating.
-  const second = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s-plan", rawPlanText: planText, summary: "add retry policy", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
-  });
+  const second = await register();
   const secondBody = (await second.json()) as { designId: string; verdict: string };
   assert.equal(secondBody.designId, firstBody.designId, "same row reregistered");
   assert.equal(secondBody.verdict, "clean", "already-justified constraint must not be re-flagged after a mere retry");
@@ -4321,7 +4466,7 @@ test("POST /v1/designs/check: a structured (non-rawPlanText) request never echoe
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "solo", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "solo", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const body = (await res.json()) as { verdict: string; creates?: string[]; touches?: string[] };
   assert.equal("touches" in body, false);
@@ -4344,14 +4489,14 @@ test("POST /v1/designs/check: a second structured register call registers cleanl
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "first", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "first", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId: firstId } = (await firstRes.json()) as { designId: string };
 
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-2", sessionId: "s2", summary: "second, different project entirely", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-2", sessionId: "s2", summary: "second, different project entirely", creates: [], touches: ["b.ts"], dependsOn: [] }),
   });
   assert.equal(secondRes.status, 200);
   const secondBody = (await secondRes.json()) as { verdict: string; designId?: string };
@@ -4373,12 +4518,12 @@ test("POST /v1/designs/check: two concurrent sessions on different projects neve
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "session-a", summary: "session A's ongoing work", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "session-a", summary: "session A's ongoing work", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const secondRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-2", sessionId: "session-b", summary: "session B's unrelated ongoing work", creates: [], touches: ["b.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-2", sessionId: "session-b", summary: "session B's unrelated ongoing work", creates: [], touches: ["b.ts"], dependsOn: [] }),
   });
   assert.equal((await firstRes.json() as { verdict: string }).verdict, "clean");
   assert.equal((await secondRes.json() as { verdict: string }).verdict, "clean");
@@ -4401,7 +4546,7 @@ test("POST /v1/designs/:id/amend: reassignProjectId moves an open, unencumbered 
   const checkRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "misfiled under the wrong repo", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "misfiled under the wrong repo", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await checkRes.json()) as { designId: string };
 
@@ -4437,7 +4582,7 @@ test("POST /v1/designs/:id/amend: reassignProjectId is refused with 403 when the
   const checkRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "stays put", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "stays put", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await checkRes.json()) as { designId: string };
 
@@ -4459,7 +4604,7 @@ test("POST /v1/designs/:id/amend: reassignProjectId is refused with 409 on a non
   const checkRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "closed already", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "closed already", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await checkRes.json()) as { designId: string };
   await app.request(`/v1/designs/${designId}/close`, { method: "PATCH", headers: bearer(admin.token) });
@@ -4487,7 +4632,7 @@ test("POST /v1/designs/:id/amend: reassignProjectId is refused with 409 once a r
   const checkRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "hits a constraint", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "hits a constraint", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   const { designId, verdict } = (await checkRes.json()) as { designId: string; verdict: string };
   assert.equal(verdict, "constraint_violation");
@@ -4525,7 +4670,7 @@ test("POST /v1/designs/:id/amend: reassignProjectId is refused with 409 once the
   const checkRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "one half of a linked multi-repo plan", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "one half of a linked multi-repo plan", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId } = (await checkRes.json()) as { designId: string };
 
@@ -4534,7 +4679,7 @@ test("POST /v1/designs/:id/amend: reassignProjectId is refused with 409 once the
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-3", sessionId: "s3", summary: "the other half", creates: [], touches: ["b.ts"], dependsOn: [], groupId: designId }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-3", sessionId: "s3", summary: "the other half", creates: [], touches: ["b.ts"], dependsOn: [], groupId: designId }),
   });
   assert.equal(designs.listByGroup(designId).length, 2, "fixture sanity: the two are actually linked");
 
@@ -4563,7 +4708,7 @@ test("POST /v1/designs/:id/amend: reassignProjectId re-checks against the new pr
   const checkRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "clean where it is today", creates: [], touches: ["shared.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "clean where it is today", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const { designId, verdict: registerVerdict } = (await checkRes.json()) as { designId: string; verdict: string };
   assert.equal(registerVerdict, "clean", "fixture sanity: clean under its current project");
@@ -4635,7 +4780,7 @@ test("no_auth mode: role-gated routes (review decide) succeed regardless of \"ro
   const checkRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...dev },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   const { designId, verdict } = (await checkRes.json()) as { designId: string; verdict: string };
   assert.equal(verdict, "constraint_violation");
@@ -4742,7 +4887,7 @@ test("no_auth mode: /v1/designs/check founds the project", async () => {
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...developerHeader("dev@example.com") },
-    body: JSON.stringify({ projectId: "p-design", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "p-design", sessionId: "s1", summary: "", creates: [], touches: ["a.ts"], dependsOn: [] }),
   });
   assert.equal(res.status, 200);
   assert.equal(identities.isProjectFounded("p-design"), true);
@@ -5110,7 +5255,7 @@ test("hook version-mismatch: a mismatched x-twing-hook-version denies with 426 b
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", "x-twing-hook-version": "0.0.1" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN,}),
   });
   assert.equal(res.status, 426);
   const body = (await res.json()) as { error: string; hookVersion: string; serverVersion: string };
@@ -5125,7 +5270,7 @@ test("hook version-mismatch: a matching x-twing-hook-version falls through to th
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", "x-twing-hook-version": "9.9.9" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN,}),
   });
   assert.equal(res.status, 401);
 });
@@ -5141,7 +5286,7 @@ test("hook version-mismatch: no x-twing-hook-version header at all falls through
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN,}),
   });
   assert.equal(res.status, 401);
 });
@@ -5158,7 +5303,7 @@ test("GET /v1/designs: an unauthenticated request succeeds and returns data when
   await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "public demo project's own real work", creates: [], touches: ["src/x.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "public demo project's own real work", creates: [], touches: ["src/x.ts"], dependsOn: [] }),
   });
 
   const res = await app.request("/v1/designs?projectId=proj-1");
@@ -5202,7 +5347,7 @@ test("an unauthenticated POST/PATCH still 401s exactly as before, even with publ
   const postRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: [], dependsOn: [] }),
   });
   assert.equal(postRes.status, 401);
 
@@ -5619,7 +5764,7 @@ async function registerVia(app: ReturnType<typeof createApp>, body: Record<strin
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...developerHeader("dev@test") },
-    body: JSON.stringify({ projectId: "proj-inv", dependsOn: [], ...body }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-inv", dependsOn: [], ...body }),
   });
   return (await res.json()) as { designId?: string; error?: string };
 }
@@ -5851,7 +5996,7 @@ test("GET /v1/designs/scope-match: a peer flag carries the counterpart design an
     const res = await app.request("/v1/designs/check", {
       method: "POST",
       headers: { "content-type": "application/json", ...bearer(admin.token) },
-      body: JSON.stringify({ projectId: "proj-1", sessionId, summary, creates: [], touches, dependsOn: [] }),
+      body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId, summary, creates: [], touches, dependsOn: [] }),
     });
     return (await res.json()) as { designId: string };
   };
@@ -6269,7 +6414,7 @@ test("POST /v1/designs/check: echoes the design's review URL so register can pri
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { ...bearer(admin.token), "content-type": "application/json" },
-    body: JSON.stringify({ projectId: "p1", sessionId: "s1", summary: "Add a retry budget", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "p1", sessionId: "s1", summary: "Add a retry budget", creates: [], touches: ["src/net/retry.ts"], dependsOn: [] }),
   });
   const body = (await res.json()) as { verdict: string; designId: string; reviewUrl?: string };
   assert.equal(body.verdict, "clean");
@@ -6283,7 +6428,7 @@ test("POST /v1/designs/check: omits reviewUrl entirely on a coordinator with no 
   const res = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { ...bearer(admin.token), "content-type": "application/json" },
-    body: JSON.stringify({ projectId: "p1", sessionId: "s1", summary: "Add a retry budget", creates: [], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "p1", sessionId: "s1", summary: "Add a retry budget", creates: [], touches: [], dependsOn: [] }),
   });
   const body = (await res.json()) as Record<string, unknown>;
   assert.ok(!("reviewUrl" in body), "no monitor means no link, never a guess");

@@ -319,7 +319,8 @@ func warnIfTouchesMissing(repoRoot, projectID string, touches []string) string {
 			"about a different repo, move it: twing design amend --id <id> --reassign-project (run from the "+
 			"correct repo) -- or close and re-register if that's refused (already has reviews/threads attached). "+
 			"If this plan genuinely spans multiple repos, register a separate design in each one with that repo's "+
-			"own file list, then link them: twing design register --touches <paths> --group <groupId>.",
+			"own file list, then link them: twing design register --summary \"<goal>\" --plan \"<how you'll build that repo's part>\" "+
+			"--touches <paths> --group <groupId>.",
 		repoRoot, projectID,
 	)
 }
@@ -1345,6 +1346,12 @@ func handleExitPlanModeMultiCandidate(payload hookPayload) {
 				DependsOn: extracted.DependsOn,
 				Summary:   extracted.Summary,
 				GroupID:   groupID,
+				// The plan itself, as each repo's design's plan text -- what
+				// "View original plan text" shows. Without it a multi-repo
+				// plan's designs had no architecture text at all. Sent beside
+				// the structured fields, so the server neither re-extracts
+				// nor treats this as an in-place plan retry (2026-09-29).
+				RawPlanText: input.Plan,
 			}
 			result, failReason := postDesignCheck(cfg.ServerURL, cfg.AuthToken, developerID, reqBody)
 			if failReason != "" {
@@ -1569,44 +1576,85 @@ func templateTarget(relPath string) string {
 // an extra step gets done carelessly or not at all. One command, no file
 // left behind, and the shape is visible in the message so it cannot be
 // guessed wrong.
+//
+// 2026-09-29: the template asks for a real plan, and the message explains
+// what one is. This is the most travelled way a design gets registered --
+// OpenCode has no plan mode and Codex's fires no hook, so for them it is the
+// *only* way -- and the reader is usually a model working in a repository
+// that has nothing to do with twing. So it says who reads the plan, what goes
+// in it and what does not, and the one YAML rule that breaks a multi-line
+// plan; it offers plan mode only where plan mode exists. The CLI refuses a
+// template with no plan or with a `<...>` line left in it, with the same
+// guidance (PLAN_GUIDANCE in @twing/core) -- keep the two in step.
 func noDesignReason(relPath string) string {
+	actions := []denyAction{}
+	if harnessHasPlanMode() {
+		actions = append(actions, denyAction{
+			Label: "Let plan mode do it for you",
+			Note:  "Finishing a plan registers this automatically. Nothing else to run.",
+		})
+	}
+	declareLabel := "Declare it here"
+	if len(actions) > 0 {
+		declareLabel = "Or declare it here"
+	}
+	actions = append(actions,
+		denyAction{
+			Label: declareLabel,
+			Block: []string{
+				"twing design register --from - <<'YAML'",
+				"goal: \"<one sentence: what changes for the user or the system>\"",
+				"plan: |",
+				"  ## Context",
+				"  <the problem, and what exists today>",
+				"  ## Approach",
+				"  <how you will build it, and the key decisions and why>",
+				"  ## Risks and checks",
+				"  <what could break, and how you will verify it>",
+				"changes:",
+				"  # one item per file you expect to change; add as many as needed",
+				"  - id: c1",
+				"    action: modify        # add|modify|rewrite|remove|rename|move",
+				"    kind: code            # code|api|schema|test|docs|config",
+				"    target: " + templateTarget(relPath),
+				"    intent: \"<what this change achieves>\"",
+				"YAML",
+			},
+			Note: "Replace every <...>. A teammate reviews this in the twing dashboard, " +
+				"often before your code exists. The goal is the one-line headline. The " +
+				"plan is the design doc they read: a few short markdown sections on why " +
+				"and how, written for someone who has not seen this code -- not a list " +
+				"of files. The changes list the files, one item per file; the first is " +
+				"the file you just tried to edit. Keep every plan line indented two " +
+				"spaces under `plan: |`, or the YAML breaks.",
+		},
+		denyAction{
+			Label:   "Or join what you already have open",
+			Command: "twing design list --mine --status open",
+			Note: "If one of these is the same effort as what you're about to do, link " +
+				"this into it instead of starting a new one: twing design amend --id <id> " +
+				"--group <id> (or --touches/--summary to just widen it).",
+		},
+	)
 	return denyMessage(
 		"Before your first edit, twing needs to know what you're building.",
 		"Other people -- and other AI sessions -- may be working in this same code "+
 			"right now. Saying what you're doing lets twing warn you before two of "+
 			"you collide.",
 		nil,
-		[]denyAction{
-			{
-				Label: "Let plan mode do it for you",
-				Note:  "Finishing a plan registers this automatically. Nothing else to run.",
-			},
-			{
-				Label: "Or declare it here",
-				Block: []string{
-					"twing design register --from - <<'YAML'",
-					"goal: \"<one sentence: what changes for the user or the system>\"",
-					"changes:",
-					"  - id: c1",
-					"    action: modify        # add|modify|rewrite|remove|rename|move",
-					"    kind: code            # code|api|schema|test|docs|config",
-					"    target: " + templateTarget(relPath),
-					"    intent: \"<what this change achieves>\"",
-					"YAML",
-				},
-				Note: "Fill in goal, action and intent -- the target is the file you just " +
-					"tried to edit. The goal is what teammates see when your work overlaps " +
-					"theirs, so describe the real objective rather than a placeholder.",
-			},
-			{
-				Label:   "Or join what you already have open",
-				Command: "twing design list --mine --status open",
-				Note: "If one of these is the same effort as what you're about to do, link " +
-					"this into it instead of starting a new one: twing design amend --id <id> " +
-					"--group <id> (or --touches/--summary to just widen it).",
-			},
-		},
+		actions,
 	)
+}
+
+// harnessHasPlanMode reports whether finishing a plan registers a design in
+// this harness -- true only for Claude Code, whose ExitPlanMode the hook
+// sees. OpenCode has no plan mode and Codex's `update_plan` fires no hook,
+// so offering either "let plan mode do it" would send the agent after a
+// step that never registers anything. TWING_HARNESS is set by twing's
+// OpenCode adapter and Codex launcher; unset means Claude Code.
+func harnessHasPlanMode() bool {
+	harness := strings.ToLower(strings.TrimSpace(os.Getenv("TWING_HARNESS")))
+	return harness == "" || harness == "claude" || harness == "claude-code"
 }
 
 func overlapReason(result designCheckResponse) string {

@@ -203,12 +203,27 @@ use the structured form supplied in a deny message, or:
 ```sh
 twing design register --from - <<'YAML'
 goal: Add retry handling
+plan: |
+  ## Context
+  Outbound calls fail outright on a transient 503.
+
+  ## Approach
+  Exponential backoff with jitter, capped at 30s.
+
+  ## Risks and checks
+  Retry storms: a burst test checks the spread.
 changes:
-  - action: modify
+  - id: c1
+    action: modify
     target: src/net/retry.ts
     intent: Retry transient failures.
 YAML
 ```
+
+`goal:` is the design's one-line headline and `plan:` is the design doc a
+reviewer reads -- why and how, not a list of files (those are `changes:`, one
+item per file). Both are required to register; keep every plan line indented
+under `plan: |`.
 
 ## For agents: handling a design-gate deny
 

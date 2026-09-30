@@ -15,7 +15,7 @@ import { inArray } from "drizzle-orm";
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import type { Claim, CallEdge, DesignChange, DesignStatement, DesignConstraintType, Finding, PendingReview, ClaudeSettings } from "@twing/core";
-import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS, buildDesignReviewUrl } from "@twing/core";
+import { DEFAULT_DESIGN_ACTIVE_TTL_MS, MAX_DESIGN_ACTIVE_TTL_MS, MIN_DESIGN_ACTIVE_TTL_MS, PLAN_GUIDANCE, buildDesignReviewUrl } from "@twing/core";
 import { computeProjectIdForGithubRepo, renderManifestWithCoordinator, bootstrapHookScript, mergeBootstrapHookEntries } from "@twing/core";
 import { type Db, createDb } from "./db/client.js";
 import { projectRecords } from "./db/schema.js";
@@ -28,6 +28,7 @@ import {
   pathInDesignScope,
   mergeDesignScope,
   appendSummaryUpdate,
+  appendPlanUpdate,
   jaccard,
   PLAN_RETRY_SIMILARITY_THRESHOLD,
   structuralOverlaps,
@@ -125,6 +126,11 @@ interface AmendRequestBody {
    * keeps the declaration current whether or not the caller knows about
    * templates. */
   changes?: DesignChange[];
+  /** Architecture text to add to the design's plan (2026-09-29), from an
+   * `amend --from` template's `plan:`. Appended as a dated section
+   * (`appendPlanUpdate`), never a replacement. Not propagated to linked
+   * siblings: a plan is written for one repo's part of the work. */
+  plan?: string;
   /** §17 design linking (2026-08): join (or move to) a different group
    * after registration -- see DesignRegistry.amend's `groupId` param doc
    * comment for the full reasoning. */
@@ -2017,8 +2023,16 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!authz.ok) return c.json({ error: authz.error }, authz.status);
 
     const hasStructured = Array.isArray(body.creates) || Array.isArray(body.touches) || Array.isArray(body.dependsOn) || typeof body.summary === "string";
-    if (!body.rawPlanText && !hasStructured) {
-      return c.json({ error: "expected rawPlanText, or structured creates/touches/dependsOn/summary" }, 400);
+    // No design exists without a plan (2026-09-29). Enforced here, where a
+    // design is created, rather than trusted to each client: the plan is what
+    // a reviewer reads, and a design that is only a file list gives them
+    // nothing. Every current caller sends one -- the CLI requires `plan:` or
+    // `--plan`, and the hook sends the ExitPlanMode plan on both its
+    // single-repo and multi-repo paths. Amending stays optional
+    // (`/v1/designs/:id/amend`): a design that already has a plan can widen
+    // its files without restating it.
+    if (typeof body.rawPlanText !== "string" || body.rawPlanText.trim().length === 0) {
+      return c.json({ error: `a design needs a plan -- send it as rawPlanText, alongside the files it changes.\n\n${PLAN_GUIDANCE}` }, 400);
     }
 
     let creates = body.creates ?? [];
@@ -2059,9 +2073,17 @@ export function createApp(options: CreateAppOptions = {}) {
     // the first one's content the moment the second's ExitPlanMode fires.
     // openPlanModeDesignForSession narrows to a *candidate* by session id;
     // the Jaccard gate below decides whether it's actually the same plan.
+    //
+    // `!hasStructured` is what "scoped to exactly the rawPlanText path"
+    // above has to mean in code (fixed 2026-09-29). Checking only for
+    // `rawPlanText` let a structured `register --from` in -- the CLI sent its
+    // YAML as plan text -- so a second, similar template in the same session
+    // silently rewrote the first design's summary, changes and plan in place.
+    // A template's `plan:` now travels as plan text on purpose, which would
+    // only have made that likelier.
     let design: DesignStatement | undefined;
     let reregistered = false;
-    if (body.rawPlanText) {
+    if (body.rawPlanText && !hasStructured) {
       const candidate = designs.openPlanModeDesignForSession(body.projectId, body.sessionId);
       if (candidate?.rawPlanExcerpt) {
         const similarity = jaccard(candidate.rawPlanExcerpt, body.rawPlanText);
@@ -2109,6 +2131,10 @@ export function createApp(options: CreateAppOptions = {}) {
       developerId: identity.developerId,
       sessionId: body.sessionId,
       agentLabel: body.agentLabel,
+      // Which path made it -- the only thing that lets a later plan-mode
+      // retry tell its own design from a manual one (see
+      // `openPlanModeDesignForSession`). Same test as the retry path above.
+      registeredVia: hasStructured ? "template" : "plan_mode",
       summary,
       creates,
       touches,
@@ -2260,7 +2286,10 @@ export function createApp(options: CreateAppOptions = {}) {
     // `touches` against its own local `repoRoot` and warn on a likely
     // wrong-project registration -- see hook/design_gate.go's
     // `handleExitPlanModeSingle`.
-    const extractedFields = body.rawPlanText ? { creates: design.creates, touches: design.touches } : {};
+    // Keyed on "extraction ran" (plan text and nothing structured), not on
+    // plan text alone: every registration carries a plan now, including a
+    // structured one that supplied its own files.
+    const extractedFields = body.rawPlanText && !hasStructured ? { creates: design.creates, touches: design.touches } : {};
     // Design review (2026-09): the design's review page, echoed back on every
     // branch so `twing design register` can print the commit trailer at the
     // one moment the agent is most attentive -- the design has just come into
@@ -2544,7 +2573,10 @@ export function createApp(options: CreateAppOptions = {}) {
     // whole purpose is letting a *closed* design join a group. Every other
     // amend shape (any actual scope/summary change) falls through
     // unchanged to the existing open-only path.
-    const hasScopeChange = Boolean((body?.addTouches?.length ?? 0) > 0 || (body?.addCreates?.length ?? 0) > 0 || (body?.addDependsOn?.length ?? 0) > 0 || body?.summary !== undefined);
+    const planUpdate = typeof body?.plan === "string" && body.plan.trim().length > 0 ? body.plan.trim() : undefined;
+    const hasScopeChange = Boolean(
+      (body?.addTouches?.length ?? 0) > 0 || (body?.addCreates?.length ?? 0) > 0 || (body?.addDependsOn?.length ?? 0) > 0 || body?.summary !== undefined || planUpdate !== undefined,
+    );
     if (body?.groupId !== undefined && !hasScopeChange) {
       const relinked = designs.relink(id, body.groupId);
       if (!relinked) return c.json({ error: "no such design" }, 404);
@@ -2574,6 +2606,8 @@ export function createApp(options: CreateAppOptions = {}) {
       // this design's merged one. See DesignRegistry.amend's `summaryUpdate`
       // param doc comment.
       summaryUpdate: body?.summary,
+      // Same once-computed rule as `summary` above.
+      rawPlanExcerpt: planUpdate !== undefined ? appendPlanUpdate(design.rawPlanExcerpt, planUpdate) : undefined,
       groupId: body?.groupId,
       // Keeps the structured declaration in step with the scope this amend
       // merges (2026-09-15). `mergeChanges` preserves every already-declared
@@ -2588,8 +2622,8 @@ export function createApp(options: CreateAppOptions = {}) {
         summary: body?.summary ?? design.summary,
       }),
     };
-    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.groupId === undefined) {
-      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/groupId" }, 400);
+    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.rawPlanExcerpt === undefined && delta.groupId === undefined) {
+      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/plan/groupId" }, 400);
     }
 
     const { outcome, open } = checkAmendedScope(design, delta);

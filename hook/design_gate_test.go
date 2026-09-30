@@ -1070,6 +1070,7 @@ func TestHandleExitPlanMode_MultiCandidate_PlanTouchesOnlyOneCandidate_Registers
 func TestHandleExitPlanMode_MultiCandidate_PlanSpansBothCandidates_RegistersInBoth(t *testing.T) {
 	var checkedProjects []string
 	var checkedGroupIDs []string
+	var checkedPlans []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		switch r.URL.Path {
@@ -1080,6 +1081,7 @@ func TestHandleExitPlanMode_MultiCandidate_PlanSpansBothCandidates_RegistersInBo
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			checkedProjects = append(checkedProjects, body.ProjectID)
 			checkedGroupIDs = append(checkedGroupIDs, body.GroupID)
+			checkedPlans = append(checkedPlans, body.RawPlanText)
 			_, _ = w.Write([]byte(`{"verdict":"clean","designId":"d1"}`))
 		}
 	}))
@@ -1101,6 +1103,13 @@ func TestHandleExitPlanMode_MultiCandidate_PlanSpansBothCandidates_RegistersInBo
 	// link automatically with no extra agent action.
 	if len(checkedGroupIDs) != 2 || checkedGroupIDs[0] == "" || checkedGroupIDs[0] != checkedGroupIDs[1] {
 		t.Errorf("checked groupIds = %v, want two equal non-empty values", checkedGroupIDs)
+	}
+	// Each repo's design keeps the plan itself as its plan text -- the
+	// architecture a reviewer opens under "View original plan text".
+	for i, plan := range checkedPlans {
+		if !strings.Contains(plan, "do the thing") {
+			t.Errorf("registration %d carried plan text %q, want the plan", i, plan)
+		}
 	}
 }
 
@@ -1815,6 +1824,17 @@ func TestNoDesignReason_OffersAStructuredTemplate(t *testing.T) {
 	for _, want := range []string{
 		"design register --from - <<'YAML'",
 		"goal:",
+		// The architecture, which is what "View original plan text" shows --
+		// not the file list, which has its own view. A skeleton rather than a
+		// one-line prompt, so the shape is visible to a model that has never
+		// seen twing.
+		"plan: |",
+		"  ## Context",
+		"  ## Approach",
+		"  ## Risks and checks",
+		"not a list",
+		"indented two",
+		"one item per file",
 		"changes:",
 		"action: modify",
 		"intent:",
@@ -1822,6 +1842,21 @@ func TestNoDesignReason_OffersAStructuredTemplate(t *testing.T) {
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("deny should hand back a fillable template, missing %q in:\n%s", want, msg)
+		}
+	}
+}
+
+// OpenCode has no plan mode and Codex's fires no hook: offering "let plan
+// mode do it" there sends the agent after a step that never registers.
+func TestNoDesignReason_OffersPlanModeOnlyWhereItRegisters(t *testing.T) {
+	for harness, want := range map[string]bool{"": true, "claude": true, "opencode": false, "codex": false} {
+		t.Setenv("TWING_HARNESS", harness)
+		msg := noDesignReason("src/billing/invoice.py")
+		if got := strings.Contains(msg, "plan mode"); got != want {
+			t.Errorf("TWING_HARNESS=%q: offers plan mode = %v, want %v", harness, got, want)
+		}
+		if !strings.Contains(msg, "design register --from - <<'YAML'") {
+			t.Errorf("TWING_HARNESS=%q: the template must always be offered", harness)
 		}
 	}
 }

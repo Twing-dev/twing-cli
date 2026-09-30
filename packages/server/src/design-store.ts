@@ -72,6 +72,7 @@ interface DesignRow {
   dependsOn: string;
   changes: string | null;
   rawPlanExcerpt: string | null;
+  registeredVia: string | null;
   ttlMs: number;
   scopeVersion: number;
   lastActivityAt: number;
@@ -104,6 +105,7 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     // nothing").
     changes: row.changes ? JSON.parse(row.changes) : undefined,
     rawPlanExcerpt: row.rawPlanExcerpt ?? undefined,
+    ...(row.registeredVia === "plan_mode" || row.registeredVia === "template" ? { registeredVia: row.registeredVia } : {}),
     ttlMs: row.ttlMs,
     scopeVersion: row.scopeVersion,
     lastActivityAt: row.lastActivityAt,
@@ -233,6 +235,7 @@ export class DesignRegistry {
         dependsOn: JSON.stringify(design.dependsOn),
         changes: design.changes ? JSON.stringify(design.changes) : null,
         rawPlanExcerpt: design.rawPlanExcerpt ?? null,
+        registeredVia: design.registeredVia ?? null,
         ttlMs: design.ttlMs,
         scopeVersion: design.scopeVersion,
         lastActivityAt: design.lastActivityAt,
@@ -397,6 +400,11 @@ export class DesignRegistry {
        * gets this *same raw text* appended onto *its own* existing summary
        * independently, via `appendSummaryUpdate`, not a shared copy. */
       summaryUpdate?: string;
+      /** The design's full plan text after this amend, already appended by
+       * the caller (app.ts's amend route, via `appendPlanUpdate`) -- a plain
+       * assignment here, like `summary`. Never fanned out to linked
+       * siblings: a plan is written for one repo's part of the work. */
+      rawPlanExcerpt?: string;
       /** §17 design linking (2026-08): join (or move to) a different
        * group after registration -- `groupId` was previously only ever
        * settable at `register()` time. Same no-existence-check trust
@@ -445,6 +453,7 @@ export class DesignRegistry {
         // calling here, so this is a plain assignment, not a merge decision
         // made at this layer.
         ...(delta.summary !== undefined ? { summary: delta.summary } : {}),
+        ...(delta.rawPlanExcerpt !== undefined ? { rawPlanExcerpt: delta.rawPlanExcerpt } : {}),
         ...(delta.groupId !== undefined ? { groupId: delta.groupId } : {}),
         scopeVersion,
         lastActivityAt: Date.now(), // §17 design lifecycle: amending is itself real activity
@@ -747,6 +756,12 @@ export class DesignRegistry {
           eq(designsTable.sessionId, sessionId),
           sql`${designsTable.status} IN ('open', 'flagged')`,
           sql`${designsTable.rawPlanExcerpt} IS NOT NULL`,
+          // Only a design plan mode itself registered (2026-09-29). Plan text
+          // used to be the signal, but every design carries one now -- so a
+          // manual registration would otherwise be a candidate, and a later
+          // ExitPlanMode with similar text would rewrite its summary, scope
+          // and declared changes in place. Found in review.
+          eq(designsTable.registeredVia, "plan_mode"),
         ),
       )
       .orderBy(sql`${designsTable.createdAt} DESC`)

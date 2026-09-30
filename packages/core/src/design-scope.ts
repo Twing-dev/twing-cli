@@ -66,6 +66,13 @@ export interface DesignTemplate {
    * design's `summary`. */
   goal: string;
   changes: DesignChange[];
+  /** Optional: the architecture -- the approach, key decisions, edge cases,
+   * in prose or markdown. Becomes the plan text twing-monitor shows under
+   * "View original plan text". Deliberately separate from `changes`: the
+   * files a design touches already have their own view, and a plan that is
+   * a list of paths tells a reviewer nothing they can't already see.
+   * Absent -- not "" -- when the template says nothing. */
+  plan?: string;
 }
 
 /** A single problem found in a template. `changeId` is absent for problems
@@ -165,7 +172,10 @@ export function parseDesignTemplate(yamlText: string): DesignTemplate {
     };
   });
 
-  return { goal: asTrimmedString(document.goal), changes };
+  // Trimmed at the ends only: a plan is multi-line prose or markdown, and its
+  // inner line breaks and indentation are the formatting.
+  const plan = typeof document.plan === "string" ? document.plan.trim() : "";
+  return { goal: asTrimmedString(document.goal), changes, ...(plan ? { plan } : {}) };
 }
 
 /**
@@ -187,6 +197,72 @@ export interface ValidateOptions {
    * silently overwrite what is already there. Defaults to true, so the
    * stricter behaviour is what a caller gets by not thinking about it. */
   requireGoal?: boolean;
+  /** Whether a `plan:` is required. Same split and same default as
+   * `requireGoal`: a new design has to say how it will be built, while an
+   * amendment may or may not change the approach. */
+  requirePlan?: boolean;
+}
+
+/**
+ * What a design's plan is and how to write one -- shown wherever an agent
+ * is asked for a plan and has not given a usable one (2026-09-29).
+ *
+ * Written for a model that has never heard of twing, working in a repository
+ * that has nothing to do with it: that is who most often reads it, because
+ * the most travelled way to register a design is the edit-deny template, in
+ * every harness (OpenCode has no plan mode; Codex's fires no hook). So it
+ * says who reads the plan, what goes in it, what does *not*, and the one
+ * YAML rule that breaks a multi-line plan. The Go hook's deny message
+ * (`noDesignReason`) carries the same skeleton; keep the two in step.
+ */
+export const PLAN_GUIDANCE = [
+  "The plan is the design doc a teammate reads in the twing dashboard -- often",
+  "before your code exists -- to understand what you are building and how.",
+  "Write a few short markdown sections: why the change is needed, how you will",
+  "build it (steps, key decisions and why, alternatives you ruled out), and",
+  "what could go wrong. Not a list of files: those go under `changes:`, one",
+  "item per file. In the YAML template, indent every plan line two spaces",
+  "under `plan: |`, including blank-line-separated sections:",
+  "",
+  "  plan: |",
+  "    ## Context",
+  "    <the problem, and what exists today>",
+  "    ## Approach",
+  "    <how you will build it, and the key decisions>",
+  "    ## Risks and checks",
+  "    <what could break, and how you will verify it>",
+].join("\n");
+
+/** A line that is still one of the template's `<...>` prompts. */
+function isPlaceholderLine(line: string): boolean {
+  return /^<[^<>]*>$/.test(line.trim());
+}
+
+/**
+ * Why a template is not valid YAML, or `undefined` when it is.
+ *
+ * `parseDesignTemplate` deliberately never throws -- it returns an empty
+ * template, and `validateTemplate` then reports "missing goal / no changes /
+ * missing plan". For a document that *has* all three but does not parse,
+ * that is actively misleading: the author goes looking for fields they
+ * already wrote. The commonest cause, found by feeding the gate's own
+ * template through the way a model fills it in, is a markdown plan pasted at
+ * column 0 under `plan: |` -- a `## heading` there is a YAML comment and the
+ * next line breaks the document. So the message names the line and that
+ * rule.
+ */
+export function templateSyntaxError(yamlText: string): string | undefined {
+  try {
+    parseYaml(yamlText);
+    return undefined;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    return (
+      `not valid YAML (${detail}). Most often: a line of the plan is not indented under \`plan: |\` -- every plan line, ` +
+      "including `## headings` and lines after a blank line, needs the same two leading spaces:\n\n" +
+      "  plan: |\n    ## Context\n    <the problem, and what exists today>\n\n    ## Approach\n    <how you will build it>"
+    );
+  }
 }
 
 export function validateTemplate(template: DesignTemplate, options: ValidateOptions = {}): TemplateProblem[] {
@@ -194,9 +270,24 @@ export function validateTemplate(template: DesignTemplate, options: ValidateOpti
 
   if ((options.requireGoal ?? true) && template.goal.length === 0) {
     problems.push({ message: 'missing `goal:` -- one sentence describing what this achieves' });
+  } else if (isPlaceholderLine(template.goal)) {
+    // The deny template's own prompt, left in: registered, it would be the
+    // headline every reviewer and overlapping session sees.
+    problems.push({ message: "`goal:` is still the template's <...> prompt -- replace it with one real sentence" });
   }
   if (template.changes.length === 0) {
     problems.push({ message: "no `changes:` declared -- a template with no changes says nothing" });
+  }
+  // A new design has to say how it will be built -- the plan is what a
+  // reviewer reads (see PLAN_GUIDANCE). And the gate's deny hands back a
+  // plan made of `<...>` prompts: registered as-is, a prompt would become
+  // the text a reviewer opens, so any line still holding one is refused.
+  // Both messages carry the guidance, because the reader is usually a model
+  // that has never seen twing before.
+  if ((options.requirePlan ?? true) && template.plan === undefined) {
+    problems.push({ message: `missing \`plan:\` -- say how you will build this.\n\n${PLAN_GUIDANCE}` });
+  } else if (template.plan !== undefined && template.plan.split("\n").some(isPlaceholderLine)) {
+    problems.push({ message: `\`plan:\` still has placeholder lines (<...>) -- replace each with your own text.\n\n${PLAN_GUIDANCE}` });
   }
 
   const seenIds = new Set<string>();
@@ -229,9 +320,13 @@ export function validateTemplate(template: DesignTemplate, options: ValidateOpti
 
     if (change.target.length === 0) {
       problems.push({ changeId: at, message: "missing `target:` -- a path, or path::Symbol.method" });
+    } else if (isPlaceholderLine(change.target)) {
+      problems.push({ changeId: at, message: "`target:` is still a <...> prompt -- the path of a file you will change" });
     }
     if (change.intent.length === 0) {
       problems.push({ changeId: at, message: "missing `intent:` -- one sentence on what this achieves" });
+    } else if (isPlaceholderLine(change.intent)) {
+      problems.push({ changeId: at, message: "`intent:` is still the template's <...> prompt -- say what this change achieves" });
     }
 
     // `from` is required by exactly the two actions that claim behaviour did

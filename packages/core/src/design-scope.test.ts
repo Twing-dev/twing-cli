@@ -89,6 +89,34 @@ changes:
   });
 });
 
+test("parseDesignTemplate keeps a multi-line plan's formatting, and omits an absent one", () => {
+  const t = parseDesignTemplate(`
+goal: g
+plan: |
+  ## Approach
+  1. Cap the budget.
+     - per host
+changes: []
+`);
+  assert.equal(t.plan, "## Approach\n1. Cap the budget.\n   - per host");
+  assert.ok(!("plan" in parseDesignTemplate("goal: g\nchanges: []\n")), "absent, not an empty string");
+});
+
+test("validateTemplate refuses a plan that is still the deny template's placeholder", () => {
+  const t = parseDesignTemplate(`
+goal: g
+plan: |
+  <approach, key decisions, edge cases -- not a file list>
+changes:
+  - id: c1
+    action: modify
+    target: a.ts
+    intent: i
+`);
+  assert.ok(validateTemplate(t).some((p) => /plan.*placeholder/.test(p.message)));
+  assert.deepEqual(validateTemplate({ ...t, plan: "Cap the budget <per host>." }), [], "angle brackets inside real prose are fine");
+});
+
 test("parseDesignTemplate keeps `from` when present and omits it otherwise", () => {
   const t = parseDesignTemplate(`
 goal: g
@@ -131,42 +159,42 @@ changes:
 // ---------------------------------------------------------------------------
 
 test("validateTemplate accepts a well-formed template", () => {
-  assert.deepEqual(validateTemplate({ goal: "g", changes: [change()] }), []);
+  assert.deepEqual(validateTemplate({ goal: "g", plan: "p", changes: [change()] }), []);
 });
 
 test("validateTemplate flags a missing goal", () => {
-  const problems = validateTemplate({ goal: "", changes: [change()] });
+  const problems = validateTemplate({ goal: "", plan: "p", changes: [change()] });
   assert.equal(problems.length, 1);
   assert.match(problems[0].message, /goal/);
 });
 
 test("validateTemplate flags an empty changes list", () => {
-  const problems = validateTemplate({ goal: "g", changes: [] });
+  const problems = validateTemplate({ goal: "g", plan: "p", changes: [] });
   assert.match(problems[0].message, /no `changes:`/);
 });
 
 test("validateTemplate rejects an unknown action and lists the valid ones", () => {
-  const problems = validateTemplate({ goal: "g", changes: [change({ action: "refactor" as never })] });
+  const problems = validateTemplate({ goal: "g", plan: "p", changes: [change({ action: "refactor" as never })] });
   assert.equal(problems.length, 1);
   assert.match(problems[0].message, /unknown action "refactor"/);
   for (const action of DESIGN_CHANGE_ACTIONS) assert.match(problems[0].message, new RegExp(action));
 });
 
 test("validateTemplate flags duplicate ids", () => {
-  const problems = validateTemplate({ goal: "g", changes: [change({ id: "c1" }), change({ id: "c1" })] });
+  const problems = validateTemplate({ goal: "g", plan: "p", changes: [change({ id: "c1" }), change({ id: "c1" })] });
   assert.equal(problems.filter((p) => /duplicate id/.test(p.message)).length, 1);
 });
 
 test("validateTemplate requires `from` on rename and on move", () => {
   for (const action of ["rename", "move"] as const) {
-    const problems = validateTemplate({ goal: "g", changes: [change({ action })] });
+    const problems = validateTemplate({ goal: "g", plan: "p", changes: [change({ action })] });
     assert.equal(problems.length, 1, `${action} should need from`);
     assert.match(problems[0].message, /needs `from:`/);
   }
 });
 
 test("validateTemplate rejects `from` on an action that isn't rename/move", () => {
-  const problems = validateTemplate({ goal: "g", changes: [change({ action: "modify", from: "Old.name" })] });
+  const problems = validateTemplate({ goal: "g", plan: "p", changes: [change({ action: "modify", from: "Old.name" })] });
   assert.equal(problems.length, 1);
   assert.match(problems[0].message, /only applies to rename\/move/);
 });
@@ -174,7 +202,7 @@ test("validateTemplate rejects `from` on an action that isn't rename/move", () =
 test("validateTemplate does not also complain about `from` when the action is already invalid", () => {
   // Otherwise a single typo produces two errors, the second of which is
   // noise -- the author needs to fix the action, not remove `from`.
-  const problems = validateTemplate({ goal: "g", changes: [change({ action: "renam" as never, from: "A.prev" })] });
+  const problems = validateTemplate({ goal: "g", plan: "p", changes: [change({ action: "renam" as never, from: "A.prev" })] });
   assert.equal(problems.length, 1);
   assert.match(problems[0].message, /unknown action/);
 });
@@ -184,12 +212,34 @@ test("validateTemplate reports every problem at once, not just the first", () =>
     goal: "",
     changes: [change({ id: "c1", action: "" as never, target: "", intent: "" })],
   });
-  // missing goal + missing action + missing target + missing intent
-  assert.equal(problems.length, 4);
+  // missing goal + missing plan + missing action + missing target + missing intent
+  assert.equal(problems.length, 5);
+});
+
+// The reader of these messages is usually a model that has never seen twing
+// -- it registered because an edit was denied, in whatever repo it is in.
+// The message has to tell it what a plan is and what shape to write it in.
+test("validateTemplate requires a plan when registering, and says what one is", () => {
+  const problems = validateTemplate({ goal: "g", changes: [change()] });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0].message, /missing `plan:`/);
+  assert.match(problems[0].message, /design doc a teammate reads/);
+  assert.match(problems[0].message, /Not a list of files/);
+  assert.match(problems[0].message, /indent every plan line/, "the one YAML rule that breaks a multi-line plan");
+});
+
+test("validateTemplate does not require a plan when appending", () => {
+  assert.deepEqual(validateTemplate({ goal: "", changes: [change()] }, { requireGoal: false, requirePlan: false }), []);
+});
+
+test("validateTemplate refuses any line still holding a <...> prompt, not just a one-line plan", () => {
+  const problems = validateTemplate({ goal: "g", plan: "## Context\nThe retry budget is global.\n## Approach\n<how you will build it>", changes: [change()] });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0].message, /placeholder lines/);
 });
 
 test("validateTemplate attributes per-change problems to the change id", () => {
-  const problems = validateTemplate({ goal: "g", changes: [change({ id: "c7", intent: "" })] });
+  const problems = validateTemplate({ goal: "g", plan: "p", changes: [change({ id: "c7", intent: "" })] });
   assert.equal(problems[0].changeId, "c7");
 });
 
@@ -214,19 +264,19 @@ test("suggestAction returns undefined when nothing is close", () => {
 // demanding it again would either be ignored or overwrite what is there.
 // This is what lets the out-of-scope deny hand back a changes-only block.
 test("validateTemplate requires a goal by default", () => {
-  const problems = validateTemplate({ goal: "", changes: [change()] });
+  const problems = validateTemplate({ goal: "", plan: "p", changes: [change()] });
   assert.equal(problems.length, 1);
   assert.match(problems[0].message, /goal/);
 });
 
 test("validateTemplate accepts a goal-less template when appending", () => {
-  const problems = validateTemplate({ goal: "", changes: [change()] }, { requireGoal: false });
+  const problems = validateTemplate({ goal: "", plan: "p", changes: [change()] }, { requireGoal: false });
   assert.deepEqual(problems, []);
 });
 
 test("requireGoal: false still enforces every per-change rule", () => {
   const problems = validateTemplate(
-    { goal: "", changes: [change({ action: "refactor" as never })] },
+    { goal: "", plan: "p", changes: [change({ action: "refactor" as never })] },
     { requireGoal: false },
   );
   assert.equal(problems.length, 1);
