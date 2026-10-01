@@ -8,13 +8,20 @@ Task-time coordination and change-time evidence for multi-agent codebases,
 across three distinct code paths that share a data model but never share
 logic:
 
-1. **Capture/advisory (`align`)** — background, never blocks. Hooks capture
-   claims (who touched what symbol) into a local daemon, which syncs them to
-   `twing serve`; `twing align` reports cross-session divergence findings.
+1. **Capture** — background, never blocks. Hooks capture claims (who
+   touched what symbol) into a local daemon, which syncs them to
+   `twing serve`, where the monitor compares a design's declared changes
+   with what was actually edited. Claims no longer raise conflicts: the
+   claim-vs-claim checks (same-symbol edits, contract breaks, an edit inside
+   another developer's declared scope) and the bare `twing align` report
+   were removed 2026-10-01 -- the semantic comparator in (2) is the only
+   conflict/duplication signal.
 2. **Design-conflict gate (§17)** — the one part of the system that actually
    blocks. Before an agent's first `Edit`/`Write`, it needs a registered
-   design; overlapping or constraint-violating designs get denied until
-   adopted or justified (which queues for human review).
+   design; designs that semantically conflict with or duplicate another
+   (`llm_divergence`, self-approvable) or violate a project rule
+   (`constraint_violation`, admin review) get denied until adopted or
+   justified.
 3. **Session capture** (2026-09) — background, never blocks, and rides the
    same hook→daemon socket as (1) but carries something different in kind:
    the *conversation*, not the edits. The daemon reads Claude Code's own
@@ -76,15 +83,15 @@ node packages/cli/dist/index.js admin bootstrap --server http://localhost:8787 -
 node packages/cli/dist/index.js init --server http://localhost:8787   # run from the target repo, not from twing-cli -- founds it, since you're already authenticated
 node packages/cli/dist/index.js init        # no --server needed once that repo's .twing/twing.yml declares a coordinator
 node packages/cli/dist/index.js login --token <pat>   # cache an already-generated PAT only, no other setup
-node packages/cli/dist/index.js align
+node packages/cli/dist/index.js align threads
 node packages/cli/dist/index.js daemon      # foreground daemon (init normally starts one detached)
 ```
 
 `npm link` in `packages/cli` gives a global `twing` command (see README) —
 memory records this is already set up locally.
 
-Simulator (two real `claude` CLI sessions against a shared fixture, exercises
-`align` end-to-end — see `simulator/README.md`):
+Simulator (two real `claude` CLI sessions against a shared fixture, ending
+with each session's `twing align threads` — see `simulator/README.md`):
 
 ```sh
 npm run build
@@ -118,13 +125,11 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     v0) used to turn a file edit into a `symbolId` like
     `src/net/retry.ts::RetryPolicy.backoff`; a full-file `Write` (vs. a
     localized `Edit`) falls back to a file-level claim with no symbol name —
-    a known, deliberate v0 gap that affects what `align`'s trigger checks
-    can catch (see simulator README's "Known limitation").
+    a known, deliberate v0 gap.
   - `call-graph.ts` — `updateCallGraph`, built on `symbol-id.ts`'s
-    `findCallSites`/`findEnclosingSymbol`. Lives here (not in `cli`, its only
-    runtime caller) because `align`'s no-daemon git-diff fallback
-    (`diff-claims.ts`) needs the same pure algorithm without pulling in the
-    daemon's socket-server/sync machinery.
+    `findCallSites`/`findEnclosingSymbol`. The daemon still computes and
+    uploads call edges, but nothing reads them since the contract-break
+    check that used them was removed (2026-10-01).
   - `transcript-filter.ts` — the session-capture contract, as a pure
     function over one line of Claude Code's transcript JSONL (the other
     harnesses translate into that shape rather than teaching this a second
@@ -195,7 +200,8 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   acks immediately (extraction happens after, never blocking the accept
   loop), runs Tree-sitter extraction (`claims.ts`), and syncs claims to
   `twing serve` in the background (`sync.ts`, `Syncer`). Answers
-  `get_claims` (CLI's `align` path) scoped by **both** `projectId` and
+  `get_claims` (no CLI caller since bare `twing align` was removed
+  2026-10-01) scoped by **both** `projectId` and
   `developerId` — not just `sessionId` — see the long comment in
   `server.ts` about why (two worktrees, same origin, same machine,
   different local `user.email`).
@@ -292,8 +298,7 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   state-changing methods also append one row to `activity_events`
   (`activity-log.ts`) — an append-only, insert-only log spanning *both* the
   §4 (Claim/Finding) and §17 (DesignStatement/PendingReview) families in one
-  table, the first place this doc's "share a data model but never share
-  logic" framing is intentionally crossed (`design-divergence.ts`). SQLite
+  table. SQLite
   is the only driver implemented and shipped; `TWING_DB_DRIVER=postgres` is
   a documented, not-yet-built seam for a future hosted multi-tenant backend
   (`db/client.ts` throws rather than silently falling back). Access control
@@ -321,18 +326,19 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   possible future managed/billed offering — bare `{id, name}` shape only, no
   `plan`/`quota`/payment fields built yet (see
   `docs/statefulness-and-identity-memo.md`). Five route groups in `app.ts`:
-  - `/v1/claims`, `/v1/notices` — advisory path: upsert claims, run
-    `checks.ts`'s divergence checks *and* `design-divergence.ts`'s
-    cross-session check (a real Claim landing inside another session's open
-    DesignStatement — `overlap`/`constraint_flag` only ever compares two
-    designs' self-reported fields; this is the one place a Claim gets
-    checked against a design), notices delivered to both parties (submitter
-    synchronously, other party on next poll). A `design_divergence` finding
-    opens/reuses an `alignment_threads` row (`alignment-store.ts`) and
-    stamps its id onto the `Finding`/`Notice` — always advisory (flag, never
-    block); `/v1/alignment-threads/*` (below) is how the two parties reply.
-  - `/v1/alignment-threads/*` — the async reply channel for a
-    `design_divergence` finding: list/read/reply/close. Closing is unilateral
+  - `/v1/claims`, `/v1/notices` — capture path: upsert claims (the monitor
+    reads them back via `GET /v1/claims`) and deliver queued notices. Until
+    2026-10-01 this route also ran claim-vs-claim conflict checks
+    (`checks.ts`: same-symbol edits, contract breaks over the call graph;
+    `design-divergence.ts`: an edit inside another developer's declared
+    scope), each flagging both designs as `symbol_conflict`, opening a
+    thread and notifying both people. All of that was removed -- it fired on
+    ordinary concurrent work and mostly produced noise (Twing-dev/twing-cli#60);
+    `findings` is always empty now. Designs and threads flagged before then
+    were left as they were.
+  - `/v1/alignment-threads/*` — the async reply channel for a semantic
+    conflict between two designs (and, for older rows, the removed
+    claim-time checks): list/read/reply/close. Closing is unilateral
     — neither party needs the other's agreement, this is voluntary
     reconciliation, not enforcement. `twing align threads`/`respond`/`close`
     is the CLI side.
@@ -383,7 +389,10 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
     back to the legacy singular `symbolId`) — never backfilled, per this
     schema's usual append-only/don't-rewrite-history convention.
   - `/v1/designs/*`, `/v1/reviews/*`, `/v1/constraints/*` — §17 gate path:
-    `design-checks.ts` (verdict logic: `clean`/`overlap`/`constraint_flag`),
+    `design-checks.ts` (verdict logic: `clean`/`constraint_violation` --
+    project rules only; file overlap between designs was removed
+    2026-10-01, and `design-semantic-check.ts`'s async comparator is the one
+    conflict/duplication check, `llm_divergence`),
     `design-store.ts` (`DesignRegistry`, `ConstraintStore`), `design-extract.ts`
     (turns free-text plan into structured `creates`/`touches`/`dependsOn` via
     one LLM chat-completion call routed by `llm-client.ts`. The provider is
@@ -507,9 +516,9 @@ node simulator/dist/index.js --enable-design-gate   # also exercise §17
   cached) and calls `/v1/projects/:id/join-via-github`.
   `login` is the cheap, repeatable subset of `init` (just cache an
   already-obtained PAT, no hook install/settings wiring/daemon
-  start/constraint seed). `align.ts` falls back to computing claims
-  directly from `git diff` against the branch's merge-base with the
-  default branch when there's no daemon/hooks (works standalone).
+  start/constraint seed). `align.ts` is the alignment-thread commands
+  (`threads`/`respond`/`close`); its bare claim-conflict report and git-diff
+  fallback were removed 2026-10-01.
   `install-hook.ts` installs `twing-hook` (prebuilt-fetch-first,
   build-from-source fallback, see the pre-release note above) and
   `wire-hooks.ts` merges (never overwrites) its hook entries into the
@@ -709,11 +718,8 @@ Claude Code tool call
                                                                        |  background sync (Syncer)
                                                                        v
                                                                   twing serve (/v1/claims)
-                                                                       |  divergence checks -> Finding
-                                                                       v
-                                                                    notices (polled by daemon, surfaced
-                                                                    via SessionStart/UserPromptSubmit
-                                                                    additionalContext, or `twing align`)
+                                                                       -> stored; read back by the monitor
+                                                                          (declared vs actual changes)
 
 Claude Code tool call
   -> twing-hook (PreToolUse: ExitPlanMode / Edit|Write)  --[HTTPS, synchronous]-->  twing serve (/v1/designs/check, /v1/constraints/match)
@@ -748,8 +754,7 @@ JSONL, OpenCode's SQLite, or Codex's rollout JSONL
   best-effort `computeGithubUsername()` — `gh` CLI / `git config github.user`
   — on the `keygen`/`admin bootstrap` paths that have no token), then
   `computeDeveloperId()` (git-email-derived, local), then a persisted random
-  id. `computeDeveloperId()` also still backs `align.ts`'s no-server git-diff
-  fallback, which never talks to a server to verify anything against.
+  id.
 - `sessionId` — Claude Code's real session id. The design gate's `Edit`/
   `Write` check looks open designs up by exact session id; it comes from
   `CLAUDE_CODE_SESSION_ID` by default (confirmed live against a real gated

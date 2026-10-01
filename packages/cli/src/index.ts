@@ -12,7 +12,7 @@ import { getCliVersion } from "./version.js";
 import { runDaemonRestart } from "./daemon-restart.js";
 import { runLogin } from "./login.js";
 import { runJoinGithub } from "./join.js";
-import { runAlign, runAlignRespond, runAlignThreads, runAlignClose } from "./align.js";
+import { runAlignRespond, runAlignThreads, runAlignClose } from "./align.js";
 import { runKeygen } from "./keygen.js";
 import { resolveServerUrl, requireAuth } from "./auth.js";
 import {
@@ -120,7 +120,6 @@ function printUsage(): void {
       "  twing join --github [--server <url>]",
       "  twing daemon",
       "  twing daemon restart",
-      "  twing align",
       "  twing align threads [--status open]",
       "  twing align respond --finding <threadId> --message \"...\"",
       "  twing align close --finding <threadId>",
@@ -252,9 +251,11 @@ async function runDesignCommand(rest: string[]): Promise<void> {
   }
 }
 
-/** Bare `twing align` is unchanged; `threads`/`respond`/`close` are the
- * alignment-thread subcommands (statefulness redesign, 2026-08) -- same
- * dispatch shape as `runDesignCommand` below. */
+/** `threads`/`respond`/`close` are the alignment-thread subcommands
+ * (statefulness redesign, 2026-08) -- same dispatch shape as
+ * `runDesignCommand` below. Bare `twing align`, a claim-conflict report, was
+ * removed 2026-10-01 with the checks behind it; it now says so and points at
+ * `threads` instead of failing with a bare usage dump. */
 async function runAlignCommand(rest: string[]): Promise<void> {
   const cwd = commandCwd;
   const [maybeSub, ...subArgs] = rest;
@@ -285,7 +286,11 @@ async function runAlignCommand(rest: string[]): Promise<void> {
 
   const flags = parseFlags(rest);
   if (flags.help === "true") return printUsage();
-  await runAlign({ cwd });
+  console.error(
+    "twing align: the conflict report was removed -- twing now flags conflicts only by comparing designs semantically.\n" +
+      "  To see the threads those open: twing align threads [--status open]",
+  );
+  process.exit(1);
 }
 
 async function runAdminCommand(rest: string[]): Promise<void> {

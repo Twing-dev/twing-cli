@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { fixtureDir, type Scenario } from "./config.js";
 import { setupWorkspace, type WorkspaceMode, type SessionWorkspace } from "./workspace.js";
 import { startEphemeralServer } from "./ephemeral-server.js";
-import { runTwingInit, runTwingAlign, runTwingDesignDisableGate } from "./twing-cli.js";
+import { runTwingInit, runTwingAlignThreads, runTwingDesignDisableGate } from "./twing-cli.js";
 import { ClaudeSession } from "./claude-session.js";
 import type { Driver } from "./drivers/driver.js";
 import { HumanDriver, closeHumanInput } from "./drivers/human-driver.js";
@@ -91,6 +91,18 @@ export async function run(options: RunOptions): Promise<void> {
   console.log(`twing-simulator: workspace ${workDir}`);
   const setup = setupWorkspace(options.mode, fixtureDir(options.scenario), workDir, runId);
 
+  // The semantic comparator is the only conflict check left (2026-10-01), and
+  // it fails soft to "no conflict" without an LLM -- which would end the run
+  // with an empty thread list that reads like success. Same variables the
+  // server's provider auto-detection reads (packages/server/src/llm-client.ts).
+  const llmVars = ["AWS_BEARER_TOKEN_BEDROCK", "GOOGLE_APPLICATION_CREDENTIALS", "OPENROUTER_API_KEY", "TWING_BIFROST_BASE_URL"];
+  if (!llmVars.some((v) => process.env[v])) {
+    console.warn(`twing-simulator: WARNING -- none of ${llmVars.join(", ")} is set, so the server can't compare designs and no conflict will be reported.`);
+  }
+  if (!options.enableDesignGate) {
+    console.warn("twing-simulator: WARNING -- design gate disabled, so neither agent registers a design and there is nothing to compare.");
+  }
+
   console.log(`twing-simulator: starting twing serve on port ${options.serverPort}...`);
   const server = await startEphemeralServer(options.serverPort);
 
@@ -114,12 +126,12 @@ export async function run(options: RunOptions): Promise<void> {
       runSession(setup.sessions[1], options.scenario.sessions.b.goal, driverB, options.claudeModel, options.scenario.maxTurns),
     ]);
 
-    console.log(`\ntwing-simulator: both sessions done -- waiting ${SETTLE_MS / 1000}s for background sync before checking align...`);
+    console.log(`\ntwing-simulator: both sessions done -- waiting ${SETTLE_MS / 1000}s for background sync before listing alignment threads...`);
     await sleep(SETTLE_MS);
 
     for (const session of setup.sessions) {
-      console.log(`\n=== twing align -- session ${session.label} (${session.dir}) ===`);
-      await runTwingAlign(session.dir);
+      console.log(`\n=== twing align threads -- session ${session.label} (${session.dir}) ===`);
+      await runTwingAlignThreads(session.dir);
     }
   } finally {
     server.stop();

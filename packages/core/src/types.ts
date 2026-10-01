@@ -428,6 +428,14 @@ export interface DesignConstraint {
 }
 
 /**
+ * 2026-10-01: only two of these are still produced. `"constraint_violation"`
+ * (a project rule) and `"llm_divergence"` (the semantic comparator) are the
+ * whole model now; `"file_overlap"` and `"symbol_conflict"` were removed
+ * along with the checks that raised them -- path- and symbol-based conflict
+ * detection mostly produced noise (Twing-dev/twing-cli#60). Both stay in the
+ * union only because designs, activity rows and threads recorded before
+ * then still carry them. The rest of this comment is the model as it was.
+ *
  * The four-bucket design-conflict model (2026-08-26 terminology
  * simplification, superseding the prior five-verdict/severity/
  * three-constraint-type/separate-align-vocabulary sprawl -- see

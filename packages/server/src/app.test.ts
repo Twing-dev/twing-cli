@@ -401,20 +401,25 @@ test("POST /v1/reviews/:id/decide: requires the project's admin role, not mere a
   });
   assert.equal(check1.status, 200);
 
-  // A genuinely different developer registers the "second, overlapping"
-  // design -- same-developer pairs no longer produce an overlap verdict at
-  // all (2026-08-22). Must come after proj-1 is founded above, or the
-  // invite this issues has no project to attach to yet.
+  // A project rule is what makes the second design's review wait for an
+  // admin -- the only kind that still does (file overlap, which this test
+  // used to set up with, was removed 2026-10-01). Must come after proj-1 is
+  // founded above, or the invite this issues has no project to attach to.
+  await app.request("/v1/constraints/seed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "a.ts needs sign-off", scope: ["a.ts"] }] }),
+  });
   const otherPat = await addProjectMember(app, admin.token, "proj-1");
 
   const check2 = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "second, overlapping", creates: ["a.ts"], touches: [], dependsOn: [] }),
+    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "second, touching a rule's path", creates: ["a.ts"], touches: [], dependsOn: [] }),
   });
   assert.equal(check2.status, 200);
   const check2Body = (await check2.json()) as { verdict: string; designId: string };
-  assert.equal(check2Body.verdict, "file_overlap");
+  assert.equal(check2Body.verdict, "constraint_violation");
 
   const resolveRes = await app.request(`/v1/designs/${check2Body.designId}/resolve`, {
     method: "POST",
@@ -553,12 +558,9 @@ test("GET /v1/reviews: carries the design a review is about, not just its justif
   assert.ok(item.design.summary.length > 0, "expected a human-readable summary to lead with");
   assert.ok(item.design.developerId.length > 0, "expected to know who is asking");
 
-  // makePendingReview justifies against a real overlap with a second
-  // developer's design, so the reviewer should be able to see whose work it
-  // collides with -- the question they're actually being asked.
-  assert.ok(item.conflicts && item.conflicts.length > 0, "expected the conflicting design to be named");
-  assert.equal(item.conflicts[0].kind, "overlap");
-  assert.ok(item.conflicts[0].summary, "expected the conflicting design's summary to be resolved");
+  // No other design is named: the review is for a project rule, and the
+  // file overlap that used to come with it was removed 2026-10-01.
+  assert.deepEqual(item.conflicts ?? [], []);
 });
 
 test("GET /v1/reviews?status=decided: only shows reviews an admin already decided", async () => {
@@ -854,12 +856,10 @@ test("GET /v1/activity: design_checked/design_flagged carry the full why (confli
   const { app, dataDir, designs } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
 
-  // Tier 1 (exact touches overlap) -- always advisory (file_overlap never
-  // blocks, see DesignVerdict's doc comment, core/types.ts). Tier 4
-  // (summary similarity) was removed entirely 2026-08-26 -- llm_divergence
-  // (the semantic comparator) is its real replacement -- so tier 1 is now
-  // the only source of an always-advisory, conflicts-populating verdict to
-  // exercise here.
+  // Two designs touching the same file. That used to produce a file_overlap
+  // verdict; since 2026-10-01 only the semantic comparator says anything
+  // about two designs, so both register clean and the "why" this test pins
+  // comes from design_flagged below.
   const firstRes = await app.request("/v1/designs/check", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(admin.token) },
@@ -875,9 +875,8 @@ test("GET /v1/activity: design_checked/design_flagged carry the full why (confli
   const firstBody = (await firstRes.json()) as { verdict: string; designId: string };
   assert.equal(firstBody.verdict, "clean");
 
-  // A genuinely different developer registers the "second" design -- same-
-  // developer pairs no longer produce a file_overlap verdict at all
-  // (2026-08-22). Must come after proj-1 is founded above.
+  // A genuinely different developer registers the "second" design. Must
+  // come after proj-1 is founded above.
   const otherPat = await addProjectMember(app, admin.token, "proj-1");
 
   const secondRes = await app.request("/v1/designs/check", {
@@ -888,16 +887,16 @@ test("GET /v1/activity: design_checked/design_flagged carry the full why (confli
       sessionId: "s2",
       summary: "adds a shared caching layer for the billing service",
       creates: [],
-      touches: ["payments.ts"], // exact overlap with the first design -- tier 1
+      touches: ["payments.ts"], // the same file as the first design -- no longer a conflict by itself
       dependsOn: [],
     }),
   });
   const secondBody = (await secondRes.json()) as { verdict: string; designId: string };
-  assert.equal(secondBody.verdict, "file_overlap", "tier 1 -- design_checked still logs conflicts on its own; design_flagged now only comes from the async semantic-conflict path (runSemanticComparatorPass)");
+  assert.equal(secondBody.verdict, "clean", "sharing a file is not a conflict any more (2026-10-01)");
 
   // Simulate what runSemanticComparatorPass (app.ts) does on a real
-  // llm_divergence hit -- flags the design directly, same DesignConflict
-  // detail shape tier 1 already uses. Exercised this way rather than
+  // llm_divergence hit -- flags the design directly with its
+  // DesignConflict detail. Exercised this way rather than
   // through the real LLM call: this test is about design_flagged's
   // activity-log detail carrying through, not about the LLM's own
   // judgment.
@@ -919,9 +918,8 @@ test("GET /v1/activity: design_checked/design_flagged carry the full why (confli
 
   const checked = activityBody.items.find((e) => e.kind === "design_checked");
   assert.ok(checked, "?relatedId= must scope to just this design's own events");
-  assert.equal(checked!.payload?.verdict, "file_overlap");
+  assert.equal(checked!.payload?.verdict, "clean");
   assert.equal(checked!.payload?.summary, "adds a shared caching layer for the billing service");
-  assert.equal(checked!.payload?.conflicts?.[0]?.conflictingSummary, "adds a shared caching layer for the payments service");
 
   const flagged = activityBody.items.find((e) => e.kind === "design_flagged");
   assert.ok(flagged, "the simulated llm_divergence flag must also log design_flagged");
@@ -1299,137 +1297,31 @@ async function fixtureWithOpenDesignAndSecondDeveloper(app: ReturnType<typeof cr
   return { alice: admin, bobToken: "bobs-pat" };
 }
 
-test("POST /v1/claims: a claim landing inside another session's open design produces a design_divergence finding with a threadId, visible via GET /v1/alignment-threads", async () => {
-  const { app, dataDir } = freshApp();
-  const { bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
-
-  const claimRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
-  });
-  const claimBody = (await claimRes.json()) as { findings: { kind: string; threadId?: string; developerId: string; otherDeveloperId: string }[] };
-  assert.equal(claimRes.status, 200, JSON.stringify(claimBody));
-  const divergence = claimBody.findings.find((f) => f.kind === "design_divergence");
-  assert.ok(divergence, "expected a design_divergence finding");
-  assert.ok(divergence!.threadId, "expected a threadId on the finding");
-  assert.equal(divergence!.developerId, "bob@example.com");
-  assert.equal(divergence!.otherDeveloperId, "alice@example.com");
-
-  const listRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(bobToken) });
-  const listBody = (await listRes.json()) as { items: { id: string }[] };
-  assert.equal(listBody.items.length, 1);
-  assert.equal(listBody.items[0].id, divergence!.threadId);
-});
-
-test("POST /v1/claims: resubmitting a changed claim against the same open divergence reuses the existing thread rather than opening a second one", async () => {
-  const { app, dataDir } = freshApp();
-  const { bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
-
-  const first = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f", ts: 1000 })] }),
-  });
-  assert.equal(first.status, 200);
-
-  // A later edit to the same symbol -- different ts, so Store.upsert treats
-  // it as "changed" and the divergence check runs again.
-  const second = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f", ts: 2000 })] }),
-  });
-  assert.equal(second.status, 200);
-
-  const listRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(bobToken) });
-  const listBody = (await listRes.json()) as { items: { id: string }[] };
-  assert.equal(listBody.items.length, 1, "should reuse the same open thread, not open a second one");
-});
-
-test("POST /v1/claims: a divergence claim on a *different* symbol against the same design pair amends the thread instead of forking a new one (2026-08-23 dedup fix)", async () => {
-  const { app, dataDir } = freshApp();
-  const { bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
-
-  const first = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f", ts: 1000 })] }),
-  });
-  const firstBody = (await first.json()) as { findings: { kind: string; threadId?: string }[] };
-  const firstThreadId = firstBody.findings.find((f) => f.kind === "design_divergence")!.threadId!;
-
-  const second = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::g", ts: 2000 })] }),
-  });
-  const secondBody = (await second.json()) as { findings: { kind: string; threadId?: string }[] };
-  const secondThreadId = secondBody.findings.find((f) => f.kind === "design_divergence")!.threadId!;
-
-  assert.equal(secondThreadId, firstThreadId, "same developer pair + target design -- must amend, not fork");
-
-  const listRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(bobToken) });
-  const listBody = (await listRes.json()) as { items: { id: string; symbolIds: string[]; category: string; subKind: string; summary: string }[] };
-  assert.equal(listBody.items.length, 1, "one thread, not two");
-  assert.deepEqual(listBody.items[0].symbolIds.sort(), ["src/x.ts::f", "src/x.ts::g"]);
-  assert.equal(listBody.items[0].category, "symbol_conflict");
-  assert.equal(listBody.items[0].subKind, "scope_intrusion", "a design_divergence finding -- an edit landing inside another's declared scope");
-  assert.match(listBody.items[0].summary, /declared scope/);
-});
-
-test("POST /v1/claims: a divergence finding links the claiming developer's own open design as initiatingDesignId, when they have one", async () => {
-  const { app, dataDir } = freshApp();
-  const { bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
-
-  const bobDesignRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
-  });
-  const bobDesignBody = (await bobDesignRes.json()) as { designId: string };
-
-  const claimRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
-  });
-  const { findings } = (await claimRes.json()) as { findings: { kind: string; threadId?: string }[] };
-  const threadId = findings.find((f) => f.kind === "design_divergence")!.threadId!;
-
-  const threadRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(bobToken) });
-  const threadBody = (await threadRes.json()) as { thread: { initiatingDesignId?: string } };
-  assert.equal(threadBody.thread.initiatingDesignId, bobDesignBody.designId);
-});
-
-test("POST /v1/claims: a divergence finding leaves initiatingDesignId unset when the claiming developer has no open design of their own", async () => {
-  const { app, dataDir } = freshApp();
-  const { bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
-
-  const claimRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
-  });
-  const { findings } = (await claimRes.json()) as { findings: { kind: string; threadId?: string }[] };
-  const threadId = findings.find((f) => f.kind === "design_divergence")!.threadId!;
-
-  const threadRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(bobToken) });
-  const threadBody = (await threadRes.json()) as { thread: { initiatingDesignId?: string } };
-  assert.equal(threadBody.thread.initiatingDesignId, undefined, "no design behind the edit -- must stay honestly absent, not a wrong value");
-});
+/** An open alignment thread between bob (who raised it) and alice, created
+ * the way the semantic comparator creates one. The thread tests used to get
+ * theirs from a claim collision, which no longer raises anything
+ * (2026-10-01); what they test -- who may read, reply and close -- doesn't
+ * depend on where the thread came from. */
+function openThreadBetweenBobAndAlice(alignmentThreads: AlignmentThreadStore): string {
+  return alignmentThreads.findOrCreate({
+    projectId: "proj-1",
+    symbolIds: [],
+    developerId: "bob@example.com",
+    otherDeveloperId: "alice@example.com",
+    systemDescription: "these designs pull in different directions (simulated for this test)",
+    category: "llm_divergence",
+    subKind: "tension",
+    summary: "bob's design vs alice's work on x.ts",
+    ts: Date.now(),
+    reopenEligible: true,
+  }).id;
+}
 
 test("alignment threads: only the two parties can read/reply/close -- a third project member gets 403", async () => {
-  const { app, dataDir } = freshApp();
+  const { app, dataDir, alignmentThreads } = freshApp();
   const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
 
-  const claimRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
-  });
-  const { findings } = (await claimRes.json()) as { findings: { kind: string; threadId?: string }[] };
-  const threadId = findings.find((f) => f.kind === "design_divergence")!.threadId!;
+  const threadId = openThreadBetweenBobAndAlice(alignmentThreads);
 
   // carol: a third project member, not a party to this thread.
   const carolInvite = await app.request("/v1/projects/proj-1/invites", {
@@ -1471,16 +1363,10 @@ test("alignment threads: only the two parties can read/reply/close -- a third pr
 });
 
 test("alignment threads: a project admin who isn't a party can list/read (but not reply/close) -- 2026-08-24 visibility reversal", async () => {
-  const { app, dataDir } = freshApp();
+  const { app, dataDir, alignmentThreads } = freshApp();
   const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
 
-  const claimRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
-  });
-  const { findings } = (await claimRes.json()) as { findings: { kind: string; threadId?: string }[] };
-  const threadId = findings.find((f) => f.kind === "design_divergence")!.threadId!;
+  const threadId = openThreadBetweenBobAndAlice(alignmentThreads);
 
   // dave: a second project *admin*, not a party to this thread -- found live
   // (2026-08-23): a project admin whose dashboard login identity differs
@@ -1523,16 +1409,10 @@ test("alignment threads: a project admin who isn't a party can list/read (but no
 });
 
 test("alignment threads: replying notifies the other party via the existing notice pipeline", async () => {
-  const { app, dataDir } = freshApp();
+  const { app, dataDir, alignmentThreads } = freshApp();
   const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir);
 
-  const claimRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
-  });
-  const { findings } = (await claimRes.json()) as { findings: { kind: string; threadId?: string }[] };
-  const threadId = findings.find((f) => f.kind === "design_divergence")!.threadId!;
+  const threadId = openThreadBetweenBobAndAlice(alignmentThreads);
 
   await app.request(`/v1/alignment-threads/${threadId}/messages`, {
     method: "POST",
@@ -1807,6 +1687,60 @@ test("POST /v1/designs/:id/resolve: self-approving an llm_divergence block posts
   assert.equal(resolutionNote!.authorId, undefined, "a system note, not posted as either party");
 });
 
+// Found live 2026-10-01: threads are reused per developer pair and
+// counterpart, so the open thread behind a semantic flag can still name an
+// *earlier* design of the justifying developer. The waiver used to come only
+// from threads naming the justified design itself, so none was recorded and
+// the comparator re-flagged the same pair after every amend.
+test("POST /v1/designs/:id/resolve: justifying an llm_divergence waives the counterpart its flag names, even when the shared thread names an older design", async () => {
+  const { app, dataDir, designs, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+  const register = async (token: string, sessionId: string, summary: string, touches: string[]) =>
+    (
+      (await (
+        await app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(token) },
+          body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId, summary, creates: [], touches, dependsOn: [] }),
+        })
+      ).json()) as { designId: string }
+    ).designId;
+
+  const aliceOld = await register(admin.token, "s-alice-1", "alice's earlier README work", ["README.md"]);
+  const bobPat = await addProjectMember(app, admin.token, "proj-1");
+  const bobDesign = await register(bobPat, "s-bob", "bob's onboarding rewrite", ["README.md"]);
+  const aliceNew = await register(admin.token, "s-alice-2", "alice's later README change", ["README.md"]);
+
+  // The thread was opened by alice's *older* design, and is reused; the
+  // newer design's flag names bob's design directly.
+  alignmentThreads.findOrCreate({
+    projectId: "proj-1",
+    symbolIds: [],
+    developerId: "alice@example.com",
+    otherDeveloperId: designs.get(bobDesign)!.developerId,
+    designId: bobDesign,
+    initiatingDesignId: aliceOld,
+    systemDescription: "both rewrite the README (simulated)",
+    category: "llm_divergence",
+    subKind: "tension",
+    summary: "README tension",
+    ts: Date.now(),
+    reopenEligible: true,
+  });
+  designs.flag(aliceNew, "llm_divergence", {
+    conflicts: [{ conflictingDesignId: bobDesign, overlapKind: "touches", overlapDetail: "both rewrite the README", conflictingSummary: "bob's onboarding rewrite", overlapPaths: [] }],
+  });
+
+  const res = await app.request(`/v1/designs/${aliceNew}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "a few lines only, coordinated" }),
+  });
+  assert.equal(((await res.json()) as { status: string }).status, "resolved");
+  assert.deepEqual(designs.get(aliceNew)!.justifiedConflicts, [bobDesign], "the comparator skips a justified counterpart -- without this it re-flags on every amend");
+  assert.equal(designs.get(aliceNew)!.status, "open");
+});
+
 // The reverse-direction merge (just above) means both sides' resolutions
 // now land in the *same* thread -- this is what actually answers "who
 // unblocked themselves and who didn't" from one place, rather than two
@@ -1893,190 +1827,6 @@ test("POST /v1/designs/:id/resolve: both sides independently self-approving a sh
   assert.ok(
     threadBody.messages.some((m) => m.message.includes("Auto-closed")),
     "the auto-close should leave its own visible trail, same as a resolution note does",
-  );
-});
-
-test("POST /v1/designs/:id/resolve: self-approving a symbol_conflict block posts a system note into the shared thread, for either side, then the thread auto-closes", async () => {
-  const { app, dataDir } = freshApp();
-  const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir); // alice's design already covers src/x.ts
-
-  const bobDesignRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
-  });
-  const { designId: bobDesignId } = (await bobDesignRes.json()) as { designId: string };
-
-  const claimRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
-  });
-  const { findings } = (await claimRes.json()) as { findings: { kind: string; threadId?: string }[] };
-  const threadId = findings.find((f) => f.kind === "design_divergence")!.threadId!;
-
-  // Get alice's design id (the one intruded upon) from the thread itself.
-  const beforeRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
-  const aliceDesignId = ((await beforeRes.json()) as { thread: { designId?: string } }).thread.designId!;
-
-  // Bob (the intruder) resolves his own side first.
-  const bobResolveRes = await app.request(`/v1/designs/${bobDesignId}/resolve`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ resolution: "justified_divergence", justification: "bob's justification" }),
-  });
-  assert.equal((await bobResolveRes.json() as { status: string }).status, "resolved");
-
-  // Alice (the intruded-upon party) independently resolves hers too.
-  const aliceResolveRes = await app.request(`/v1/designs/${aliceDesignId}/resolve`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(alice.token) },
-    body: JSON.stringify({ resolution: "justified_divergence", justification: "alice's justification" }),
-  });
-  assert.equal((await aliceResolveRes.json() as { status: string }).status, "resolved");
-
-  const afterRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
-  const afterBody = (await afterRes.json()) as { thread: { status: string }; messages: { message: string }[] };
-  const resolutionNotes = afterBody.messages.filter((m) => m.message.includes("Resolved"));
-  assert.equal(resolutionNotes.length, 2, "both the initiator and the referenced side must each show up as resolved");
-  assert.ok(resolutionNotes.some((m) => m.message.includes("bob@example.com") && m.message.includes("bob's justification")));
-  assert.ok(resolutionNotes.some((m) => m.message.includes("alice@example.com") && m.message.includes("alice's justification")));
-
-  // Item 3 (2026-08-27): same auto-close guarantee as the llm_divergence
-  // case above, exercised here for symbol_conflict instead.
-  assert.equal(afterBody.thread.status, "closed", "both sides settled -- the thread should auto-close");
-  assert.ok(
-    afterBody.messages.some((m) => m.message.includes("Auto-closed")),
-    "the auto-close should leave its own visible trail, same as a resolution note does",
-  );
-});
-
-// Reopen-on-new-finding fix (2026-08-28): continues exactly the scenario
-// above (a symbol_conflict thread that both sides settled and that
-// auto-closed) one step further -- a decideReview approve unconditionally
-// reopens the *design* itself back to "open" (design-store.ts), so both
-// alice's and bob's designs are live again after that resolution, same ids
-// as before. A genuinely new collision between the same pair must reuse
-// (and reopen) that same closed thread, not silently fork a new one --
-// findOrCreate's dedup key is still the same design pair.
-test("POST /v1/claims: a new symbol_conflict finding against the same design pair reopens an already-closed thread instead of forking a new one, since both designs are live again", async () => {
-  const { app, dataDir } = freshApp();
-  const { alice, bobToken } = await fixtureWithOpenDesignAndSecondDeveloper(app, dataDir); // alice's design already covers src/x.ts
-
-  const bobDesignRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-bob", summary: "bob's own work", creates: [], touches: ["src/y.ts"], dependsOn: [] }),
-  });
-  const { designId: bobDesignId } = (await bobDesignRes.json()) as { designId: string };
-
-  const firstClaimRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::f" })] }),
-  });
-  const { findings: firstFindings } = (await firstClaimRes.json()) as { findings: { kind: string; threadId?: string }[] };
-  const threadId = firstFindings.find((f) => f.kind === "design_divergence")!.threadId!;
-
-  const beforeRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
-  const aliceDesignId = ((await beforeRes.json()) as { thread: { designId?: string } }).thread.designId!;
-
-  // Both sides resolve, exactly as the auto-close test above -- the thread
-  // closes, and both designs flip back to "open" (decideReview's approve
-  // path is unconditional about this, same ids as before).
-  await app.request(`/v1/designs/${bobDesignId}/resolve`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ resolution: "justified_divergence", justification: "bob's justification" }),
-  });
-  await app.request(`/v1/designs/${aliceDesignId}/resolve`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(alice.token) },
-    body: JSON.stringify({ resolution: "justified_divergence", justification: "alice's justification" }),
-  });
-  const midRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
-  assert.equal(((await midRes.json()) as { thread: { status: string } }).thread.status, "closed", "sanity check: same as the test above");
-
-  // A genuinely new collision -- a different symbol, still inside alice's
-  // declared scope, still outside bob's -- between the same still-live pair.
-  const secondClaimRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/x.ts::g", ts: 2000 })] }),
-  });
-  const { findings: secondFindings } = (await secondClaimRes.json()) as { findings: { kind: string; threadId?: string }[] };
-  const secondThreadId = secondFindings.find((f) => f.kind === "design_divergence")!.threadId!;
-  assert.equal(secondThreadId, threadId, "must reuse the existing thread, not fork a new one, for the same design pair");
-
-  const listRes = await app.request("/v1/alignment-threads?projectId=proj-1", { headers: bearer(alice.token) });
-  assert.equal(((await listRes.json()) as { items: unknown[] }).items.length, 1, "still exactly one thread for this pair");
-
-  const afterRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(alice.token) });
-  const afterBody2 = (await afterRes.json()) as { thread: { status: string }; messages: { message: string }[] };
-  assert.equal(afterBody2.thread.status, "open", "both designs are live again -- the new finding reopens the conversation");
-  assert.ok(
-    afterBody2.messages.some((m) => m.message.includes("src/x.ts::g")),
-    `expected the new finding's own message in the reopened thread's history: ${JSON.stringify(afterBody2.messages)}`,
-  );
-
-  // And both designs are genuinely re-blocked -- the reopened thread isn't
-  // just a stale label, the underlying enforcement actually re-armed too.
-  const aliceListRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s-alice`, { headers: bearer(alice.token) });
-  const aliceDesigns = (await aliceListRes.json()) as { items: { id: string; status: string }[] };
-  assert.equal(aliceDesigns.items.find((d) => d.id === aliceDesignId)?.status, "flagged");
-});
-
-// The negative case: nobody's left to act on it, so the thread must stay
-// closed even though the finding is still recorded.
-// Uses `textual_overlap` (two developers writing the same symbol) rather
-// than `design_divergence` -- that check fires whether or not either side
-// has a design at all (design-divergence.ts's own check is gated on the
-// intruded-upon design still being open, so it can't reach a state where a
-// finding lands with the referenced design already closed; `textualOverlap`,
-// checks.ts, has no such gate). Neither alice nor bob ever registers a
-// design here, which is the simplest way to get `reopenEligible: false` on
-// both sides of every finding.
-test("POST /v1/claims: a new textual_overlap finding against a pair whose thread already closed leaves it closed when neither side has a live design", async () => {
-  const { app, dataDir, alignmentThreads } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir); // alice
-  const bobToken = await addProjectMember(app, admin.token, "proj-1");
-
-  await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-alice", symbolId: "src/shared.ts::f" })] }),
-  });
-  const firstRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/shared.ts::f" })] }),
-  });
-  const { findings } = (await firstRes.json()) as { findings: { kind: string; threadId?: string }[] };
-  const threadId = findings.find((f) => f.kind === "textual_overlap")!.threadId!;
-
-  alignmentThreads.close(threadId, "alice@example.com");
-
-  // A genuinely new overlap between the same pair, still neither side ever
-  // having registered a design.
-  await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-alice", symbolId: "src/shared.ts::g" })] }),
-  });
-  const secondRes = await app.request("/v1/claims", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(bobToken) },
-    body: JSON.stringify({ projectId: "proj-1", claims: [makeClaim({ projectId: "proj-1", sessionId: "s-bob", symbolId: "src/shared.ts::g" })] }),
-  });
-  const { findings: secondFindings } = (await secondRes.json()) as { findings: { kind: string; threadId?: string }[] };
-  assert.equal(secondFindings.find((f) => f.kind === "textual_overlap")!.threadId, threadId, "still reuses the existing thread, not a fork");
-
-  const afterRes = await app.request(`/v1/alignment-threads/${threadId}`, { headers: bearer(admin.token) });
-  const afterBody = (await afterRes.json()) as { thread: { status: string }; messages: { message: string }[] };
-  assert.equal(afterBody.thread.status, "closed", "neither side ever had a live design -- nobody to act on it, so it stays closed");
-  assert.ok(
-    afterBody.messages.some((m) => m.message.includes("src/shared.ts::g")),
-    "the finding is still recorded even though the thread doesn't reopen",
   );
 });
 
@@ -2365,43 +2115,6 @@ test("designs.flag(..., 'llm_divergence', ...) persists as status 'flagged', not
   assert.equal(registered?.status, "flagged", "a design flagged with an 'llm_divergence' verdict must not read back as 'open'");
 });
 
-// 2026-08-26: blocking is now a static function of verdict alone --
-// file_overlap (tier 1's exactOverlap) always stays advisory. This is the
-// counterpart to the test above, pinning that behavior for the same
-// status/response-shape surface.
-test("POST /v1/designs/check: a file_overlap (tier 1 exact) verdict stays status 'open', not 'flagged'", async () => {
-  const { app, dataDir } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-
-  await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "first, unrelated topic entirely", creates: ["a.ts"], touches: [], dependsOn: [] }),
-  });
-  const otherPat = await addProjectMember(app, admin.token, "proj-1"); // same-developer pairs no longer produce a file_overlap verdict at all (2026-08-22); must come after proj-1 is founded above
-  const overlapRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "second, also unrelated topic", creates: ["a.ts"], touches: [], dependsOn: [] }),
-  });
-  const overlapBody = (await overlapRes.json()) as { verdict: string; designId: string };
-  assert.equal(overlapBody.verdict, "file_overlap");
-
-  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s2`, { headers: bearer(admin.token) });
-  const listBody = (await listRes.json()) as { items: { id: string; status: string }[] };
-  const registered = listBody.items.find((d) => d.id === overlapBody.designId);
-  assert.equal(registered?.status, "open", "a file_overlap verdict must not demote the design out of 'open'");
-
-  // Still visible for display -- the whole point of keeping it a flag at
-  // all rather than silently dropping it.
-  const activityRes = await app.request(`/v1/activity?projectId=proj-1&relatedId=${overlapBody.designId}`, { headers: bearer(admin.token) });
-  const activityBody = (await activityRes.json()) as { items: { kind: string; payload?: { verdict?: string } }[] };
-  const checked = activityBody.items.find((e) => e.kind === "design_checked");
-  assert.ok(checked, "the check itself is still logged for the dashboard's activity feed");
-  assert.equal(checked!.payload?.verdict, "file_overlap");
-  assert.ok(!activityBody.items.some((e) => e.kind === "design_flagged"), "a file_overlap verdict must not also log design_flagged");
-});
-
 test("GET /v1/designs: newest-first, optionally filtered by status/sessionId", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
@@ -2601,7 +2314,7 @@ test("POST /v1/designs/check: with no groupId in the body, the response self-ass
   assert.equal(body.groupId, body.designId);
 });
 
-test("POST /v1/designs/check: a caller-supplied groupId links a registration in a different project, echoed back on the overlap verdict branch too", async () => {
+test("POST /v1/designs/check: a caller-supplied groupId links a registration in a different project", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
 
@@ -2621,21 +2334,6 @@ test("POST /v1/designs/check: a caller-supplied groupId links a registration in 
   const second = (await secondRes.json()) as { verdict: string; designId: string; groupId?: string };
   assert.equal(second.verdict, "clean");
   assert.equal(second.groupId, first.groupId);
-
-  // A different developer in proj-b registers a genuinely conflicting
-  // design against `second`'s own scope, to exercise the "file_overlap" verdict
-  // response branch specifically -- confirms groupId is echoed there too,
-  // not just on the "clean" branch (a separate `c.json()` call in the
-  // route that could otherwise be missed).
-  const otherPat = await addProjectMember(app, admin.token, "proj-b");
-  const conflictRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-b", sessionId: "s3", summary: "conflicting", creates: ["b.ts"], touches: [], dependsOn: [] }),
-  });
-  const conflict = (await conflictRes.json()) as { verdict: string; designId: string; groupId?: string };
-  assert.equal(conflict.verdict, "file_overlap");
-  assert.equal(conflict.groupId, conflict.designId, "the conflicting design got its own default group, unrelated to the linked pair's");
 });
 
 test("POST /v1/designs/:id/amend: a summary update propagates to a linked sibling design in a different project", async () => {
@@ -2867,54 +2565,6 @@ test("GET /v1/designs/scope-match: with no ?path=, can only report no_design/fla
   const noPathBody = (await noPathInScope.json()) as { state: string; designId?: string };
   assert.equal(noPathBody.state, "in_scope");
   assert.equal(noPathBody.designId, undefined, "no designId hint when there's nothing to disambiguate a path against");
-});
-
-test("POST /v1/designs/check: a flagged design stays visible to a *third* design's overlap check (openDesigns includes flagged, end to end)", async () => {
-  const { app, dataDir } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-
-  // "second" needs to actually reach status "flagged" to test what this
-  // test is about -- since the 2026-08-19 severity split, a tier 1
-  // (exactOverlap) hit alone no longer does that (warning severity, stays
-  // "open"). So "second" is flagged via a constraint match (tier 3, error
-  // severity) on a path first doesn't touch at all -- structuralOverlaps
-  // against "first" must come back empty, or tier 1 would short-circuit
-  // runDesignChecks before constraintMatch ever runs. "second" also touches
-  // "shared.ts" so "third"'s own tier-1 check has something to find it by.
-  await app.request("/v1/constraints/seed", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ projectId: "proj-1", constraints: [{ statement: "protected path", scope: ["constrained.ts"], type: "constraint" }] }),
-  });
-  // "third" is registered by a different developer than "second" -- same-
-  // developer pairs no longer produce a tier-1 overlap verdict at all
-  // (2026-08-22), which is what this test is actually exercising. Must come
-  // after proj-1 is founded above (the seed call itself founds it).
-  const thirdDeveloperPat = await addProjectMember(app, admin.token, "proj-1");
-  await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "first", creates: [], touches: ["s1-only.ts"], dependsOn: [] }),
-  });
-  const secondRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "second", creates: [], touches: ["shared.ts", "constrained.ts"], dependsOn: [] }),
-  });
-  const secondBody = (await secondRes.json()) as { verdict: string; designId: string };
-  assert.equal(secondBody.verdict, "constraint_violation");
-
-  const thirdRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(thirdDeveloperPat) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s3", summary: "third, also overlapping", creates: [], touches: ["shared.ts"], dependsOn: [] }),
-  });
-  const thirdBody = (await thirdRes.json()) as { verdict: string; conflicts: { conflictingDesignId: string }[] };
-  assert.equal(thirdBody.verdict, "file_overlap", "a flagged design must not become invisible to new registrations' structural overlap checks");
-  assert.ok(
-    thirdBody.conflicts.some((c) => c.conflictingDesignId === secondBody.designId),
-    "the flagged (second) design specifically should show up as a conflict, not just the still-open first one",
-  );
 });
 
 test("POST /v1/designs/:id/amend: a clean amendment persists, bumps scopeVersion, and fires a fresh semantic-comparator pass", async () => {
@@ -3225,53 +2875,6 @@ test("POST /v1/designs/:id/amend: a conflicting amendment persists the merged sc
   assert.deepEqual(design?.touches, ["a.ts", "constrained.ts"]);
 });
 
-// 2026-08-19 severity split: same shape as above, but a warning-severity
-// (tier 1) amendment must persist and stay "open" -- no flag, no review
-// needed, matching a fresh registration's warning-severity behavior.
-test("POST /v1/designs/:id/amend: a file_overlap (tier 1 exact) amendment persists and stays 'open'", async () => {
-  const { app, dataDir } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  const otherPat = await addProjectMember(app, admin.token, "proj-1"); // same-developer pairs no longer produce an overlap verdict at all (2026-08-22)
-
-  await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-other", summary: "unrelated topic", creates: [], touches: ["shared.ts"], dependsOn: [] }),
-  });
-  const registerRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "also unrelated", creates: [], touches: ["a.ts"], dependsOn: [] }),
-  });
-  const { designId } = (await registerRes.json()) as { designId: string };
-
-  const amendRes = await app.request(`/v1/designs/${designId}/amend`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ addTouches: ["shared.ts"] }),
-  });
-  const amendBody = (await amendRes.json()) as { verdict: string; designId: string };
-  assert.equal(amendBody.verdict, "file_overlap");
-
-  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
-  const listBody = (await listRes.json()) as { items: { id: string; status: string; touches: string[] }[] };
-  const design = listBody.items.find((d) => d.id === designId);
-  assert.equal(design?.status, "open", "a file_overlap amend must not demote the design out of 'open'");
-  assert.deepEqual(design?.touches, ["a.ts", "shared.ts"], "the proposed scope still persists even though it's only a warning");
-
-  // Found while updating twing-monitor for the severity split: since
-  // design_flagged is (correctly) skipped for a warning, without a
-  // dedicated log here a warning-severity amend left zero activity trail
-  // at all -- design_amended's own event only ever carries the scope
-  // delta, never the check outcome.
-  const activityRes = await app.request(`/v1/activity?projectId=proj-1&relatedId=${designId}`, { headers: bearer(admin.token) });
-  const activityBody = (await activityRes.json()) as { items: { kind: string; payload?: { verdict?: string } }[] };
-  const checked = activityBody.items.find((e) => e.kind === "design_checked");
-  assert.ok(checked, "a file_overlap amend must still log a design_checked event explaining why");
-  assert.equal(checked!.payload?.verdict, "file_overlap");
-  assert.ok(!activityBody.items.some((e) => e.kind === "design_flagged"), "a file_overlap amend must not also log design_flagged");
-});
-
 test("POST /v1/designs/:id/amend: a rejected amend's proposed scope survives an approved review -- decideReview reopens it intact, not empty-handed", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
@@ -3372,52 +2975,6 @@ test("POST /v1/designs/:id/amend: an approved review waives only that specific c
   assert.equal((await thirdAmend.json() as { verdict: string }).verdict, "constraint_violation", "b/** was never justified -- approving a/** must not waive it too");
 });
 
-test("POST /v1/designs/:id/resolve: an approved structural overlap on one path doesn't re-flag on a later amend, but a newly-added overlapping path on the same pair still flags fresh (item 7's fix)", async () => {
-  const { app, dataDir } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  const otherPat = await addProjectMember(app, admin.token, "proj-1"); // same-developer pairs no longer produce an overlap verdict at all (2026-08-22)
-
-  // The other design claims both file1.ts and file2.ts from the start.
-  await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s-other", summary: "", creates: [], touches: ["file1.ts", "file2.ts"], dependsOn: [] }),
-  });
-
-  const registerRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["file1.ts"], dependsOn: [] }),
-  });
-  const { verdict: firstVerdict, designId } = (await registerRes.json()) as { verdict: string; designId: string };
-  assert.equal(firstVerdict, "file_overlap", "sanity: file1.ts overlap must be caught first");
-
-  const resolveRes = await app.request(`/v1/designs/${designId}/resolve`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ resolution: "justified_divergence", justification: "proceeding on file1.ts despite the overlap" }),
-  });
-  const { reviewId } = (await resolveRes.json()) as { reviewId: string };
-  await app.request(`/v1/reviews/${reviewId}/decide`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ decision: "approve" }),
-  });
-
-  // Amending to also touch file2.ts re-runs the check against the design's
-  // *entire* merged scope (file1.ts + file2.ts), not just the delta -- if
-  // file1.ts's approval weren't remembered, this would report both paths
-  // as conflicts, not just the genuinely new one.
-  const amendRes = await app.request(`/v1/designs/${designId}/amend`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ addTouches: ["file2.ts"] }),
-  });
-  const amendBody = (await amendRes.json()) as { verdict: string; conflicts: { overlapPaths: string[] }[] };
-  assert.equal(amendBody.verdict, "file_overlap", "file2.ts was never justified -- approving file1.ts must not waive it too");
-  assert.deepEqual(amendBody.conflicts[0].overlapPaths, ["file2.ts"], "file1.ts's already-approved overlap must not resurface");
-});
-
 test("POST /v1/designs/:id/resolve: attributes constraintId even when the design *also* overlaps another open design on the same path", async () => {
   // Regression test for a real bug found live, 2026-08-17: resolve() used
   // to derive constraintId by re-running the *overall* verdict check
@@ -3431,6 +2988,10 @@ test("POST /v1/designs/:id/resolve: attributes constraintId even when the design
   // /v1/constraints/match backstop kept denying identically forever, even
   // after approval. The fix matches constraints directly against the
   // design's own scope, independent of whatever else is open.
+  //
+  // Since 2026-10-01 file overlap no longer exists, so registration itself
+  // reports the rule; the test still pins that attribution holds with
+  // another open design on the same path.
   const { app, dataDir, constraints } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
   const constraint = constraints.add("proj-1", "needs review", ["shared.ts"], "constraint", "seeded");
@@ -3450,7 +3011,7 @@ test("POST /v1/designs/:id/resolve: attributes constraintId even when the design
     body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "", creates: [], touches: ["shared.ts"], dependsOn: [] }),
   });
   const { verdict, designId } = (await registerRes.json()) as { verdict: string; designId: string };
-  assert.equal(verdict, "file_overlap", "sanity check: registration itself must see the overlap, not the constraint, since tier 1 wins");
+  assert.equal(verdict, "constraint_violation", "another design on the same path no longer hides the rule (2026-10-01)");
 
   const resolveRes = await app.request(`/v1/designs/${designId}/resolve`, {
     method: "POST",
@@ -3995,53 +3556,6 @@ test("POST /v1/designs/:id/resume: a conflicting resume persists (identity reass
   assert.equal(design?.sessionId, "s1");
 });
 
-// 2026-08-19 severity split: same shape as above, but a warning-severity
-// (tier 1) resume must persist and reopen -- no flag, no review needed.
-test("POST /v1/designs/:id/resume: a file_overlap (tier 1 exact) resume persists and reopens as 'open'", async () => {
-  const { app, dataDir, designs } = freshApp();
-  const admin = await bootstrapAdmin(app, dataDir);
-  // Resume reassigns the design's developerId to whoever calls it (admin,
-  // below) -- "s2" needs to belong to someone else, or this is a
-  // same-developer pair and no longer produces an overlap verdict at all
-  // (2026-08-22).
-  const otherPat = await addProjectMember(app, admin.token, "proj-1");
-
-  const firstRes = await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(otherPat) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s1", summary: "unrelated", creates: [], touches: ["shared.ts"], dependsOn: [], ttlMs: 10 }),
-  });
-  const { designId } = (await firstRes.json()) as { designId: string };
-  designs.sweepExpired(Date.now() + 1000); // -> dormant
-
-  await app.request("/v1/designs/check", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId: "s2", summary: "also unrelated", creates: [], touches: ["shared.ts"], dependsOn: [] }),
-  });
-
-  const resumeRes = await app.request(`/v1/designs/${designId}/resume`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...bearer(admin.token) },
-    body: JSON.stringify({ sessionId: "s1" }),
-  });
-  const resumeBody = (await resumeRes.json()) as { verdict: string };
-  assert.equal(resumeBody.verdict, "file_overlap");
-
-  const listRes = await app.request(`/v1/designs?projectId=proj-1&sessionId=s1`, { headers: bearer(admin.token) });
-  const listBody = (await listRes.json()) as { items: { id: string; status: string; sessionId: string }[] };
-  const design = listBody.items.find((d) => d.id === designId);
-  assert.equal(design?.status, "open", "a file_overlap resume must reopen as 'open', not 'flagged'");
-
-  const activityRes = await app.request(`/v1/activity?projectId=proj-1&relatedId=${designId}`, { headers: bearer(admin.token) });
-  const activityBody = (await activityRes.json()) as { items: { kind: string; payload?: { verdict?: string } }[] };
-  const checked = activityBody.items.find((e) => e.kind === "design_checked");
-  assert.ok(checked, "a file_overlap resume must still log a design_checked event explaining why");
-  assert.equal(checked!.payload?.verdict, "file_overlap");
-  assert.ok(!activityBody.items.some((e) => e.kind === "design_flagged"), "a file_overlap resume must not also log design_flagged");
-  assert.equal(design?.sessionId, "s1");
-});
-
 test("POST /v1/designs/check: registering a non-overlapping design for the same session notifies about the stale sibling without changing its status", async () => {
   const { app, dataDir } = freshApp();
   const admin = await bootstrapAdmin(app, dataDir);
@@ -4280,7 +3794,7 @@ test("POST /v1/designs/check: a rawPlanText registration under a *different* ses
   const secondBody = (await second.json()) as { designId: string; verdict: string };
   assert.equal(second.status, 200);
   assert.notEqual(secondBody.designId, firstBody.designId, "a different session must not reregister another session's design");
-  assert.equal(secondBody.verdict, "file_overlap", "and correctly conflicts with it, same as any other pair of unrelated open designs");
+  assert.equal(secondBody.verdict, "clean", "sharing a file is not a conflict (2026-10-01); only the semantic comparator compares designs");
 });
 
 // No design exists without a plan -- the design doc a reviewer reads. Enforced

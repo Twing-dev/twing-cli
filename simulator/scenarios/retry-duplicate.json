@@ -1,6 +1,6 @@
 {
   "name": "retry-duplicate",
-  "description": "Two sessions independently add retry/backoff logic to different files in the same project -- the kind of duplicate construction that align's trigger-duplication check exists to catch.",
+  "description": "Two sessions independently add retry/backoff logic to different files in the same project -- duplicate construction the semantic comparator should flag once both sessions have registered their designs (the design gate's first-edit deny prompts that).",
   "fixture": "sample-service",
   "maxTurns": 3,
   "sessions": {

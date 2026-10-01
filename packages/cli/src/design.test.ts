@@ -254,22 +254,16 @@ test("runDesignClose: throws without --id", async () => {
 
 // --- runDesignAmend -----------------------------------------------------------
 
-test("runDesignAmend: sends the split scope delta and prints conflict detail on overlap", async () => {
-  const { fetch, calls } = captureFetch(
-    jsonResponse({
-      verdict: "file_overlap",
-      designId: "d1",
-      conflicts: [{ conflictingDesignId: "d2", overlapKind: "touches", overlapDetail: "both touch b.ts", conflictingSummary: "someone else's work" }],
-    }),
-  );
+// (Printing file-overlap "conflicts with" detail was removed 2026-10-01 with
+// file overlap itself.)
+test("runDesignAmend: sends the split scope delta", async () => {
+  const { fetch, calls } = captureFetch(jsonResponse({ verdict: "clean", designId: "d1" }));
   await withHome(async () => {
     cacheToken(SERVER_URL, "test-token");
     const repo = tmpRepo(SERVER_URL);
-    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runDesignAmend({ cwd: repo, id: "d1", touches: "b.ts,c.ts" })));
+    await captureConsole(() => withMockFetch(fetch, () => runDesignAmend({ cwd: repo, id: "d1", touches: "b.ts,c.ts" })));
     assert.match(calls[0].url, /\/v1\/designs\/d1\/amend$/);
     assert.deepEqual(calls[0].body, { addTouches: ["b.ts", "c.ts"], addCreates: [], addDependsOn: [] });
-    assert.ok(logs.some((l) => l.includes("touches") && l.includes("d2")));
-    assert.ok(logs.some((l) => l.includes("someone else's work")));
   });
 });
 

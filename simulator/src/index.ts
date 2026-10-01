@@ -45,7 +45,7 @@ function printUsage(): void {
       "  --bedrock-model <model>       default: google.gemma-4-31b",
       "  --bedrock-region <region>     default: AWS_REGION/AWS_DEFAULT_REGION env",
       "  --server-port <port>          default: 8790",
-      "  --enable-design-gate          leave the §17 PreToolUse gate wired (default: off)",
+      "  --disable-design-gate         turn the §17 PreToolUse gate off (default: on -- without it no design is registered and nothing is compared)",
     ].join("\n"),
   );
 }
@@ -69,7 +69,11 @@ async function main(): Promise<void> {
     bedrockRegion: flags["bedrock-region"],
     serverPort: Number(flags["server-port"] ?? 8790),
     workspacesRoot: path.join(SIMULATOR_ROOT, ".workspaces"),
-    enableDesignGate: flags["enable-design-gate"] === "true",
+    // On by default since 2026-10-01: the semantic comparator compares
+    // registered designs, and the gate's first-edit deny is how the agents
+    // register theirs. With it off, nothing is compared and the run ends
+    // with an empty, success-looking thread list.
+    enableDesignGate: flags["disable-design-gate"] !== "true",
   });
 }
 
