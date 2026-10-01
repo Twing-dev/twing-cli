@@ -140,7 +140,7 @@ export const EVAL_CASES: EvalCase[] = [
   // ---------------------------------------------------------------------
   {
     id: "obvious-01-exact-overlap-creates-retrypolicy",
-    bucket: "obvious_conflict",
+    bucket: "semantic_gap",
     category: "exact_overlap_creates",
     source: "manual",
     rationale:
@@ -164,13 +164,12 @@ export const EVAL_CASES: EvalCase[] = [
         summary: "Add a reusable retry policy class for outbound calls",
       }),
     ],
-    expectedVerdict: "file_overlap",
-    expectedOverlapKind: "creates",
+    expectedVerdict: "clean",
     futureLlmExpectation: "should_flag_as_conflict",
   },
   {
     id: "obvious-02-exact-overlap-touches-retry-ts-planmode",
-    bucket: "obvious_conflict",
+    bucket: "semantic_gap",
     category: "exact_overlap_touches",
     source: "plan_mode",
     rationale:
@@ -194,8 +193,7 @@ export const EVAL_CASES: EvalCase[] = [
         summary: "Add a circuit breaker around retry.ts so it stops retrying after repeated failures and fails fast",
       }),
     ],
-    expectedVerdict: "file_overlap",
-    expectedOverlapKind: "touches",
+    expectedVerdict: "clean",
     futureLlmExpectation: "should_flag_as_conflict",
     planModeProvenance: {
       rawPlanText:
@@ -530,7 +528,7 @@ export const EVAL_CASES: EvalCase[] = [
   // ---------------------------------------------------------------------
   {
     id: "obvious-12-planmode-vs-planmode-exact-creates",
-    bucket: "obvious_conflict",
+    bucket: "semantic_gap",
     category: "exact_overlap_creates",
     source: "plan_mode",
     rationale:
@@ -555,8 +553,7 @@ export const EVAL_CASES: EvalCase[] = [
         summary: "Add a FeatureFlagClient helper that wraps the flag-check API with caching, wired into checkout to gate the new payment method.",
       }),
     ],
-    expectedVerdict: "file_overlap",
-    expectedOverlapKind: "creates",
+    expectedVerdict: "clean",
     futureLlmExpectation: "should_flag_as_conflict",
     otherPlanModeProvenance: {
       rawPlanText:
@@ -871,7 +868,7 @@ export const EVAL_CASES: EvalCase[] = [
   // ---------------------------------------------------------------------
   {
     id: "obvious-20-multi-design-mixed-tiers",
-    bucket: "obvious_conflict",
+    bucket: "semantic_gap",
     category: "multi_design_accumulation",
     source: "manual",
     rationale:
@@ -888,13 +885,12 @@ export const EVAL_CASES: EvalCase[] = [
       design({ id: "open-tier2", developerId: "dev2", creates: ["Bar"], touches: ["src/unrelated-y.ts"], summary: "Builds Bar, which the candidate assumes exists" }),
       design({ id: "open-unrelated", developerId: "dev2", creates: ["Zzz"], touches: ["src/z.ts"], summary: "Genuinely unrelated third design" }),
     ],
-    expectedVerdict: "file_overlap",
-    expectedConflictCount: 1,
+    expectedVerdict: "clean",
     futureLlmExpectation: "should_flag_as_conflict",
   },
   {
     id: "obvious-21-multi-design-both-tier1",
-    bucket: "obvious_conflict",
+    bucket: "semantic_gap",
     category: "multi_design_accumulation",
     source: "manual",
     rationale: "2 open designs, both independently exact-overlap at tier 1 (different creates symbols each) -- asserts both land in the accumulated conflicts array, not just the first.",
@@ -905,8 +901,7 @@ export const EVAL_CASES: EvalCase[] = [
       design({ id: "open-p", developerId: "dev2", creates: ["Alpha"], summary: "Also builds Alpha" }),
       design({ id: "open-q", developerId: "dev2", creates: ["Beta"], summary: "Also builds Beta" }),
     ],
-    expectedVerdict: "file_overlap",
-    expectedConflictCount: 2,
+    expectedVerdict: "clean",
     futureLlmExpectation: "should_flag_as_conflict",
   },
 

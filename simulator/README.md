@@ -2,8 +2,9 @@
 
 Runs two real `claude` CLI sessions concurrently against a shared fixture
 project, wired up with real `twing` hooks and a real (ephemeral) `twing
-serve`, so you can watch `twing align` react to genuine concurrent-agent
-activity instead of a synthetic test.
+serve`, so you can watch twing coordinate genuine concurrent-agent activity
+instead of a synthetic test -- the designs each session registers, and the
+alignment threads the semantic comparator opens between them.
 
 It never touches twing-cli's own source -- both sessions work on a small
 bundled fixture copied into a scratch workspace (`simulator/.workspaces/`,
@@ -99,13 +100,15 @@ node simulator/dist/index.js --mode clones --driver-a human
    loops: the configured driver (human or Bedrock) looks at what the
    agent just did and either gives it another instruction or ends the
    session. Both sessions run concurrently the whole time.
-4. Once both sessions finish, waits ~10s for the daemon's background sync
-   to reach the server, then runs `twing align` in each session directory
-   and prints the real report.
+4. Once both sessions finish, waits ~10s for background work to reach the
+   server, then runs `twing align threads` in each session directory and
+   prints the real list. (Until 2026-10-01 this ran bare `twing align`, a
+   report of claim-vs-claim conflicts; that report and the checks behind it
+   were removed -- see the twing-cli README.)
 
 Workspaces are left on disk afterward (`simulator/.workspaces/<run-id>/`)
-so you can inspect what each session actually wrote, or re-run `twing align`
-yourself.
+so you can inspect what each session actually wrote, or re-run
+`twing align threads` yourself.
 
 ## Driving mode: human
 
@@ -136,13 +139,10 @@ A scenario is a small JSON file (see `simulator/scenarios/retry-duplicate.json`)
 `--scenario <path>` loads a file directly. `fixture` names a directory
 under `simulator/fixtures/`.
 
-## Known limitation worth knowing about
+## What it no longer shows
 
-Whether `align`'s trigger-duplication check fires depends on the agent's
-edit style: a localized `Edit` call produces a symbol-level claim (so a new
-function's name gets checked against `.twing/twing.yml` triggers), but a
-full-file `Write` falls back to a file-level claim with no symbol name to
-check (§5 of the design doc, deliberately, for v0). Two sessions that
-independently build near-duplicate helpers may or may not both get flagged
-depending on which tool each one happened to use -- this is a real,
-observed gap, not a simulator bug.
+Two sessions editing the same functions used to be flagged from their
+claims. Since 2026-10-01 only the semantic comparator flags conflicts, and
+it compares the two sessions' *designs*, not their edits -- so a run where
+both agents happen to edit the same code but intend different things shows
+no thread at all, by design.

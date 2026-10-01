@@ -1,9 +1,9 @@
 # twing-cli
 
 twing coordinates concurrent coding work in Claude Code, OpenCode (Codex is WIP).
-It registers designs before edits, checks configured constraints, and reports
-overlapping work. The design gate blocks edits when it needs a design or a
-resolution; claim capture and alignment findings are advisory.
+It registers designs before edits, checks configured constraints, and flags
+designs that conflict with or duplicate each other, judged semantically. The
+design gate blocks edits when it needs a design or a resolution.
 
 ## Architecture
 Twing requires a coordination server - that does the coordination. You can
@@ -174,9 +174,10 @@ The gate checks these conditions:
 | --- | --- |
 | No design, or edit outside its declared scope | Edit is denied until you register, amend, resume, or resolve the design. |
 | A configured constraint | Edit is denied. A justification creates an admin review. |
-| Symbol conflict with another open design | A later edit can be denied. The blocked developer can resolve it with a justification. |
-| Semantic conflict between designs | Checked asynchronously. The triggering edit can succeed; a later notice or edit can report or block the conflict. |
-| Declared file overlap | Advisory only. |
+| Semantic conflict or duplication between designs | Checked asynchronously. The triggering edit can succeed; a later edit can be denied. The blocked developer can resolve it with a justification. |
+
+Two designs touching the same file, or edits landing on the same code, are not
+conflicts by themselves; only the semantic comparison decides that.
 
 `Bash`, `exec_command`, and other shell-driven writes are not hooked. They
 bypass both the design gate and claim capture. Do not use them to work around a
@@ -194,7 +195,7 @@ Useful commands:
 twing design list --mine --status open
 twing design amend --id <design-id> --touches src/a.ts,src/b.ts
 twing design resolve --id <design-id> --justify "why this can proceed"
-twing align
+twing align threads
 ```
 
 `--touches` takes one comma-separated value. For a less error-prone design,
@@ -240,8 +241,8 @@ twing design list --mine --status open
 ```
 
 Amend that design if it covers the same effort instead of registering a second
-one. A `symbol_conflict` or semantic-conflict justification can resolve the
-blocked design immediately. A `constraint_violation` justification stays
+one. A semantic-conflict justification resolves the blocked design
+immediately. A `constraint_violation` justification stays
 pending until a project admin decides the review with:
 
 ```sh
@@ -354,7 +355,7 @@ twing uninstall [--dry-run]
 twing join --github [--server <url>]
 twing whoami [--server <url>]
 twing daemon | twing daemon restart
-twing align [threads | respond | close]
+twing align threads | respond | close
 twing design register | amend | resolve | resume | close | list | reviews
 twing design comments [<design-id>]
 twing design comment reply <comment-id> --message "..."

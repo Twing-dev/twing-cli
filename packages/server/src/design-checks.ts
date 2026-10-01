@@ -1,13 +1,19 @@
 /**
- * Overlap detection (design doc §17.4 / spec §6) -- the synchronous half of
- * the four-bucket design-conflict model (2026-08-26 terminology
- * simplification; see `DesignVerdict`'s doc comment in core/types.ts for
- * the full model). Two tiers now, cheapest first: exact `creates`/`touches`
- * overlap (`"file_overlap"`, always advisory, never blocks), then
- * constraint match (`"constraint_violation"`, always blocks). `"symbol_conflict"`
- * (real-edit collisions, sourced from Claims) lives in `checks.ts`/
- * `design-divergence.ts`; `"llm_divergence"` lives in
- * `design-semantic-check.ts`'s async comparator -- neither runs here.
+ * The synchronous design check (design doc §17.4 / spec §6): a design's
+ * declared paths against the project's rules (`"constraint_violation"`,
+ * always blocks). That is all it does now.
+ *
+ * 2026-10-01: every conflict/duplication check except the semantic one was
+ * removed -- the path- and symbol-based ones mostly produced noise (decided
+ * in review of Twing-dev/twing-cli#60). Gone: exact `creates`/`touches`
+ * overlap here (`"file_overlap"`), and the claim-time `"symbol_conflict"`
+ * checks (same-symbol edits, contract breaks over the call graph, an edit
+ * inside another developer's declared scope) that lived in `checks.ts` and
+ * `design-divergence.ts`. The one conflict/duplication signal left is the
+ * semantic comparator (`"llm_divergence"`, `design-semantic-check.ts`),
+ * which runs asynchronously, not here. The notes below are the history of
+ * the removed tiers, kept because they explain decisions still visible
+ * elsewhere (same-developer pairs, waivers).
  *
  * (2026-08-19, removed: a "dependency collision" tier that used to sit
  * between exact overlap and constraint match -- one design's `creates`
@@ -247,31 +253,6 @@ export function isDesignLive(design: DesignStatement | undefined): boolean {
   return design?.status === "open" || design?.status === "flagged";
 }
 
-/** Drops any path in `paths` already waived (`justifiedOverlaps`) for this
- * specific `otherId` -- item 7's fix (2026-08-18): a path *not* in the list
- * still flags normally, so this only ever narrows an already-detected
- * overlap down to its unwaived remainder, never widens what counts as an
- * overlap in the first place. */
-function withoutJustified(candidate: DesignStatement, otherId: string, paths: string[]): string[] {
-  return paths.filter((p) => !candidate.justifiedOverlaps.includes(overlapWaiverKey(otherId, p)));
-}
-
-/** Tier 1: exact `creates`/`touches` intersection. */
-function exactOverlap(candidate: DesignStatement, other: DesignStatement): DesignConflict | undefined {
-  const createsHit = withoutJustified(candidate, other.id, intersects(candidate.creates, other.creates));
-  const touchesHit = withoutJustified(candidate, other.id, intersects(candidate.touches, other.touches));
-  if (createsHit.length === 0 && touchesHit.length === 0) return undefined;
-  const hit = [...createsHit, ...touchesHit];
-  return {
-    conflictingDesignId: other.id,
-    agentLabel: other.agentLabel,
-    overlapKind: createsHit.length > 0 ? "creates" : "touches",
-    overlapDetail: `both ${createsHit.length > 0 ? "create" : "touch"} ${hit.join(", ")}`,
-    conflictingSummary: other.summary,
-    overlapPaths: hit,
-  };
-}
-
 export interface ConstraintHit {
   id: string;
   statement: string;
@@ -449,51 +430,22 @@ export function appendPlanUpdate(existingPlan: string | undefined, update: strin
   return `${existingPlan}\n\n## Update (${date})\n\n${update}`;
 }
 
-/** Tier 1 (exact overlap) -- exported (2026-08-18) so
- * `/v1/designs/:id/resolve` can recompute the *current* set of structural
- * conflicts independently at justify-time, the same "trust current state,
- * not the original verdict" reasoning `constraintId`'s own recompute
- * already established, needed to know which specific paths a
- * justified-divergence review should waive (see
- * DesignStatement.justifiedOverlaps).
+/** A design's registration/amend/resume check: project rules only.
  *
- * Skips same-developer pairs (2026-08-22) -- see runDesignChecks's doc
- * comment for why. Both call sites (here via runDesignChecks, and
- * `/v1/designs/:id/resolve`'s own direct call) get the exclusion for free
- * by living here rather than at each call site. */
-export function structuralOverlaps(candidate: DesignStatement, others: DesignStatement[]): DesignConflict[] {
-  const conflicts: DesignConflict[] = [];
-  for (const other of others) {
-    if (other.id === candidate.id) continue;
-    if (other.developerId === candidate.developerId) continue;
-    const exact = exactOverlap(candidate, other);
-    if (exact) conflicts.push(exact);
-  }
-  return conflicts;
-}
-
+ * File overlap (two designs naming the same path) was removed 2026-10-01,
+ * along with every other non-semantic conflict check -- see the top of this
+ * file. Removing it also fixed a quiet bug: an overlap returned before the
+ * rules below were consulted, so a design sharing a file with a teammate's
+ * was never checked against the project's constraints at registration.
+ *
+ * `openDesigns` is no longer read; it stays in the signature because every
+ * caller already has it to hand and the semantic pass they start next uses
+ * it. */
 export function runDesignChecks(
   candidate: DesignStatement,
-  openDesigns: DesignStatement[],
+  _openDesigns: DesignStatement[],
   constraints: DesignConstraint[],
 ): DesignCheckOutcome {
-  const others = openDesigns.filter((d) => d.id !== candidate.id);
-
-  const structuralConflicts = structuralOverlaps(candidate, others);
-  if (structuralConflicts.length > 0) {
-    // Always advisory (2026-08-19, renamed from "overlap" 2026-08-26) -- a
-    // same-file coincidence between two designs' self-reported
-    // creates/touches isn't itself evidence of a real merge conflict (a
-    // design can decline to actually write to a path it named, or write
-    // something that doesn't collide with what the other one wrote). Still
-    // worth surfacing before either writes code -- that's the one thing
-    // this tier can do that claims (§4) can't, since claims don't exist
-    // until code does -- just never worth blocking on. Real edits landing
-    // on the same real symbol is a different, blocking bucket --
-    // `"symbol_conflict"`, see checks.ts/design-divergence.ts.
-    return { verdict: "file_overlap", conflicts: structuralConflicts, constraints: [] };
-  }
-
   // §17 review-flow fix (2026-08): a constraint already justified and
   // approved *for this exact design* doesn't re-flag -- runDesignChecks
   // re-evaluates the whole merged scope on every amend/resume, not just the

@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { fixtureDir, type Scenario } from "./config.js";
 import { setupWorkspace, type WorkspaceMode, type SessionWorkspace } from "./workspace.js";
 import { startEphemeralServer } from "./ephemeral-server.js";
-import { runTwingInit, runTwingAlign, runTwingDesignDisableGate } from "./twing-cli.js";
+import { runTwingInit, runTwingAlignThreads, runTwingDesignDisableGate } from "./twing-cli.js";
 import { ClaudeSession } from "./claude-session.js";
 import type { Driver } from "./drivers/driver.js";
 import { HumanDriver, closeHumanInput } from "./drivers/human-driver.js";
@@ -114,12 +114,12 @@ export async function run(options: RunOptions): Promise<void> {
       runSession(setup.sessions[1], options.scenario.sessions.b.goal, driverB, options.claudeModel, options.scenario.maxTurns),
     ]);
 
-    console.log(`\ntwing-simulator: both sessions done -- waiting ${SETTLE_MS / 1000}s for background sync before checking align...`);
+    console.log(`\ntwing-simulator: both sessions done -- waiting ${SETTLE_MS / 1000}s for background sync before listing alignment threads...`);
     await sleep(SETTLE_MS);
 
     for (const session of setup.sessions) {
-      console.log(`\n=== twing align -- session ${session.label} (${session.dir}) ===`);
-      await runTwingAlign(session.dir);
+      console.log(`\n=== twing align threads -- session ${session.label} (${session.dir}) ===`);
+      await runTwingAlignThreads(session.dir);
     }
   } finally {
     server.stop();

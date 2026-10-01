@@ -1,22 +1,19 @@
 /**
- * `twing align` (§6): design/coordination check -- constraint matches
- * (local), cross-session divergence (server round-trip).
+ * `twing align threads|respond|close` (statefulness redesign, 2026-08): the
+ * CLI side of alignment threads (`alignment-store.ts` server-side) -- the
+ * async reply channel a semantic conflict between two designs opens. Same
+ * shape as `design.ts`'s commands: a thin wrapper over one server call each.
  *
- * `respond`/`threads`/`close` (statefulness redesign, 2026-08) are the CLI
- * side of alignment threads (`alignment-store.ts` server-side) -- the async
- * reply channel a `design_divergence` finding opens. Same shape as
- * `design.ts`'s commands: a thin wrapper over one server call each.
- *
- * (2026-08-19: dropped `--intent`, which surfaced trigger matches against
- * free-text narration -- it was entirely built on the now-removed
- * `triggers`/`matchTriggers` mechanism, see manifest.ts's header comment.)
+ * Bare `twing align` used to be a report of claim-vs-claim conflicts
+ * (same-symbol edits, contract breaks, edits inside another developer's
+ * declared scope), with a git-diff fallback when no daemon was running.
+ * Removed 2026-10-01 along with those checks on the server: the semantic
+ * comparator is the only conflict signal now, and its threads are what the
+ * three subcommands here act on.
  */
 
-import { readConfig, getServerAuth, computeProjectId, computeDeveloperId, loadManifestFromFile, twingConfigPath, authFetch, type Finding } from "@twing/core";
+import { readConfig, getServerAuth, computeProjectId, computeDeveloperId, loadManifestFromFile, twingConfigPath, authFetch } from "@twing/core";
 import { requireRepoRoot } from "./repo-scope.js";
-import { gatherClaims } from "./gather-claims.js";
-import { queryDaemonNotices } from "./daemon-client.js";
-import { printReport } from "./report.js";
 
 const UNAUTHORIZED_HINT = "unauthorized -- run `twing login` to re-authenticate";
 
@@ -40,66 +37,6 @@ function requireCoordinator(repoRoot: string): RequiredConfig {
   }
   const authToken = getServerAuth(readConfig(), serverUrl)?.authToken;
   return { serverUrl, authToken, developerId: computeDeveloperId(repoRoot) };
-}
-
-export interface AlignOptions {
-  cwd: string;
-}
-
-export async function runAlign(options: AlignOptions): Promise<void> {
-  const repoRoot = requireRepoRoot(options.cwd);
-  const manifest = loadManifestFromFile(twingConfigPath(repoRoot));
-  const projectId = computeProjectId(repoRoot);
-
-  const gathered = await gatherClaims(options.cwd);
-
-  // Resolve serverUrl from the repo's own committed coordinator, not a
-  // single global slot -- this repo is the source of truth for which
-  // coordinator it talks to, independent of what other repos/servers this
-  // machine has ever pointed at.
-  const serverUrl = manifest.coordinator.serverUrl;
-  const authToken = serverUrl ? getServerAuth(readConfig(), serverUrl)?.authToken : undefined;
-  const developerId = computeDeveloperId(repoRoot);
-  let findings: Finding[] = [];
-  let serverError: string | undefined;
-
-  if (serverUrl && (gathered.claims.length > 0 || gathered.callEdges.length > 0)) {
-    try {
-      const res = await authFetch(
-        `${serverUrl}/v1/claims`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ projectId, claims: gathered.claims, callEdges: gathered.callEdges }),
-        },
-        authToken,
-        developerId,
-      );
-      if (res.ok) {
-        const body = (await res.json()) as { findings: Finding[] };
-        findings = body.findings;
-      } else if (res.status === 401) {
-        serverError = "unauthorized -- run `twing login` to re-authenticate";
-      } else {
-        serverError = `server responded ${res.status}`;
-      }
-    } catch (err) {
-      serverError = err instanceof Error ? err.message : String(err);
-    }
-  }
-
-  // Daemon path only: its background sync may have already discovered a
-  // finding that our own POST above won't re-surface (we likely just
-  // resubmitted the same claim the daemon already pushed, which the server
-  // correctly treats as a no-op rather than a new finding). Only worth
-  // checking when our own round-trip came up empty.
-  let daemonNotices: string[] | undefined;
-  if (gathered.source === "daemon" && findings.length === 0 && gathered.claims.length > 0) {
-    const notices = await queryDaemonNotices(gathered.claims[0].sessionId);
-    if (notices && notices.length > 0) daemonNotices = notices.map((n) => n.message);
-  }
-
-  printReport({ gathered, manifest, findings, serverUrl, serverError, daemonNotices });
 }
 
 export interface AlignRespondOptions {

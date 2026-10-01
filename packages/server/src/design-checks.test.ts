@@ -45,23 +45,6 @@ test("clean when no overlap, no constraint match", () => {
   assert.equal(outcome.verdict, "clean");
 });
 
-test("tier 1: exact creates overlap -> file_overlap verdict (always advisory)", () => {
-  const candidate = design({ id: "a", creates: ["RetryPolicy"] });
-  const other = design({ id: "b", sessionId: "s2", developerId: "dev2", creates: ["RetryPolicy"] });
-  const outcome = runDesignChecks(candidate, [other], []);
-  assert.equal(outcome.verdict, "file_overlap");
-  assert.equal(outcome.conflicts[0].overlapKind, "creates");
-  assert.equal(outcome.conflicts[0].conflictingDesignId, "b");
-});
-
-test("tier 1: exact touches overlap -> file_overlap verdict (always advisory)", () => {
-  const candidate = design({ id: "a", touches: ["src/net/retry.ts"] });
-  const other = design({ id: "b", sessionId: "s2", developerId: "dev2", touches: ["src/net/retry.ts"] });
-  const outcome = runDesignChecks(candidate, [other], []);
-  assert.equal(outcome.verdict, "file_overlap");
-  assert.equal(outcome.conflicts[0].overlapKind, "touches");
-});
-
 // 2026-08-22: same-developer pairs are excluded from every overlap/conflict
 // tier that compares two designs (tier 1 here; design-divergence.ts and
 // checks.ts separately) -- see design-checks.ts's top-of-file comment.
@@ -82,26 +65,6 @@ test("tier 1: no overlap verdict when the 'other' design belongs to the same dev
 // the default fixture's identical "does something" summary on both sides
 // would otherwise itself trip tier 4's similarity fallback once tier 1
 // is correctly silenced, masking what these tests are actually checking.
-
-test("tier 1: a waived path stays quiet, but a second, different path on the same pair still flags", () => {
-  const other = design({ id: "b", sessionId: "s2", developerId: "dev2", creates: ["file1.ts"], summary: "totally unrelated" });
-  const waivedOnly = design({ id: "a", creates: ["file1.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
-  assert.equal(runDesignChecks(waivedOnly, [other], []).verdict, "clean");
-
-  const otherWithBoth = design({ id: "b", sessionId: "s2", developerId: "dev2", creates: ["file1.ts", "file2.ts"], summary: "totally unrelated" });
-  const waivedOnlyFile1 = design({ id: "a", creates: ["file1.ts", "file2.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
-  const outcome = runDesignChecks(waivedOnlyFile1, [otherWithBoth], []);
-  assert.equal(outcome.verdict, "file_overlap");
-  assert.deepEqual(outcome.conflicts[0].overlapPaths, ["file2.ts"]);
-});
-
-test("tier 1: a waiver against design B doesn't leak to design C sharing the same path", () => {
-  const candidate = design({ id: "a", creates: ["file1.ts"], justifiedOverlaps: [overlapWaiverKey("b", "file1.ts")] });
-  const designC = design({ id: "c", sessionId: "s3", developerId: "dev3", creates: ["file1.ts"], summary: "totally unrelated" });
-  const outcome = runDesignChecks(candidate, [designC], []);
-  assert.equal(outcome.verdict, "file_overlap");
-  assert.equal(outcome.conflicts[0].conflictingDesignId, "c");
-});
 
 test("tier 3: constraint scope match -> constraint_violation", () => {
   const candidate = design({ id: "a", touches: ["src/net/retry.ts"] });

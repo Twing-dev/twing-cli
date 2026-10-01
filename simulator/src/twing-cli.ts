@@ -18,11 +18,13 @@ export async function runTwingDesignDisableGate(cwd: string): Promise<void> {
   await execFileAsync(process.execPath, [cliEntryPath(), "design", "disable-gate"], { cwd, maxBuffer: MAX_BUFFER });
 }
 
-/** Inherits stdio so `align`'s own report prints directly -- that report
- * *is* the point of running the simulator, not something to re-format. */
-export function runTwingAlign(cwd: string): Promise<number> {
+/** Inherits stdio so the thread list prints directly. These are the threads
+ * the semantic comparator opened between the two sessions' designs -- the
+ * one conflict signal left since bare `twing align`'s claim-conflict report
+ * was removed (2026-10-01). */
+export function runTwingAlignThreads(cwd: string): Promise<number> {
   return new Promise((resolve, reject) => {
-    const args = [cliEntryPath(), "align"];
+    const args = [cliEntryPath(), "align", "threads"];
     const child = spawn(process.execPath, args, { cwd, stdio: "inherit" });
     child.once("error", reject);
     child.once("exit", (code) => resolve(code ?? 0));

@@ -106,26 +106,14 @@ function warnIfTouchesMissing(repoRoot: string, touches: string[]): void {
   );
 }
 
-interface DesignConflictJSON {
-  conflictingDesignId: string;
-  overlapKind: string;
-  overlapDetail: string;
-  conflictingSummary: string;
-}
-
 interface DesignCheckResponseJSON {
   error?: string;
-  /** 2026-08-26 terminology simplification: renamed from
-   * `"clean" | "overlap" | "constraint_flag"`. Only `"file_overlap"` and
-   * `"constraint_violation"` can come back from
-   * `/v1/designs/check`/`amend`/`resume` (design-checks.ts tiers 1/3);
-   * `"symbol_conflict"`/`"llm_divergence"` only ever arise from
-   * `/v1/claims` or the async semantic-comparator pass, never this
-   * synchronous response. See DesignVerdict's own doc comment,
-   * core/types.ts, for the full four-bucket model. (A fifth value,
-   * `"has_open_designs"`, existed briefly for this response 2026-08-25 to
-   * 2026-08-31 -- retired, see DesignVerdict's doc comment for why.) */
-  verdict?: "clean" | "file_overlap" | "constraint_violation";
+  /** `/v1/designs/check`/`amend`/`resume` answer only these two since
+   * 2026-10-01, when file overlap (`"file_overlap"`) was removed;
+   * `"llm_divergence"` arises only from the async semantic-comparator pass,
+   * never this synchronous response. See DesignVerdict's own doc comment,
+   * core/types.ts. */
+  verdict?: "clean" | "constraint_violation";
   designId?: string;
   /** Design review (2026-09): this design's page in twing-monitor, echoed by
    * the coordinator so `register` can print the commit trailer without a
@@ -137,7 +125,6 @@ interface DesignCheckResponseJSON {
    * or caller-supplied. Copy this into a sibling repo's
    * `twing design register --group <id>` to link the two. */
   groupId?: string;
-  conflicts?: DesignConflictJSON[];
   /** Every constraint the checked scope matched (2026-08-22, was a single
    * `constraint` object -- see design-checks.ts's matchConstraintsForPaths
    * doc comment for the full reasoning). */
@@ -181,17 +168,11 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
     console.log(`  review: ${result.reviewUrl}`);
     console.log(`  when you commit this work, add the trailer: ${DESIGN_TRAILER_KEY}: ${result.reviewUrl}`);
   }
-  // 2026-08-26: blocking is now a static function of `verdict` alone --
-  // `"file_overlap"` (renamed from `"overlap"`) is always advisory-only,
-  // `"constraint_violation"` (renamed from `"constraint_flag"`) always
-  // blocks. No more severity branch to check within a single verdict.
-  if (result.verdict === "file_overlap") {
-    for (const c of result.conflicts ?? []) {
-      console.log(`  [${c.overlapKind}] conflicts with ${c.conflictingDesignId}: ${c.overlapDetail}`);
-      console.log(`    their summary: ${c.conflictingSummary}`);
-    }
-    console.log(`  (advisory only -- no action needed; visible in the dashboard's design detail/activity feed)`);
-  } else if (result.verdict === "constraint_violation") {
+  // A project rule is the only thing a registration can hit now: file
+  // overlap, which printed advisory "conflicts with" lines here, was removed
+  // 2026-10-01. Conflicts between designs come only from the semantic
+  // comparator, after registration, as alignment threads.
+  if (result.verdict === "constraint_violation") {
     for (const c of result.constraints ?? []) {
       console.log(`  [${c.type}] ${c.statement}`);
     }
