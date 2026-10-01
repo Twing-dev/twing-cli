@@ -2306,11 +2306,23 @@ export function createApp(options: CreateAppOptions = {}) {
     // `designId` instead of its `initiatingDesignId` -- same both-sides
     // shape `symbolConflictWaivers` below already has to handle, for the
     // same reason.
-    const conflictWaivers = alignmentThreads
+    const threadCounterparts = alignmentThreads
       .listByProject(design.projectId, "open")
       .filter((t) => t.category === "llm_divergence" && (t.initiatingDesignId === design.id || t.designId === design.id))
-      .map((t) => ({ conflictingDesignId: (t.initiatingDesignId === design.id ? t.designId : t.initiatingDesignId)! }))
-      .filter((w) => w.conflictingDesignId);
+      .map((t) => (t.initiatingDesignId === design.id ? t.designId : t.initiatingDesignId))
+      .filter((id): id is string => !!id);
+    // Plus whatever the design's current semantic flag names (2026-10-01).
+    // Threads are reused per developer pair and counterpart, so the one
+    // behind a flag can still name an *earlier* design of this developer's
+    // -- found live: the thread named 3879a491, the justified design was
+    // 4ffcd4e2, no waiver was recorded, and the comparator re-flagged the
+    // same pair after every amend. The flag itself always names the right
+    // counterpart.
+    const latestFlag = activityLog.eventsForProjectPage(design.projectId, { relatedId: design.id, kinds: ["design_flagged"], limit: 1 }).items[0];
+    const flagPayload = latestFlag?.payload as { verdict?: string; conflicts?: { conflictingDesignId?: string }[] } | undefined;
+    const flagCounterparts =
+      flagPayload?.verdict === "llm_divergence" ? (flagPayload.conflicts ?? []).map((c) => c.conflictingDesignId).filter((id): id is string => !!id) : [];
+    const conflictWaivers = [...new Set([...threadCounterparts, ...flagCounterparts])].map((conflictingDesignId) => ({ conflictingDesignId }));
     // `symbolConflictWaivers`: nothing raises symbol_conflict any more
     // (removed 2026-10-01), but designs and threads it flagged before then
     // were left as they are. Justifying one of those still records the

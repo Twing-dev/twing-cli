@@ -1687,6 +1687,60 @@ test("POST /v1/designs/:id/resolve: self-approving an llm_divergence block posts
   assert.equal(resolutionNote!.authorId, undefined, "a system note, not posted as either party");
 });
 
+// Found live 2026-10-01: threads are reused per developer pair and
+// counterpart, so the open thread behind a semantic flag can still name an
+// *earlier* design of the justifying developer. The waiver used to come only
+// from threads naming the justified design itself, so none was recorded and
+// the comparator re-flagged the same pair after every amend.
+test("POST /v1/designs/:id/resolve: justifying an llm_divergence waives the counterpart its flag names, even when the shared thread names an older design", async () => {
+  const { app, dataDir, designs, alignmentThreads } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir); // alice
+  const register = async (token: string, sessionId: string, summary: string, touches: string[]) =>
+    (
+      (await (
+        await app.request("/v1/designs/check", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...bearer(token) },
+          body: JSON.stringify({ rawPlanText: TEST_PLAN, projectId: "proj-1", sessionId, summary, creates: [], touches, dependsOn: [] }),
+        })
+      ).json()) as { designId: string }
+    ).designId;
+
+  const aliceOld = await register(admin.token, "s-alice-1", "alice's earlier README work", ["README.md"]);
+  const bobPat = await addProjectMember(app, admin.token, "proj-1");
+  const bobDesign = await register(bobPat, "s-bob", "bob's onboarding rewrite", ["README.md"]);
+  const aliceNew = await register(admin.token, "s-alice-2", "alice's later README change", ["README.md"]);
+
+  // The thread was opened by alice's *older* design, and is reused; the
+  // newer design's flag names bob's design directly.
+  alignmentThreads.findOrCreate({
+    projectId: "proj-1",
+    symbolIds: [],
+    developerId: "alice@example.com",
+    otherDeveloperId: designs.get(bobDesign)!.developerId,
+    designId: bobDesign,
+    initiatingDesignId: aliceOld,
+    systemDescription: "both rewrite the README (simulated)",
+    category: "llm_divergence",
+    subKind: "tension",
+    summary: "README tension",
+    ts: Date.now(),
+    reopenEligible: true,
+  });
+  designs.flag(aliceNew, "llm_divergence", {
+    conflicts: [{ conflictingDesignId: bobDesign, overlapKind: "touches", overlapDetail: "both rewrite the README", conflictingSummary: "bob's onboarding rewrite", overlapPaths: [] }],
+  });
+
+  const res = await app.request(`/v1/designs/${aliceNew}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ resolution: "justified_divergence", justification: "a few lines only, coordinated" }),
+  });
+  assert.equal(((await res.json()) as { status: string }).status, "resolved");
+  assert.deepEqual(designs.get(aliceNew)!.justifiedConflicts, [bobDesign], "the comparator skips a justified counterpart -- without this it re-flags on every amend");
+  assert.equal(designs.get(aliceNew)!.status, "open");
+});
+
 // The reverse-direction merge (just above) means both sides' resolutions
 // now land in the *same* thread -- this is what actually answers "who
 // unblocked themselves and who didn't" from one place, rather than two
