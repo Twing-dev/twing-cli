@@ -40,28 +40,31 @@ Usage: twing-simulator [options]
   --bedrock-model <model>       default: google.gemma-4-31b
   --bedrock-region <region>     default: AWS_REGION/AWS_DEFAULT_REGION env
   --server-port <port>          default: 8790
-  --enable-design-gate          leave the §17 PreToolUse gate wired (default: off)
+  --disable-design-gate         turn the §17 PreToolUse gate off (default: on -- without it no design is registered and nothing is compared)
 ```
 
 ## Testing the design-conflict gate (§17)
 
-`twing init` now wires the design gate (`PreToolUse` on `ExitPlanMode`/
+`twing init` wires the design gate (`PreToolUse` on `ExitPlanMode`/
 `Edit`\|`Write`, plus `SessionEnd`) into every repo it runs in, including the
-scratch session directories this simulator sets up. Since the existing
-scenarios weren't written with design registration in mind, the orchestrator
-disables the gate again right after `init` **unless** you pass
-`--enable-design-gate` -- otherwise every real agent's first edit would get
-denied for having no registered design, breaking scenarios that have nothing
-to do with this feature.
+scratch session directories this simulator sets up, and the simulator
+**leaves it on** (since 2026-10-01). Each agent's first edit is denied with a
+filled-in `twing design register` command, which is how designs get
+registered in real sessions too -- and registered designs are what the
+semantic comparator compares, the one conflict check left. With the gate off
+(`--disable-design-gate`), neither agent registers anything and the run ends
+with an empty thread list that proves nothing.
 
-With the flag on, export `AWS_BEARER_TOKEN_BEDROCK` (and `AWS_REGION` if not
-already set) first -- the ephemeral server needs it for `ExitPlanMode`'s
-structured-field extraction (§17.3):
+Export an LLM credential first -- `AWS_BEARER_TOKEN_BEDROCK` (and
+`AWS_REGION` if not already set), which the default Bedrock drivers need
+anyway. The ephemeral server uses it for design extraction and for the
+semantic comparator, which otherwise fails soft to "no conflict"; the
+simulator warns at startup when none is set:
 
 ```sh
 export AWS_BEARER_TOKEN_BEDROCK=...
 export AWS_REGION=us-east-1
-node simulator/dist/index.js --enable-design-gate
+node simulator/dist/index.js
 ```
 
 Rough edge, not a simulator bug: agents run with

@@ -9,11 +9,9 @@ export async function runTwingInit(cwd: string, serverUrl: string): Promise<void
   await execFileAsync(process.execPath, [cliEntryPath(), "init", "--server", serverUrl], { cwd, maxBuffer: MAX_BUFFER });
 }
 
-/** `init` wires the §17 design gate by default now. Scenarios written
- * before that existed (e.g. retry-duplicate) don't instruct their agents to
- * register a design, so without this the Edit|Write fallback would deny
- * every edit in every scenario run unless `--enable-design-gate` is passed
- * explicitly -- see orchestrator.ts. */
+/** Only for `--disable-design-gate` (2026-10-01: the gate is on by default
+ * -- its first-edit deny is how each agent registers the design the
+ * semantic comparator then compares; see orchestrator.ts). */
 export async function runTwingDesignDisableGate(cwd: string): Promise<void> {
   await execFileAsync(process.execPath, [cliEntryPath(), "design", "disable-gate"], { cwd, maxBuffer: MAX_BUFFER });
 }

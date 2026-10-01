@@ -91,6 +91,18 @@ export async function run(options: RunOptions): Promise<void> {
   console.log(`twing-simulator: workspace ${workDir}`);
   const setup = setupWorkspace(options.mode, fixtureDir(options.scenario), workDir, runId);
 
+  // The semantic comparator is the only conflict check left (2026-10-01), and
+  // it fails soft to "no conflict" without an LLM -- which would end the run
+  // with an empty thread list that reads like success. Same variables the
+  // server's provider auto-detection reads (packages/server/src/llm-client.ts).
+  const llmVars = ["AWS_BEARER_TOKEN_BEDROCK", "GOOGLE_APPLICATION_CREDENTIALS", "OPENROUTER_API_KEY", "TWING_BIFROST_BASE_URL"];
+  if (!llmVars.some((v) => process.env[v])) {
+    console.warn(`twing-simulator: WARNING -- none of ${llmVars.join(", ")} is set, so the server can't compare designs and no conflict will be reported.`);
+  }
+  if (!options.enableDesignGate) {
+    console.warn("twing-simulator: WARNING -- design gate disabled, so neither agent registers a design and there is nothing to compare.");
+  }
+
   console.log(`twing-simulator: starting twing serve on port ${options.serverPort}...`);
   const server = await startEphemeralServer(options.serverPort);
 
