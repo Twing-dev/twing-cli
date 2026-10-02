@@ -37,6 +37,14 @@ export type ActivityEventKind =
   /** §17 scope enforcement (2026-08): `DesignRegistry.amend` expanded an
    * open design's creates/touches/dependsOn after a clean re-check. */
   | "design_amended"
+  /** An owner replaced a design's title/overview text
+   * (`DesignRegistry.reviseOverview`, 2026-10-02). Distinct from
+   * `design_amended` on purpose: that one means the declared *scope* moved,
+   * and twing-monitor renders it as such, while this one is purely the
+   * human-facing prose. The payload's `source` names the channel that
+   * carried it (`"owner_edit"` today), so one kind keeps covering this when
+   * a resynthesis or session-close fold can write the same fields. */
+  | "design_overview_revised"
   /** §17 design lifecycle (2026-08): `DesignRegistry.sweepExpired` demoted
    * an open/flagged design to "dormant" for no activity within `ttlMs`. */
   | "design_dormant"

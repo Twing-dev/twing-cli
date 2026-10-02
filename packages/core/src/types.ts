@@ -268,7 +268,39 @@ export interface DesignStatement {
   blockedReason?: DesignVerdict;
   createdAt: number;
   closedAt?: number;
+  /** Owner-authored title (2026-10-02), set via `PATCH
+   * /v1/designs/:id/overview`. Absent on every design nobody has retitled --
+   * nothing writes it at registration -- and twing-monitor then derives a
+   * title from `summary`'s first sentence (`designTitle.ts`), exactly what it
+   * did before this field existed. So absent renders unchanged. */
+  title?: string;
   summary: string;
+  /** The extraction-time `summary`, preserved verbatim the first time an owner
+   * revises the overview and never written again (2026-10-02) -- so the LLM's
+   * original paraphrase stays recoverable however many rewrites follow. Absent
+   * while `overviewRevision` is 0, where `summary` *is* the original. */
+  summaryExtracted?: string;
+  /** How many times the title/overview has been revised; 0 until the first one
+   * (2026-10-02). `> 0` is the "a human has written this text" flag, which is
+   * what a later resynthesis is expected to consult before overwriting an
+   * owner's own words.
+   *
+   * Deliberately NOT `scopeVersion`: that one is how the async semantic
+   * comparator notices it has been superseded mid-run
+   * (`design-semantic-check.ts`), and a prose correction must not abort an
+   * in-flight pass. Two counters, two different questions. */
+  overviewRevision?: number;
+  overviewRevisedAt?: number;
+  /** Who the revision belongs to -- **always a `developerId`**, never a bot or
+   * process id, even when another channel carried the write. The developer is
+   * the single authority over their own design's text; an agent or an async
+   * job acts on their behalf and says so via `overviewRevisionSource`. */
+  overviewRevisedBy?: string;
+  /** Which channel carried the revision. `"owner_edit"` (a person typing in
+   * twing-monitor) is the only one today. A plain string rather than a union
+   * on purpose: a new channel should cost one string and one twing-monitor
+   * label, not a migration. */
+  overviewRevisionSource?: string;
   creates: string[];
   touches: string[];
   dependsOn: string[];

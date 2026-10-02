@@ -6717,3 +6717,132 @@ test("GET /v1/designs/:id: still 404s for a developer who is neither a member no
   const projects = (await (await app.request("/v1/projects", { headers: bearer("outsiders-pat") })).json()) as { items: unknown[] };
   assert.deepEqual(projects.items, [], "an outsider's project list stays empty");
 });
+
+// --- PATCH /v1/designs/:id/overview (owner-editable text, 2026-10-02) ------
+
+/** Registers a design straight through the store rather than over
+ * `/v1/designs/check`: this route authorizes on design *ownership* alone, so
+ * these tests need a design with a known `developerId` and nothing else --
+ * no project, no membership, no verdict. */
+function ownedDesign(designs: DesignRegistry, developerId: string, summary = "LLM-extracted prose.") {
+  return designs.register({ projectId: "proj-1", developerId, sessionId: "s1", summary, creates: [], touches: ["a.ts"], dependsOn: [] });
+}
+
+async function patchOverview(app: ReturnType<typeof createApp>, token: string, id: string, body: unknown) {
+  return app.request(`/v1/designs/${id}/overview`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...bearer(token) },
+    body: JSON.stringify(body),
+  });
+}
+
+test("PATCH /v1/designs/:id/overview: the owner replaces title and summary", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const d = ownedDesign(designs, admin.developerId);
+
+  const res = await patchOverview(app, admin.token, d.id, { title: "Retry logic for the HTTP client", summary: "Retries failed calls three times." });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { design: { title: string; summary: string; overviewRevision: number; summaryExtracted: string; overviewRevisionSource: string } };
+  assert.equal(body.design.title, "Retry logic for the HTTP client");
+  assert.equal(body.design.summary, "Retries failed calls three times.");
+  assert.equal(body.design.overviewRevision, 1);
+  assert.equal(body.design.summaryExtracted, "LLM-extracted prose.", "the original stays recoverable");
+  assert.equal(body.design.overviewRevisionSource, "owner_edit");
+});
+
+test("PATCH /v1/designs/:id/overview: a non-owner is refused, even a project admin", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  // The caller is an admin of the project the design belongs to and still
+  // cannot rewrite someone else's words -- this route is owner-only on
+  // purpose, unlike the comment-mutation guard's owner-or-manager shape.
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+  const d = ownedDesign(designs, "someone-else@example.com");
+
+  const res = await patchOverview(app, admin.token, d.id, { summary: "not mine to rewrite" });
+  assert.equal(res.status, 403);
+  assert.equal(designs.get(d.id)?.summary, "LLM-extracted prose.", "nothing was written");
+});
+
+test("PATCH /v1/designs/:id/overview: unknown design is 404", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const res = await patchOverview(app, admin.token, "no-such-design", { summary: "x" });
+  assert.equal(res.status, 404);
+});
+
+test("PATCH /v1/designs/:id/overview: works on a closed design, unlike amend", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const d = ownedDesign(designs, admin.developerId);
+  designs.close(d.id);
+
+  const res = await patchOverview(app, admin.token, d.id, { summary: "corrected after the fact" });
+  assert.equal(res.status, 200);
+  assert.equal(designs.get(d.id)?.summary, "corrected after the fact");
+  assert.equal(designs.get(d.id)?.status, "closed", "revising must not reopen it");
+});
+
+test("PATCH /v1/designs/:id/overview: title null clears a stored title", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const d = ownedDesign(designs, admin.developerId);
+
+  await patchOverview(app, admin.token, d.id, { title: "Stored title" });
+  assert.equal(designs.get(d.id)?.title, "Stored title");
+  const res = await patchOverview(app, admin.token, d.id, { title: null });
+  assert.equal(res.status, 200);
+  assert.equal(designs.get(d.id)?.title, undefined, "cleared -- the monitor derives a title again");
+});
+
+test("PATCH /v1/designs/:id/overview: a prose revision never bumps scopeVersion", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const d = ownedDesign(designs, admin.developerId);
+  const before = d.scopeVersion;
+
+  await patchOverview(app, admin.token, d.id, { summary: "rewritten" });
+  // The async semantic comparator reads scopeVersion to detect being
+  // superseded mid-run; a wording fix must not abort an in-flight pass.
+  assert.equal(designs.get(d.id)?.scopeVersion, before);
+});
+
+test("PATCH /v1/designs/:id/overview: rejects an empty body, blanks, and over-long text", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const d = ownedDesign(designs, admin.developerId);
+
+  assert.equal((await patchOverview(app, admin.token, d.id, {})).status, 400, "neither field supplied");
+  assert.equal((await patchOverview(app, admin.token, d.id, { summary: "   " })).status, 400, "blank summary");
+  // A blank title is a UI bug, not a request for the derived title -- `null`
+  // already says that unambiguously.
+  assert.equal((await patchOverview(app, admin.token, d.id, { title: "  " })).status, 400, "blank title");
+  assert.equal((await patchOverview(app, admin.token, d.id, { title: "t".repeat(121) })).status, 400, "title over 120");
+  assert.equal((await patchOverview(app, admin.token, d.id, { summary: "s".repeat(8001) })).status, 400, "summary over 8000");
+
+  assert.equal(designs.get(d.id)?.overviewRevision, 0, "no rejected request wrote anything");
+});
+
+test("PATCH /v1/designs/:id/overview: does not fan out to groupId siblings", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const mine = ownedDesign(designs, admin.developerId, "my text");
+  const theirs = designs.register({
+    projectId: "proj-2",
+    developerId: "someone-else@example.com",
+    sessionId: "s2",
+    summary: "their text",
+    creates: [],
+    touches: [],
+    dependsOn: [],
+    groupId: mine.groupId,
+  });
+
+  await patchOverview(app, admin.token, mine.id, { title: "Mine", summary: "mine rewritten" });
+  // amend() propagates a summary update across a linked group; this must
+  // not, or one developer rewrites another's design text while bypassing
+  // the owner check above.
+  assert.equal(designs.get(theirs.id)?.summary, "their text");
+  assert.equal(designs.get(theirs.id)?.title, undefined);
+});

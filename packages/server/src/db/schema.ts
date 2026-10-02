@@ -200,7 +200,36 @@ export const designs = sqliteTable(
     reviewDecision: text("review_decision"), // "approve" | "reject" | null
     createdAt: integer("created_at").notNull(),
     closedAt: integer("closed_at"),
+    /** Owner-authored title (2026-10-02, `PATCH /v1/designs/:id/overview`).
+     * Nullable with no default, this file's usual convention -- nothing
+     * writes it at registration, so null means "never retitled" and
+     * twing-monitor derives a title from `summary` exactly as it did before
+     * this column existed. */
+    title: text("title"),
     summary: text("summary").notNull(),
+    /** The extraction-time `summary`, captured once on the first overview
+     * revision and never rewritten (2026-10-02), so the LLM's original
+     * paraphrase survives every later edit. Null while
+     * `overview_revision` is 0 -- `summary` is the original in that case,
+     * so copying it up front would just duplicate the column. */
+    summaryExtracted: text("summary_extracted"),
+    /** Title/overview revision count (2026-10-02).
+     *
+     * `.notNull().default(0)` rather than nullable, and the default is
+     * load-bearing for rollback, not tidiness: an older server that doesn't
+     * know this column omits it from its INSERTs, and without a default
+     * SQLite would reject every design registration the moment the server
+     * is rolled back against a migrated DB. */
+    overviewRevision: integer("overview_revision").notNull().default(0),
+    overviewRevisedAt: integer("overview_revised_at"),
+    /** Always a `developerId` -- the authority over the text -- never a bot
+     * or process id, even once some other channel can carry the write. The
+     * channel goes in `overview_revision_source` instead. */
+    overviewRevisedBy: text("overview_revised_by"),
+    /** Which channel carried the revision: "owner_edit" today. Free text
+     * rather than a checked set, so a future channel costs one string
+     * instead of a migration. */
+    overviewRevisionSource: text("overview_revision_source"),
     creates: text("creates").notNull(), // JSON string[]
     touches: text("touches").notNull(), // JSON string[]
     dependsOn: text("depends_on").notNull(), // JSON string[]
