@@ -104,6 +104,19 @@ test("writeResolverWiring: calling it again changes nothing", async () => {
   });
 });
 
+test("writeResolverWiring: atomically replaces a stale resolver", async () => {
+  await withHome(async (home) => {
+    const settings = path.join(home, ".claude", "settings.json");
+    writeResolverWiring(settings);
+    fs.writeFileSync(resolverPath(), "stale resolver");
+    const staleInode = fs.statSync(resolverPath()).ino;
+
+    assert.equal(writeResolverWiring(settings), true);
+    assert.notEqual(fs.statSync(resolverPath()).ino, staleInode, "the stale script must be replaced, not truncated in place");
+    assert.equal(fs.readFileSync(resolverPath(), "utf8"), resolverScript());
+  });
+});
+
 test("writeResolverWiring: a changed event set replaces the old entries rather than accumulating", async () => {
   // The v2 -> v3 bootstrap rename appended beside instead of replacing, both
   // fired, and the stale one denied everything. Same hazard, same rule.

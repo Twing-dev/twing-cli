@@ -352,8 +352,11 @@ export function writeResolverWiring(settingsPath: string): boolean {
   const target = resolverPath();
   let scriptChanged = false;
   if (!fs.existsSync(target) || fs.readFileSync(target, "utf8") !== script) {
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, script, { mode: 0o755 });
+    const directory = path.dirname(target);
+    fs.mkdirSync(directory, { recursive: true });
+    const temporary = path.join(directory, `.${path.basename(target)}.${process.pid}.tmp`);
+    fs.writeFileSync(temporary, script, { mode: 0o755 });
+    fs.renameSync(temporary, target);
     scriptChanged = true;
   }
 
