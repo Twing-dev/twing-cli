@@ -103,6 +103,18 @@ interface ResolveRequestBody {
   justification?: string;
 }
 
+/** Caps on owner-authored design text (2026-10-02, `PATCH
+ * /v1/designs/:id/overview`). The title cap matches twing-monitor's own
+ * `MAX_TITLE_CHARS` (`designTitle.ts`), the ceiling it already clamps a
+ * *derived* title to -- a stored title longer than that would render
+ * ellipsised anyway, so refusing is more honest than silently truncating in
+ * the UI. The summary cap is a sanity bound, not a design constraint: real
+ * extracted summaries run to a few hundred chars and a very long plan's can
+ * reach a couple of thousand, so this leaves room for several rewrites'
+ * worth of prose while still refusing someone pasting a whole file in. */
+const MAX_DESIGN_TITLE_CHARS = 120;
+const MAX_DESIGN_SUMMARY_CHARS = 8000;
+
 // §17 scope enforcement (2026-08): "add" fields only -- amend expands an
 // open design's declared scope, it never removes from it. `summary`
 // (2026-08-17) is no exception to that anymore either: a provided summary
@@ -2388,6 +2400,76 @@ export function createApp(options: CreateAppOptions = {}) {
       }
     }
     return c.json({ status: closed?.status });
+  });
+
+  /** Owner-editable title/overview (2026-10-02). The `summary` a design
+   * carries is LLM-extracted from its plan at registration
+   * (`design-extract.ts`), and until now nothing could correct it: `amend`'s
+   * `summary` *appends* a dated `Update (date):` entry rather than
+   * replacing (`appendSummaryUpdate`, deliberately -- see its doc comment),
+   * which is right for "also touches X because Y" and wrong for "this
+   * sentence is inaccurate".
+   *
+   * Three ways this is deliberately narrower than `amend`:
+   *
+   *  - **Owner only**, not any project member. Same owner-or-manager shape
+   *    the comment-mutation guard uses (`canMutateComment` above), minus
+   *    the manager half: this is one developer's own words about their own
+   *    work, and nobody else's to rewrite. A project admin who needs the
+   *    text changed asks them.
+   *  - **Any status.** `amend`'s open-only gate exists to stop a scope
+   *    expansion being laundered past the checks; prose can't do that, and
+   *    an overview that was wrong when the design closed is still worth
+   *    fixing.
+   *  - **No re-check and no `groupId` fan-out** -- see
+   *    `DesignRegistry.reviseOverview`'s own doc comment for all four of
+   *    the things it refuses to do and why.
+   *
+   * `title: null` clears a stored title (twing-monitor falls back to
+   * deriving one from `summary`); omitting a field leaves it untouched. */
+  app.patch("/v1/designs/:id/overview", async (c) => {
+    const identity = c.get("identity");
+    const id = c.req.param("id");
+    const design = designs.get(id);
+    if (!design) return c.json({ error: "no such design" }, 404);
+    if (identity.developerId !== design.developerId) {
+      return c.json({ error: "only the design's owner can revise its overview" }, 403);
+    }
+
+    const body = await c.req.json<{ title?: string | null; summary?: string }>().catch(() => null);
+    if (!body || (body.title === undefined && body.summary === undefined)) {
+      return c.json({ error: "expected at least one of title/summary" }, 400);
+    }
+
+    // `null` is a real instruction (clear the title), so only a non-null
+    // title is length/blank-checked. A blank string is rejected rather than
+    // quietly treated as a clear: "" is far more likely a UI bug or an
+    // accidental submit than someone deliberately asking for the derived
+    // title back, and `null` already says that unambiguously.
+    let title: string | null | undefined;
+    if (body.title !== undefined) {
+      if (body.title === null) {
+        title = null;
+      } else {
+        const trimmed = body.title.trim();
+        if (trimmed.length === 0) return c.json({ error: "title is blank -- pass null to clear it instead" }, 400);
+        if (trimmed.length > MAX_DESIGN_TITLE_CHARS) return c.json({ error: `title is ${trimmed.length} chars, max ${MAX_DESIGN_TITLE_CHARS}` }, 400);
+        title = trimmed;
+      }
+    }
+
+    let summary: string | undefined;
+    if (body.summary !== undefined) {
+      const trimmed = body.summary.trim();
+      if (trimmed.length === 0) return c.json({ error: "summary is blank" }, 400);
+      if (trimmed.length > MAX_DESIGN_SUMMARY_CHARS) return c.json({ error: `summary is ${trimmed.length} chars, max ${MAX_DESIGN_SUMMARY_CHARS}` }, 400);
+      summary = trimmed;
+    }
+
+    const revised = designs.reviseOverview(id, { title, summary, actor: identity.developerId, source: "owner_edit" });
+    if (!revised) return c.json({ error: "no such design" }, 404);
+    console.log(`twing serve: design ${id.slice(0, 8)} overview revised by ${identity.developerId} (revision ${revised.overviewRevision})`);
+    return c.json({ design: revised });
   });
 
   // §17 scope enforcement (2026-08): expand an *open* design's declared

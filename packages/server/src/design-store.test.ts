@@ -1116,3 +1116,131 @@ test("DesignRegistry: retimeActiveDesigns covers flagged designs too -- they're 
   assert.equal(registry.get(a.id)?.status, "flagged", "re-timing must not change status");
   registry.stop();
 });
+
+// --- reviseOverview (owner-editable title/overview, 2026-10-02) ------------
+
+test("DesignRegistry: reviseOverview replaces the summary and stores a title", () => {
+  const registry = freshRegistry();
+  const d = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "LLM text.", creates: [], touches: ["a.ts"], dependsOn: [] });
+  const revised = registry.reviseOverview(d.id, { title: "Real title", summary: "What it actually does.", actor: "d1", source: "owner_edit" });
+  assert.equal(revised?.title, "Real title");
+  assert.equal(revised?.summary, "What it actually does.");
+  // Replaced, not appended -- the whole point of this method existing
+  // separately from amend(), whose summary goes through appendSummaryUpdate.
+  assert.ok(!revised?.summary.includes("LLM text."));
+  registry.stop();
+});
+
+test("DesignRegistry: reviseOverview captures the extraction-time summary once and never rewrites it", () => {
+  const registry = freshRegistry();
+  const d = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "original LLM text", creates: [], touches: [], dependsOn: [] });
+  assert.equal(registry.get(d.id)?.summaryExtracted, undefined, "nothing captured before the first revision");
+
+  registry.reviseOverview(d.id, { summary: "first rewrite", actor: "d1", source: "owner_edit" });
+  assert.equal(registry.get(d.id)?.summaryExtracted, "original LLM text");
+
+  registry.reviseOverview(d.id, { summary: "second rewrite", actor: "d1", source: "owner_edit" });
+  assert.equal(registry.get(d.id)?.summaryExtracted, "original LLM text", "the original survives every later rewrite");
+  assert.equal(registry.get(d.id)?.summary, "second rewrite");
+  registry.stop();
+});
+
+test("DesignRegistry: a title-only revision leaves summaryExtracted unset", () => {
+  const registry = freshRegistry();
+  const d = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "untouched prose", creates: [], touches: [], dependsOn: [] });
+  registry.reviseOverview(d.id, { title: "Just a title", actor: "d1", source: "owner_edit" });
+  // `summary` still IS the original, so stamping summaryExtracted would just
+  // duplicate a column that hasn't changed.
+  assert.equal(registry.get(d.id)?.summaryExtracted, undefined);
+  assert.equal(registry.get(d.id)?.summary, "untouched prose");
+  registry.stop();
+});
+
+test("DesignRegistry: reviseOverview increments its own counter and never touches scopeVersion", () => {
+  const registry = freshRegistry();
+  const d = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "s", creates: [], touches: [], dependsOn: [] });
+  assert.equal(d.overviewRevision, 0);
+  const scopeBefore = d.scopeVersion;
+
+  registry.reviseOverview(d.id, { summary: "one", actor: "d1", source: "owner_edit" });
+  assert.equal(registry.get(d.id)?.overviewRevision, 1);
+  registry.reviseOverview(d.id, { summary: "two", actor: "d1", source: "owner_edit" });
+  assert.equal(registry.get(d.id)?.overviewRevision, 2);
+
+  // The async semantic comparator reads scopeVersion to detect being
+  // superseded mid-run; a prose fix must not abort an in-flight pass.
+  assert.equal(registry.get(d.id)?.scopeVersion, scopeBefore, "prose revisions must not bump scopeVersion");
+  registry.stop();
+});
+
+test("DesignRegistry: reviseOverview records the actor and the channel", () => {
+  const registry = freshRegistry();
+  const d = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "s", creates: [], touches: [], dependsOn: [] });
+  const revised = registry.reviseOverview(d.id, { summary: "edited", actor: "d1", source: "owner_edit" });
+  assert.equal(revised?.overviewRevisedBy, "d1");
+  assert.equal(revised?.overviewRevisionSource, "owner_edit");
+  assert.ok((revised?.overviewRevisedAt ?? 0) > 0);
+  registry.stop();
+});
+
+test("DesignRegistry: reviseOverview with title null clears a stored title back to derived", () => {
+  const registry = freshRegistry();
+  const d = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "s", creates: [], touches: [], dependsOn: [] });
+  registry.reviseOverview(d.id, { title: "Stored", actor: "d1", source: "owner_edit" });
+  assert.equal(registry.get(d.id)?.title, "Stored");
+  registry.reviseOverview(d.id, { title: null, actor: "d1", source: "owner_edit" });
+  assert.equal(registry.get(d.id)?.title, undefined, "null clears it; the monitor derives a title again");
+  registry.stop();
+});
+
+test("DesignRegistry: reviseOverview works on a closed design, unlike amend", () => {
+  const registry = freshRegistry();
+  const d = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "s", creates: [], touches: [], dependsOn: [] });
+  registry.close(d.id);
+  const revised = registry.reviseOverview(d.id, { summary: "corrected after the fact", actor: "d1", source: "owner_edit" });
+  assert.equal(revised?.summary, "corrected after the fact");
+  assert.equal(revised?.status, "closed", "revising must not reopen it");
+  registry.stop();
+});
+
+test("DesignRegistry: reviseOverview does not fan out to groupId siblings", () => {
+  const registry = freshRegistry();
+  const a = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "a's text", creates: [], touches: [], dependsOn: [] });
+  const b = registry.register({ projectId: "p2", developerId: "d2", sessionId: "s2", summary: "b's text", creates: [], touches: [], dependsOn: [], groupId: a.groupId });
+  registry.reviseOverview(a.id, { title: "A retitled", summary: "a rewritten", actor: "d1", source: "owner_edit" });
+  // amend() propagates a summary update across a group; this must not --
+  // sibling rows belong to other developers, and writing them would route
+  // around the route's owner check.
+  assert.equal(registry.get(b.id)?.summary, "b's text");
+  assert.equal(registry.get(b.id)?.title, undefined);
+  assert.equal(registry.get(b.id)?.overviewRevision, 0);
+  registry.stop();
+});
+
+test("DesignRegistry: reviseOverview returns undefined for an unknown design", () => {
+  const registry = freshRegistry();
+  assert.equal(registry.reviseOverview("nope", { summary: "x", actor: "d1", source: "owner_edit" }), undefined);
+  registry.stop();
+});
+
+test("DesignRegistry: reviseOverview appends a design_overview_revised event naming the channel", () => {
+  const db = createDb({ memory: true });
+  const log = new DrizzleActivityLog(db);
+  const registry = new DesignRegistry(db);
+  const d = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "s", creates: [], touches: [], dependsOn: [] });
+
+  registry.reviseOverview(d.id, { title: "T", summary: "edited", actor: "d1", source: "owner_edit" });
+  const events = log.eventsForRelatedId(d.id).filter((e) => e.kind === "design_overview_revised");
+  assert.equal(events.length, 1);
+  const payload = events[0].payload as Record<string, unknown>;
+  assert.equal(payload.source, "owner_edit");
+  assert.equal(payload.actor, "d1");
+  assert.equal(payload.revision, 1);
+  assert.equal(payload.newTitle, "T");
+  assert.equal(payload.newSummary, "edited");
+
+  // Not design_amended -- that kind means the declared scope moved, and
+  // twing-monitor renders it that way.
+  assert.equal(log.eventsForRelatedId(d.id).filter((e) => e.kind === "design_amended").length, 0);
+  registry.stop();
+});

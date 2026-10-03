@@ -66,7 +66,13 @@ interface DesignRow {
   reviewDecision: string | null;
   createdAt: number;
   closedAt: number | null;
+  title: string | null;
   summary: string;
+  summaryExtracted: string | null;
+  overviewRevision: number;
+  overviewRevisedAt: number | null;
+  overviewRevisedBy: string | null;
+  overviewRevisionSource: string | null;
   creates: string;
   touches: string;
   dependsOn: string;
@@ -95,7 +101,13 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     reviewDecision: (row.reviewDecision as DesignStatement["reviewDecision"]) ?? undefined,
     createdAt: row.createdAt,
     closedAt: row.closedAt ?? undefined,
+    title: row.title ?? undefined,
     summary: row.summary,
+    summaryExtracted: row.summaryExtracted ?? undefined,
+    overviewRevision: row.overviewRevision,
+    overviewRevisedAt: row.overviewRevisedAt ?? undefined,
+    overviewRevisedBy: row.overviewRevisedBy ?? undefined,
+    overviewRevisionSource: row.overviewRevisionSource ?? undefined,
     creates: JSON.parse(row.creates),
     touches: JSON.parse(row.touches),
     dependsOn: JSON.parse(row.dependsOn),
@@ -210,6 +222,11 @@ export class DesignRegistry {
       createdAt: now,
       ttlMs: input.ttlMs ?? DEFAULT_DESIGN_ACTIVE_TTL_MS,
       scopeVersion: 1,
+      // Stated explicitly rather than left to the column default: this
+      // object is hand-built, not read back through `fromDesignRow`, so
+      // omitting it would have `register()` return `undefined` for a column
+      // that is `NOT NULL DEFAULT 0` and which `get()` reports as 0.
+      overviewRevision: 0,
       lastActivityAt: now,
       justifiedConstraintIds: [],
       justifiedOverlaps: [],
@@ -549,6 +566,102 @@ export class DesignRegistry {
       payload: { newGroupId: groupId },
     });
     return this.get(id);
+  }
+
+  /** Replace a design's human-facing text -- its `title`, its `summary`, or
+   * both (2026-10-02). The owner-editable overview: `summary` is
+   * LLM-extracted at registration (`design-extract.ts`) and until now
+   * nothing could correct it.
+   *
+   * **Replaces, where `amend()` appends.** `amend`'s `summary` is run
+   * through `appendSummaryUpdate` into a dated `Update (date):` entry --
+   * deliberately, since replace-outright was destroying a design's original
+   * context on scope-only amends (2026-08-18). That's the right behavior
+   * for "also touches X because Y" and the wrong one for "this sentence is
+   * wrong", so this is a separate method rather than a flag on `amend`.
+   * Nothing is lost either way: `summaryExtracted` keeps the original.
+   *
+   * Four things this deliberately does NOT do, each the opposite of
+   * `amend()`:
+   *
+   *  - **No `scopeVersion` bump.** That counter is how the async semantic
+   *    comparator detects it's been superseded mid-run
+   *    (`design-semantic-check.ts`); bumping it for a typo fix would abort
+   *    an in-flight pass over text whose *scope* hasn't moved at all.
+   *  - **No re-check.** `runDesignChecks` reads only declared paths since
+   *    the 2026-10-01 pruning, so prose genuinely cannot change a verdict
+   *    -- re-running it would be an LLM call that can only produce a false
+   *    flag.
+   *  - **No `groupId` fan-out.** `amend` propagates summary updates to
+   *    linked siblings across projects; those rows belong to *other*
+   *    developers, and writing into them would route straight around the
+   *    owner check the caller just passed.
+   *  - **No status guard.** Works on any status, unlike `amend`'s
+   *    open-only gate -- that gate exists to stop scope laundering, which
+   *    prose can't do, and an inaccurate overview is worth correcting on a
+   *    closed design too.
+   *
+   * **No auth check here either**, on purpose: authorization is the route's
+   * (`app.ts`'s `PATCH /v1/designs/:id/overview` owner check), so a future
+   * internal caller -- an LLM resynthesis, a session-close fold -- can
+   * reuse this with a different `source` and no HTTP identity at all.
+   *
+   * `title: null` clears a stored title, reverting twing-monitor to
+   * deriving one from `summary` -- distinct from `undefined`, which leaves
+   * whatever is there alone. Returns `undefined` only if the design doesn't
+   * exist. */
+  reviseOverview(
+    id: string,
+    revision: {
+      /** `null` clears the stored title; `undefined` leaves it untouched. */
+      title?: string | null;
+      summary?: string;
+      /** Always a developerId -- the authority over this text. */
+      actor: string;
+      /** The channel that carried it: `"owner_edit"` today. */
+      source: string;
+    },
+  ): DesignStatement | undefined {
+    const existing = this.get(id);
+    if (!existing) return undefined;
+    const now = Date.now();
+    this.db
+      .update(designsTable)
+      .set({
+        ...(revision.title !== undefined ? { title: revision.title } : {}),
+        ...(revision.summary !== undefined ? { summary: revision.summary } : {}),
+        // Captured once, from the text as it reads *before* this first
+        // revision -- so it's the extraction-time original rather than
+        // whatever the previous revision happened to say. Only when a
+        // summary is actually being replaced: a title-only revision leaves
+        // `summary` as the original, so stamping this would be a redundant
+        // copy of a column that hasn't changed.
+        ...(existing.summaryExtracted === undefined && revision.summary !== undefined ? { summaryExtracted: existing.summary } : {}),
+        overviewRevision: (existing.overviewRevision ?? 0) + 1,
+        overviewRevisedAt: now,
+        overviewRevisedBy: revision.actor,
+        overviewRevisionSource: revision.source,
+        lastActivityAt: now, // revising is real activity, same as amending
+      })
+      .where(eq(designsTable.id, id))
+      .run();
+    const revised = this.get(id);
+    this.activityLog.append({
+      projectId: existing.projectId,
+      developerId: existing.developerId,
+      sessionId: existing.sessionId,
+      kind: "design_overview_revised",
+      relatedId: id,
+      ts: now,
+      payload: {
+        source: revision.source,
+        actor: revision.actor,
+        revision: revised?.overviewRevision ?? 0,
+        ...(revision.title !== undefined ? { newTitle: revision.title } : {}),
+        ...(revision.summary !== undefined ? { newSummary: revision.summary } : {}),
+      },
+    });
+    return revised;
   }
 
   /** Change D (2026-08-31, design-gate registration-flow fixes):
