@@ -6992,3 +6992,98 @@ test("PATCH /v1/designs/:id/close: leaves an overview a human wrote alone", asyn
   assert.equal(designs.get(d.id)!.summary, "What I actually meant.");
   assert.equal(designs.get(d.id)!.overviewRevisionSource, "owner_edit");
 });
+
+// --- rephrase: anyone may ask, nobody may smuggle text in (2026-10-06) -----
+
+/** A second developer in the same project, so "any member" is tested with a
+ * real non-owner rather than by asserting about the owner twice. */
+async function memberPat(app: ReturnType<typeof createApp>, admin: { token: string; orgId: string }, label: string, pat: string) {
+  // A *project* invite, not an org one: `isProjectMember` reads
+  // `identity.projects`, and an org membership alone does not populate it.
+  const inviteRes = await app.request("/v1/projects/proj-1/invites", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ label }),
+  });
+  const { code } = (await inviteRes.json()) as { code: string };
+  await app.request(`/v1/invites/${code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex(pat), label }),
+  });
+  return pat;
+}
+
+test("POST /v1/designs/:id/resynthesize: any project member may ask, not just the owner", async () => {
+  const { factory } = stubResynthesis();
+  const { app, dataDir, designs, identities } = freshApp({ resynthesis: factory });
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+  const bob = await memberPat(app, admin, "bob@example.com", "bobs-pat");
+  const d = ownedDesign(designs, admin.developerId, AMENDED_SUMMARY);
+
+  const res = await app.request(`/v1/designs/${d.id}/resynthesize`, { method: "POST", headers: bearer(bob) });
+  assert.equal(res.status, 200);
+  assert.equal(((await res.json()) as { summary: string | null }).summary, "One current overview.");
+});
+
+// "Nothing new to fold" is a fact about the design, not a failure.
+test("POST /v1/designs/:id/resynthesize: an unchanged design answers 200 with a reason", async () => {
+  const { factory } = stubResynthesis();
+  const { app, dataDir, designs } = freshApp({ resynthesis: factory });
+  const admin = await bootstrapAdmin(app, dataDir);
+  const d = ownedDesign(designs, admin.developerId, "Never amended.");
+
+  const res = await app.request(`/v1/designs/${d.id}/resynthesize`, { method: "POST", headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { summary: string | null; unavailable?: string };
+  assert.equal(body.summary, null);
+  assert.equal(body.unavailable, "nothing_new");
+});
+
+// THE reason apply is its own route: it carries no text, so a non-owner can
+// accept a rephrase without ever being able to write words of their own.
+test("POST /v1/designs/:id/resynthesize/apply: a non-owner may accept a proposal", async () => {
+  const { factory } = stubResynthesis("The design, as it now stands.");
+  const { app, dataDir, designs, identities } = freshApp({ resynthesis: factory });
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+  const bob = await memberPat(app, admin, "bob@example.com", "bobs-pat");
+  const d = ownedDesign(designs, admin.developerId, AMENDED_SUMMARY);
+
+  await app.request(`/v1/designs/${d.id}/resynthesize`, { method: "POST", headers: bearer(bob) });
+  const res = await app.request(`/v1/designs/${d.id}/resynthesize/apply`, { method: "POST", headers: bearer(bob) });
+  assert.equal(res.status, 200);
+
+  const saved = designs.get(d.id)!;
+  assert.equal(saved.summary, "The design, as it now stands.");
+  // Attributed to whoever accepted it, and marked as a human decision so the
+  // automatic path leaves it alone -- but not claimed as the owner's edit.
+  assert.equal(saved.overviewRevisionSource, "rephrase_accepted");
+  assert.notEqual(saved.overviewRevisedBy, admin.developerId);
+});
+
+test("POST /v1/designs/:id/resynthesize/apply: refuses when no proposal was ever fetched", async () => {
+  const { factory } = stubResynthesis();
+  const { app, dataDir, designs } = freshApp({ resynthesis: factory });
+  const admin = await bootstrapAdmin(app, dataDir);
+  const d = ownedDesign(designs, admin.developerId, AMENDED_SUMMARY);
+
+  const res = await app.request(`/v1/designs/${d.id}/resynthesize/apply`, { method: "POST", headers: bearer(admin.token) });
+  assert.equal(res.status, 409, "nothing may be saved that nobody has read");
+  assert.equal(designs.get(d.id)!.summary, AMENDED_SUMMARY);
+});
+
+// The editing route is untouched by any of this: arbitrary text is still
+// owner-only, which is what "anyone can rephrase, only you can edit" means.
+test("PATCH /v1/designs/:id/overview: still refuses a non-owner after rephrase opened up", async () => {
+  const { app, dataDir, designs, identities } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+  const bob = await memberPat(app, admin, "bob@example.com", "bobs-pat");
+  const d = ownedDesign(designs, admin.developerId, AMENDED_SUMMARY);
+
+  const res = await patchOverview(app, bob, d.id, { summary: "words of my own" });
+  assert.equal(res.status, 403);
+  assert.equal(designs.get(d.id)!.summary, AMENDED_SUMMARY);
+});

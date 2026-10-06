@@ -50,7 +50,7 @@ import { DesignChatStore } from "./design-chat-store.js";
 import { NotificationStore } from "./notification-store.js";
 import { assembleDesignContext, describeProvenance, designScopePaths, type AssembledContext } from "./design-context.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
-import { ResynthesisQueue, proposeOverview, AMENDMENT_THRESHOLD, amendmentsSinceOverview, type ResynthesisDeps } from "./overview-resynthesis.js";
+import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, AMENDMENT_THRESHOLD, amendmentsSinceOverview, type ResynthesisDeps } from "./overview-resynthesis.js";
 import { callLlm } from "./llm-client.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
 import { fetchRepoPermissions, fetchGithubUser, type GithubUser, type GithubRepoPermissions } from "./github-client.js";
@@ -2536,8 +2536,28 @@ export function createApp(options: CreateAppOptions = {}) {
     const id = c.req.param("id");
     const design = designs.get(id);
     if (!design) return c.json({ error: "no such design" }, 404);
-    if (identity.developerId !== design.developerId && !canManageProject(identity, design.projectId)) {
-      return c.json({ error: "only the design's owner or a project admin can ask for a rewrite" }, 403);
+    // **Any project member** (2026-10-06), not the owner and admins it used to
+    // be. Rephrasing is reading work, not authoring it: it produces a
+    // proposal from text the caller can already see, and saving it is a
+    // separate decision with its own route below. A teammate who notices a
+    // design has drifted into a changelog should be able to do something
+    // about it.
+    // The owner always passes -- it is their design -- and so does anyone else
+    // in the project. Written as two checks rather than membership alone
+    // because a design's owner is not guaranteed to have a recorded
+    // membership row, and being refused access to your own design would be
+    // absurd.
+    if (identity.developerId !== design.developerId && !isProjectMember(identity, design.projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
+
+    const availability = rephraseAvailability(design, activityLog.eventsForRelatedId(id));
+    if (!availability.allowed) {
+      // 200, not an error: "there is nothing new to fold" is an ordinary
+      // answer about the design's state, and the dashboard disables the
+      // button on the same rule. Returned so a client that asked anyway is
+      // told *why* rather than being left to guess.
+      return c.json({ summary: null, unavailable: availability.reason });
     }
 
     // `resynthesis.deps`, not the bundle above: a caller may have injected a
@@ -2545,6 +2565,50 @@ export function createApp(options: CreateAppOptions = {}) {
     // and the same reads the automatic path uses.
     const summary = await proposeOverview(resynthesis.deps, id);
     return c.json({ summary: summary ?? null });
+  });
+
+  /** Accepting a rephrase (2026-10-06).
+   *
+   * Separate from `PATCH /overview` on purpose, and the separation is the
+   * whole security story. That route takes **arbitrary text** and is
+   * therefore owner-only -- nobody rewrites your words but you. This one
+   * takes **no text at all**: it saves the proposal the server itself
+   * computed for this exact design state, which the caller has just read on
+   * screen. So any project member may accept a rephrase, and still nobody can
+   * put words of their own into someone else's design.
+   *
+   * Refuses when no proposal has been computed for the current state --
+   * meaning the caller never fetched one, or the design moved underneath
+   * them. Either way, re-fetch and read it before saving it.
+   */
+  app.post("/v1/designs/:id/resynthesize/apply", async (c) => {
+    const identity = c.get("identity");
+    const id = c.req.param("id");
+    const design = designs.get(id);
+    if (!design) return c.json({ error: "no such design" }, 404);
+    if (identity.developerId !== design.developerId && !isProjectMember(identity, design.projectId)) {
+      return c.json({ error: "not a member of this project" }, 403);
+    }
+
+    const availability = rephraseAvailability(design, activityLog.eventsForRelatedId(id));
+    if (!availability.allowed) {
+      return c.json({ error: "nothing new to rephrase on this design", reason: availability.reason }, 409);
+    }
+
+    const proposal = cachedProposal(design);
+    if (proposal === undefined) {
+      return c.json({ error: "no proposal for this design's current state -- ask for a rephrase first" }, 409);
+    }
+
+    // `rephrase_accepted`, not `owner_edit`: a person settled on this text,
+    // which is what the automatic path's guard cares about, but attributing
+    // it to the owner would be a lie when a teammate accepted it. Both count
+    // as human-written everywhere that distinction matters
+    // (`HUMAN_REVISION_SOURCES`).
+    const revised = designs.reviseOverview(id, { summary: proposal, actor: identity.developerId, source: "rephrase_accepted" });
+    if (!revised) return c.json({ error: "no such design" }, 404);
+    console.log(`twing serve: design ${id.slice(0, 8)} rephrase accepted by ${identity.developerId} (revision ${revised.overviewRevision})`);
+    return c.json({ design: revised });
   });
 
   // §17 scope enforcement (2026-08): expand an *open* design's declared

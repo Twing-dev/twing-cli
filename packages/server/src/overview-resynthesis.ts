@@ -98,6 +98,104 @@ export type ResynthesisRefusal =
   | "not_enough_amendments"
   | "design_moved";
 
+/** Revision sources that mean **a person decided on this text** -- either by
+ * writing it or by reading a proposal and accepting it (2026-10-06).
+ *
+ * The distinction that matters everywhere below is human-vs-machine, not
+ * owner-vs-anyone: `rephrase_accepted` can be written by any project member,
+ * and it still represents somebody having read the words and chosen them. */
+export const HUMAN_REVISION_SOURCES = ["owner_edit", "rephrase_accepted"] as const;
+
+export function isHumanWritten(design: DesignStatement): boolean {
+  return (HUMAN_REVISION_SOURCES as readonly string[]).includes(design.overviewRevisionSource ?? "");
+}
+
+/** How much drift it takes before the **button** offers a rephrase.
+ *
+ * Two numbers, and the difference is the whole policy: nobody is attached to
+ * prose a machine wrote unattended, so one amendment is enough to make
+ * folding it worthwhile. Text a person wrote -- or read and accepted -- is
+ * theirs, and rewriting a paragraph of it to absorb a single line is a bad
+ * trade. At two it has genuinely drifted.
+ *
+ * Both sit below `AMENDMENT_THRESHOLD`, which gates the *automatic* path: a
+ * person choosing to press a button is a lower bar than a machine deciding
+ * on its own, and the automatic path additionally never touches human text
+ * at all (`shouldResynthesize`). */
+export const MANUAL_THRESHOLD_MACHINE_TEXT = 1;
+export const MANUAL_THRESHOLD_HUMAN_TEXT = 2;
+
+/** Why the rephrase button is offered, or is offered but inert. Returned
+ * rather than a bare boolean so the dashboard and the route agree on the
+ * reason, and the reason is what the user is actually shown. */
+export type RephraseAvailability = { allowed: true } | { allowed: false; reason: "nothing_new" | "human_text_barely_changed" };
+
+/**
+ * Whether pressing rephrase would do anything, given the overview's state.
+ *
+ * Deliberately says nothing about *who is asking*. Anyone may rephrase any
+ * design they can see; what decides whether it acts is how far the overview
+ * has drifted from the text somebody last settled on. Enforced here as well
+ * as in the dashboard, since a disabled button is a courtesy and not a
+ * control.
+ */
+export function rephraseAvailability(design: DesignStatement, events: ActivityEvent[]): RephraseAvailability {
+  const since = amendmentsSinceOverview(design, events);
+  const needed = isHumanWritten(design) ? MANUAL_THRESHOLD_HUMAN_TEXT : MANUAL_THRESHOLD_MACHINE_TEXT;
+  if (since >= needed) return { allowed: true };
+  return { allowed: false, reason: isHumanWritten(design) ? "human_text_barely_changed" : "nothing_new" };
+}
+
+/**
+ * Proposals already computed, keyed by the exact design state they describe.
+ *
+ * The key is what makes this correct with no expiry: an amendment moves
+ * `scopeVersion` and a save moves `overviewRevision`, so the moment anything
+ * about the design changes, the next lookup misses and the model runs again.
+ * Age never makes a cached proposal wrong -- change does, and change is in
+ * the key.
+ *
+ * Bounded by count rather than by time. An entry whose design has since moved
+ * is unreachable but still resident, so without a bound this grows forever;
+ * with one, the dead entries fall out oldest-first. A proposal is a couple of
+ * kilobytes, so a few hundred costs well under a megabyte.
+ *
+ * In-process, so a restart empties it -- the same trade `ResynthesisQueue`
+ * makes, and worth no more than one extra model call.
+ */
+const PROPOSAL_CACHE_MAX = 200;
+const proposalCache = new Map<string, string>();
+
+function cacheKey(design: DesignStatement): string {
+  return `${design.id}:${design.scopeVersion}:${design.overviewRevision ?? 0}`;
+}
+
+export function cachedProposal(design: DesignStatement): string | undefined {
+  const key = cacheKey(design);
+  const hit = proposalCache.get(key);
+  // Re-inserted on read so the Map's own insertion order doubles as the LRU
+  // ordering -- the oldest *untouched* entry is the one evicted below.
+  if (hit !== undefined) {
+    proposalCache.delete(key);
+    proposalCache.set(key, hit);
+  }
+  return hit;
+}
+
+function rememberProposal(design: DesignStatement, proposal: string): void {
+  proposalCache.set(cacheKey(design), proposal);
+  while (proposalCache.size > PROPOSAL_CACHE_MAX) {
+    const oldest = proposalCache.keys().next().value;
+    if (oldest === undefined) break;
+    proposalCache.delete(oldest);
+  }
+}
+
+/** For tests, and for anything that ever needs to prove a call was made. */
+export function __clearProposalCache(): void {
+  proposalCache.clear();
+}
+
 /** The dated-entry marker `appendSummaryUpdate` writes. Kept in step with
  * that function and with twing-monitor's `lib/amendments.ts`, which splits
  * the same string for display. */
@@ -115,7 +213,7 @@ export function originalText(design: DesignStatement): string {
   // Reachable from the Rewrite button only -- the automatic path refuses an
   // `owner_edit` design outright (`shouldResynthesize`) -- which is exactly
   // the case the monitor's nudge exists to offer.
-  if (design.overviewRevisionSource !== "owner_edit") {
+  if (!isHumanWritten(design)) {
     const extracted = design.summaryExtracted?.trim();
     if (extracted) return extracted;
   }
@@ -152,7 +250,22 @@ export function amendmentTexts(design: DesignStatement): string[] {
  * every event it has. */
 export function amendmentsSinceOverview(design: DesignStatement, events: ActivityEvent[]): number {
   const since = design.overviewRevisedAt ?? 0;
-  return events.filter((e) => e.kind === "design_amended" && e.ts > since).length;
+  const fromEvents = events.filter((e) => e.kind === "design_amended" && e.ts > since).length;
+  // ...and the markers still standing in the summary, whichever is greater.
+  //
+  // Neither source is sufficient alone. Events are what survive a rewrite:
+  // the markers are folded away, so counting those would reset to zero and
+  // never trip again on a design that keeps being amended. Markers are what
+  // survive *missing events*: a design carrying `Update (date):` entries with
+  // no matching rows -- a legacy row, a pruned log -- visibly has a pile to
+  // fold, and refusing to fold it because the log is thin would be absurd.
+  //
+  // It also keeps this in step with twing-monitor, which counts the markers
+  // it can see (`lib/amendments.ts`). Were the two to disagree, the dashboard
+  // would offer a button the server then refuses -- so the server counts at
+  // least whatever the reader is looking at.
+  const fromMarkers = amendmentTexts(design).length;
+  return Math.max(fromEvents, fromMarkers);
 }
 
 /**
@@ -182,7 +295,7 @@ export function shouldResynthesize(
   reason: ResynthesisReason,
 ): ResynthesisRefusal | undefined {
   if (!design) return "no_such_design";
-  if (design.overviewRevisionSource === "owner_edit") return "human_wrote_it";
+  if (isHumanWritten(design)) return "human_wrote_it";
   if (comments.some((c) => c.status === "open" && c.anchor?.field === "summary")) return "open_anchored_comments";
   // Closing is the moment the overview becomes the permanent record, so one
   // amendment is worth folding there; the threshold exists to stop the
@@ -241,6 +354,12 @@ export async function proposeOverview(deps: ResynthesisDeps, designId: string): 
   const amendments = amendmentTexts(design);
   if (amendments.length === 0) return undefined;
 
+  // The same design state always produces the same proposal, so a second
+  // press -- by this reader or any other -- is answered from the cache rather
+  // than by paying for the model again. See `proposalCache`.
+  const cached = cachedProposal(design);
+  if (cached !== undefined) return cached;
+
   const original = originalText(design);
   try {
     const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments));
@@ -249,6 +368,7 @@ export async function proposeOverview(deps: ResynthesisDeps, designId: string): 
     // throws. Checked rather than trusted, because an empty string would pass
     // straight through `reviseOverview` and blank the design.
     if (text.length === 0) return undefined;
+    rememberProposal(design, text);
     return text;
   } catch (err) {
     deps.log?.(`twing serve: design ${designId.slice(0, 8)} overview resynthesis failed -- keeping existing text (${String(err)})`);
