@@ -50,6 +50,8 @@ import { DesignChatStore } from "./design-chat-store.js";
 import { NotificationStore } from "./notification-store.js";
 import { assembleDesignContext, describeProvenance, designScopePaths, type AssembledContext } from "./design-context.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
+import { ResynthesisQueue, proposeOverview, AMENDMENT_THRESHOLD, amendmentsSinceOverview, type ResynthesisDeps } from "./overview-resynthesis.js";
+import { callLlm } from "./llm-client.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
 import { fetchRepoPermissions, fetchGithubUser, type GithubUser, type GithubRepoPermissions } from "./github-client.js";
 import {
@@ -247,6 +249,15 @@ export interface CreateAppOptions {
    * answers a reviewer's private "Ask this design" chat. Review comments
    * themselves are answered by people only. Same default as the two above. */
   commentAnswerModel?: string;
+  /** overview-resynthesis.ts's model (2026-10-06) -- what folds a design's
+   * amendment pile back into one current overview. Same default as the
+   * three above. */
+  resynthesisModel?: string;
+  /** Overview resynthesis, injected whole (2026-10-06). Tests pass a queue
+   * built on a stub model so the triggers can be exercised with no provider
+   * and no timers; real `twing serve` leaves it undefined and gets the one
+   * built below. */
+  resynthesis?: ResynthesisQueue;
   /** Design review comment store (2026-09). Injected in tests for the same
    * reason every other store here is. */
   designComments?: DesignCommentStore;
@@ -612,6 +623,25 @@ export function createApp(options: CreateAppOptions = {}) {
   const extractModel = options.extractModel ?? "google.gemma-4-31b";
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
   const commentAnswerModel = options.commentAnswerModel ?? "google.gemma-4-31b";
+  const resynthesisModel = options.resynthesisModel ?? "google.gemma-4-31b";
+  /** Overview resynthesis (2026-10-06). Everything it reads is already
+   * constructed above; it is given narrow accessors rather than the stores
+   * themselves so the job cannot grow a second opinion about what a design
+   * is. `writeOverview` goes through the same `reviseOverview` the owner's
+   * own edit uses -- this adds no second way to store an overview -- and
+   * stamps `llm_resynthesis` as the source, which is exactly what the
+   * `owner_edit` guard keys off to leave a human's words alone. */
+  const resynthesisDeps: ResynthesisDeps = {
+    getDesign: (id) => designs.get(id),
+    eventsFor: (id) => activityLog.eventsForRelatedId(id),
+    commentsFor: (id) => designComments.listByDesign(id),
+    callModel: (systemPrompt, userPrompt) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel }),
+    writeOverview: (id, summary) => {
+      designs.reviseOverview(id, { summary, actor: "twing", source: "llm_resynthesis" });
+    },
+    log: (message) => console.log(message),
+  };
+  const resynthesis = options.resynthesis ?? new ResynthesisQueue(resynthesisDeps);
   const monitorUrl = options.monitorUrl;
   const noAuth = options.noAuth ?? false;
   const githubClientId = options.githubClientId ?? process.env.TWING_GITHUB_CLIENT_ID ?? "Ov23liSaEt1UliMyahy6";
@@ -2398,6 +2428,14 @@ export function createApp(options: CreateAppOptions = {}) {
       for (const t of alignmentThreads.listByProject(design.projectId, "open")) {
         if (t.initiatingDesignId === id || t.designId === id) maybeAutoCloseThread(t.id);
       }
+      // Overview resynthesis (2026-10-06). Closing is the best moment to
+      // fold a design's amendment pile: the work is finished, so nobody is
+      // mid-review, and whatever the overview says now becomes the
+      // permanent record people read months later. Run immediately rather
+      // than debounced -- there is no burst of further amendments coming
+      // for a closed design. Fire-and-forget: a close must not wait on a
+      // model call, and every failure path inside keeps the existing text.
+      void resynthesis.run(id, "design_closed");
     }
     return c.json({ status: closed?.status });
   });
@@ -2470,6 +2508,43 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!revised) return c.json({ error: "no such design" }, 404);
     console.log(`twing serve: design ${id.slice(0, 8)} overview revised by ${identity.developerId} (revision ${revised.overviewRevision})`);
     return c.json({ design: revised });
+  });
+
+  /** Overview resynthesis, on request (2026-10-06) -- the Rewrite button.
+   *
+   * **Computes and returns; never writes.** That is the whole point of the
+   * route rather than an accident of implementation. The owner reads the
+   * proposal in twing-monitor, edits it if they want, and saves it through
+   * `PATCH /v1/designs/:id/overview` above like any other edit -- so the
+   * stored text lands as `owner_edit`, authored by a person, with that
+   * route's own length and blank validation. Three things follow for free:
+   * nothing is ever saved that nobody has read, the automatic path then
+   * correctly leaves that design alone forever after (its `owner_edit`
+   * guard), and this route needs no write permissions of its own.
+   *
+   * Owner or project admin, unlike the overview route's owner-only rule: a
+   * proposal is not an edit, and an admin who can already read the design
+   * learns nothing new from one. Acting on it still requires being the
+   * owner, because saving does.
+   *
+   * 200 with `summary: null` is the honest answer when there is nothing to
+   * fold or no provider configured -- not an error. The button has nothing
+   * to offer, which the client says plainly rather than showing a failure.
+   */
+  app.post("/v1/designs/:id/resynthesize", async (c) => {
+    const identity = c.get("identity");
+    const id = c.req.param("id");
+    const design = designs.get(id);
+    if (!design) return c.json({ error: "no such design" }, 404);
+    if (identity.developerId !== design.developerId && !canManageProject(identity, design.projectId)) {
+      return c.json({ error: "only the design's owner or a project admin can ask for a rewrite" }, 403);
+    }
+
+    // `resynthesis.deps`, not the bundle above: a caller may have injected a
+    // whole queue, and the button must then propose through the same model
+    // and the same reads the automatic path uses.
+    const summary = await proposeOverview(resynthesis.deps, id);
+    return c.json({ summary: summary ?? null });
   });
 
   // §17 scope enforcement (2026-08): expand an *open* design's declared
@@ -2629,6 +2704,20 @@ export function createApp(options: CreateAppOptions = {}) {
     // actually reviewed and signed off on.
     const amended = designs.amend(id, delta);
     if (!amended) return c.json({ error: `design is ${design.status}, not open -- can't amend` }, 409);
+
+    // Overview resynthesis (2026-10-06), once the pile is deep enough to be
+    // the problem it exists to fix. Placed here rather than on the clean
+    // path below so a flagged amendment counts too: `designs.amend` has
+    // already merged the scope and appended the summary either way, so the
+    // overview grew regardless of the verdict.
+    //
+    // Debounced inside the queue, which is what keeps a deny -> amend ->
+    // retry burst from starting a rewrite per amendment. The threshold is
+    // re-checked inside the job as well; this only decides whether to
+    // bother scheduling, and the job decides whether to act.
+    if (amendmentsSinceOverview(amended, activityLog.eventsForRelatedId(id)) >= AMENDMENT_THRESHOLD) {
+      resynthesis.enqueue(id, "amendment_threshold");
+    }
 
     if (outcome.verdict !== "clean") {
       // 2026-08-26: blocking is now a static function of `verdict` alone

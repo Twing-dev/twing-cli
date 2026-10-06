@@ -140,6 +140,15 @@ interface ProviderModels {
    * Defaults to the same model, so nobody has to care until they do. */
   commentAnswerEnv: string;
   commentAnswerDefault: string;
+  /** Overview resynthesis (2026-10-06): the model that folds a design's
+   * amendment pile back into one current overview. Its own knob for the same
+   * reason the comment answer has one -- it writes prose a human reads and
+   * judges, and it runs on a background job rather than in anyone's way, so
+   * an operator may well want to spend differently on it than on the two
+   * paths that block an agent. Defaults to the same model, so nobody has to
+   * care until they do. */
+  resynthesisEnv: string;
+  resynthesisDefault: string;
 }
 
 const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
@@ -150,6 +159,8 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
     semanticDefault: "google.gemma-4-31b",
     commentAnswerEnv: "TWING_BEDROCK_COMMENT_ANSWER_MODEL",
     commentAnswerDefault: "google.gemma-4-31b",
+    resynthesisEnv: "TWING_BEDROCK_RESYNTHESIS_MODEL",
+    resynthesisDefault: "google.gemma-4-31b",
   },
   vertex: {
     extractEnv: "TWING_VERTEX_EXTRACT_MODEL",
@@ -162,6 +173,8 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
     semanticDefault: "google/gemini-2.5-flash",
     commentAnswerEnv: "TWING_VERTEX_COMMENT_ANSWER_MODEL",
     commentAnswerDefault: "google/gemini-2.5-flash",
+    resynthesisEnv: "TWING_VERTEX_RESYNTHESIS_MODEL",
+    resynthesisDefault: "google/gemini-2.5-flash",
   },
   openrouter: {
     extractEnv: "TWING_OPENROUTER_EXTRACT_MODEL",
@@ -170,6 +183,8 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
     semanticDefault: "openai/gpt-4o-mini",
     commentAnswerEnv: "TWING_OPENROUTER_COMMENT_ANSWER_MODEL",
     commentAnswerDefault: "openai/gpt-4o-mini",
+    resynthesisEnv: "TWING_OPENROUTER_RESYNTHESIS_MODEL",
+    resynthesisDefault: "openai/gpt-4o-mini",
   },
   bifrost: {
     extractEnv: "TWING_BIFROST_EXTRACT_MODEL",
@@ -178,6 +193,8 @@ const PROVIDER_MODELS: Record<LlmProvider, ProviderModels> = {
     semanticDefault: "openai/gpt-4o-mini",
     commentAnswerEnv: "TWING_BIFROST_COMMENT_ANSWER_MODEL",
     commentAnswerDefault: "openai/gpt-4o-mini",
+    resynthesisEnv: "TWING_BIFROST_RESYNTHESIS_MODEL",
+    resynthesisDefault: "openai/gpt-4o-mini",
   },
 };
 
@@ -203,6 +220,15 @@ export function resolveSemanticCheckModel(): string {
 export function resolveCommentAnswerModel(): string {
   const m = PROVIDER_MODELS[selectProvider()];
   return process.env[m.commentAnswerEnv]?.trim() || m.commentAnswerDefault;
+}
+
+/** The overview-resynthesis model for the active provider (2026-10-06):
+ * `TWING_<PROVIDER>_RESYNTHESIS_MODEL` if set, else the provider's default
+ * (the same model the others use). See `ProviderModels` for why it gets its
+ * own variable despite sharing a default. */
+export function resolveResynthesisModel(): string {
+  const m = PROVIDER_MODELS[selectProvider()];
+  return process.env[m.resynthesisEnv]?.trim() || m.resynthesisDefault;
 }
 
 /** One-line, secret-free description of the active provider config, for

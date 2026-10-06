@@ -15,6 +15,8 @@ import { DesignRegistry, ConstraintStore } from "./design-store.js";
 import { AlignmentThreadStore } from "./alignment-store.js";
 import { CaptureStore } from "./capture-store.js";
 import { DesignChatStore } from "./design-chat-store.js";
+import { ResynthesisQueue } from "./overview-resynthesis.js";
+import { appendSummaryUpdate } from "./design-checks.js";
 
 /** Every registration needs a plan (2026-09-29); tests that are not about the
  * plan itself send this one. */
@@ -61,7 +63,7 @@ async function waitFor(predicate: () => Promise<boolean> | boolean, timeoutMs = 
 }
 
 function freshApp(
-  options: { corsOrigins?: string[]; version?: string; publicProjectIds?: string[]; githubApp?: GithubAppConfig; noAuth?: boolean; monitorUrl?: string } = {},
+  options: { corsOrigins?: string[]; version?: string; publicProjectIds?: string[]; githubApp?: GithubAppConfig; noAuth?: boolean; monitorUrl?: string; resynthesis?: (designs: DesignRegistry) => ResynthesisQueue } = {},
 ) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-app-test-"));
   // In-memory DB for speed -- these tests don't need cross-instance
@@ -95,6 +97,7 @@ function freshApp(
     githubApp: options.githubApp,
     noAuth: options.noAuth,
     monitorUrl: options.monitorUrl,
+    resynthesis: options.resynthesis?.(designs),
   });
   return { app, dataDir, identities, store, designs, constraints, alignmentThreads, captures, designChats };
 }
@@ -6845,4 +6848,147 @@ test("PATCH /v1/designs/:id/overview: does not fan out to groupId siblings", asy
   // the owner check above.
   assert.equal(designs.get(theirs.id)?.summary, "their text");
   assert.equal(designs.get(theirs.id)?.title, undefined);
+});
+
+// --- POST /v1/designs/:id/resynthesize (the Rewrite button, 2026-10-06) ----
+
+/**
+ * A queue over the app's own registry whose model is a fixed string.
+ * `wrote` resolves when a write actually lands: the automatic path is
+ * fire-and-forget, so a test that only awaited the HTTP response would race
+ * the job rather than observe it.
+ */
+function stubResynthesis(text = "One current overview.") {
+  let resolveWrote: (summary: string) => void = () => {};
+  const wrote = new Promise<string>((resolve) => (resolveWrote = resolve));
+  const factory = (designs: DesignRegistry) =>
+    new ResynthesisQueue(
+      {
+        getDesign: (id) => designs.get(id),
+        eventsFor: () => [],
+        commentsFor: () => [],
+        callModel: async () => text,
+        writeOverview: (id, summary) => {
+          designs.reviseOverview(id, { summary, actor: "twing", source: "llm_resynthesis" });
+          resolveWrote(summary);
+        },
+        log: () => {},
+      },
+      1,
+    );
+  return { factory, wrote };
+}
+
+/** What a design looks like after one `amend` carrying a summary. */
+const AMENDED_SUMMARY = appendSummaryUpdate("The original intent.", "also touches the retry path");
+
+test("POST /v1/designs/:id/resynthesize: the owner gets a proposal, and nothing is stored", async () => {
+  const { factory } = stubResynthesis();
+  const { app, dataDir, designs } = freshApp({ resynthesis: factory });
+  const admin = await bootstrapAdmin(app, dataDir);
+  const d = ownedDesign(designs, admin.developerId, AMENDED_SUMMARY);
+
+  const res = await app.request(`/v1/designs/${d.id}/resynthesize`, { method: "POST", headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+  assert.equal(((await res.json()) as { summary: string | null }).summary, "One current overview.");
+
+  // THE property of this route: it proposes, it does not save. The design is
+  // untouched, and the owner saves through the overview route if they agree --
+  // which is also what records the result as their own edit.
+  assert.equal(designs.get(d.id)!.summary, AMENDED_SUMMARY);
+  assert.equal(designs.get(d.id)!.overviewRevision ?? 0, 0);
+});
+
+test("POST /v1/designs/:id/resynthesize: a project admin may ask, unlike the overview route", async () => {
+  const { factory } = stubResynthesis();
+  const { app, dataDir, designs, identities } = freshApp({ resynthesis: factory });
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+  const d = ownedDesign(designs, "someone-else@example.com", AMENDED_SUMMARY);
+
+  // Proposing is not editing: an admin who can already read the design learns
+  // nothing new from a proposal, and acting on it still requires ownership.
+  const res = await app.request(`/v1/designs/${d.id}/resynthesize`, { method: "POST", headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+});
+
+test("POST /v1/designs/:id/resynthesize: someone who is neither owner nor admin is refused", async () => {
+  const { factory } = stubResynthesis();
+  const { app, dataDir, designs } = freshApp({ resynthesis: factory });
+  const admin = await bootstrapAdmin(app, dataDir);
+  const inviteRes = await app.request("/v1/admin/invites", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ label: "bob@example.com", orgId: admin.orgId }),
+  });
+  const { code } = (await inviteRes.json()) as { code: string };
+  const bobPat = "bobs-pat";
+  await app.request(`/v1/invites/${code}/redeem`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tokenHash: sha256Hex(bobPat), label: "bob@example.com" }),
+  });
+
+  const d = ownedDesign(designs, admin.developerId, AMENDED_SUMMARY);
+  const res = await app.request(`/v1/designs/${d.id}/resynthesize`, { method: "POST", headers: bearer(bobPat) });
+  assert.equal(res.status, 403);
+});
+
+test("POST /v1/designs/:id/resynthesize: unknown design is 404", async () => {
+  const { app, dataDir } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const res = await app.request("/v1/designs/nope/resynthesize", { method: "POST", headers: bearer(admin.token) });
+  assert.equal(res.status, 404);
+});
+
+// Nothing to fold is an ordinary answer, not a failure: the button has
+// nothing to offer, which the client can say plainly.
+test("POST /v1/designs/:id/resynthesize: a never-amended design proposes nothing, with a 200", async () => {
+  const { factory } = stubResynthesis();
+  const { app, dataDir, designs } = freshApp({ resynthesis: factory });
+  const admin = await bootstrapAdmin(app, dataDir);
+  const d = ownedDesign(designs, admin.developerId, "Never amended.");
+
+  const res = await app.request(`/v1/designs/${d.id}/resynthesize`, { method: "POST", headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+  assert.equal(((await res.json()) as { summary: string | null }).summary, null);
+});
+
+// --- the automatic trigger on close ---------------------------------------
+
+test("PATCH /v1/designs/:id/close: folds the amendment pile into one overview", async () => {
+  const { factory, wrote } = stubResynthesis("The design, as it now stands.");
+  const { app, dataDir, designs, identities } = freshApp({ resynthesis: factory });
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+  const d = ownedDesign(designs, admin.developerId, AMENDED_SUMMARY);
+
+  const res = await app.request(`/v1/designs/${d.id}/close`, { method: "PATCH", headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+
+  // Closing does not wait on the model, so the test waits on the write.
+  assert.equal(await wrote, "The design, as it now stands.");
+  const closed = designs.get(d.id)!;
+  assert.equal(closed.summary, "The design, as it now stands.");
+  assert.equal(closed.status, "closed", "the close itself is unaffected");
+  assert.equal(closed.overviewRevisionSource, "llm_resynthesis");
+  assert.equal(closed.summaryExtracted, AMENDED_SUMMARY, "the pre-fold text stays recoverable");
+});
+
+// The guard that answers the comment-anchor objection, end to end through
+// the route rather than only in the job's own unit tests.
+test("PATCH /v1/designs/:id/close: leaves an overview a human wrote alone", async () => {
+  const { factory } = stubResynthesis();
+  const { app, dataDir, designs, identities } = freshApp({ resynthesis: factory });
+  const admin = await bootstrapAdmin(app, dataDir);
+  identities.foundProject("proj-1", admin.developerId, { owner: "acme", repo: "widgets" });
+  const d = ownedDesign(designs, admin.developerId, AMENDED_SUMMARY);
+  designs.reviseOverview(d.id, { summary: "What I actually meant.", actor: admin.developerId, source: "owner_edit" });
+
+  const res = await app.request(`/v1/designs/${d.id}/close`, { method: "PATCH", headers: bearer(admin.token) });
+  assert.equal(res.status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(designs.get(d.id)!.summary, "What I actually meant.");
+  assert.equal(designs.get(d.id)!.overviewRevisionSource, "owner_edit");
 });
