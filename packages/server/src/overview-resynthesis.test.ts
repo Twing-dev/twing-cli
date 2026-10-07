@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   originalText,
@@ -8,12 +8,21 @@ import {
   proposeOverview,
   resynthesizeNow,
   ResynthesisQueue,
+  rephraseAvailability,
+  isHumanWritten,
+  cachedProposal,
+  __clearProposalCache,
   AMENDMENT_THRESHOLD,
   type ResynthesisDeps,
 } from "./overview-resynthesis.js";
 import { appendSummaryUpdate } from "./design-checks.js";
 import type { DesignStatement } from "@twing/core";
 import type { ActivityEvent } from "./activity-log.js";
+
+// The proposal cache is module state and deliberately survives calls -- which
+// makes tests non-independent unless it is reset. Cleared per test rather than
+// per file so the cache's own tests can still observe it filling.
+beforeEach(() => __clearProposalCache());
 
 function design(overrides: Partial<DesignStatement> = {}): DesignStatement {
   return {
@@ -327,4 +336,86 @@ test("ResynthesisQueue: a trigger during a run re-runs once, not concurrently", 
   assert.equal(maxInFlight, 1);
   assert.equal(stub.written.length, 2); // the in-flight one, then the re-run
   queue.clear();
+});
+
+// --- the manual path: who may rephrase, and when it does anything ----------
+
+test("rephraseAvailability: machine-written text needs one amendment", () => {
+  const d = design();
+  assert.deepEqual(rephraseAvailability(d, []), { allowed: false, reason: "nothing_new" });
+  assert.deepEqual(rephraseAvailability(d, [amendEvent(1)]), { allowed: true });
+});
+
+// Nobody is attached to prose a machine wrote; a paragraph somebody chose is
+// theirs, and absorbing a single line into it is a bad trade.
+test("rephraseAvailability: human-written text needs two", () => {
+  for (const source of ["owner_edit", "rephrase_accepted"]) {
+    const d = design({ overviewRevisionSource: source, overviewRevision: 1 });
+    assert.deepEqual(rephraseAvailability(d, [amendEvent(1)]), { allowed: false, reason: "human_text_barely_changed" }, source);
+    assert.deepEqual(rephraseAvailability(d, [amendEvent(1), amendEvent(2)]), { allowed: true }, source);
+  }
+});
+
+// A rephrase is not final: new amendments re-arm the button.
+test("rephraseAvailability: amendments after a rephrase re-enable it", () => {
+  const d = design({ overviewRevision: 1, overviewRevisedAt: 100, overviewRevisionSource: "llm_resynthesis" });
+  assert.deepEqual(rephraseAvailability(d, [amendEvent(50)]), { allowed: false, reason: "nothing_new" }, "an older amendment does not count");
+  assert.deepEqual(rephraseAvailability(d, [amendEvent(50), amendEvent(150)]), { allowed: true });
+});
+
+test("isHumanWritten: both an edit and an accepted rephrase count", () => {
+  assert.equal(isHumanWritten(design({ overviewRevisionSource: "owner_edit" })), true);
+  assert.equal(isHumanWritten(design({ overviewRevisionSource: "rephrase_accepted" })), true);
+  assert.equal(isHumanWritten(design({ overviewRevisionSource: "llm_resynthesis" })), false);
+  assert.equal(isHumanWritten(design()), false);
+});
+
+// The automatic path keeps its hands off anything a person settled on --
+// including a rephrase a teammate accepted.
+test("shouldResynthesize: an accepted rephrase is as untouchable as a hand edit", () => {
+  const d = design({ overviewRevisionSource: "rephrase_accepted" });
+  assert.equal(shouldResynthesize(d, [amendEvent(1), amendEvent(2), amendEvent(3)], [], "design_closed"), "human_wrote_it");
+});
+
+// --- the cache -------------------------------------------------------------
+
+test("proposeOverview: a second call for the same state costs no model call", async () => {
+  __clearProposalCache();
+  const summary = appendSummaryUpdate("Base.", "first");
+  const { deps, prompts } = stubDeps({ design: design({ summary }) });
+
+  assert.equal(await proposeOverview(deps, "d1"), "One current overview.");
+  assert.equal(await proposeOverview(deps, "d1"), "One current overview.");
+  assert.equal(prompts.length, 1, "the model ran once for two presses");
+});
+
+// The key is what expires an entry: change, never age.
+test("proposeOverview: an amendment retires the cached proposal", async () => {
+  __clearProposalCache();
+  const summary = appendSummaryUpdate("Base.", "first");
+  const stub = stubDeps({ design: design({ summary }) });
+
+  await proposeOverview(stub.deps, "d1");
+  // A new amendment bumps scopeVersion, which is in the cache key.
+  stub.setDesign(design({ summary: appendSummaryUpdate(summary, "second"), scopeVersion: 2 }));
+  await proposeOverview(stub.deps, "d1");
+
+  assert.equal(stub.prompts.length, 2, "the model ran again for the changed design");
+});
+
+test("proposeOverview: saving a rephrase retires the cached proposal", async () => {
+  __clearProposalCache();
+  const summary = appendSummaryUpdate("Base.", "first");
+  const stub = stubDeps({ design: design({ summary }) });
+
+  await proposeOverview(stub.deps, "d1");
+  stub.setDesign(design({ summary, overviewRevision: 1, overviewRevisionSource: "rephrase_accepted" }));
+  await proposeOverview(stub.deps, "d1");
+
+  assert.equal(stub.prompts.length, 2);
+});
+
+test("cachedProposal: nothing for a state never computed", () => {
+  __clearProposalCache();
+  assert.equal(cachedProposal(design()), undefined);
 });
