@@ -180,7 +180,7 @@ export class NotificationStore {
    * Bounded to the most recent `WINDOW_ROWS` notifying events, which is what
    * the panel shows and what the badge counts.
    */
-  feedFor(developerId: string, projectIds: string[], options: { limit?: number } = {}): NotificationFeed {
+  feedFor(developerId: string, projectIds: string[], options: { limit?: number; canReadComment?: (commentId: string) => boolean } = {}): NotificationFeed {
     const lastSeen = this.lastSeenAt(developerId);
     const limit = options.limit ?? DEFAULT_LIMIT;
     if (projectIds.length === 0) return { items: [], unreadCount: 0, lastSeenAt: lastSeen };
@@ -210,7 +210,8 @@ export class NotificationStore {
       .limit(Math.max(limit, WINDOW_ROWS))
       .all() as FeedRow[];
 
-    const all = this.toItems(rows, lastSeen);
+    const visible = options.canReadComment ? rows.filter((row) => options.canReadComment!(row.comment.id)) : rows;
+    const all = this.toItems(visible, lastSeen);
     const unreadCount = all.filter((i) => i.unread).length;
     return { items: all.slice(0, limit), unreadCount, lastSeenAt: lastSeen };
   }

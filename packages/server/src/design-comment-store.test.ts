@@ -35,6 +35,18 @@ function seedDesign(db: Db, id: string, developerId: string, options: { summary?
 
 const baseComment = { projectId: "p1", designId: "d1", authorId: "reviewer@example.com", body: "why a new table rather than reusing threads?", designVersion: 3 };
 
+test("document comments retain revision, access provenance and shared-group scope", () => {
+  const { store } = freshStore();
+  const anchor = { field: "document:problemStatement" as const, quote: "shared reasoning", documentGroupId: "shared", documentRevision: 7 };
+  const shared = store.create({ ...baseComment, anchor, documentSourceProjects: ["p1", "private"] });
+  const original = store.create(baseComment);
+  assert.deepEqual(store.get(shared.id)?.anchor, anchor);
+  assert.deepEqual(store.documentSourceProjects(shared.id), ["p1", "private"]);
+  assert.deepEqual(store.listForReview("d2", "shared").map(c => c.id), [shared.id]);
+  assert.deepEqual(store.listForReview("d1", "relinked").map(c => c.id), [original.id]);
+  assert.deepEqual(store.documentSourceProjects(original.id), []);
+});
+
 test("DesignCommentStore: a new comment starts open, with no replies", () => {
   const { store } = freshStore();
   const comment = store.create(baseComment);

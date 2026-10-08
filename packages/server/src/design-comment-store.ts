@@ -38,7 +38,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or } from "drizzle-orm";
 import type { CommentAnchor, CommentAnchorField, DesignComment, DesignCommentReply, DesignCommentStatus } from "@twing/core";
 import type { Db } from "./db/client.js";
 import { designComments as commentsTable, designs as designsTable } from "./db/schema.js";
@@ -55,6 +55,9 @@ interface CommentRow {
   anchorQuote: string | null;
   anchorPrefix: string | null;
   anchorSuffix: string | null;
+  anchorDocumentGroupId: string | null;
+  anchorDocumentRevision: number | null;
+  anchorDocumentSourceProjects: string | null;
   designVersion: number;
   status: string;
   resolvedAt: number | null;
@@ -68,6 +71,8 @@ function anchorFromRow(row: CommentRow): CommentAnchor | undefined {
   return {
     field: row.anchorField as CommentAnchorField,
     ...(row.anchorChangeId ? { changeId: row.anchorChangeId } : {}),
+    ...(row.anchorDocumentGroupId ? { documentGroupId: row.anchorDocumentGroupId } : {}),
+    ...(row.anchorDocumentRevision !== null ? { documentRevision: row.anchorDocumentRevision } : {}),
     quote: row.anchorQuote,
     ...(row.anchorPrefix ? { prefix: row.anchorPrefix } : {}),
     ...(row.anchorSuffix ? { suffix: row.anchorSuffix } : {}),
@@ -101,6 +106,8 @@ export interface CreateCommentInput {
   /** Already validated against the design by the route
    * (`validateCommentAnchor`, design-comment-anchor.ts). */
   anchor?: CommentAnchor;
+  /** Trusted published source projects, resolved by the route, never client-sent. */
+  documentSourceProjects?: string[];
   /** The design's `scopeVersion` at the moment of commenting. */
   designVersion: number;
 }
@@ -147,6 +154,9 @@ export class DesignCommentStore {
       anchorQuote: input.anchor?.quote ?? null,
       anchorPrefix: input.anchor?.prefix ?? null,
       anchorSuffix: input.anchor?.suffix ?? null,
+      anchorDocumentGroupId: input.anchor?.documentGroupId ?? null,
+      anchorDocumentRevision: input.anchor?.documentRevision ?? null,
+      anchorDocumentSourceProjects: input.documentSourceProjects ? JSON.stringify(input.documentSourceProjects) : null,
       designVersion: input.designVersion,
       status: "open",
       resolvedAt: null,
@@ -176,6 +186,20 @@ export class DesignCommentStore {
    * activity feed's newest-first ordering, deliberately. */
   listByDesign(designId: string): DesignComment[] {
     return (this.db.select().from(commentsTable).where(eq(commentsTable.designId, designId)).orderBy(asc(commentsTable.createdAt)).all() as CommentRow[]).map(fromRow);
+  }
+
+  /** Shared overview comments are visible from any member, including a one-repo view. */
+  listForReview(designId: string, groupId: string): DesignComment[] {
+    return this.db.select().from(commentsTable).where(or(
+      and(eq(commentsTable.designId, designId), isNull(commentsTable.anchorDocumentGroupId)),
+      eq(commentsTable.anchorDocumentGroupId, groupId),
+    )).orderBy(asc(commentsTable.createdAt)).all().map(fromRow);
+  }
+
+  documentSourceProjects(commentId: string): string[] {
+    const row = this.db.select({ projects: commentsTable.anchorDocumentSourceProjects }).from(commentsTable)
+      .where(eq(commentsTable.id, commentId)).get();
+    return row?.projects ? JSON.parse(row.projects) : [];
   }
 
   /** Replies under one comment, oldest first. */

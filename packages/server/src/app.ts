@@ -51,6 +51,7 @@ import { NotificationStore } from "./notification-store.js";
 import { assembleDesignContext, describeProvenance, designScopePaths, type AssembledContext } from "./design-context.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, AMENDMENT_THRESHOLD, amendmentsSinceOverview, type ResynthesisDeps } from "./overview-resynthesis.js";
+import { DesignDocumentService, buildDocumentSources } from "./design-document.js";
 import { callLlm } from "./llm-client.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
 import { fetchRepoPermissions, fetchGithubUser, type GithubUser, type GithubRepoPermissions } from "./github-client.js";
@@ -221,6 +222,7 @@ interface RedeemRequestBody {
 const MAX_CAPTURE_RECORDS_PER_REQUEST = 5000;
 
 export interface CreateAppOptions {
+  designDocuments?: DesignDocumentService;
   /** Shared Drizzle handle every store below is built from -- pass one
    * explicitly to share a single database across a test; otherwise built
    * from `dataDir` (statefulness redesign, 2026-08). */
@@ -601,6 +603,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const captures = options.captures ?? new CaptureStore(db, options.dataDir ? { capturesDir: `${options.dataDir}/captures` } : {});
   const designComments = options.designComments ?? new DesignCommentStore(db);
   const designChats = options.designChats ?? new DesignChatStore(db);
+  const documents = options.designDocuments ?? new DesignDocumentService(db);
   const notifications = new NotificationStore(db);
   const activityLog = new DrizzleActivityLog(db);
   // Tightening alignment threads item 4 (2026-08-27): wired here, after
@@ -634,7 +637,9 @@ export function createApp(options: CreateAppOptions = {}) {
   const resynthesisDeps: ResynthesisDeps = {
     getDesign: (id) => designs.get(id),
     eventsFor: (id) => activityLog.eventsForRelatedId(id),
-    commentsFor: (id) => designComments.listByDesign(id),
+    // Shared-document discussions may quote other repositories. They must
+    // never be used to rewrite an individual design's original overview.
+    commentsFor: (id) => designComments.listByDesign(id).filter((comment) => !comment.anchor?.documentGroupId),
     callModel: (systemPrompt, userPrompt) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel }),
     writeOverview: (id, summary) => {
       designs.reviseOverview(id, { summary, actor: "twing", source: "llm_resynthesis" });
@@ -1623,6 +1628,18 @@ export function createApp(options: CreateAppOptions = {}) {
     return isProjectMember(identity, projectId) || canManageProject(identity, projectId);
   }
 
+  function canReadSharedDocument(identity: ResolvedIdentity, groupId: string, historicalProjects: string[] = []): boolean {
+    const row = documents.get(groupId);
+    const projects = [...buildDocumentSources(db, groupId).projects,
+      ...(row ? JSON.parse(row.publishedSourceProjects) as string[] : []), ...historicalProjects];
+    return projects.every((projectId) => canViewDesignComments(identity, projectId));
+  }
+
+  function canReadReviewComment(identity: ResolvedIdentity, comment: { id: string; projectId: string; anchor?: { documentGroupId?: string } }): boolean {
+    return canViewDesignComments(identity, comment.projectId) && (!comment.anchor?.documentGroupId
+      || canReadSharedDocument(identity, comment.anchor.documentGroupId, designComments.documentSourceProjects(comment.id)));
+  }
+
   /**
    * A design plus whatever survives of the session that produced it (design
    * review phase 2, 2026-09).
@@ -1699,7 +1716,14 @@ export function createApp(options: CreateAppOptions = {}) {
     const text = typeof body?.body === "string" ? body.body.trim() : "";
     if (text.length === 0) return c.json({ error: "expected { body: string, anchor?: { field, quote, prefix?, suffix?, changeId? } }" }, 400);
 
-    const anchor = validateCommentAnchor(body?.anchor, design);
+    const groupId = design.groupId ?? design.id;
+    const documentAnchor = body?.anchor && typeof body.anchor === "object"
+      && typeof (body.anchor as { field?: unknown }).field === "string"
+      && String((body.anchor as { field: string }).field).startsWith("document:");
+    if (documentAnchor && !canReadSharedDocument(identity, groupId)) {
+      return c.json({ error: "shared document is not available with your project access" }, 403);
+    }
+    const anchor = validateCommentAnchor(body?.anchor, design, documentAnchor ? documents.response(groupId) : undefined);
     if (!anchor.ok) return c.json({ error: anchor.error }, anchor.status);
 
     const comment = designComments.create({
@@ -1708,6 +1732,7 @@ export function createApp(options: CreateAppOptions = {}) {
       authorId: identity.developerId,
       body: text,
       anchor: anchor.anchor,
+      ...(documentAnchor ? { documentSourceProjects: JSON.parse(documents.get(groupId)!.publishedSourceProjects) as string[] } : {}),
       designVersion: design.scopeVersion,
     });
     return c.json({ comment: { ...comment, canResolve: canResolveComment(identity, comment) } });
@@ -1718,7 +1743,8 @@ export function createApp(options: CreateAppOptions = {}) {
     const design = designs.get(c.req.param("id"));
     if (!design) return c.json({ error: "no such design" }, 404);
     if (!canViewDesignComments(identity, design.projectId)) return c.json({ error: "not a member of this project" }, 403);
-    const items = designComments.listByDesign(design.id);
+    const items = designComments.listForReview(design.id, design.groupId ?? design.id)
+      .filter((comment) => canReadReviewComment(identity, comment));
     // `canResolve` per comment, so the dashboard renders the rule instead of
     // reimplementing it -- and cannot drift from it. The client also has no
     // reliable way to work this out for itself: a full-auth viewer's identity
@@ -1738,6 +1764,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const comment = designComments.get(c.req.param("id"));
     if (!comment) return { error: "no such comment", status: 404 as const };
     if (!canCommentOnDesign(identity, comment.projectId)) return { error: "not a member of this project", status: 403 as const };
+    if (!canReadReviewComment(identity, comment)) return { error: "shared document is not available with your project access", status: 403 as const };
     return { comment, identity };
   }
 
@@ -1927,7 +1954,9 @@ export function createApp(options: CreateAppOptions = {}) {
     const identity = c.get("identity");
     const limitParam = Number(c.req.query("limit"));
     const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 100) : 50;
-    return c.json(notifications.feedFor(identity.developerId, notificationProjectIds(identity), { limit }));
+    return c.json(notifications.feedFor(identity.developerId, notificationProjectIds(identity), {
+      limit, canReadComment: (id) => { const comment = designComments.get(id); return !!comment && canReadReviewComment(identity, comment); },
+    }));
   });
 
   app.post("/v1/notifications/seen", (c) => {
@@ -1935,7 +1964,9 @@ export function createApp(options: CreateAppOptions = {}) {
     notifications.markSeen(identity.developerId);
     // The feed comes back with the cursor already applied, so the client
     // doesn't need a second round trip to learn the badge is now zero.
-    return c.json(notifications.feedFor(identity.developerId, notificationProjectIds(identity), { limit: 50 }));
+    return c.json(notifications.feedFor(identity.developerId, notificationProjectIds(identity), {
+      limit: 50, canReadComment: (id) => { const comment = designComments.get(id); return !!comment && canReadReviewComment(identity, comment); },
+    }));
   });
 
   // Multi-repo ExitPlanMode fallback (2026-08-18): extraction only, no
@@ -3138,6 +3169,31 @@ export function createApp(options: CreateAppOptions = {}) {
   // order, and a bare `:id` segment would otherwise swallow a literal path
   // like `scope-match` before it ever reaches its real handler (found
   // live, via a full scope-match test regression, while building this).
+  // Combined prose is readable only when every current AND published source
+  // project is readable. A relink must not expose a previous group's text.
+  app.get("/v1/designs/:id/document", (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    const canRead = (projectId: string) => isProjectMember(identity, projectId) || canManageProject(identity, projectId);
+    if (!design || !canRead(design.projectId)) return c.json({ error: "no such design" }, 404);
+    const groupId = design.groupId ?? design.id;
+    if (!canReadSharedDocument(identity, groupId)) return c.json({ error: "shared document is not available with your project access" }, 403);
+    return c.json(documents.response(groupId));
+  });
+
+  app.post("/v1/designs/:id/document/regenerate", (c) => {
+    const identity = c.get("identity");
+    if (identity.isPublicViewer) return c.json({ error: "not available" }, 404);
+    const design = designs.get(c.req.param("id"));
+    const canRead = (projectId: string) => isProjectMember(identity, projectId) || canManageProject(identity, projectId);
+    if (!design || !canRead(design.projectId)) return c.json({ error: "no such design" }, 404);
+    const groupId = design.groupId ?? design.id;
+    if (!buildDocumentSources(db, groupId).projects.every(canRead)) return c.json({ error: "shared document is not available with your project access" }, 403);
+    documents.request(groupId);
+    // No published content in this response: it may include a removed project.
+    return c.json({ groupId, status: documents.get(groupId)?.generationStatus ?? "pending" }, 202);
+  });
+
   app.get("/v1/designs/:id", (c) => {
     const identity = c.get("identity");
     const design = designs.get(c.req.param("id"));
@@ -3235,7 +3291,12 @@ export function createApp(options: CreateAppOptions = {}) {
     const developerId = c.req.query("developerId") || undefined;
     const relatedId = c.req.query("relatedId") || undefined;
     const { items, nextBefore } = activityLog.eventsForProjectPage(projectId, { before, limit, kinds, developerId, relatedId });
-    return c.json({ items, nextBefore });
+    const visible = items.filter((event) => {
+      if (!event.kind.startsWith("design_comment_") || !event.relatedId) return true;
+      const comment = designComments.get(event.relatedId);
+      return !comment || canReadReviewComment(identity, comment);
+    });
+    return c.json({ items: visible, nextBefore });
   });
 
   // twing-monitor v1: the dashboard's ConstraintsView -- read-only reference

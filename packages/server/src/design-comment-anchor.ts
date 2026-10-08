@@ -21,7 +21,7 @@
  * server.
  */
 
-import type { CommentAnchor, CommentAnchorField, DesignStatement } from "@twing/core";
+import { DESIGN_DOCUMENT_SECTIONS, type CommentAnchor, type CommentAnchorField, type DesignDocumentResponse, type DesignDocumentSection, type DesignStatement } from "@twing/core";
 
 /** Long enough for a paragraph, short enough that nobody highlights a whole
  * plan and calls it an anchor. */
@@ -31,7 +31,7 @@ export const MAX_QUOTE_CHARS = 2000;
  * a sentence either side is plenty. Clipped rather than refused. */
 export const MAX_CONTEXT_CHARS = 64;
 
-const FIELDS: readonly CommentAnchorField[] = ["summary", "plan", "change"];
+const FIELDS: readonly CommentAnchorField[] = ["summary", "plan", "change", ...DESIGN_DOCUMENT_SECTIONS.map((section) => `document:${section}` as const)];
 
 type AnchorSource = Pick<DesignStatement, "summary" | "rawPlanExcerpt" | "changes">;
 
@@ -62,7 +62,7 @@ export function anchorSourceText(design: AnchorSource, field: CommentAnchorField
  * `undefined`/`null` is a comment on the design as a whole, which is still
  * allowed -- not everything worth saying is about one sentence.
  */
-export function validateCommentAnchor(raw: unknown, design: AnchorSource): AnchorValidation {
+export function validateCommentAnchor(raw: unknown, design: AnchorSource, document?: DesignDocumentResponse): AnchorValidation {
   if (raw === undefined || raw === null) return { ok: true };
   if (typeof raw !== "object") return { ok: false, status: 400, error: "anchor must be an object" };
   const input = raw as Record<string, unknown>;
@@ -72,13 +72,22 @@ export function validateCommentAnchor(raw: unknown, design: AnchorSource): Ancho
     return { ok: false, status: 400, error: `anchor.field must be one of ${FIELDS.join(", ")}` };
   }
   const quote = typeof input.quote === "string" ? collapseWhitespace(input.quote) : "";
+  const documentField = field.startsWith("document:");
+  if (documentField && (typeof input.documentGroupId !== "string" || !input.documentGroupId
+    || !Number.isSafeInteger(input.documentRevision) || Number(input.documentRevision) < 1)) {
+    return { ok: false, status: 400, error: "document anchors require documentGroupId and a positive documentRevision" };
+  }
+  if (documentField && (!document?.content || document.groupId !== input.documentGroupId || document.revision !== input.documentRevision)) {
+    return { ok: false, status: 409, error: "the shared document has changed -- reload it and highlight again" };
+  }
   if (!quote) return { ok: false, status: 400, error: "anchor.quote must be the highlighted text" };
   if (quote.length > MAX_QUOTE_CHARS) return { ok: false, status: 400, error: `anchor.quote is longer than ${MAX_QUOTE_CHARS} characters -- highlight less` };
 
   const changeId = typeof input.changeId === "string" && input.changeId ? input.changeId : undefined;
   if (field === "change" && !changeId) return { ok: false, status: 400, error: "anchor.changeId is required when anchor.field is change" };
 
-  const source = anchorSourceText(design, field as CommentAnchorField, changeId);
+  const source = documentField ? document?.content?.sections[field.slice("document:".length) as DesignDocumentSection]
+    : anchorSourceText(design, field as CommentAnchorField, changeId);
   if (source === undefined || !collapseWhitespace(source).includes(quote)) {
     return {
       ok: false,
@@ -97,6 +106,7 @@ export function validateCommentAnchor(raw: unknown, design: AnchorSource): Ancho
     anchor: {
       field: field as CommentAnchorField,
       ...(field === "change" ? { changeId } : {}),
+      ...(documentField ? { documentGroupId: document!.groupId, documentRevision: document!.revision } : {}),
       quote,
       ...(prefix ? { prefix } : {}),
       ...(suffix ? { suffix } : {}),
