@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { DesignDocumentResponse } from "@twing/core";
 import { MAX_CONTEXT_CHARS, MAX_QUOTE_CHARS, validateCommentAnchor } from "./design-comment-anchor.js";
 
 const design = {
@@ -7,6 +8,35 @@ const design = {
   rawPlanExcerpt: "## Plan\n1. Add RetryBudget\n2. Wire it into   the client",
   changes: [{ id: "c1", action: "modify" as const, target: "src/net/retry.ts::RetryPolicy.backoff", intent: "cap exponential growth at 30s" }],
 };
+
+const document: DesignDocumentResponse = { groupId: "group", revision: 2, status: "ready", stale: false,
+  content: { schemaVersion: 1, title: "Shared retry budget", sections: { problemStatement: "Slow hosts can exhaust the shared budget." } } };
+
+test("document anchors validate section text, group and revision independently of the original summary", () => {
+  const anchor = { field: "document:problemStatement", documentGroupId: "group", documentRevision: 2, quote: "shared budget" };
+  const result = validateCommentAnchor(anchor, design, document);
+  assert.ok(result.ok);
+  assert.deepEqual(result.anchor, anchor);
+  for (const changed of [{ ...anchor, documentRevision: 1 }, { ...anchor, documentGroupId: "other" },
+    { ...anchor, field: "document:validation" }, { ...anchor, quote: "private original quote" }]) {
+    const rejected = validateCommentAnchor(changed, design, document);
+    assert.equal(rejected.ok ? undefined : rejected.status, 409);
+  }
+  const missing = validateCommentAnchor(anchor, design);
+  assert.equal(missing.ok ? undefined : missing.status, 409);
+});
+
+test("document anchors require revision metadata and reject unknown sections", () => {
+  for (const anchor of [
+    { field: "document:problemStatement", quote: "shared budget" },
+    { field: "document:problemStatement", quote: "shared budget", documentGroupId: "group", documentRevision: 0 },
+    { field: "document:problemStatement", quote: "shared budget", documentGroupId: "group", documentRevision: "2" },
+    { field: "document:unknown", quote: "shared budget", documentGroupId: "group", documentRevision: 2 },
+  ]) {
+    const result = validateCommentAnchor(anchor, design, document);
+    assert.equal(result.ok ? undefined : result.status, 400);
+  }
+});
 
 test("validateCommentAnchor: no anchor is a comment on the design as a whole", () => {
   assert.deepEqual(validateCommentAnchor(undefined, design), { ok: true });

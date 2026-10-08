@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { createDb } from "./db/client.js";
+import { DesignDocumentService } from "./design-document.js";
 import { ConstraintStore } from "./design-store.js";
 import { IdentityStore } from "./identity-store.js";
 import { describeLlmProvider, resolveExtractModel, resolveSemanticCheckModel, resolveCommentAnswerModel, resolveResynthesisModel } from "./llm-client.js";
@@ -92,8 +93,12 @@ const publicProjectIds = process.env.TWING_PUBLIC_PROJECT_IDS?.split(",")
 // designs. Unset means no monitor, and every consumer omits the link.
 const monitorUrl = process.env.TWING_MONITOR_URL?.trim() || undefined;
 
+const designDocuments = new DesignDocumentService(db, { model: resynthesisModel });
+designDocuments.start();
+
 const app = createApp({
   db,
+  designDocuments,
   // Forwarded so blob-backed state lands beside the database rather than in
   // the home default: `CaptureStore` writes session captures to files under
   // `<dataDir>/captures`, and without this a server configured with

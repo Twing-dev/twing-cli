@@ -4,6 +4,8 @@
  * note in §11 and §4a of the memo.
  */
 
+import type { DesignDocumentSection } from "./design-document.js";
+
 /** Shared by the daemon's hook-driven extraction and the CLI's git-diff
  * fallback, so a claim's lifetime doesn't depend on which path produced it. */
 export const DEFAULT_CLAIM_TTL_MS = 6 * 60 * 60 * 1000;
@@ -682,7 +684,7 @@ export interface EnrichedPendingReview extends PendingReview {
  *  - `plan` -- `DesignStatement.rawPlanExcerpt`, the original plan text.
  *  - `change` -- one declared change's `intent`/`target`, addressed by
  *    `changeId`. */
-export type CommentAnchorField = "summary" | "plan" | "change";
+export type CommentAnchorField = "summary" | "plan" | "change" | `document:${DesignDocumentSection}`;
 
 /**
  * What a comment is attached to: the highlighted text itself, plus a little
@@ -701,6 +703,9 @@ export interface CommentAnchor {
   field: CommentAnchorField;
   /** Required when `field` is `change`, meaningless otherwise. */
   changeId?: string;
+  /** Required for generated document sections; the group and published revision selected. */
+  documentGroupId?: string;
+  documentRevision?: number;
   quote: string;
   prefix?: string;
   suffix?: string;

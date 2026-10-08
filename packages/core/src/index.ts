@@ -5,6 +5,7 @@ export * from "./tree-sitter.js";
 export * from "./symbol-id.js";
 export * from "./manifest.js";
 export * from "./design-scope.js";
+export * from "./design-document.js";
 export * from "./transcript-filter.js";
 export * from "./redact.js";
 export * from "./repo-root.js";

@@ -178,6 +178,21 @@ export const invites = sqliteTable("invites", {
 // Design-gate domain
 // ---------------------------------------------------------------------------
 
+/** Source updates enqueue work through migration 0023's triggers, in the
+ * same transaction as the design write, including writes by older servers. */
+export const designDocuments = sqliteTable("design_documents", {
+  groupId: text("group_id").primaryKey(),
+  contentJson: text("content_json"),
+  revision: integer("revision").notNull().default(0),
+  requestedVersion: integer("requested_version").notNull().default(1),
+  requestedFingerprint: text("requested_fingerprint"),
+  publishedFingerprint: text("published_fingerprint"),
+  publishedSourceProjects: text("published_source_projects").notNull().default("[]"),
+  generationStatus: text("generation_status").notNull().default("pending"),
+  lastErrorCode: text("last_error_code"),
+  updatedAt: integer("updated_at").notNull().default(0),
+}, (t) => [index("design_documents_status_idx").on(t.generationStatus)]);
+
 export const designs = sqliteTable(
   "designs",
   {
@@ -491,6 +506,10 @@ export const designComments = sqliteTable(
     anchorQuote: text("anchor_quote"),
     anchorPrefix: text("anchor_prefix"),
     anchorSuffix: text("anchor_suffix"),
+    anchorDocumentGroupId: text("anchor_document_group_id"),
+    anchorDocumentRevision: integer("anchor_document_revision"),
+    /** Access to quoted source text remains restricted after relinking or regeneration. */
+    anchorDocumentSourceProjects: text("anchor_document_source_projects"),
     /** The design's `scopeVersion` when this was posted -- how a reader
      * learns the design changed after the comment was left. */
     designVersion: integer("design_version").notNull(),
@@ -505,6 +524,7 @@ export const designComments = sqliteTable(
   },
   (t) => [
     index("design_comments_design_id_idx").on(t.designId),
+    index("design_comments_document_group_idx").on(t.anchorDocumentGroupId),
     // The review queue's query is "every open comment on designs this
     // developer owns" -- it filters on status, then joins to `designs` for
     // ownership.

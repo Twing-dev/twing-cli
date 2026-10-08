@@ -162,6 +162,20 @@
       "when": 1790933578819,
       "tag": "0022_design-overview-edit",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1791396000000,
+      "tag": "0023_shared-design-documents",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1791439080918,
+      "tag": "0024_design-document-comments",
+      "breakpoints": true
     }
   ]
 }
