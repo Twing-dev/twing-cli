@@ -83,6 +83,13 @@ export interface ResynthesisDeps {
   callModel: (systemPrompt: string, userPrompt: string) => Promise<string>;
   /** `designs.reviseOverview`, narrowed to what this needs. */
   writeOverview: (id: string, summary: string) => void;
+  /** Budgeted, redacted conversation grounding for this design, when its
+   * session was captured and held something -- `undefined` otherwise
+   * (never captured, captured but empty, or a read failure). Optional so
+   * tests that don't care about grounding can omit it entirely; the prompt
+   * simply states absence rather than forcing every caller to wire a store
+   * through just to pass `undefined` explicitly. */
+  groundingFor?: (design: DesignStatement) => string | undefined;
   /** Overridable for tests; `console.log` in production, matching every
    * other job in this package. */
   log?: (message: string) => void;
@@ -309,17 +316,22 @@ export function shouldResynthesize(
 const SYSTEM_PROMPT = [
   "You are rewriting the overview of a software design statement.",
   "",
-  "You are given the design's ORIGINAL overview and, in order, the AMENDMENTS its author appended as the work changed.",
-  "Write ONE current overview: what the design is doing now, as if written fresh today.",
+  "You are given the design's ORIGINAL overview, in order, the AMENDMENTS its author appended as the work changed, and -- when available -- an abridged, redacted transcript of the session that produced it.",
+  "",
+  "Write the current overview as up to three short, labeled lines. Most designs do not need all three -- omit a line that would add nothing for a change this size:",
+  "",
+  "What: one sentence -- what changes, for the user or the system. Always required.",
+  "Approach: only if there is a real decision or tradeoff worth recording (one short sentence). Omit for a change with nothing to decide.",
+  "Touches: only if naming where the change lives would actually help a reviewer (one short phrase -- files, components). Omit when it is a single obvious file or already implied by What.",
   "",
   "Rules:",
   "- Present tense. No dates, no 'Update:', no changelog, no mention of amendments or of this rewrite.",
   "- A later amendment that contradicts the original wins. State the current position only; do not narrate the change.",
   "- Keep every distinct piece of scope the text mentions. Dropping a commitment is the one unacceptable failure.",
   "- Drop duplicates: amendments are often pasted twice.",
-  "- Omit bare lists of change ids or PR links. Those are recorded structurally elsewhere.",
-  "- One to three short paragraphs. Plain prose, no headings, no bullet points.",
-  "- Output the overview itself and nothing else: no preamble, no quotes around it, no explanation.",
+  "- When a transcript is given, use it to make Approach specific -- a real reason that actually appears in it, never a guess. If the transcript doesn't explain the decision, leave Approach out rather than inventing one.",
+  "- Short. A clause or a sentence per line, not a paragraph per line. A trivial change may be a single 'What:' line and nothing else.",
+  "- Output just the labeled lines and nothing else: no preamble, no quotes, no explanation, no bullet characters.",
 ].join("\n");
 
 /** Cap on what reaches the model. Generous -- the overview route already
@@ -327,9 +339,10 @@ const SYSTEM_PROMPT = [
  * in principle and a prompt should not be. */
 const MAX_INPUT_CHARS = 24_000;
 
-function buildUserPrompt(original: string, amendments: string[]): string {
+function buildUserPrompt(original: string, amendments: string[], grounding?: string): string {
   const parts = [`ORIGINAL OVERVIEW:\n${original}`];
   amendments.forEach((text, i) => parts.push(`AMENDMENT ${i + 1}:\n${text}`));
+  if (grounding) parts.push(`SESSION TRANSCRIPT (conversation that produced this; abridged and redacted):\n${grounding}`);
   return parts.join("\n\n").slice(0, MAX_INPUT_CHARS);
 }
 
@@ -361,8 +374,9 @@ export async function proposeOverview(deps: ResynthesisDeps, designId: string): 
   if (cached !== undefined) return cached;
 
   const original = originalText(design);
+  const grounding = deps.groundingFor?.(design);
   try {
-    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments));
+    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments, grounding));
     const text = out.trim();
     // A model that returns nothing usable is the same case as one that
     // throws. Checked rather than trusted, because an empty string would pass
