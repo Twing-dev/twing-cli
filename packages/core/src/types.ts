@@ -681,8 +681,14 @@ export interface EnrichedPendingReview extends PendingReview {
  *  - `summary` -- `DesignStatement.summary`, the overview.
  *  - `plan` -- `DesignStatement.rawPlanExcerpt`, the original plan text.
  *  - `change` -- one declared change's `intent`/`target`, addressed by
- *    `changeId`. */
-export type CommentAnchorField = "summary" | "plan" | "change";
+ *    `changeId`.
+ *  - `groupOverview` (2026-10-10) -- the synthesized combined overview
+ *    across every design sharing a `groupId` (`group-overview-resynthesis.ts`).
+ *    Not any one design's own field -- stored on whichever design the
+ *    highlight happened to be taken from (`DesignComment.designId`), the
+ *    same way a comment "on the design as a whole" already is, since this
+ *    text has no row of its own to anchor to directly. */
+export type CommentAnchorField = "summary" | "plan" | "change" | "groupOverview";
 
 /**
  * What a comment is attached to: the highlighted text itself, plus a little

@@ -364,6 +364,33 @@ export const constraints = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// Design groups -- human-authored overview only (2026-10-10)
+// ---------------------------------------------------------------------------
+
+/**
+ * One row per `groupId`, and only once a person has actually written an
+ * overview for the group. The computed, model-synthesized combined overview
+ * (`group-overview-resynthesis.ts`) stays exactly as it was -- compute-on-
+ * read, cached in memory, nothing here -- because nothing automatic ever
+ * writes to this table. A row existing *is* the "a human settled on this
+ * text" signal, the same role `designs.overviewRevisionSource ===
+ * "owner_edit"` plays per-design (`isHumanWritten`), just represented as
+ * presence/absence instead of a column, since there's no automatic writer
+ * on this table to distinguish from.
+ *
+ * `groupId` is the primary key rather than a generated id: there is at most
+ * one current overview per group, this is not an append-only log, and a
+ * second edit is a plain overwrite of the one row, matching how
+ * `designs.summary` itself is a single mutable field rather than a history.
+ */
+export const designGroupOverviews = sqliteTable("design_group_overviews", {
+  groupId: text("group_id").primaryKey(),
+  overview: text("overview").notNull(),
+  revisedBy: text("revised_by").notNull(),
+  revisedAt: integer("revised_at").notNull(),
+});
+
+// ---------------------------------------------------------------------------
 // Unified activity log -- insert-only by convention
 // ---------------------------------------------------------------------------
 

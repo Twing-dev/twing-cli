@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A plain-language guide to @twing/core: architecture, use-case flows, and every exported API.">
+  <title>@twing/core — How it works</title>
+  <style>
+    :root { color-scheme: light; --ink: #172b36; --muted: #526570; --paper: #f5f7f8; --line: #dce4e8; --accent: #086c67; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 24px; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.65 system-ui, -apple-system, sans-serif; }
+    a { color: var(--accent); text-underline-offset: 3px; }
+    .layout { max-width: 1450px; margin: auto; display: grid; grid-template-columns: 235px minmax(0, 1fr); }
+    nav { position: sticky; top: 0; height: 100vh; overflow: auto; padding: 36px 22px; border-right: 1px solid var(--line); }
+    nav strong { display: block; margin-bottom: 18px; }
+    nav a { display: block; padding: 7px 0; text-decoration: none; font-size: 14px; }
+    main { min-width: 0; padding: 46px 48px 80px; }
+    h1, h2, h3 { line-height: 1.25; letter-spacing: -.025em; }
+    h1 { font-size: clamp(32px, 5vw, 52px); margin: 12px 0 20px; }
+    h2 { font-size: 29px; margin: 0 0 20px; }
+    h3 { font-size: 20px; margin-top: 26px; }
+    p { margin: 12px 0; }
+    section { margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--line); }
+    .eyebrow { font-size: 12px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+    .lead { max-width: 780px; font-size: 21px; color: var(--muted); }
+    .muted, .source { color: var(--muted); font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 24px 0; }
+    .card, .flow { background: white; border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
+    .card h3 { margin: 0 0 12px; }
+    .callout { border-left: 4px solid var(--accent); background: #e7f3f0; padding: 16px 20px; margin: 20px 0; }
+    .warning { background: #fff4df; border-color: #b47a12; }
+    .flow { margin: 22px 0; }
+    .flow h3 { margin-top: 0; }
+    .flow ol { padding-left: 24px; }
+    .flow li { padding: 5px 0 5px 6px; }
+    .route { font-weight: 600; color: var(--accent); }
+    code { background: #eaf0f3; padding: 2px 5px; border-radius: 4px; font: .87em/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+    pre { background: #142d38; color: #e7f3f5; padding: 22px; border-radius: 10px; overflow: auto; font-size: 13px; line-height: 1.7; }
+    pre code { background: none; color: inherit; padding: 0; overflow-wrap: normal; }
+    .table-wrap { overflow-x: auto; margin: 18px 0; }
+    table { width: 100%; border-collapse: collapse; background: white; font-size: 14px; }
+    th, td { text-align: left; padding: 13px 15px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: #eaf0f3; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+    td:first-child { width: 36%; }
+    details { background: white; border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin: 14px 0; }
+    summary { cursor: pointer; font-weight: 700; }
+    input { width: 100%; padding: 13px 16px; border: 1px solid #a5b8c1; border-radius: 8px; font: inherit; background: white; margin: 10px 0; }
+    input:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid #169d91; outline-offset: 3px; }
+    .api-group { margin-top: 32px; }
+    [hidden] { display: none !important; }
+    footer { margin-top: 50px; color: var(--muted); font-size: 14px; }
+    @media (max-width: 1000px) { main { padding: 32px 25px; } .cards { grid-template-columns: 1fr; } }
+    @media (max-width: 720px) { .layout { display: block; } nav { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 20px; } nav a { display: inline-block; margin-right: 16px; } main { padding: 28px 18px 60px; } td, th { padding: 10px; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print { nav, .search { display: none; } .layout { display: block; } main { padding: 0; } body { background: white; } details { break-inside: avoid; } pre { white-space: pre-wrap; } .flow { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <nav aria-label="Guide sections">
+    <strong>@twing/core<br><span class="muted">Code → plain English</span></strong>
+    <a href="#gist">The 60-second gist</a>
+    <a href="#architecture">Where core fits</a>
+    <a href="#vocabulary">Key concepts</a>
+    <a href="#flows">Use-case flows</a>
+    <a href="#examples">Small examples</a>
+    <a href="#apis">All runtime APIs</a>
+    <a href="#contracts">Types &amp; constants</a>
+    <a href="#http">Related HTTP endpoints</a>
+    <a href="#gotchas">Limits &amp; gotchas</a>
+    <a href="#reading">Where to read next</a>
+  </nav>
+  <main>
+    <header id="gist">
+      <div class="eyebrow">Developer guide · source snapshot · 9 October 2026</div>
+      <h1>One shared toolbox.<br>Three different flows.</h1>
+      <p class="lead"><strong>@twing/core</strong> gives the CLI, background daemon, and coordination server the same definitions and helper functions. It helps them agree on <em>which project</em>, <em>which code</em>, <em>what was planned</em>, and <em>what messages mean</em>.</p>
+      <div class="callout"><strong>The most important distinction:</strong> core is a library, not a running service. It exposes TypeScript/JavaScript APIs through <code>src/index.ts</code>. It does not register HTTP routes, start a daemon, store designs in a database, or make conflict decisions by itself.</div>
+      <div class="cards">
+        <article class="card"><h3>1. Record edits</h3><p>After an edit, record which file or function changed. Core supplies parsing, symbol names, identity, and message formats. This is background evidence, not a blocking conflict check.</p></article>
+        <article class="card"><h3>2. Check a design</h3><p>Before an edit, require a usable plan covering the file and check project rules. Core supplies plan validation and data contracts. The hook and server decide whether to allow it.</p></article>
+        <article class="card"><h3>3. Capture conversation</h3><p>When opted in, keep human messages and assistant prose, remove tool content, and redact likely secrets. Core does the filtering; the daemon handles consent, storage, and uploads.</p></article>
+      </div>
+      <p class="source">Based on all 18 modules re-exported by <a href="src/index.ts">packages/core/src/index.ts</a>, plus the CLI/daemon/server call sites. Package version: <code>1.3.19-experimental.1</code>; core requires Node <code>&gt;=22.5</code>. Older comments and legacy types are not treated as proof of current behavior.</p>
+    </header>
+
+    <section id="architecture">
+      <h2>Where core fits</h2>
+      <pre><code>AI coding session (Claude Code / OpenCode / Codex)
+  │
+  ├─ BEFORE edit → hook → HTTP → coordination server → allow / deny
+  │                            ↑
+  │                      core's shared models
+  │
+  ├─ AFTER edit → hook → local socket → daemon → HTTP → server
+  │                                     ↑
+  │                          core parses / names / frames
+  │
+  └─ Prompt / session events → daemon reads transcript
+                                 → core filter + redact
+                                 → local capture file → server upload</code></pre>
+      <p>Think of core as the <strong>shared vocabulary and reusable tools</strong>. The CLI is the control panel, the hook is the messenger/checkpoint, the daemon is the local worker, and the server is the team coordinator.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Responsibility</th><th>Owner</th><th>Core contributes</th></tr></thead>
+        <tbody>
+          <tr><td>Commands such as init, design register, align</td><td><code>packages/cli/src</code></td><td>Identity, settings, template validation, authenticated fetch.</td></tr>
+          <tr><td>Fast event forwarding and synchronous edit gate</td><td><code>hook/</code> (Go)</td><td>Wire/identity rules mirrored in Go, not imported from TS.</td></tr>
+          <tr><td>Extract claims, read transcripts, retry uploads</td><td><code>packages/cli/src/daemon</code></td><td>AST parsing, symbols, call edges, transcript filtering, redaction.</td></tr>
+          <tr><td>Auth, membership, designs, reviews, semantic comparison</td><td><code>packages/server/src</code></td><td>Shared data shapes, bootstrap generation, review URLs, redaction.</td></tr>
+        </tbody>
+      </table></div>
+      <p><strong>Dependencies:</strong> <code>yaml</code> reads configuration/templates, <code>minimatch</code> matches file globs, and <code>web-tree-sitter</code> plus JS/TS grammars parses code using WebAssembly.</p>
+    </section>
+
+    <section id="vocabulary">
+      <h2>Words you will see everywhere</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Word</th><th>Simple meaning</th></tr></thead><tbody>
+          <tr><td><code>projectId</code></td><td>“Which repository?” Normally a SHA-256 hash of the normalized origin URL, so SSH and HTTPS clones of the same repo agree.</td></tr>
+          <tr><td><code>developerId</code></td><td>“Who is doing the work?” Core can suggest a local label from git email. In normal authenticated server requests, the server trusts the token-resolved identity instead, not a supplied label.</td></tr>
+          <tr><td><code>sessionId</code></td><td>“Which AI conversation?” Separates multiple sessions belonging to the same developer.</td></tr>
+          <tr><td><code>symbolId</code> / design <code>target</code></td><td>“Which piece of code?” Shared spelling: <code>src/net/retry.ts::RetryPolicy.backoff</code>. With no identifiable symbol, just <code>src/net/retry.ts</code>.</td></tr>
+          <tr><td><code>Claim</code></td><td>A receipt saying a session touched a file/function, when, on which branch, and optionally how its signature changed. Not the source-code body.</td></tr>
+          <tr><td><code>DesignStatement</code></td><td>A plan registered on the server: goal/summary, plan text, declared changes, file scope, owner, session, and lifecycle state.</td></tr>
+          <tr><td><code>DesignConstraint</code></td><td>A project rule tied to paths or symbols. A matching rule can require admin approval; matching does not analyze the code diff.</td></tr>
+          <tr><td><code>PendingReview</code> vs <code>DesignComment</code></td><td>A PendingReview is an approval request to override a block. A DesignComment is a person's discussion on a design. These are different workflows.</td></tr>
+          <tr><td><code>CallEdge</code></td><td>A “function A might call function B” link, based on names and locally observed files. Not a full compiler/type-resolved call graph.</td></tr>
+          <tr><td><code>Manifest</code> vs machine config</td><td>Manifest: committed repo settings in <code>.twing/twing.yml</code>. Machine config: credentials per coordinator in <code>~/.twing/config.json</code>.</td></tr>
+          <tr><td>Coordinator / TTL / AST</td><td>Coordinator = team server. TTL = how long something stays active. AST = the code's parsed structure, used to find functions instead of relying on line numbers.</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="flows">
+      <h2>Use-case flows, step by step</h2>
+      <p>Green route names below belong to <strong>packages/server</strong>, not to core. The named helper functions belong to core unless explicitly labeled otherwise.</p>
+
+      <article class="flow"><h3>1 · Set up a repository</h3>
+        <p><strong>Situation:</strong> you run <code>twing init</code> so a repo can coordinate AI work.</p>
+        <ol>
+          <li>Find the repo with <code>findRepoRoot</code>; compute project identity using <code>computeProjectId</code>. GitHub helpers can identify its owner/repo.</li>
+          <li>CLI auth resolution chooses the coordinator (explicit flag, then environment, then repo manifest). Core normalizes URLs and reads credentials with <code>readConfig</code> / <code>getServerAuth</code>.</li>
+          <li>The CLI handles joining/authentication when needed. Core does not mint tokens or decide project membership.</li>
+          <li><code>upsertCoordinatorServerUrl</code> sets the committed coordinator without silently replacing a different one. <code>loadManifestFromFile</code> reads rules and settings.</li>
+          <li>The CLI installs/wires the hook and starts the daemon. Core generates reusable committed bootstrap content through <code>bootstrapHookScript</code> and <code>mergeBootstrapHookEntries</code>.</li>
+          <li>The CLI seeds rules/settings via <span class="route">POST /v1/constraints/seed</span> using <code>authFetch</code>. Server permissions decide whether this is allowed.</li>
+        </ol><p><strong>Result:</strong> the repo knows its coordinator; this machine has the local tools/auth it needs. Session capture remains off unless the repo explicitly enables it.</p>
+        <p class="source">Call sites: <a href="../cli/src/init.ts">cli/init.ts</a>, <a href="../cli/src/enforce-hooks.ts">cli/enforce-hooks.ts</a>.</p>
+      </article>
+
+      <article class="flow"><h3>2 · Register a plan before coding</h3>
+        <p><strong>Situation:</strong> an agent wants to modify retry behavior and registers a YAML design template.</p>
+        <ol>
+          <li>CLI reads the file; <code>templateSyntaxError</code> checks YAML syntax. <code>parseDesignTemplate</code> produces a goal, optional plan, and changes.</li>
+          <li><code>validateTemplate</code> reports all problems: missing goal/plan/changes, unsupported action/kind, duplicates, placeholders, and invalid <code>from</code> usage.</li>
+          <li><code>deriveScope</code> extracts file paths from targets. <code>add</code> goes into <code>creates</code>; all other actions go into <code>touches</code>. Each list is deduplicated.</li>
+          <li>CLI sends structured scope, changes, and architecture text to <span class="route">POST /v1/designs/check</span> through <code>authFetch</code>.</li>
+          <li>The server registers the design and synchronously checks project rules. A separate asynchronous semantic comparison can later find conflicting/duplicate intent and flag designs.</li>
+        </ol><p><strong>Result:</strong> the design has a stable ID. A clean response is not a promise that a later semantic pass will never flag it.</p>
+        <p><strong>Plan-mode variant:</strong> Claude Code's <code>ExitPlanMode</code> hook can send plain plan text for server-side extraction. OpenCode and Codex fall back to explicit registration after a first-edit denial; core does not implement harness adapters.</p>
+        <p class="source">Call sites: <a href="../cli/src/design.ts">cli/design.ts</a>, <a href="../server/src/app.ts">server/app.ts</a>, <a href="../../hook/design_gate.go">hook/design_gate.go</a>.</p>
+      </article>
+
+      <article class="flow"><h3>3 · Ask “may this edit happen?”</h3>
+        <p><strong>Situation:</strong> an agent is about to edit <code>src/net/retry.ts</code>.</p>
+        <ol>
+          <li>The Go hook resolves the repo/coordinator and cached credentials. A local gate override can switch off this repo's design gate; core's <code>setGateDisabled</code> writes that override.</li>
+          <li>The hook talks <strong>directly to the server</strong>, not through the daemon. <span class="route">GET /v1/designs/scope-match</span> checks this project's session and file against usable design scope.</li>
+          <li>An open design covering the file gives <code>in_scope</code>. Other outcomes include <code>no_design</code>, <code>out_of_scope</code>, <code>flagged</code>, and <code>dormant</code>.</li>
+          <li><span class="route">GET /v1/constraints/match</span> checks the actual file against project rules, independently of the registered plan. Applicable approvals are considered server-side.</li>
+          <li>The hook returns the allow/deny response to the coding harness. Review-comment acknowledgement and version checks are additional hook behavior, not core template validation.</li>
+        </ol><p><strong>Result:</strong> an in-scope, unblocked edit can proceed. Missing scope calls for registration/amendment; dormant work needs resume; constraint blocks need admin review.</p>
+        <div class="callout warning">Against a configured coordinator, auth/network/parse failures fail closed: the hook denies rather than pretending the check passed. A repo with no coordinator configured is a different case: it is not gated.</div>
+      </article>
+
+      <article class="flow"><h3>4 · Record the edit that actually happened</h3>
+        <p><strong>Situation:</strong> an edit successfully changes <code>RetryPolicy.backoff</code>.</p>
+        <ol>
+          <li>The hook sends an <code>EnqueueMessage</code> over <code>defaultSocketPath()</code>. <code>encodeFrame</code> / <code>FrameDecoder.push</code> preserve JSON message boundaries.</li>
+          <li>The daemon acknowledges promptly, then runs its own <code>extractClaim</code> pipeline in <code>daemon/claims.ts</code>.</li>
+          <li>Core locates the repo and identity. <code>parseSource</code> parses the current file; <code>findEnclosingSymbol</code> finds the function around the edit point.</li>
+          <li><code>computeSymbolId</code> creates <code>src/net/retry.ts::RetryPolicy.backoff</code>. The daemon compares old/new signatures when it has a previous version.</li>
+          <li><code>matchConstraints</code> attaches local rule-match IDs. Symbol enumeration and <code>updateCallGraph</code> update locally observed call relationships.</li>
+          <li>The daemon constructs a <code>Claim</code>, batches it, and sends claims/new edges to <span class="route">POST /v1/claims</span>. The server stores evidence; the monitor can read it back.</li>
+        </ol><p><strong>Result:</strong> evidence of what was edited. <strong>No current claim-vs-claim conflict detection:</strong> those checks were removed on 1 October 2026, and this route's findings are empty.</p>
+        <p><strong>Fallbacks:</strong> whole-file <code>Write</code>, unsupported language, imports/outside a named function, or a missing edit-point match yields a file-level symbol ID. <code>Read</code> can prime the parser cache but produces no live claim; <code>Grep</code>/<code>Glob</code> also produce no live claims.</p>
+        <p class="source">Call sites: <a href="../cli/src/daemon/claims.ts">daemon/claims.ts</a>, <a href="../cli/src/daemon/server.ts">daemon/server.ts</a>, <a href="../cli/src/daemon/sync.ts">daemon/sync.ts</a>.</p>
+      </article>
+
+      <article class="flow"><h3>5 · Change, pause, finish, or resolve a design</h3>
+        <ol>
+          <li><strong>New files needed:</strong> amend the design. Template validation can omit the existing goal/plan on an amendment; new declared changes derive additional scope. The server rechecks the merged scope.</li>
+          <li><strong>Work went idle:</strong> the server makes the design <code>dormant</code> after its active inactivity window (default seven days). Explicit resume re-runs checks; core only defines constants and types.</li>
+          <li><strong>Peer intent conflict:</strong> adopt another design (this one becomes <code>superseded</code>) or justify a divergence. With no outstanding constraint hits, the current server auto-approves that justification.</li>
+          <li><strong>Project rule hit:</strong> justify it, then wait for a project admin to approve/reject the <code>PendingReview</code>. Approval records specific waivers so the same settled rule does not block every amendment again.</li>
+          <li><strong>Done:</strong> close the design explicitly or through session-end handling. Its ID/review link remains meaningful afterward.</li>
+        </ol><p><strong>Lifecycle gist:</strong> <code>open → dormant → expired</code> on inactivity; <code>dormant → open</code> on checked resume; <code>open → flagged</code> on a block; approved resolution can reopen it; close/adopt finish or supersede it. Default dormant retention is another seven days from becoming dormant.</p>
+        <p><strong>Linked multi-repo work:</strong> designs can share a <code>groupId</code>. Summary amendments and closing propagate across the group; file scope and rule approvals stay project-specific. This is server-store behavior, not a core function.</p>
+      </article>
+
+      <article class="flow"><h3>6 · Capture an opted-in conversation</h3>
+        <ol>
+          <li>The repo has <code>capture: { enabled: true }</code>. <code>captureEnabled</code> recognizes only literal boolean <code>true</code>, not a string or a missing setting.</li>
+          <li>A prompt/session event sends <code>get_notices</code> or <code>session_end</code> with a <code>TranscriptSourceDescriptor</code>. The daemon's source adapters read Claude JSONL, OpenCode SQLite, or Codex rollout data and normalize entries.</li>
+          <li>The daemon determines consent and where capture may begin. <code>reposForEntry</code> helps attribute real tool paths to repos instead of treating every entry's cwd as a new repo touch.</li>
+          <li><code>filterTranscriptEntry</code> keeps human text, assistant prose, and selected file paths. It drops tool inputs/results as content, thinking, images, metadata turns, compaction summaries, and harness-injected noise.</li>
+          <li><code>redact</code> masks likely credentials in retained conversation text. The daemon appends records to <code>~/.twing/sessions/&lt;sessionId&gt;.jsonl</code> and saves its source cursor.</li>
+          <li>The uploader reads the durable local capture and sends new content via <span class="route">POST /v1/captures</span>, with retry progress tracked per session/server.</li>
+        </ol><div class="callout warning"><strong>Consent is sticky for the session.</strong> Once an opted-in repo qualifies it, later conversation can include work on repos that did not opt in. Capture reaches backward only to its consent boundary (or session start for an opted-in cwd). This is not a per-repo privacy filter.</div>
+        <p><strong>Current storage distinction:</strong> there is no public GET/DELETE capture route. However, server-side design chat/resynthesis can use captures internally as context; “nobody reads captures” is no longer accurate.</p>
+        <p class="source">Call sites: <a href="../cli/src/daemon/transcript.ts">daemon/transcript.ts</a>, <a href="../cli/src/daemon/capture-upload.ts">daemon/capture-upload.ts</a>, <a href="../server/src/design-context.ts">server/design-context.ts</a>.</p>
+      </article>
+
+      <article class="flow"><h3>7 · Receive a review reminder and add a commit link</h3>
+        <ol>
+          <li>A person leaves a <code>DesignComment</code> in the monitor, optionally anchored to quoted plan/summary/change text. People answer comments; comments are not an automatic agent answer.</li>
+          <li>The daemon polls <span class="route">GET /v1/review-queue</span> and active designs. <code>buildDesignReviewUrl</code> builds dashboard links from the configured/published monitor URL.</li>
+          <li>A <code>NoticesMessage</code> returns durable <code>openReviews</code>, ordinary notice items, optional version mismatch information, and <code>designLinks</code> to the hook.</li>
+          <li>The hook reminds the session/user about reviews; it can require a one-time acknowledgement for the edited project. It sends the fact/IDs/link, not the reviewer's comment body.</li>
+          <li>The agent is asked to add <code>Twing-Design: &lt;review-url&gt;</code> to its commit message. Core defines <code>DESIGN_TRAILER_KEY</code>; it does not run git or insert trailers.</li>
+        </ol><p><strong>Separate feature:</strong> the dashboard's private design chat is model-backed and grounded server-side. It is not the same as a person's review comment.</p>
+      </article>
+
+      <article class="flow"><h3>8 · Bootstrap without a local CLI / inspect the daemon</h3>
+        <p><strong>GitHub App setup:</strong> server-side setup uses <code>computeProjectIdForGithubRepo</code>, <code>renderManifestWithCoordinator</code>, and the same bootstrap script/settings generators as the CLI. It writes onboarding files via GitHub APIs; core itself only returns content.</p>
+        <p><strong>Daemon administration:</strong> the CLI frames a <code>get_identity</code> message; the daemon returns PID, startup version, and start time. A <code>shutdown</code> message gets <code>shutdown_ack</code>, then daemon-owned flush/exit behavior. Core only supplies the contracts and frame codec.</p>
+        <p><strong>Read cached claims:</strong> <code>get_claims</code> remains supported by the socket protocol. Its daemon handler scopes claims by project and local developer. The removed bare <code>twing align</code> report is no longer its CLI consumer.</p>
+      </article>
+    </section>
+
+    <section id="examples">
+      <h2>Small examples that make it click</h2>
+      <details open><summary>A design template → file scope</summary>
+        <pre><code>goal: Retry requests without waiting forever
+plan: |
+  ## Approach
+  Cap exponential backoff and add a boundary test.
+  ## Checks
+  Verify the cap and unchanged behavior for small delays.
+changes:
+  - id: cap-delay
+    action: modify
+    target: src/net/retry.ts::RetryPolicy.backoff
+    intent: Keep retry waits within the configured maximum
+  - id: cap-test
+    action: add
+    kind: test
+    target: src/net/retry.test.ts
+    intent: Cover the maximum delay boundary</code></pre>
+        <p><code>deriveScope(changes)</code> returns <code>creates: ["src/net/retry.test.ts"]</code> and <code>touches: ["src/net/retry.ts"]</code>. Here “creates” means action <code>add</code>, not an actual filesystem-existence check.</p>
+      </details>
+      <details><summary>Use core from TypeScript</summary>
+        <pre><code>import {
+  parseDesignTemplate, validateTemplate, deriveScope,
+  canonicalizeRemoteUrl, computeSymbolId, pathOfTarget,
+  encodeFrame, FrameDecoder, redact,
+} from "@twing/core";
+
+canonicalizeRemoteUrl("git@github.com:Team/App.git");
+// "github.com/team/app"
+
+const id = computeSymbolId("src/net/retry.ts", "RetryPolicy.backoff");
+// "src/net/retry.ts::RetryPolicy.backoff"
+pathOfTarget(id); // "src/net/retry.ts"
+
+const template = parseDesignTemplate(yamlText); // caller supplies YAML string
+const problems = validateTemplate(template);
+if (problems.length === 0) {
+  const scope = deriveScope(template.changes);
+  // Caller, not core, registers template + scope with the server.
+}
+
+const decoder = new FrameDecoder();
+decoder.push(encodeFrame({ type: "get_identity" }));
+// [{ type: "get_identity" }]
+
+redact("password=example-secret");
+// "password=[redacted]"</code></pre>
+      </details>
+      <details><summary>Repo config is not credential storage</summary>
+        <pre><code># Committed: .twing/twing.yml
+coordinator:
+  serverUrl: https://coordinator.example.com
+capture:
+  enabled: true
+settings:
+  designDormantAfter: 7d
+constraints:
+  - text: Reuse the shared socket framing format
+    scope: packages/core/src/framing.ts
+require_human_review:
+  - path: packages/server/src/identity-store.ts
+    reason: Identity changes need an admin review</code></pre>
+        <p>Personal credentials belong in <code>~/.twing/config.json</code>, keyed by server URL. The example above deliberately contains no token. Rules/settings need seeding to the coordinator; merely editing the YAML is not server enforcement.</p>
+      </details>
+    </section>
+
+    <section id="apis">
+      <h2>Every exported runtime API</h2>
+      <p>All entries below are re-exported by <code>src/index.ts</code>. Parameters are shortened for readability; links open the authoritative TypeScript source. “Pure” means no filesystem/network I/O; in-memory mutation is noted separately.</p>
+      <div class="search"><label for="api-search"><strong>Find an API</strong></label><input id="api-search" type="search" placeholder="Try: symbol, token, template, socket, config…"><p id="search-status" class="muted" role="status" aria-live="polite"></p></div>
+
+      <div class="api-group"><h3>Project / developer identity · <a href="src/identity.ts">identity.ts</a> + <a href="src/repo-root.ts">repo-root.ts</a></h3>
+        <div class="table-wrap"><table><thead><tr><th>API</th><th>What it does / returns</th><th>Important behavior</th></tr></thead><tbody>
+          <tr><td><code>findRepoRoot(startDir)</code></td><td>Walks upward to a directory containing <code>.git</code>.</td><td>Filesystem read. If none exists, returns the resolved starting directory; does not prove it is a real git repo.</td></tr>
+          <tr><td><code>isGitRepo(dir)</code></td><td>Asks git whether the directory is in a repository → boolean.</td><td>Runs git; failure means false.</td></tr>
+          <tr><td><code>canonicalizeRemoteUrl(url)</code></td><td>Normalizes SSH/HTTP/etc remote spelling to a lowercase host/path string.</td><td>Pure. Removes scheme/auth prefix, terminal <code>.git</code>, and trailing slashes; not a general URL-security validator.</td></tr>
+          <tr><td><code>computeProjectId(repoRoot)</code></td><td>Hashes normalized origin → project ID.</td><td>Runs git. No origin: best-effort persisted UUID in <code>.git/twing-project-id</code>. Not a real repo: throws.</td></tr>
+          <tr><td><code>computeProjectIdForGithubRepo(owner, repo)</code></td><td>Same GitHub project hash without needing a checkout.</td><td>Pure; used by server GitHub setup.</td></tr>
+          <tr><td><code>computeDeveloperId(repoRoot)</code></td><td>Git email, otherwise best-effort persisted random ID at <code>~/.twing/id</code>.</td><td>Local label/attribution, not authenticated identity proof. Existing parent directory needed for fallback persistence.</td></tr>
+          <tr><td><code>computeBranch(repoRoot)</code></td><td>Current git branch label.</td><td>Runs git; failure → <code>"unknown"</code>; detached HEAD can return <code>"HEAD"</code>.</td></tr>
+          <tr><td><code>getOriginRemoteUrl(repoRoot)</code></td><td>Raw origin URL, or null.</td><td>Runs git; no remote is normal.</td></tr>
+          <tr><td><code>parseGithubOwnerRepo(canonicalRemoteUrl)</code></td><td>Extracts <code>{owner, repo}</code> from <code>github.com/owner/repo</code>.</td><td>Pure. Expects already canonicalized input; other hosts/shapes → undefined.</td></tr>
+          <tr><td><code>githubBinding(repoRoot)</code></td><td>Combines origin lookup, canonicalization, and GitHub parsing.</td><td>Runs git; no GitHub origin → undefined.</td></tr>
+        </tbody></table></div>
+      </div>
+
+      <div class="api-group"><h3>Repo manifest · <a href="src/manifest.ts">manifest.ts</a></h3>
+        <div class="table-wrap"><table><thead><tr><th>API</th><th>What it does / returns</th><th>Important behavior</th></tr></thead><tbody>
+          <tr><td><code>twingConfigPath(repoRoot)</code></td><td>Builds <code>&lt;repoRoot&gt;/.twing/twing.yml</code>.</td><td>No disk read.</td></tr>
+          <tr><td><code>parseManifest(yamlText)</code></td><td>YAML → rules, coordinator, capture, settings.</td><td>Pure; malformed YAML can throw. Not full schema validation.</td></tr>
+          <tr><td><code>loadManifestFromFile(filePath)</code></td><td>Reads YAML from disk → Manifest.</td><td>Missing file → empty manifest. Read/parse failures can throw.</td></tr>
+          <tr><td><code>renderManifestWithCoordinator(content, serverUrl, replace=false)</code></td><td>Returns updated YAML text, changed flag, optional conflicting existing URL.</td><td>Pure; preserves other YAML content/comments through a document edit. Different URL is refused unless replace is true.</td></tr>
+          <tr><td><code>upsertCoordinatorServerUrl(filePath, serverUrl, replace=false)</code></td><td>Disk-writing wrapper → written flag / conflicting existing URL.</td><td>Creates parent directories if writing; no write for unchanged/refused value.</td></tr>
+          <tr><td><code>matchConstraints(manifest, relPath)</code></td><td>Returns all path-glob constraint hits with text and <code>constraint:&lt;index&gt;</code> IDs.</td><td>Pure; these local index IDs are not the server's durable rule IDs. Does not check whether the diff violated the prose.</td></tr>
+          <tr><td><code>matchRequireHumanReview(manifest, relPath, symbolId)</code></td><td>Returns matching review reasons.</td><td>Pure; path glob or exact symbol ID. A helper result is not itself an enforced admin gate.</td></tr>
+          <tr><td><code>parseDuration(raw)</code></td><td>Integer with <code>s/m/h/d</code> suffix → milliseconds.</td><td>Pure. Invalid/unsafe number → undefined; no unit-less/fractional duration.</td></tr>
+          <tr><td><code>designActiveTtlMs(manifest)</code></td><td>Valid <code>designDormantAfter</code> override in milliseconds.</td><td>Pure. Missing, invalid, &lt;5 minutes, or &gt;90 days → undefined (caller uses default).</td></tr>
+          <tr><td><code>captureEnabled(manifest)</code></td><td>Answers whether capture explicitly opted in.</td><td>Pure; only <code>enabled === true</code> counts.</td></tr>
+        </tbody></table></div>
+      </div>
+
+      <div class="api-group"><h3>Machine auth / HTTP / gate switch · <a href="src/config.ts">config.ts</a>, <a href="src/http.ts">http.ts</a>, <a href="src/gate-overrides.ts">gate-overrides.ts</a></h3>
+        <div class="table-wrap"><table><thead><tr><th>API</th><th>What it does / returns</th><th>Important behavior</th></tr></thead><tbody>
+          <tr><td><code>configPath()</code></td><td>Path to <code>~/.twing/config.json</code>.</td><td>No disk read.</td></tr>
+          <tr><td><code>normalizeServerUrl(input)</code></td><td>Adds <code>http://</code> if no scheme; checks URL parsing; removes one trailing slash.</td><td>Pure; throws on unparsable URL. Not comprehensive normalization or an HTTP-only scheme allowlist.</td></tr>
+          <tr><td><code>parseConfig(raw)</code></td><td>Object → per-server credential map.</td><td>Pure; migrates old single-server shape in memory. Not full runtime schema validation.</td></tr>
+          <tr><td><code>readConfig()</code></td><td>Loads/parses machine config.</td><td>Missing/unreadable/invalid JSON → empty server map.</td></tr>
+          <tr><td><code>writeConfig(config)</code></td><td>Persists formatted JSON and a newline.</td><td>Writes disk; creates parent directories; write failures propagate.</td></tr>
+          <tr><td><code>getServerAuth(config, serverUrl)</code></td><td>Finds cached auth for a normalized server URL.</td><td>Pure; unknown server → undefined.</td></tr>
+          <tr><td><code>setServerAuth(config, serverUrl, auth)</code></td><td>Returns a new config with that server's entry replaced.</td><td>Pure/immutable; call <code>writeConfig</code> to persist.</td></tr>
+          <tr><td><code>authFetch(url, init={}, token?, developerId?)</code></td><td>Standard fetch response with optional bearer and developer headers.</td><td>Network I/O. Adds <code>Authorization</code> and/or <code>X-Twing-Developer-Id</code>. No retry, timeout, JSON parsing, or automatic HTTP-error throwing.</td></tr>
+          <tr><td><code>isGateDisabled(projectId)</code></td><td>Reads this project's machine-local gate override.</td><td>Reads <code>~/.twing/gate-overrides.json</code>; unreadable/missing → not disabled.</td></tr>
+          <tr><td><code>setGateDisabled(projectId, disabled)</code></td><td>Writes/removes the project's <code>"disabled"</code> entry.</td><td>Writes disk. Does not unwire global hooks or change capture consent.</td></tr>
+        </tbody></table></div>
+      </div>
+
+      <div class="api-group"><h3>Socket messages / framing · <a href="src/protocol.ts">protocol.ts</a>, <a href="src/framing.ts">framing.ts</a>, <a href="src/socket-path.ts">socket-path.ts</a></h3>
+        <div class="table-wrap"><table><thead><tr><th>API</th><th>What it does / returns</th><th>Important behavior</th></tr></thead><tbody>
+          <tr><td><code>defaultSocketPath()</code></td><td><code>TWING_SOCK</code> override, otherwise <code>~/.twing/daemon.sock</code>.</td><td>Reads environment; no connection is opened.</td></tr>
+          <tr><td><code>stageForTool(toolName)</code></td><td>Edit/Write → firm; Read/Grep/Glob → soft.</td><td>Pure mapping; live daemon does not actually emit soft claims.</td></tr>
+          <tr><td><code>encodeFrame(message)</code></td><td>JSON → Buffer containing a 4-byte big-endian length + UTF-8 body.</td><td>Pure encoding; no socket write or protocol-shape validation. Encoder has no explicit 10 MiB guard.</td></tr>
+          <tr><td><code>new FrameDecoder()</code></td><td>Creates a streaming decoder with an empty private buffer.</td><td>Use one decoder per incoming byte stream.</td></tr>
+          <tr><td><code>FrameDecoder.push(chunk)</code></td><td>Accepts bytes → array of complete decoded JSON values.</td><td>Mutates buffer; partial frame → waits. Throws for body length &gt;10 MiB or invalid JSON; does not validate message fields.</td></tr>
+        </tbody></table></div>
+      </div>
+
+      <div class="api-group"><h3>Code parsing / symbols / call graph · <a href="src/tree-sitter.ts">tree-sitter.ts</a>, <a href="src/symbol-id.ts">symbol-id.ts</a>, <a href="src/call-graph.ts">call-graph.ts</a></h3>
+        <div class="table-wrap"><table><thead><tr><th>API</th><th>What it does / returns</th><th>Important behavior</th></tr></thead><tbody>
+          <tr><td><code>languageForPath(filePath)</code></td><td>Extension → typescript / tsx / javascript / null.</td><td>Pure; TS/MTS/CTS, TSX, JS/MJS/CJS/JSX supported (case-insensitive).</td></tr>
+          <tr><td><code>await parseSource(filePath, content)</code></td><td>Source string → language, AST root, original content.</td><td>Loads/caches WASM grammars/parsers. Does not read the source file. Unsupported extension/no tree → null; initialization errors can reject.</td></tr>
+          <tr><td><code>findEnclosingSymbol(rootNode, startIndex, endIndex=startIndex)</code></td><td>Finds the nearest named function/method/class around a position → scopePath, node, normalized signature.</td><td>Pure AST walk. Covers common named arrow/function values and export wrappers; no match → null. Signature normally excludes body.</td></tr>
+          <tr><td><code>findAllDeclaredSymbols(rootNode)</code></td><td>Enumerates named functions, methods, classes, and supported function-valued fields/variables.</td><td>Pure AST walk; not every possible TS declaration is a supported symbol.</td></tr>
+          <tr><td><code>computeSymbolId(relPath, scopePath)</code></td><td>Combines file path and symbol as <code>path::scope</code>.</td><td>Pure; null/empty scope → bare path. Caller must provide normalized relative path.</td></tr>
+          <tr><td><code>leafName(scopePath)</code></td><td><code>RetryPolicy.backoff</code> → <code>backoff</code>.</td><td>Pure; used as the call-name index key.</td></tr>
+          <tr><td><code>findCallSites(rootNode)</code></td><td>Finds simple identifier/member calls → calleeName and node.</td><td>Pure; <code>policy.backoff()</code> becomes just <code>backoff</code>. Does not resolve imports/types/receivers.</td></tr>
+          <tr><td><code>updateCallGraph(edgesByFile, nameIndex, relPath, rootNode, projectId)</code></td><td>Rebuilds that file's call edges; returns only edges new since the previous call.</td><td>Mutates <code>edgesByFile</code>. Ambiguous leaf names link to every candidate; top-level calls are skipped. Removed edges are not returned as deletion records.</td></tr>
+        </tbody></table></div>
+      </div>
+
+      <div class="api-group"><h3>Design template helpers · <a href="src/design-scope.ts">design-scope.ts</a></h3>
+        <div class="table-wrap"><table><thead><tr><th>API</th><th>What it does / returns</th><th>Important behavior</th></tr></thead><tbody>
+          <tr><td><code>kindOf(change)</code></td><td>Returns stated kind, otherwise <code>code</code>.</td><td>Pure; not validation of arbitrary input.</td></tr>
+          <tr><td><code>pathOfTarget(target)</code></td><td>Removes the first <code>::</code> and symbol suffix.</td><td>Pure; bare file target is unchanged.</td></tr>
+          <tr><td><code>deriveScope(changes)</code></td><td>Returns deduplicated <code>creates</code> / <code>touches</code> file arrays.</td><td>Pure; only add → creates. Does not add a move's <code>from</code> path automatically or check files exist.</td></tr>
+          <tr><td><code>parseDesignTemplate(yamlText)</code></td><td>Tolerant YAML → <code>DesignTemplate</code>.</td><td>Pure; malformed YAML → empty template, never throws for parse errors. Missing IDs become positional <code>#1</code>, <code>#2</code>, etc.</td></tr>
+          <tr><td><code>templateSyntaxError(yamlText)</code></td><td>YAML syntax error explanation, otherwise undefined.</td><td>Pure; gives plan indentation guidance rather than pretending existing fields are missing.</td></tr>
+          <tr><td><code>validateTemplate(template, options={})</code></td><td>Returns all <code>TemplateProblem</code>s; empty array means validation passed.</td><td>Pure; requires goal and plan by default. Amendments can opt out. Checks declarations, not actual implementation/conformance.</td></tr>
+          <tr><td><code>suggestAction(invalid)</code></td><td>Prefix-based suggestion for an action typo.</td><td>Pure; e.g. <code>renamed</code> → rename; no close match → undefined. Not fuzzy edit-distance matching.</td></tr>
+        </tbody></table></div>
+      </div>
+
+      <div class="api-group"><h3>Conversation filtering / secret masking · <a href="src/transcript-filter.ts">transcript-filter.ts</a>, <a href="src/redact.ts">redact.ts</a></h3>
+        <div class="table-wrap"><table><thead><tr><th>API</th><th>What it does / returns</th><th>Important behavior</th></tr></thead><tbody>
+          <tr><td><code>filterTranscriptEntry(raw)</code></td><td>One normalized transcript entry → optional conversation turn, paths, optional cwd.</td><td>Pure; unknown entry kinds contribute nothing. Selected nested tool path keys survive, raw tool content does not. Does not decide consent/redact/store.</td></tr>
+          <tr><td><code>reposForEntry(entry, resolve)</code></td><td>Maps touched paths → distinct repository roots using an injected resolver.</td><td>No built-in I/O; supplied resolver may do I/O. Excludes cwd itself; relative paths need cwd; unresolved paths skipped.</td></tr>
+          <tr><td><code>shannonEntropy(value)</code></td><td>Computes how random-looking a string is, in bits per character.</td><td>Pure; empty string → 0. A supporting heuristic, not a secret detector by itself.</td></tr>
+          <tr><td><code>looksLikeSecret(candidate)</code></td><td>Checks long/random-looking token candidates → boolean.</td><td>Pure; exempts UUIDs, numeric runs, selected digest lengths. 64-char hex is intentionally not exempt because Twing PATs share that shape.</td></tr>
+          <tr><td><code>redact(text)</code></td><td>Masks provider token prefixes, URI passwords, keyed secrets, and entropy candidates with <code>[redacted]</code>.</td><td>Pure/best effort, not a guarantee. URI username/host remain. Re-running on already masked text is safe.</td></tr>
+        </tbody></table></div>
+      </div>
+
+      <div class="api-group"><h3>Claude settings / committed bootstrap · <a href="src/claude-settings.ts">claude-settings.ts</a>, <a href="src/repo-setup.ts">repo-setup.ts</a></h3>
+        <div class="table-wrap"><table><thead><tr><th>API</th><th>What it does / returns</th><th>Important behavior</th></tr></thead><tbody>
+          <tr><td><code>readClaudeSettings(settingsPath)</code></td><td>Reads a settings JSON object.</td><td>Disk read; missing → {}; invalid JSON/read failure throws.</td></tr>
+          <tr><td><code>writeClaudeSettings(settingsPath, settings)</code></td><td>Writes two-space JSON with trailing newline.</td><td>Disk write; makes parent directory. Does not perform hook merging itself.</td></tr>
+          <tr><td><code>coordinatorInstallShell()</code></td><td>Returns reusable shell text for checking Node, downloading the coordinator-matching CLI, and unattended setup.</td><td>Pure generation; does not execute it. Generated shell can install/download when run.</td></tr>
+          <tr><td><code>bootstrapHookScript()</code></td><td>Returns the full committed bootstrap shell script.</td><td>Pure generation. Script delegates to installed hook, avoids some duplicate global wiring, and can bootstrap or deny on setup failure.</td></tr>
+          <tr><td><code>bootstrapHookCommand(event)</code></td><td>Returns a Claude settings command entry invoking the committed script for that event.</td><td>Pure; uses <code>${CLAUDE_PROJECT_DIR}</code> placeholder and script existence guard.</td></tr>
+          <tr><td><code>isBootstrapHook(hook)</code></td><td>Recognizes old marker-based or current script-path hook entries.</td><td>Pure; supports removing/upgrading earlier generated versions.</td></tr>
+          <tr><td><code>hasBootstrapHookWired(settings)</code></td><td>Checks whether any recognized bootstrap entry exists.</td><td>Pure; any version/event counts, not proof that all six entries are present.</td></tr>
+          <tr><td><code>mergeBootstrapHookEntries(settings)</code></td><td>Replaces old bootstrap entries with the current six; returns whether settings changed.</td><td>Mutates input in memory; preserves other tools' hooks. Caller writes the result.</td></tr>
+          <tr><td><code>removeBootstrapHookEntries(settings)</code></td><td>Removes recognized Twing bootstrap entries → changed boolean.</td><td>Mutates input in memory; preserves sibling hooks and prunes empty entries/events.</td></tr>
+        </tbody></table></div>
+      </div>
+
+      <div class="api-group"><h3>Dashboard link · <a href="src/types.ts">types.ts</a></h3>
+        <div class="table-wrap"><table><thead><tr><th>API</th><th>What it does / returns</th><th>Important behavior</th></tr></thead><tbody>
+          <tr><td><code>buildDesignReviewUrl(monitorUrl, projectId, designId)</code></td><td>Returns <code>&lt;monitor&gt;/?repos=&lt;project&gt;&amp;tab=designs&amp;focus=&lt;design&gt;</code>.</td><td>Pure; query values encoded; trims whitespace/trailing slashes. Missing/blank monitor → undefined, not an automatic hosted fallback. Works for closed designs too.</td></tr>
+        </tbody></table></div>
+      </div>
+    </section>
+
+    <section id="contracts">
+      <h2>Exported contracts: types, messages, constants</h2>
+      <p>Types describe object shapes at compile time. Import them with <code>import type</code>; they are not runtime functions or automatic input validators. The lists below cover all exported type/interface names in the 18 source modules.</p>
+      <details open><summary>Socket protocol: every message</summary>
+        <div class="table-wrap"><table><thead><tr><th>Message types</th><th>Purpose / useful fields</th></tr></thead><tbody>
+          <tr><td><code>EnqueueMessage</code> → <code>AckMessage</code></td><td><code>enqueue</code> carries sessionId, cwd, toolName, raw toolInput. <code>ack</code> confirms acceptance, not completed extraction/upload.</td></tr>
+          <tr><td><code>GetNoticesMessage</code> → <code>NoticesMessage</code></td><td><code>get_notices</code> carries sessionId, optional cwd/source/transcriptPath. <code>notices</code> contains items plus optional versionMismatch, openReviews, designLinks.</td></tr>
+          <tr><td><code>SessionEndMessage</code></td><td><code>session_end</code> carries sessionId, cwd, source/transcriptPath for a final capture drain; no reply defined.</td></tr>
+          <tr><td><code>GetClaimsMessage</code> → <code>ClaimsMessage</code></td><td><code>get_claims</code> carries cwd; <code>claims</code> returns claims and callEdges.</td></tr>
+          <tr><td><code>GetIdentityMessage</code> → <code>IdentityMessage</code></td><td><code>get_identity</code> → <code>identity</code> with pid, startup version, startedAt.</td></tr>
+          <tr><td><code>ShutdownMessage</code> → <code>ShutdownAckMessage</code></td><td><code>shutdown</code> → <code>shutdown_ack</code>; daemon owns graceful flush/exit.</td></tr>
+        </tbody></table></div>
+        <p><strong>Other protocol exports:</strong> <code>HookToolName</code>, <code>TranscriptSourceDescriptor</code> (<code>kind</code> + string-valued <code>values</code>), <code>NoticeItem</code>, <code>VersionMismatchInfo</code>, and unions <code>HookToDaemonMessage</code>, <code>CliToDaemonMessage</code>, <code>DaemonToHookMessage</code>, <code>DaemonToCliMessage</code>, <code>ProtocolMessage</code>.</p>
+        <p><code>source</code> takes precedence over deprecated <code>transcriptPath</code>; an old path-only sender means Claude Code JSONL. Core defines the descriptor; adapter resolution lives in the daemon.</p>
+      </details>
+      <details><summary>Shared domain models · types.ts</summary>
+        <ul>
+          <li><strong>Edit evidence:</strong> <code>Claim</code>, <code>CallEdge</code>, <code>Notice</code>, <code>FindingKind</code>, <code>Finding</code>.</li>
+          <li><strong>Plan declaration:</strong> <code>DesignChangeAction</code>, <code>DesignChangeKind</code>, <code>DesignChange</code>, <code>DesignStatement</code>. Actions: add, modify, rewrite, remove, rename, move. Kinds: code, api, schema, test, docs, config.</li>
+          <li><strong>Checking/rules:</strong> <code>DesignConstraintType</code> (only <code>constraint</code>), <code>DesignConstraint</code>, <code>DesignVerdict</code>, <code>DesignOverlapKind</code>, <code>DesignConflict</code>, <code>DesignCheckResult</code>.</li>
+          <li><strong>Approval workflow:</strong> <code>PendingReview</code>, <code>ReviewDesignSummary</code>, <code>ReviewConstraintSummary</code>, <code>ReviewConflictSummary</code>, <code>EnrichedPendingReview</code>.</li>
+          <li><strong>Human review discussion:</strong> <code>CommentAnchorField</code>, <code>CommentAnchor</code>, <code>DesignCommentStatus</code>, <code>DesignComment</code>, <code>DesignCommentReply</code>, <code>OpenReviewNotice</code>.</li>
+          <li><strong>Commit/dashboard reminder:</strong> <code>DesignLink</code>.</li>
+        </ul>
+        <p>A design records scope/activity versions and specific approved waivers, not merely “approved forever.” Overview edits have a separate revision counter from scope changes. Optional legacy fields must not be mistaken for a fresh declaration.</p>
+        <p>Comment anchors store quotes plus surrounding text, not fragile character offsets. Comment status is open/resolved. The daemon's review notice carries comment IDs and design summary/link, never comment bodies.</p>
+      </details>
+      <details><summary>Helper types · remaining modules</summary>
+        <ul>
+          <li><strong>Manifest:</strong> <code>RequireHumanReviewRule</code>, <code>ConstraintRule</code>, <code>CoordinatorConfig</code>, <code>CaptureConfig</code>, <code>SettingsConfig</code>, <code>Manifest</code>, <code>UpsertCoordinatorResult</code>, <code>RenderManifestResult</code>, <code>ConstraintMatch</code>.</li>
+          <li><strong>Machine config:</strong> <code>ServerAuth</code> (optional authToken/noAuth), <code>TwingConfig</code> (servers map).</li>
+          <li><strong>Parsing:</strong> <code>SupportedLanguage</code>, <code>ParsedFile</code>, <code>EnclosingSymbol</code>, <code>CallSite</code>.</li>
+          <li><strong>Templates:</strong> <code>DesignTemplate</code>, <code>TemplateProblem</code>, <code>ValidateOptions</code>.</li>
+          <li><strong>Capture:</strong> <code>CapturedRecord</code> (turn or paths record), <code>FilteredEntry</code>, <code>RepoResolver</code>.</li>
+          <li><strong>Hook settings:</strong> <code>HookCommand</code>, <code>HookMatcherEntry</code>, <code>ClaudeSettings</code>.</li>
+        </ul>
+      </details>
+      <details><summary>Every exported constant</summary>
+        <div class="table-wrap"><table><thead><tr><th>Constant</th><th>Value / purpose</th></tr></thead><tbody>
+          <tr><td><code>DEFAULT_CLAIM_TTL_MS</code></td><td>6 hours.</td></tr>
+          <tr><td><code>DEFAULT_DESIGN_ACTIVE_TTL_MS</code></td><td>7 days of inactivity before dormancy.</td></tr>
+          <tr><td><code>MIN_DESIGN_ACTIVE_TTL_MS</code> / <code>MAX_DESIGN_ACTIVE_TTL_MS</code></td><td>5 minutes / 90 days, bounds for project override.</td></tr>
+          <tr><td><code>DEFAULT_DESIGN_DORMANT_TTL_MS</code></td><td>7 days after becoming dormant before expiry.</td></tr>
+          <tr><td><code>DESIGN_TRAILER_KEY</code></td><td><code>Twing-Design</code>.</td></tr>
+          <tr><td><code>DEFAULT_MONITOR_URL</code></td><td><code>https://monitor.twing.dev</code>; caller/server policy, not buildDesignReviewUrl's missing-value fallback.</td></tr>
+          <tr><td><code>DESIGN_CHANGE_ACTIONS</code> / <code>DESIGN_CHANGE_KINDS</code></td><td>Runtime lists of valid action/kind strings for validation.</td></tr>
+          <tr><td><code>PLAN_GUIDANCE</code></td><td>Reusable explanation of what belongs in architecture plan text and how to indent it.</td></tr>
+          <tr><td><code>BOOTSTRAP_HOOK_MARKER</code></td><td><code># twing-bootstrap-hook-v4</code>.</td></tr>
+          <tr><td><code>KNOWN_BOOTSTRAP_HOOK_MARKERS</code></td><td>Current marker plus v3 and old install-enforcement v2/v1 markers.</td></tr>
+          <tr><td><code>BOOTSTRAP_SCRIPT_RELPATH</code></td><td><code>.twing/bootstrap-hook.sh</code>.</td></tr>
+          <tr><td><code>WIRED_HOOK_EVENTS</code></td><td>Six entries: PreToolUse ExitPlanMode, PreToolUse Edit|Write, PostToolUse Edit|Write|Read|Grep|Glob, SessionStart, UserPromptSubmit, SessionEnd.</td></tr>
+          <tr><td><code>MIN_NODE_MAJOR</code> / <code>MIN_NODE_MINOR</code></td><td>22 / 5; interpolated into generated installer checks.</td></tr>
+        </tbody></table></div>
+      </details>
+    </section>
+
+    <section id="http">
+      <h2>Related HTTP APIs — not owned by core</h2>
+      <p>This is a <strong>flow-oriented map of relevant server endpoints</strong>, not the full server API specification. Core's only general HTTP function is <code>authFetch</code>. Route implementations, request validation, access rules, and persistence live in <a href="../server/src/app.ts">packages/server/src/app.ts</a>.</p>
+      <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>Why it appears in these flows</th></tr></thead><tbody>
+        <tr><td><code>GET /v1/version</code></td><td>Learn coordinator version/auth mode/monitor URL; generated installer uses version to choose CLI release.</td></tr>
+        <tr><td><code>GET /v1/auth/whoami</code></td><td>Get authenticated identity.</td></tr>
+        <tr><td><code>POST /v1/projects/:id/join-via-github</code><br><code>POST /v1/invites/:code/redeem</code><br><code>POST /v1/admin/bootstrap</code></td><td>GitHub join/founding, invitation onboarding, or initial break-glass admin setup.</td></tr>
+        <tr><td><code>POST /v1/constraints/seed</code></td><td>Upload repo rules and project settings with server-side permission checks.</td></tr>
+        <tr><td><code>POST /v1/designs/extract</code><br><code>POST /v1/designs/check</code></td><td>Extract raw plan fields without registering; or register/check a raw or structured plan.</td></tr>
+        <tr><td><code>GET /v1/designs/scope-match</code><br><code>GET /v1/constraints/match</code></td><td>Check session/file scope and literal path rules before an edit.</td></tr>
+        <tr><td><code>POST /v1/designs/:id/amend</code><br><code>POST /v1/designs/:id/resume</code><br><code>POST /v1/designs/:id/resolve</code><br><code>PATCH /v1/designs/:id/close</code></td><td>Expand scope, resume idle work, justify/adopt, or finish.</td></tr>
+        <tr><td><code>GET /v1/designs</code><br><code>GET /v1/designs/:id</code><br><code>PATCH /v1/designs/:id/overview</code></td><td>List/read designs and update owner-written title/overview.</td></tr>
+        <tr><td><code>GET /v1/reviews</code><br><code>GET /v1/reviews/:id</code><br><code>POST /v1/reviews/:id/decide</code></td><td>Read approval requests and record admin decisions.</td></tr>
+        <tr><td><code>POST /v1/claims</code><br><code>GET /v1/claims</code><br><code>GET /v1/notices</code></td><td>Upload/read edit evidence and poll queued notices.</td></tr>
+        <tr><td><code>POST /v1/captures</code></td><td>Append conversation capture. No public capture GET/DELETE endpoint.</td></tr>
+        <tr><td><code>GET /v1/alignment-threads</code><br><code>GET /v1/alignment-threads/:id</code><br><code>POST /v1/alignment-threads/:id/messages</code><br><code>PATCH /v1/alignment-threads/:id/close</code></td><td>Discuss a semantic conflict asynchronously; closing a thread is not the same operation as resolving a design gate.</td></tr>
+        <tr><td><code>POST/GET /v1/designs/:id/comments</code><br><code>POST /v1/comments/:id/replies</code><br><code>POST /v1/comments/:id/resolve</code><br><code>GET /v1/review-queue</code></td><td>Human review discussions and durable owner reminders.</td></tr>
+        <tr><td><code>GET/POST /v1/designs/:id/chat</code><br><code>POST /v1/designs/:id/resynthesize</code><br><code>POST /v1/designs/:id/resynthesize/apply</code></td><td>Private model-backed design questions and suggested overview rewriting using server-side context.</td></tr>
+      </tbody></table></div>
+      <p>Normal mode requires a bearer token and uses the resolved developer identity. Explicit <code>no_auth</code> mode instead requires <code>X-Twing-Developer-Id</code> for attribution; it is not verified identity or equivalent access control. Some onboarding/version routes have their own exemptions.</p>
+    </section>
+
+    <section id="gotchas">
+      <h2>What not to assume</h2>
+      <ul>
+        <li><strong>Two people editing the same symbol no longer automatically triggers a conflict.</strong> Old Finding/DesignVerdict values and waiver fields remain for historical data, but current blocking conflict sources are project constraints and semantic intent divergence.</li>
+        <li><strong>Core does not prove a plan was implemented correctly.</strong> Shared targets enable comparing declared vs actual work, but <code>validateTemplate</code> checks the declaration, not behavior or AST equivalence after rename/move.</li>
+        <li><strong>Call edges are approximate and currently not used for the removed contract-break check.</strong> They are still built/uploaded; do not treat them as compiler-grade dependency analysis.</li>
+        <li><strong>Only JS/TS are parsed.</strong> Other languages still yield file-level claims through the daemon, not symbol-level parsing in core.</li>
+        <li><strong>Read/Grep/Glob are in the protocol but are not live soft claims.</strong> A Read may help prime future signature comparisons.</li>
+        <li><strong>First observation is not proof that a signature stayed unchanged.</strong> Without a prior version the daemon has nothing to diff and can mark a first-seen symbol's signatureChanged false.</li>
+        <li><strong>Shell edits/commits are not gated or claim-captured by the normal tool matchers.</strong> A commit reminder depends on the agent following it. Transcript capture can retain narrated shell findings, not raw shell output.</li>
+        <li><strong>Parse helpers have different failure policies.</strong> Template parsing is tolerant; manifest/settings JSON parsing can throw; config reads fail soft. Handle each boundary deliberately.</li>
+        <li><strong>TypeScript types do not validate received JSON.</strong> Framing returns unknown values, and authFetch returns a raw Response. Consumers must validate/check status themselves.</li>
+        <li><strong>Redaction is best effort.</strong> Some digest/project IDs are masked intentionally; unknown secret shapes can still be missed. Capture's session-level consent is broader than a per-repo filter.</li>
+        <li><strong>Some comments are historical.</strong> Source comments saying capture is local-only or unread, or describing path/symbol collision checks, can lag current call sites. This guide uses current implementations to resolve those differences.</li>
+      </ul>
+    </section>
+
+    <section id="reading">
+      <h2>A short reading path</h2>
+      <ol>
+        <li><a href="src/index.ts">src/index.ts</a> — the public export surface.</li>
+        <li><a href="src/types.ts">src/types.ts</a> and <a href="src/protocol.ts">src/protocol.ts</a> — shared nouns and messages.</li>
+        <li><a href="src/design-scope.ts">src/design-scope.ts</a> and <a href="src/manifest.ts">src/manifest.ts</a> — how plans and repo rules become structured data.</li>
+        <li><a href="../cli/src/daemon/claims.ts">cli/src/daemon/claims.ts</a> — see core helpers assembled into a real edit-evidence pipeline.</li>
+        <li><a href="src/transcript-filter.ts">src/transcript-filter.ts</a>, <a href="src/redact.ts">src/redact.ts</a>, then <a href="../cli/src/daemon/transcript.ts">daemon/transcript.ts</a> — filtering versus consent/storage.</li>
+        <li><a href="../server/src/app.ts">server/src/app.ts</a> and <a href="../../hook/design_gate.go">hook/design_gate.go</a> — where actual route permissions and edit allow/deny decisions happen.</li>
+      </ol>
+      <p>Tests under <code>packages/core/src/*.test.ts</code> pin identity normalization, template validation/scope, manifest behavior, config migration, redaction, transcript filtering, review links, gate overrides, and bootstrap generation.</p>
+    </section>
+    <footer>Static, offline-friendly guide. No external fonts, libraries, analytics, or network requests. Source links are relative to this file. This is a snapshot, not generated live from the code.</footer>
+  </main>
+</div>
+<script>
+  const search = document.getElementById('api-search');
+  const groups = [...document.querySelectorAll('.api-group')];
+  const status = document.getElementById('search-status');
+  function filterApis() {
+    const query = search.value.trim().toLowerCase();
+    let visible = 0;
+    for (const group of groups) {
+      const heading = group.querySelector('h3').textContent.toLowerCase();
+      let matches = 0;
+      for (const row of group.querySelectorAll('tbody tr')) {
+        const match = !query || (heading + ' ' + row.textContent.toLowerCase()).includes(query);
+        row.hidden = !match;
+        if (match) matches++;
+      }
+      group.hidden = matches === 0;
+      visible += matches;
+    }
+    status.textContent = query ? `${visible} API entries match “${search.value.trim()}”.` : `${visible} runtime API entries (including FrameDecoder construction and push).`;
+  }
+  search.addEventListener('input', filterApis);
+  filterApis();
+</script>
+</body>
+</html>

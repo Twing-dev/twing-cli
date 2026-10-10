@@ -31,7 +31,7 @@ export const MAX_QUOTE_CHARS = 2000;
  * a sentence either side is plenty. Clipped rather than refused. */
 export const MAX_CONTEXT_CHARS = 64;
 
-const FIELDS: readonly CommentAnchorField[] = ["summary", "plan", "change"];
+const FIELDS: readonly CommentAnchorField[] = ["summary", "plan", "change", "groupOverview"];
 
 type AnchorSource = Pick<DesignStatement, "summary" | "rawPlanExcerpt" | "changes">;
 
@@ -42,8 +42,9 @@ export function collapseWhitespace(text: string): string {
 }
 
 /** The text a field names, as it reads *now*. `undefined` when the field
- * does not exist on this design at all (no plan text, no such change). */
-export function anchorSourceText(design: AnchorSource, field: CommentAnchorField, changeId?: string): string | undefined {
+ * does not exist on this design at all (no plan text, no such change, or --
+ * `groupOverview` -- no combined overview currently computable for it). */
+export function anchorSourceText(design: AnchorSource, field: CommentAnchorField, changeId?: string, groupOverviewText?: string): string | undefined {
   switch (field) {
     case "summary":
       return design.summary;
@@ -55,6 +56,11 @@ export function anchorSourceText(design: AnchorSource, field: CommentAnchorField
       // row; joined so a quote from either one matches.
       return change ? `${change.target}\n${change.intent}` : undefined;
     }
+    case "groupOverview":
+      // Supplied by the caller (app.ts), computed the same way `GET
+      // .../group-overview` computes it -- this function stays pure and
+      // storage-agnostic otherwise, same as every other case here.
+      return groupOverviewText;
   }
 }
 
@@ -62,7 +68,7 @@ export function anchorSourceText(design: AnchorSource, field: CommentAnchorField
  * `undefined`/`null` is a comment on the design as a whole, which is still
  * allowed -- not everything worth saying is about one sentence.
  */
-export function validateCommentAnchor(raw: unknown, design: AnchorSource): AnchorValidation {
+export function validateCommentAnchor(raw: unknown, design: AnchorSource, groupOverviewText?: string): AnchorValidation {
   if (raw === undefined || raw === null) return { ok: true };
   if (typeof raw !== "object") return { ok: false, status: 400, error: "anchor must be an object" };
   const input = raw as Record<string, unknown>;
@@ -78,12 +84,15 @@ export function validateCommentAnchor(raw: unknown, design: AnchorSource): Ancho
   const changeId = typeof input.changeId === "string" && input.changeId ? input.changeId : undefined;
   if (field === "change" && !changeId) return { ok: false, status: 400, error: "anchor.changeId is required when anchor.field is change" };
 
-  const source = anchorSourceText(design, field as CommentAnchorField, changeId);
+  const source = anchorSourceText(design, field as CommentAnchorField, changeId, groupOverviewText);
   if (source === undefined || !collapseWhitespace(source).includes(quote)) {
     return {
       ok: false,
       status: 409,
-      error: "the design has changed since you highlighted that -- reload it and highlight again",
+      error:
+        field === "groupOverview"
+          ? "the combined overview has changed since you highlighted that -- reload it and highlight again"
+          : "the design has changed since you highlighted that -- reload it and highlight again",
     };
   }
 

@@ -83,6 +83,13 @@ export interface ResynthesisDeps {
   callModel: (systemPrompt: string, userPrompt: string) => Promise<string>;
   /** `designs.reviseOverview`, narrowed to what this needs. */
   writeOverview: (id: string, summary: string) => void;
+  /** Budgeted, redacted conversation grounding for this design, when its
+   * session was captured and held something -- `undefined` otherwise
+   * (never captured, captured but empty, or a read failure). Optional so
+   * tests that don't care about grounding can omit it entirely; the prompt
+   * simply states absence rather than forcing every caller to wire a store
+   * through just to pass `undefined` explicitly. */
+  groundingFor?: (design: DesignStatement) => string | undefined;
   /** Overridable for tests; `console.log` in production, matching every
    * other job in this package. */
   log?: (message: string) => void;
@@ -307,19 +314,27 @@ export function shouldResynthesize(
 }
 
 const SYSTEM_PROMPT = [
-  "You are rewriting the overview of a software design statement.",
+  "You are rewriting the overview of a software design statement, for a reviewer deciding whether to approve it.",
   "",
-  "You are given the design's ORIGINAL overview and, in order, the AMENDMENTS its author appended as the work changed.",
-  "Write ONE current overview: what the design is doing now, as if written fresh today.",
+  "You are given the design's ORIGINAL overview, in order, the AMENDMENTS its author appended as the work changed, and -- when available -- an abridged, redacted transcript of the session that produced it.",
+  "",
+  "Write it as prose a colleague would say out loud, in two beats, not two labeled sections -- just the shape of the thinking, not headers on it:",
+  "",
+  "1. The problem: what's missing, wrong, or painful that makes this worth doing.",
+  "2. The plan: how this solves it.",
+  "",
+  "Plain sentences, present tense, no labels, no headings, no bullet points. Skip the plan beat entirely when the problem statement already makes it obvious -- most small changes do.",
+  "",
+  "Length follows the real size of the change, nothing more: a small, single-purpose change is one short sentence covering both beats at once. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length, and never write a sentence that just restates another in different words. No fixed limit -- crisp and to the point is the goal, not a character count.",
   "",
   "Rules:",
-  "- Present tense. No dates, no 'Update:', no changelog, no mention of amendments or of this rewrite.",
-  "- A later amendment that contradicts the original wins. State the current position only; do not narrate the change.",
+  "- Simple, direct English. Short words over long ones, active voice, no filler phrases ('in order to', 'it is worth noting').",
+  "- No dates, no 'Update:', no changelog, no mention of amendments or of this rewrite -- state the current position only, as if written fresh today.",
   "- Keep every distinct piece of scope the text mentions. Dropping a commitment is the one unacceptable failure.",
   "- Drop duplicates: amendments are often pasted twice.",
-  "- Omit bare lists of change ids or PR links. Those are recorded structurally elsewhere.",
-  "- One to three short paragraphs. Plain prose, no headings, no bullet points.",
-  "- Output the overview itself and nothing else: no preamble, no quotes around it, no explanation.",
+  "- When a transcript is given, use it to make the plan specific -- a real reason that actually appears in it, never a guess. If the transcript doesn't explain a decision, leave that part out rather than inventing one.",
+  "- Name a specific file or component only when it actually helps a reviewer locate the change -- never as a reflex, never when it's the one obvious place the change could be.",
+  "- Output the overview itself and nothing else: no preamble, no quotes, no explanation.",
 ].join("\n");
 
 /** Cap on what reaches the model. Generous -- the overview route already
@@ -327,9 +342,10 @@ const SYSTEM_PROMPT = [
  * in principle and a prompt should not be. */
 const MAX_INPUT_CHARS = 24_000;
 
-function buildUserPrompt(original: string, amendments: string[]): string {
+function buildUserPrompt(original: string, amendments: string[], grounding?: string): string {
   const parts = [`ORIGINAL OVERVIEW:\n${original}`];
   amendments.forEach((text, i) => parts.push(`AMENDMENT ${i + 1}:\n${text}`));
+  if (grounding) parts.push(`SESSION TRANSCRIPT (conversation that produced this; abridged and redacted):\n${grounding}`);
   return parts.join("\n\n").slice(0, MAX_INPUT_CHARS);
 }
 
@@ -361,8 +377,9 @@ export async function proposeOverview(deps: ResynthesisDeps, designId: string): 
   if (cached !== undefined) return cached;
 
   const original = originalText(design);
+  const grounding = deps.groundingFor?.(design);
   try {
-    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments));
+    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments, grounding));
     const text = out.trim();
     // A model that returns nothing usable is the same case as one that
     // throws. Checked rather than trusted, because an empty string would pass

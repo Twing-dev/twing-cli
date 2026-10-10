@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Twing's high-level architecture explained through a school team-project analogy, with no coding background required.">
+  <title>Twing — The big picture, explained simply</title>
+  <style>
+    :root { color-scheme: light; --ink: #20313b; --muted: #526774; --accent: #096f68; --border: #dbe4e8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f4f7f8; color: var(--ink); font: 17px/1.7 system-ui, -apple-system, sans-serif; }
+    main { max-width: 960px; margin: auto; padding: 56px 28px 72px; }
+    h1, h2, h3 { line-height: 1.25; letter-spacing: -.025em; }
+    h1 { font-size: clamp(36px, 6vw, 58px); margin: 12px 0 20px; }
+    h2 { font-size: 29px; margin-top: 0; }
+    h3 { font-size: 21px; }
+    a { color: var(--accent); text-underline-offset: 3px; }
+    .label { color: var(--accent); text-transform: uppercase; font-size: 12px; font-weight: 750; letter-spacing: .12em; }
+    .lead { font-size: 22px; color: var(--muted); }
+    section { margin-top: 44px; background: white; border: 1px solid var(--border); border-radius: 14px; padding: 28px; }
+    .note { border-left: 4px solid var(--accent); background: #eaf5f2; padding: 16px 20px; margin: 22px 0; }
+    .warning { background: #fff5e2; border-color: #ba801a; }
+    .people { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .person { padding: 18px; background: #f4f7f8; border-radius: 10px; }
+    .person h3 { margin-top: 0; }
+    .map { background: #17333e; color: #e8f3f6; padding: 24px; border-radius: 12px; }
+    .map p { margin: 8px 0; }
+    .arrow { color: #83d7c8; padding-left: 12px; }
+    .steps { padding-left: 25px; }
+    .steps li { padding: 7px 0 7px 6px; }
+    .small { font-size: 14px; color: var(--muted); }
+    code { background: #edf2f4; border-radius: 4px; padding: 2px 5px; font: .88em/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+    .table { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 15px; }
+    th, td { text-align: left; padding: 14px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { background: #edf2f4; }
+    details { margin: 18px 0; border-top: 1px solid var(--border); padding-top: 16px; }
+    summary { font-weight: 700; cursor: pointer; }
+    a:focus-visible, summary:focus-visible { outline: 3px solid #149b8e; outline-offset: 4px; }
+    footer { margin-top: 32px; }
+    @media (max-width: 600px) { main { padding: 30px 16px 50px; } section { padding: 20px; } .people { grid-template-columns: 1fr; } }
+    @media print { body { background: white; } main { padding: 0; } section { border-radius: 0; } .person, .note { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="label">The big picture · no coding background required</div>
+    <h1>A team of AI helpers.<br>One shared plan.</h1>
+    <p class="lead">Twing helps people and their AI coding assistants work on the same project without silently heading in different directions.</p>
+    <div class="note"><strong>One-sentence version:</strong> before changing code, explain your plan; afterward, leave a receipt of what you changed.</div>
+    <p class="small">This is the high-level architecture of the project, with special attention to <strong>@twing/core</strong>. Source snapshot: 9 October 2026.</p>
+  </header>
+
+  <section id="problem">
+    <h2>1. Imagine a school group project</h2>
+    <p>You and your friends are building an app for the school library. Everyone has an AI assistant helping them write code.</p>
+    <div class="people">
+      <div class="person"><h3>Maya + her AI</h3><p>“I’ll let students borrow books for two weeks.”</p></div>
+      <div class="person"><h3>Leo + his AI</h3><p>“I’ll make overdue reminders assuming books are due after one week.”</p></div>
+    </div>
+    <p>The code might be in completely different files. But the two plans disagree about how the app should work.</p>
+    <p>Or both AIs might build their own version of the same feature without knowing the other one is doing it.</p>
+    <div class="note"><strong>The problem is not just “two people changed the same file.”</strong> It is “two people made plans that do not fit together.”</div>
+    <p>Twing makes plans visible, checks them against project rules and other plans, and records edits so the team has evidence of what happened.</p>
+  </section>
+
+  <section id="pieces">
+    <h2>2. Meet the five main pieces</h2>
+    <p>Think of them as different jobs in your school project.</p>
+    <div class="table"><table>
+      <thead><tr><th>Piece</th><th>School-project version</th><th>Actual job</th></tr></thead>
+      <tbody>
+        <tr><td><strong>CLI</strong><br><code>packages/cli</code></td><td>The control panel you use.</td><td>You type commands such as “set up this project,” “register this plan,” or “close this task.”</td></tr>
+        <tr><td><strong>Hook</strong><br><code>hook/</code></td><td>The checkpoint beside your desk.</td><td>Before certain AI edits, it asks whether they may proceed. After tool use, it sends events to the local worker.</td></tr>
+        <tr><td><strong>Daemon</strong><br><code>packages/cli/src/daemon</code></td><td>Your quiet note-taker.</td><td>A background program on your computer that figures out what changed and sends records to the coordinator.</td></tr>
+        <tr><td><strong>Server</strong><br><code>packages/server</code></td><td>The team's coordinator and noticeboard.</td><td>Stores plans and rules, checks permissions, manages reviews, and compares the meaning of plans.</td></tr>
+        <tr><td><strong>Core</strong><br><code>packages/core</code></td><td>The shared dictionary and stationery kit.</td><td>Provides the same message formats, names, and helper tools to the other TypeScript pieces.</td></tr>
+      </tbody>
+    </table></div>
+    <p>The <strong>monitor/dashboard</strong> is another view of the team's noticeboard: people can read designs and discuss them in a browser. Its UI is not part of the core package.</p>
+    <div class="note"><strong>Important:</strong> core is not another worker running in the background. It is a library—a box of reusable code that the other programs use.</div>
+  </section>
+
+  <section id="map">
+    <h2>3. The whole system on one map</h2>
+    <div class="map" role="img" aria-label="Before an edit, the AI hook asks the shared server for permission. After an edit, the hook sends an event to the local daemon, which sends edit evidence to the server. Core provides shared tools to the CLI, daemon, and server.">
+      <p><strong>On your computer</strong></p>
+      <p>YOU → CLI → setup and plan commands</p>
+      <p>YOUR AI → HOOK</p>
+      <p class="arrow">├ Before editing → SERVER → allow or deny</p>
+      <p class="arrow">└ After editing → DAEMON → SERVER → record the edit</p>
+      <p style="margin-top: 22px"><strong>Shared with the team</strong></p>
+      <p>SERVER ↔ plans, rules, permissions, reviews</p>
+      <p>PEOPLE → DASHBOARD → read plans and discuss them</p>
+      <p style="margin-top: 22px"><strong>Underneath the TypeScript pieces</strong></p>
+      <p>CORE → common dictionary + reusable tools</p>
+    </div>
+    <p>The server can be hosted elsewhere or run locally. The key idea is that participating computers talk to the same coordinator for that project.</p>
+    <p class="small">The hook is written in Go, so it has matching copies of the wire-format and identity rules rather than directly importing the TypeScript core library.</p>
+  </section>
+
+  <section id="before">
+    <h2>4. Flow A: “Can I make this change?”</h2>
+    <p>This is the <strong>before-edit</strong> flow. It is the checkpoint, not the note-taker.</p>
+    <ol class="steps">
+      <li><strong>The AI describes its plan.</strong><br>“I’ll change the borrowing period and update its tests.” The plan includes why, how, and which files it expects to change.</li>
+      <li><strong>The plan gets registered with the coordinator.</strong><br>Core helps turn the written plan into a consistent format. The server stores it and checks project rules.</li>
+      <li><strong>The coordinator compares plans.</strong><br>A separate AI-powered comparison looks for duplication or disagreements in meaning. This can happen after the initial registration response.</li>
+      <li><strong>The AI tries an edit.</strong><br>The hook asks the server: “Does this session have a usable plan covering this file? Does this file need special approval?”</li>
+      <li><strong>The hook passes back the answer.</strong><br>If the checks pass, the edit can proceed. Otherwise, the agent gets a reason and the next step.</li>
+    </ol>
+    <h3>What could stop it?</h3>
+    <ul>
+      <li><strong>No plan:</strong> register one.</li>
+      <li><strong>File outside the plan:</strong> expand the plan or register the appropriate work.</li>
+      <li><strong>A project rule needs approval:</strong> explain the exception and ask an admin.</li>
+      <li><strong>Plans disagree:</strong> adopt another approach or explain why a different approach is justified.</li>
+      <li><strong>The plan went inactive:</strong> explicitly resume it so checks run again.</li>
+    </ul>
+    <div class="note warning"><strong>Like a checkpoint that cannot reach its office:</strong> when a coordinator is configured but cannot be reached, the gate denies rather than guessing “yes.” A project with no coordinator configured is not gated in the first place.</div>
+    <p><strong>Core's role:</strong> format and validate the plan. <strong>Not core's role:</strong> decide permission or run the AI comparison.</p>
+  </section>
+
+  <section id="after">
+    <h2>5. Flow B: “What actually changed?”</h2>
+    <p>This is the <strong>after-edit</strong> flow. It is background record-keeping, not another permission request.</p>
+    <ol class="steps">
+      <li><strong>The edit has already happened.</strong><br>The hook sends a short event to the daemon on your computer.</li>
+      <li><strong>The daemon looks at the file.</strong><br>Core's code parser helps find the function or class around the edit.</li>
+      <li><strong>It creates a receipt.</strong><br>For example: “Maya's session changed the borrowing-period function in this file at this time.” Twing calls this a <strong>claim</strong>.</li>
+      <li><strong>The receipt gets sent to the coordinator.</strong><br>The team can use the evidence to understand what was touched and compare declared work with recorded edits.</li>
+    </ol>
+    <div class="person">
+      <h3>What is in the receipt?</h3>
+      <p>Which project · which developer · which session · which branch · which file/function · when it happened.</p>
+      <p>It can also include old/new function signatures when the daemon has an earlier version to compare.</p>
+      <p class="small">A signature is the function's name and input/output shape, not the whole function body.</p>
+    </div>
+    <div class="note"><strong>Do not mix up the two flows:</strong> the checkpoint answers “may it happen?” The receipt says “it happened.” The receipt flow does not block the edit.</div>
+    <p><strong>Current behavior:</strong> matching edits by two people do not automatically produce a new conflict warning. Those edit-vs-edit conflict checks were removed. The plan-meaning comparison is the current peer-conflict signal.</p>
+  </section>
+
+  <section id="core">
+    <h2>6. So what does core actually provide?</h2>
+    <p>Imagine the CLI, daemon, and server each invented their own names and forms. One might call a project “LibraryApp,” another “library-app,” and another its folder path. They could accidentally treat the same project as three different projects.</p>
+    <p>Core prevents that kind of disagreement by supplying shared tools.</p>
+    <div class="table"><table>
+      <thead><tr><th>Core's tool</th><th>Why the system needs it</th><th>Everyday analogy</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Project identity</strong></td><td>Recognize the same repo even when people cloned it using different URL spellings.</td><td>A consistent student ID instead of guessing from nicknames.</td></tr>
+        <tr><td><strong>Code-piece identity</strong></td><td>Name a particular function using its file and symbol name.</td><td>“Room 3, shelf B” instead of “somewhere in the building.”</td></tr>
+        <tr><td><strong>Message formats</strong></td><td>Make sure the sender and receiver agree on what an event or plan contains.</td><td>The same application form used by every office.</td></tr>
+        <tr><td><strong>Message packaging</strong></td><td>Separate messages correctly when bytes arrive in pieces or several arrive together.</td><td>Putting each letter in an envelope with its length on the front.</td></tr>
+        <tr><td><strong>Code parsing</strong></td><td>Find named functions/classes in JavaScript and TypeScript.</td><td>A book's contents page, so you can locate a chapter without counting every line.</td></tr>
+        <tr><td><strong>Config and plan helpers</strong></td><td>Read rules/settings, validate plan declarations, and extract file scope.</td><td>Check that a permission slip has its required fields filled in.</td></tr>
+        <tr><td><strong>Auth request helper</strong></td><td>Attach the caller's token to server requests.</td><td>Present your pass at the entrance; the office still decides if it is valid.</td></tr>
+        <tr><td><strong>Conversation cleanup</strong></td><td>Keep useful prose while dropping tool content and masking likely secrets.</td><td>Prepare shareable notes instead of handing over every rough worksheet.</td></tr>
+        <tr><td><strong>Setup generators and links</strong></td><td>Produce consistent bootstrap files and dashboard URLs.</td><td>Use the same setup checklist and noticeboard address everywhere.</td></tr>
+      </tbody>
+    </table></div>
+    <div class="note"><strong>Core knows the format of a decision, not whether your particular work should be approved.</strong> It has no HTTP routes of its own and does not run a database, daemon, or AI model.</div>
+  </section>
+
+  <section id="capture">
+    <h2>7. Optional flow C: “Keep the useful conversation”</h2>
+    <p>Code receipts show what was touched. They do not explain all the reasoning that led to the change. Optional conversation capture preserves some of that context.</p>
+    <ol class="steps">
+      <li><strong>The repo explicitly opts in.</strong><br>The committed project config must say capture is enabled. Installing the CLI does not enable it by itself.</li>
+      <li><strong>The daemon reads the existing session history.</strong><br>Different coding tools store history differently; adapters translate it into the common shape.</li>
+      <li><strong>Core filters and cleans it.</strong><br>Keep human messages, assistant explanations, and selected file paths. Drop raw tool inputs/results, thinking blocks, and injected noise. Mask likely credentials in retained text.</li>
+      <li><strong>The daemon saves and uploads new records.</strong><br>Progress markers let it continue from where it left off. It does not need to wait until the conversation ends.</li>
+    </ol>
+    <p>The server can use captured context internally for features such as private questions about a design. There is no public “download raw captures” API in this code path.</p>
+    <div class="note warning"><strong>Privacy detail worth understanding:</strong> consent is sticky for the conversation. After an opted-in repo qualifies the session, later captured discussion can include other repos too. Secret masking is best effort, not a promise that every secret will be caught.</div>
+    <p><strong>Core's role:</strong> cleanup rules. <strong>Daemon's role:</strong> consent boundary, reading, progress, storage, and upload. <strong>Server's role:</strong> receiving records and using permitted context.</p>
+  </section>
+
+  <section id="example">
+    <h2>8. One complete story</h2>
+    <p>Let's return to Maya and Leo's library app.</p>
+    <ol class="steps">
+      <li><strong>Maya sets up the repo.</strong> The CLI connects her checkout to the team's coordinator and prepares the local hook/daemon.</li>
+      <li><strong>Maya's AI registers a plan:</strong> “Students can borrow books for two weeks.”</li>
+      <li><strong>Leo's AI registers a plan:</strong> “Send overdue reminders after one week.”</li>
+      <li><strong>The server's semantic comparison may spot the mismatch.</strong> It can flag both plans and open an alignment discussion. This is an AI judgement, not an infallible guarantee.</li>
+      <li><strong>They reconcile their approaches.</strong> They adjust their plans, adopt the appropriate design, or justify a difference through the resolution workflow. Simply closing a discussion thread is not the same as clearing a design block.</li>
+      <li><strong>Before each covered edit, the hook checks permission.</strong> The active plan must cover the file, with no unresolved applicable rule block.</li>
+      <li><strong>After edits, the daemon sends receipts.</strong> Core helps label the functions that were changed.</li>
+      <li><strong>People review the work in the dashboard.</strong> A design link can be put in the commit message so future readers can find the reasoning.</li>
+    </ol>
+    <p>The payoff is not “AI can never make a mistake.” It is <strong>“the team has visible plans, explicit disagreements, and records of what happened.”</strong></p>
+  </section>
+
+  <section id="boundaries">
+    <h2>9. What this system does not magically do</h2>
+    <ul>
+      <li><strong>It does not replace git.</strong> Git still handles commits, branches, and merging.</li>
+      <li><strong>It does not prove code is correct.</strong> A well-filled plan and an edit receipt are not substitutes for tests or review.</li>
+      <li><strong>It does not understand every programming language at function level.</strong> Core's parser currently supports JavaScript/TypeScript. Other files can be recorded at file level.</li>
+      <li><strong>It does not catch every way of editing a file.</strong> Normal shell-driven edits are not covered by the edit-tool gate/claim matchers.</li>
+      <li><strong>It does not put every decision in core.</strong> Approval, memberships, plan lifecycle, and semantic conflict checks belong to the server/hook layers.</li>
+      <li><strong>It does not automatically write commit links.</strong> It reminds the agent; the agent has to add the trailer.</li>
+    </ul>
+    <details><summary>Why separate the checkpoint and the note-taker?</summary>
+      <p>Permission needs an answer right now, before the edit. So the hook asks the coordinator directly.</p>
+      <p>Detailed record-keeping can happen afterward. So the hook quickly passes that work to the daemon and avoids putting parsing/upload work in the edit's way.</p>
+      <p>Different jobs, different timing. Sharing core tools keeps their vocabulary consistent without making them the same flow.</p>
+    </details>
+  </section>
+
+  <section id="remember">
+    <h2>10. If you remember only five things</h2>
+    <ol class="steps">
+      <li><strong>CLI:</strong> the control panel.</li>
+      <li><strong>Hook:</strong> the checkpoint and messenger.</li>
+      <li><strong>Daemon:</strong> the local background note-taker.</li>
+      <li><strong>Server:</strong> the shared coordinator.</li>
+      <li><strong>Core:</strong> the dictionary and toolbox they agree on.</li>
+    </ol>
+    <div class="note"><strong>Before:</strong> check the plan.<br><strong>After:</strong> record the edit.<br><strong>Optionally:</strong> preserve useful conversation context.</div>
+    <p>Ready for the function names and details? Open the <a href="core-guide.html">full core API and flow guide</a>.</p>
+  </section>
+  <footer class="small">Self-contained HTML · works offline · no external libraries, analytics, or network requests. This explanation simplifies the architecture; it does not change the implementation.</footer>
+</main>
+</body>
+</html>

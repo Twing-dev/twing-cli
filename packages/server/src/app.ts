@@ -21,6 +21,7 @@ import { type Db, createDb } from "./db/client.js";
 import { projectRecords } from "./db/schema.js";
 import { Store } from "./store.js";
 import { DesignRegistry, ConstraintStore } from "./design-store.js";
+import { DesignGroupStore } from "./design-group-store.js";
 import {
   runDesignChecks,
   matchConstraintsForPaths,
@@ -51,6 +52,7 @@ import { NotificationStore } from "./notification-store.js";
 import { assembleDesignContext, describeProvenance, designScopePaths, type AssembledContext } from "./design-context.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, AMENDMENT_THRESHOLD, amendmentsSinceOverview, type ResynthesisDeps } from "./overview-resynthesis.js";
+import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
 import { callLlm } from "./llm-client.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
 import { fetchRepoPermissions, fetchGithubUser, type GithubUser, type GithubRepoPermissions } from "./github-client.js";
@@ -237,6 +239,10 @@ export interface CreateAppOptions {
   /** Session capture sink. Injected in tests so the blob directory is a
    * temp dir rather than the real `~/.twing/serve-data/captures`. */
   captures?: CaptureStore;
+  /** The one piece of persisted group-level state -- a human-saved override
+   * for a `groupId`'s combined overview (2026-10-10). Injected in tests for
+   * the same reason every other store here is. */
+  designGroups?: DesignGroupStore;
   /** Bedrock model id for design-extract.ts's plan->fields extraction (see
    * llm-client.ts's header comment) -- defaults to the same model
    * semanticCheckModel does below, the one this repo's own eval validated
@@ -258,6 +264,9 @@ export interface CreateAppOptions {
    * and no timers; real `twing serve` leaves it undefined and gets the one
    * built below. */
   resynthesis?: ResynthesisQueue;
+  /** Group-level overview resynthesis (2026-10-09), injected whole for the
+   * same reason as `resynthesis` above. */
+  groupResynthesis?: GroupResynthesisQueue;
   /** Design review comment store (2026-09). Injected in tests for the same
    * reason every other store here is. */
   designComments?: DesignCommentStore;
@@ -599,6 +608,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const identities = options.identities ?? new IdentityStore(db, { dataDir: options.dataDir });
   const alignmentThreads = options.alignmentThreads ?? new AlignmentThreadStore(db);
   const captures = options.captures ?? new CaptureStore(db, options.dataDir ? { capturesDir: `${options.dataDir}/captures` } : {});
+  const designGroups = options.designGroups ?? new DesignGroupStore(db);
   const designComments = options.designComments ?? new DesignCommentStore(db);
   const designChats = options.designChats ?? new DesignChatStore(db);
   const notifications = new NotificationStore(db);
@@ -639,9 +649,28 @@ export function createApp(options: CreateAppOptions = {}) {
     writeOverview: (id, summary) => {
       designs.reviseOverview(id, { summary, actor: "twing", source: "llm_resynthesis" });
     },
+    // `groundingTextFor` is a hoisted function declaration defined later in
+    // this same factory -- callable here despite the textual position, the
+    // same convention `maybeDormThread`/`groundDesign` already rely on
+    // above.
+    groundingFor: (design) => groundingTextFor(design),
     log: (message) => console.log(message),
   };
   const resynthesis = options.resynthesis ?? new ResynthesisQueue(resynthesisDeps);
+  /** Group-level overview resynthesis (2026-10-09) -- one combined overview
+   * for every design sharing a `groupId`, built from each member's own
+   * (already-clean) overview plus its grounding. See
+   * `group-overview-resynthesis.ts`'s header for why this is compute-on-read
+   * and cached rather than written anywhere. */
+  const groupResynthesisDeps: GroupResynthesisDeps = {
+    listMembers: (groupId) => designs.listByGroup(groupId),
+    groundingFor: (design) => groundingTextFor(design),
+    labelFor: (design) => identities.getProjectRecord(design.projectId)?.githubRepo ?? design.projectId.slice(0, 10),
+    callModel: (systemPrompt, userPrompt) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel }),
+    getOverride: (groupId) => designGroups.get(groupId)?.overview,
+    log: (message) => console.log(message),
+  };
+  const groupResynthesis = options.groupResynthesis ?? new GroupResynthesisQueue(groupResynthesisDeps);
   const monitorUrl = options.monitorUrl;
   const noAuth = options.noAuth ?? false;
   const githubClientId = options.githubClientId ?? process.env.TWING_GITHUB_CLIENT_ID ?? "Ov23liSaEt1UliMyahy6";
@@ -1650,6 +1679,26 @@ export function createApp(options: CreateAppOptions = {}) {
     return assembleDesignContext(design, slice, { budgetChars });
   }
 
+  /** `groundDesign`, reduced to a plain string for overview resynthesis
+   * (2026-10-09) -- a resynthesis prompt has no thread and no live
+   * question to budget around, unlike the chat path `groundDesign` was
+   * built for, so this reserves its own small, fixed budget rather than
+   * taking one as an argument. Returns `undefined` -- not an empty string
+   * -- whenever there is nothing to ground in (never captured, captured
+   * but empty, or a read failure already logged by `groundDesign`), so the
+   * resynthesis prompt can state absence instead of silently omitting a
+   * section no caller asked it to omit. */
+  function groundingTextFor(design: DesignStatement): string | undefined {
+    // Small and fixed: a resynthesis prompt also carries the original
+    // overview and every amendment (or, at the group level, every
+    // sibling's), so grounding is one ingredient among several rather than
+    // the whole budget the chat path gives it.
+    const RESYNTHESIS_GROUNDING_BUDGET_CHARS = 6_000;
+    const assembled = groundDesign(design, RESYNTHESIS_GROUNDING_BUDGET_CHARS);
+    if (!assembled.provenance.captured || assembled.provenance.turnsUsed === 0) return undefined;
+    return assembled.context;
+  }
+
   /**
    * One chat request at a time per thread.
    *
@@ -1699,7 +1748,21 @@ export function createApp(options: CreateAppOptions = {}) {
     const text = typeof body?.body === "string" ? body.body.trim() : "";
     if (text.length === 0) return c.json({ error: "expected { body: string, anchor?: { field, quote, prefix?, suffix?, changeId? } }" }, 400);
 
-    const anchor = validateCommentAnchor(body?.anchor, design);
+    // A `groupOverview` anchor needs the group's *current* combined text to
+    // validate the quote against (`anchorSourceText`'s groupOverview case) --
+    // there's no design field to read it from directly. Same "can see every
+    // member" bar as writing the override (`PATCH .../group-overview`): a
+    // quote about a repo you can't see isn't yours to post.
+    let groupOverviewText: string | undefined;
+    if ((body?.anchor as { field?: unknown } | undefined)?.field === "groupOverview") {
+      if (!design.groupId) return c.json({ error: "this design isn't linked to a group -- there's no combined overview to comment on" }, 400);
+      const allMembers = designs.listByGroup(design.groupId);
+      const canSeeWholeGroup = allMembers.every((m) => isProjectMember(identity, m.projectId) || canManageProject(identity, m.projectId));
+      if (!canSeeWholeGroup) return c.json({ error: "you can't see every design in this group, so you can't comment on its combined overview" }, 403);
+      groupOverviewText = await proposeOverviewForMembers(groupResynthesisDeps, allMembers);
+    }
+
+    const anchor = validateCommentAnchor(body?.anchor, design, groupOverviewText);
     if (!anchor.ok) return c.json({ error: anchor.error }, anchor.status);
 
     const comment = designComments.create({
@@ -2436,6 +2499,10 @@ export function createApp(options: CreateAppOptions = {}) {
       // for a closed design. Fire-and-forget: a close must not wait on a
       // model call, and every failure path inside keeps the existing text.
       void resynthesis.run(id, "design_closed");
+      // Same reasoning as the amend trigger above, run immediately rather
+      // than enqueued for the same reason the per-design close path is:
+      // nothing further is coming for this member.
+      if (closed.groupId) void groupResynthesis.run(closed.groupId);
     }
     return c.json({ status: closed?.status });
   });
@@ -2782,6 +2849,14 @@ export function createApp(options: CreateAppOptions = {}) {
     if (amendmentsSinceOverview(amended, activityLog.eventsForRelatedId(id)) >= AMENDMENT_THRESHOLD) {
       resynthesis.enqueue(id, "amendment_threshold");
     }
+    // Group overview (2026-10-09): an amendment on any one member is reason
+    // enough to refresh the combined view, independent of that member's own
+    // amendment-threshold check above -- a group's overview can go stale
+    // from a single-amendment change to any sibling, since it is summarizing
+    // N designs' worth of drift at once, not one. No-ops via
+    // `proposeGroupOverview`'s own `members.length < 2` guard when this
+    // design isn't actually linked to anyone.
+    if (amended.groupId) groupResynthesis.enqueue(amended.groupId);
 
     if (outcome.verdict !== "clean") {
       // 2026-08-26: blocking is now a static function of `verdict` alone
@@ -3144,6 +3219,75 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
     const groupMembers = design.groupId ? designs.listByGroup(design.groupId).filter((d) => d.id !== design.id && (isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId))) : [];
     return c.json({ design, groupMembers });
+  });
+
+  /** The current overview for this design's `groupId` -- every design has
+   * one, whether or not anything else shares it (2026-10-10; was gated to
+   * 2+ members until then, which is why a standalone design used to show
+   * its raw stored text while a linked group showed this computed one --
+   * see `group-overview-resynthesis.ts`'s header for the fix). Computes on
+   * read rather than reading a stored value, same as before.
+   *
+   * Members are filtered to what *this* identity may see before anything
+   * is synthesized or looked up in the cache -- deliberately including
+   * `design` itself in that filter via `listByGroup`+filter, rather than
+   * trusting the caller already passed an authorized id, matching the
+   * same-named filter `GET /v1/designs/:id` applies to `groupMembers` just
+   * above. `overview: null` means the model had nothing to offer (no
+   * provider configured, or a call failure) -- same honest "nothing to
+   * offer" shape the old per-design Rewrite button used, not an error.
+   */
+  app.get("/v1/designs/:id/group-overview", async (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
+    if (!design.groupId) return c.json({ overview: null });
+    const visibleMembers = designs.listByGroup(design.groupId).filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId));
+    const overview = await proposeOverviewForMembers(groupResynthesisDeps, visibleMembers);
+    return c.json({ overview: overview ?? null });
+  });
+
+  /** Saving a human-written override for a `groupId`'s current overview
+   * (2026-10-10) -- including a group of one, now that the route above
+   * computes for those too. Once saved, `GET .../group-overview` above
+   * returns this verbatim, forever, same as a design's own `owner_edit` --
+   * nothing automatic ever regenerates over it (`getOverride`'s
+   * short-circuit in `group-overview-resynthesis.ts`).
+   *
+   * **Any member who can see every design in the group**, not an owner --
+   * a group has no single owner the way a design does (its members can
+   * even belong to different developers), so the bar is "entitled to speak
+   * for the whole group" rather than "entitled to speak for one person's
+   * work". For a group of one this reduces to ordinary project membership
+   * on that one design -- looser than the owner-only bar
+   * `PATCH /v1/designs/:id/overview` uses for the same design's *own*
+   * `summary` field, a deliberate tradeoff for one consistent editing
+   * surface rather than two different rules depending on group size.
+   * Checked against the *unfiltered* member list, not whatever the caller's
+   * own visibility happens to admit: writing a summary of a group you can
+   * only partly see would silently describe (or omit) a repo you never had
+   * access to.
+   */
+  app.patch("/v1/designs/:id/group-overview", async (c) => {
+    const identity = c.get("identity");
+    const id = c.req.param("id");
+    const design = designs.get(id);
+    if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
+    if (!design.groupId) return c.json({ error: "this design isn't linked to a group" }, 400);
+
+    const allMembers = designs.listByGroup(design.groupId);
+    const canSeeWholeGroup = allMembers.every((m) => isProjectMember(identity, m.projectId) || canManageProject(identity, m.projectId));
+    if (!canSeeWholeGroup) return c.json({ error: "you can't see every design in this group, so you can't write its combined overview" }, 403);
+
+    const body = await c.req.json<{ overview?: string }>().catch(() => null);
+    if (!body || typeof body.overview !== "string") return c.json({ error: "expected { overview: string }" }, 400);
+    const trimmed = body.overview.trim();
+    if (trimmed.length === 0) return c.json({ error: "overview is blank" }, 400);
+    if (trimmed.length > MAX_DESIGN_SUMMARY_CHARS) return c.json({ error: `overview is ${trimmed.length} chars, max ${MAX_DESIGN_SUMMARY_CHARS}` }, 400);
+
+    const saved = designGroups.save(design.groupId, trimmed, identity.developerId);
+    console.log(`twing serve: group ${design.groupId.slice(0, 8)} overview revised by ${identity.developerId}`);
+    return c.json({ overview: saved.overview });
   });
 
   // §17.5: the human-facing queue -- justified divergences pending sign-off.
