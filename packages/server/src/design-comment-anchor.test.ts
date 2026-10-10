@@ -24,6 +24,23 @@ test("validateCommentAnchor: whitespace is collapsed on both sides, nothing else
   assert.equal(wrongCase.ok, false, "case is part of what was said");
 });
 
+test("validateCommentAnchor: a groupOverview anchor matches against the supplied combined text, not the design's own summary", () => {
+  const result = validateCommentAnchor({ field: "groupOverview", quote: "the server validates it" }, design, "What: adds a priority field. Touches: the server validates it, the CLI prints it.");
+  assert.equal(result.ok, true);
+});
+
+test("validateCommentAnchor: a groupOverview anchor with no combined text supplied is a 409, not a crash", () => {
+  const result = validateCommentAnchor({ field: "groupOverview", quote: "anything" }, design);
+  assert.equal(result.ok, false);
+});
+
+test("validateCommentAnchor: a groupOverview quote the design's own summary happens to contain is still refused if it's not in the combined text", () => {
+  // Guards against a regression where this falls back to `design.summary`
+  // instead of the supplied combined text.
+  const result = validateCommentAnchor({ field: "groupOverview", quote: "retry budget" }, design, "What: something entirely different.");
+  assert.equal(result.ok, false);
+});
+
 test("validateCommentAnchor: a change anchor matches its target or its intent, and needs the change id", () => {
   assert.equal(validateCommentAnchor({ field: "change", changeId: "c1", quote: "exponential growth" }, design).ok, true);
   assert.equal(validateCommentAnchor({ field: "change", changeId: "c1", quote: "RetryPolicy.backoff" }, design).ok, true);

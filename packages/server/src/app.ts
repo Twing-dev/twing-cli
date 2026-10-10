@@ -1748,7 +1748,21 @@ export function createApp(options: CreateAppOptions = {}) {
     const text = typeof body?.body === "string" ? body.body.trim() : "";
     if (text.length === 0) return c.json({ error: "expected { body: string, anchor?: { field, quote, prefix?, suffix?, changeId? } }" }, 400);
 
-    const anchor = validateCommentAnchor(body?.anchor, design);
+    // A `groupOverview` anchor needs the group's *current* combined text to
+    // validate the quote against (`anchorSourceText`'s groupOverview case) --
+    // there's no design field to read it from directly. Same "can see every
+    // member" bar as writing the override (`PATCH .../group-overview`): a
+    // quote about a repo you can't see isn't yours to post.
+    let groupOverviewText: string | undefined;
+    if ((body?.anchor as { field?: unknown } | undefined)?.field === "groupOverview") {
+      if (!design.groupId) return c.json({ error: "this design isn't linked to a group -- there's no combined overview to comment on" }, 400);
+      const allMembers = designs.listByGroup(design.groupId);
+      const canSeeWholeGroup = allMembers.every((m) => isProjectMember(identity, m.projectId) || canManageProject(identity, m.projectId));
+      if (!canSeeWholeGroup) return c.json({ error: "you can't see every design in this group, so you can't comment on its combined overview" }, 403);
+      groupOverviewText = await proposeOverviewForMembers(groupResynthesisDeps, allMembers);
+    }
+
+    const anchor = validateCommentAnchor(body?.anchor, design, groupOverviewText);
     if (!anchor.ok) return c.json({ error: anchor.error }, anchor.status);
 
     const comment = designComments.create({
@@ -3207,19 +3221,21 @@ export function createApp(options: CreateAppOptions = {}) {
     return c.json({ design, groupMembers });
   });
 
-  /** One combined overview across this design and every sibling sharing its
-   * `groupId` (2026-10-09) -- see `group-overview-resynthesis.ts`'s header
-   * for why this computes on read rather than reading a stored value.
+  /** The current overview for this design's `groupId` -- every design has
+   * one, whether or not anything else shares it (2026-10-10; was gated to
+   * 2+ members until then, which is why a standalone design used to show
+   * its raw stored text while a linked group showed this computed one --
+   * see `group-overview-resynthesis.ts`'s header for the fix). Computes on
+   * read rather than reading a stored value, same as before.
    *
    * Members are filtered to what *this* identity may see before anything
    * is synthesized or looked up in the cache -- deliberately including
    * `design` itself in that filter via `listByGroup`+filter, rather than
    * trusting the caller already passed an authorized id, matching the
    * same-named filter `GET /v1/designs/:id` applies to `groupMembers` just
-   * above. `overview: null` covers both "not linked to anyone" and "linked,
-   * but to fewer than two members this viewer can see" -- same honest
-   * "nothing to offer" shape the per-design Rewrite button uses, not an
-   * error.
+   * above. `overview: null` means the model had nothing to offer (no
+   * provider configured, or a call failure) -- same honest "nothing to
+   * offer" shape the old per-design Rewrite button used, not an error.
    */
   app.get("/v1/designs/:id/group-overview", async (c) => {
     const identity = c.get("identity");
@@ -3227,25 +3243,30 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
     if (!design.groupId) return c.json({ overview: null });
     const visibleMembers = designs.listByGroup(design.groupId).filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId));
-    if (visibleMembers.length < 2) return c.json({ overview: null });
     const overview = await proposeOverviewForMembers(groupResynthesisDeps, visibleMembers);
     return c.json({ overview: overview ?? null });
   });
 
-  /** Saving a human-written override for a group's combined overview
-   * (2026-10-10). Once saved, `GET .../group-overview` above returns this
-   * verbatim, forever, same as a design's own `owner_edit` -- nothing
-   * automatic ever regenerates over it (`getOverride`'s short-circuit in
-   * `group-overview-resynthesis.ts`).
+  /** Saving a human-written override for a `groupId`'s current overview
+   * (2026-10-10) -- including a group of one, now that the route above
+   * computes for those too. Once saved, `GET .../group-overview` above
+   * returns this verbatim, forever, same as a design's own `owner_edit` --
+   * nothing automatic ever regenerates over it (`getOverride`'s
+   * short-circuit in `group-overview-resynthesis.ts`).
    *
    * **Any member who can see every design in the group**, not an owner --
    * a group has no single owner the way a design does (its members can
    * even belong to different developers), so the bar is "entitled to speak
    * for the whole group" rather than "entitled to speak for one person's
-   * work". Checked against the *unfiltered* member list, not whatever the
-   * caller's own visibility happens to admit: writing a summary of a group
-   * you can only partly see would silently describe (or omit) a repo you
-   * never had access to.
+   * work". For a group of one this reduces to ordinary project membership
+   * on that one design -- looser than the owner-only bar
+   * `PATCH /v1/designs/:id/overview` uses for the same design's *own*
+   * `summary` field, a deliberate tradeoff for one consistent editing
+   * surface rather than two different rules depending on group size.
+   * Checked against the *unfiltered* member list, not whatever the caller's
+   * own visibility happens to admit: writing a summary of a group you can
+   * only partly see would silently describe (or omit) a repo you never had
+   * access to.
    */
   app.patch("/v1/designs/:id/group-overview", async (c) => {
     const identity = c.get("identity");
@@ -3255,7 +3276,6 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!design.groupId) return c.json({ error: "this design isn't linked to a group" }, 400);
 
     const allMembers = designs.listByGroup(design.groupId);
-    if (allMembers.length < 2) return c.json({ error: "this group has fewer than two members -- nothing to combine" }, 400);
     const canSeeWholeGroup = allMembers.every((m) => isProjectMember(identity, m.projectId) || canManageProject(identity, m.projectId));
     if (!canSeeWholeGroup) return c.json({ error: "you can't see every design in this group, so you can't write its combined overview" }, 403);
 

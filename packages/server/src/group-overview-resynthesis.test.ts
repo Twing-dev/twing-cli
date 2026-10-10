@@ -53,9 +53,19 @@ function stubDeps(overrides: Partial<GroupResynthesisDeps> & { members?: DesignS
   return { deps, members, prompts, logs };
 }
 
-test("proposeGroupOverview: fewer than two members proposes nothing", async () => {
-  const { deps } = stubDeps({ members: [design({ id: "d1" })] });
+test("proposeGroupOverview: a single member -- a group of one -- is proposed too, not refused", async () => {
+  // Every design has a groupId, its own when nothing else shares it
+  // (2026-10-10) -- this is what makes a standalone design go through the
+  // same pipeline as a linked group instead of showing raw stored text.
+  const { deps, prompts } = stubDeps({ members: [design({ id: "d1" })] });
   const result = await proposeGroupOverview(deps, "g1");
+  assert.equal(result, "What: combined overview.");
+  assert.equal(prompts.length, 1);
+});
+
+test("proposeOverviewForMembers: zero members proposes nothing -- the one case left with nothing to compute", async () => {
+  const { deps } = stubDeps({ members: [] });
+  const result = await proposeOverviewForMembers(deps, []);
   assert.equal(result, undefined);
 });
 

@@ -314,24 +314,27 @@ export function shouldResynthesize(
 }
 
 const SYSTEM_PROMPT = [
-  "You are rewriting the overview of a software design statement.",
+  "You are rewriting the overview of a software design statement, for a reviewer deciding whether to approve it.",
   "",
   "You are given the design's ORIGINAL overview, in order, the AMENDMENTS its author appended as the work changed, and -- when available -- an abridged, redacted transcript of the session that produced it.",
   "",
-  "Write the current overview as up to three short, labeled lines. Most designs do not need all three -- omit a line that would add nothing for a change this size:",
+  "Write it as prose a colleague would say out loud, in two beats, not two labeled sections -- just the shape of the thinking, not headers on it:",
   "",
-  "What: one sentence -- what changes, for the user or the system. Always required.",
-  "Approach: only if there is a real decision or tradeoff worth recording (one short sentence). Omit for a change with nothing to decide.",
-  "Touches: only if naming where the change lives would actually help a reviewer (one short phrase -- files, components). Omit when it is a single obvious file or already implied by What.",
+  "1. The problem: what's missing, wrong, or painful that makes this worth doing.",
+  "2. The plan: how this solves it.",
+  "",
+  "Plain sentences, present tense, no labels, no headings, no bullet points. Skip the plan beat entirely when the problem statement already makes it obvious -- most small changes do.",
+  "",
+  "Length follows the real size of the change, nothing more: a small, single-purpose change is one short sentence covering both beats at once. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length, and never write a sentence that just restates another in different words. No fixed limit -- crisp and to the point is the goal, not a character count.",
   "",
   "Rules:",
-  "- Present tense. No dates, no 'Update:', no changelog, no mention of amendments or of this rewrite.",
-  "- A later amendment that contradicts the original wins. State the current position only; do not narrate the change.",
+  "- Simple, direct English. Short words over long ones, active voice, no filler phrases ('in order to', 'it is worth noting').",
+  "- No dates, no 'Update:', no changelog, no mention of amendments or of this rewrite -- state the current position only, as if written fresh today.",
   "- Keep every distinct piece of scope the text mentions. Dropping a commitment is the one unacceptable failure.",
   "- Drop duplicates: amendments are often pasted twice.",
-  "- When a transcript is given, use it to make Approach specific -- a real reason that actually appears in it, never a guess. If the transcript doesn't explain the decision, leave Approach out rather than inventing one.",
-  "- Short. A clause or a sentence per line, not a paragraph per line. A trivial change may be a single 'What:' line and nothing else.",
-  "- Output just the labeled lines and nothing else: no preamble, no quotes, no explanation, no bullet characters.",
+  "- When a transcript is given, use it to make the plan specific -- a real reason that actually appears in it, never a guess. If the transcript doesn't explain a decision, leave that part out rather than inventing one.",
+  "- Name a specific file or component only when it actually helps a reviewer locate the change -- never as a reflex, never when it's the one obvious place the change could be.",
+  "- Output the overview itself and nothing else: no preamble, no quotes, no explanation.",
 ].join("\n");
 
 /** Cap on what reaches the model. Generous -- the overview route already
