@@ -22,6 +22,9 @@
  */
 
 import type { DesignStatement } from "@twing/core";
+// Moved to llm-prompts.ts (2026-10-10), alongside every other prompt this
+// server sends, so they can be read in one place -- see that file's header.
+import { GROUP_OVERVIEW_RESYNTHESIS_PROMPT as SYSTEM_PROMPT } from "./llm-prompts.js";
 
 export interface GroupResynthesisDeps {
   /** Every design sharing a `groupId`, as the caller is authorized to see.
@@ -48,27 +51,6 @@ export interface GroupResynthesisDeps {
   log?: (message: string) => void;
 }
 
-const SYSTEM_PROMPT = [
-  "You are writing the current overview for a design, for a reviewer deciding whether to approve it -- every design has a `groupId`, whether or not anything else shares it, so this may be one repo alone or several linked as one piece of work.",
-  "",
-  "You are given each repo's own current design overview, labeled with its repo name, and -- when available -- grounding from the conversation that produced each one.",
-  "",
-  "Write it as prose a colleague would say out loud, as one unified change (it is, whether it's one repo or several), in two beats, not two labeled sections -- just the shape of the thinking, not headers on it:",
-  "",
-  "1. The problem: what's missing, wrong, or painful that makes this worth doing.",
-  "2. The plan: how this solves it, across whichever repos are involved.",
-  "",
-  "Plain sentences, present tense, no labels, no headings, no bullet points, no per-repo changelog. Skip the plan beat entirely when the problem statement already makes it obvious -- most small changes do.",
-  "",
-  "Length follows the real size of the change, nothing more: a small, single-purpose change is one short sentence covering both beats at once. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length. No fixed limit -- crisp and to the point is the goal, not a character count.",
-  "",
-  "Rules:",
-  "- Simple, direct English. Short words over long ones, active voice, no filler phrases.",
-  "- Name a specific repo inline only when there's more than one involved and naming it adds information a reader needs -- e.g. 'the server validates it, the CLI prints it'. Never a list of repos, never restate one if the first sentence already makes its role obvious, and never name the one repo everything lives in when there's only one.",
-  "- When grounding is given, use it to make the plan specific -- a real reason that actually appears in it, never a guess. If it doesn't explain a decision, leave that part out rather than inventing one.",
-  "- If the repos are genuinely doing unrelated things under one groupId, say so plainly rather than inventing a unifying thread that isn't there.",
-  "- Output the overview itself and nothing else: no preamble, no quotes, no explanation.",
-].join("\n");
 
 const MAX_INPUT_CHARS = 24_000;
 /** Per-member cap inside the prompt -- grounding especially, so one heavily

@@ -12,7 +12,6 @@ import {
   isHumanWritten,
   cachedProposal,
   __clearProposalCache,
-  AMENDMENT_THRESHOLD,
   type ResynthesisDeps,
 } from "./overview-resynthesis.js";
 import { appendSummaryUpdate } from "./design-checks.js";
@@ -154,18 +153,13 @@ test("shouldResynthesize: a comment anchored in another field is no obstacle", (
   assert.equal(shouldResynthesize(design(), [amendEvent(1)], comments, "design_closed"), undefined);
 });
 
-test("shouldResynthesize: the threshold gates the mid-flight trigger only", () => {
+// No threshold (2026-10-10): a single amendment is enough to fold, on any
+// trigger -- there is no "mid-flight" bar left to clear.
+test("shouldResynthesize: a single amendment is enough, on every trigger", () => {
   const events = [amendEvent(1)];
-  assert.equal(shouldResynthesize(design(), events, [], "amendment_threshold"), "not_enough_amendments");
-  // Closing is the moment the overview becomes the permanent record, so one
-  // amendment is worth folding there.
+  assert.equal(shouldResynthesize(design(), events, [], "amendment_threshold"), undefined);
   assert.equal(shouldResynthesize(design(), events, [], "design_closed"), undefined);
   assert.equal(shouldResynthesize(design(), events, [], "manual"), undefined);
-});
-
-test("shouldResynthesize: allows the threshold trigger once the pile is deep enough", () => {
-  const events = Array.from({ length: AMENDMENT_THRESHOLD }, (_, i) => amendEvent(i + 1));
-  assert.equal(shouldResynthesize(design(), events, [], "amendment_threshold"), undefined);
 });
 
 test("shouldResynthesize: no design is a refusal, not a crash", () => {
@@ -274,20 +268,18 @@ test("resynthesizeNow: discards a proposal when a human edits during the call", 
 
 // --- the queue --------------------------------------------------------------
 
-/** A design deep enough into its pile that the threshold trigger will act --
- * three appended entries and the three events that recorded them. Without the
- * events the queue tests pass for the wrong reason: the job refuses on the
- * threshold and writes nothing, which is indistinguishable from the debounce
- * working. */
-function amendedPastThreshold() {
-  let summary = "Base.";
-  for (let i = 0; i < AMENDMENT_THRESHOLD; i++) summary = appendSummaryUpdate(summary, `amendment ${i + 1}`);
-  const events = Array.from({ length: AMENDMENT_THRESHOLD }, (_, i) => amendEvent(i + 1));
+/** A design with one amendment on it -- enough to fold, now that there's no
+ * threshold. Without the event the queue tests pass for the wrong reason:
+ * `proposeOverview` finds nothing to fold and writes nothing, which is
+ * indistinguishable from the debounce working. */
+function amendedOnce() {
+  const summary = appendSummaryUpdate("Base.", "amendment 1");
+  const events = [amendEvent(1)];
   return { summary, events };
 }
 
 test("ResynthesisQueue: coalesces a burst into one run", async () => {
-  const { summary, events } = amendedPastThreshold();
+  const { summary, events } = amendedOnce();
   const { deps, written } = stubDeps({ design: design({ summary }), eventsFor: () => events });
   const queue = new ResynthesisQueue(deps, 5);
 
@@ -301,7 +293,7 @@ test("ResynthesisQueue: coalesces a burst into one run", async () => {
 });
 
 test("ResynthesisQueue: clear() cancels a pending run", async () => {
-  const { summary, events } = amendedPastThreshold();
+  const { summary, events } = amendedOnce();
   const { deps, written } = stubDeps({ design: design({ summary }), eventsFor: () => events });
   const queue = new ResynthesisQueue(deps, 5);
 

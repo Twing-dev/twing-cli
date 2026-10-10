@@ -160,6 +160,56 @@ test("CaptureStore.read: keeps both ends of a long session and reports the gap b
   assert.equal(slice.keptTurns, 7);
 });
 
+test("CaptureStore.read: since excludes turns before the cutoff and counts only what's left", () => {
+  const { store } = freshStore();
+  store.append({
+    sessionId: "s1",
+    developerId: "dev@example.com",
+    records: [
+      { type: "turn", role: "user", ts: "2026-10-10T10:00:00Z", text: "old turn 0" },
+      { type: "turn", role: "assistant", ts: "2026-10-10T10:00:01Z", text: "old turn 1" },
+      { type: "turn", role: "user", ts: "2026-10-10T12:00:00Z", text: "new turn 2" },
+      { type: "turn", role: "assistant", ts: "2026-10-10T12:00:01Z", text: "new turn 3" },
+    ],
+  });
+
+  // Cutoff sits between the two pairs.
+  const since = Date.parse("2026-10-10T11:00:00Z");
+  const slice = store.read("dev@example.com", "s1", { since })!;
+  assert.deepEqual(
+    slice.turns.map((t) => (t.record as { text: string }).text),
+    ["new turn 2", "new turn 3"],
+  );
+  // Not 4 -- the excluded turns are not counted either, so a caller reporting
+  // "grounded in N of M turns" describes the scoped window, not the whole
+  // session diluted by turns it was never shown.
+  assert.equal(slice.totalTurns, 2);
+});
+
+test("CaptureStore.read: a turn with no parseable ts is kept, not silently dropped, when since is given", () => {
+  const { store } = freshStore();
+  store.append({
+    sessionId: "s1",
+    developerId: "dev@example.com",
+    records: [
+      { type: "turn", role: "user", text: "no timestamp at all" },
+      { type: "turn", role: "assistant", ts: "not a date", text: "unparseable timestamp" },
+      { type: "turn", role: "user", ts: "2026-10-10T12:00:00Z", text: "has a real, recent timestamp" },
+    ],
+  });
+
+  const since = Date.parse("2026-10-10T11:00:00Z");
+  const slice = store.read("dev@example.com", "s1", { since })!;
+  assert.equal(slice.totalTurns, 3);
+});
+
+test("CaptureStore.read: omitting since behaves exactly as before -- every turn counts", () => {
+  const { store } = freshStore();
+  seedSession(store, 5);
+  const slice = store.read("dev@example.com", "s1", {})!;
+  assert.equal(slice.totalTurns, 5);
+});
+
 test("CaptureStore.read: a session shorter than the window comes back whole, with no gap", () => {
   const { store } = freshStore();
   seedSession(store, 5);

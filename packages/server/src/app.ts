@@ -51,7 +51,7 @@ import { DesignChatStore } from "./design-chat-store.js";
 import { NotificationStore } from "./notification-store.js";
 import { assembleDesignContext, describeProvenance, designScopePaths, type AssembledContext } from "./design-context.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
-import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, AMENDMENT_THRESHOLD, amendmentsSinceOverview, type ResynthesisDeps } from "./overview-resynthesis.js";
+import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
 import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
 import { callLlm } from "./llm-client.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
@@ -653,7 +653,15 @@ export function createApp(options: CreateAppOptions = {}) {
     // this same factory -- callable here despite the textual position, the
     // same convention `maybeDormThread`/`groundDesign` already rely on
     // above.
-    groundingFor: (design) => groundingTextFor(design),
+    //
+    // `since: design.overviewRevisedAt` (2026-10-10) is what makes this an
+    // incremental reviser rather than a summarizer: once a design has been
+    // folded at least once, grounding is scoped to the conversation *since*
+    // that fold, not the whole session re-read every time. `overviewRevisedAt`
+    // is `undefined` until the first fold, which `since` treats as "no
+    // cutoff" -- so the very first resynthesis still sees everything
+    // available, and only the second and later ones narrow to what's new.
+    groundingFor: (design) => groundingTextFor(design, { since: design.overviewRevisedAt }),
     log: (message) => console.log(message),
   };
   const resynthesis = options.resynthesis ?? new ResynthesisQueue(resynthesisDeps);
@@ -661,7 +669,13 @@ export function createApp(options: CreateAppOptions = {}) {
    * for every design sharing a `groupId`, built from each member's own
    * (already-clean) overview plus its grounding. See
    * `group-overview-resynthesis.ts`'s header for why this is compute-on-read
-   * and cached rather than written anywhere. */
+   * and cached rather than written anywhere.
+   *
+   * Deliberately NOT scoped by `since` (2026-10-10), unlike the per-design
+   * deps above: this is a summarizer, not a reviser -- there is no persisted
+   * "previous group overview" it is incrementally updating (only a human
+   * override, which bypasses the model entirely), so it always needs each
+   * member's full current picture, not just what changed recently. */
   const groupResynthesisDeps: GroupResynthesisDeps = {
     listMembers: (groupId) => designs.listByGroup(groupId),
     groundingFor: (design) => groundingTextFor(design),
@@ -1666,10 +1680,10 @@ export function createApp(options: CreateAppOptions = {}) {
    * than passing off as a whole conversation. Losing grounding costs a
    * thinner answer; failing the request costs the reviewer their question.
    */
-  function groundDesign(design: DesignStatement, budgetChars: number): AssembledContext {
+  function groundDesign(design: DesignStatement, budgetChars: number, options: { since?: number } = {}): AssembledContext {
     let slice;
     try {
-      slice = captures.read(design.developerId, design.sessionId, { focusPaths: designScopePaths(design) });
+      slice = captures.read(design.developerId, design.sessionId, { focusPaths: designScopePaths(design), since: options.since });
     } catch (err) {
       console.warn(`twing serve: capture read failed for design ${design.id}: ${err instanceof Error ? err.message : err}`);
     }
@@ -1688,13 +1702,13 @@ export function createApp(options: CreateAppOptions = {}) {
    * but empty, or a read failure already logged by `groundDesign`), so the
    * resynthesis prompt can state absence instead of silently omitting a
    * section no caller asked it to omit. */
-  function groundingTextFor(design: DesignStatement): string | undefined {
+  function groundingTextFor(design: DesignStatement, options: { since?: number } = {}): string | undefined {
     // Small and fixed: a resynthesis prompt also carries the original
     // overview and every amendment (or, at the group level, every
     // sibling's), so grounding is one ingredient among several rather than
     // the whole budget the chat path gives it.
     const RESYNTHESIS_GROUNDING_BUDGET_CHARS = 6_000;
-    const assembled = groundDesign(design, RESYNTHESIS_GROUNDING_BUDGET_CHARS);
+    const assembled = groundDesign(design, RESYNTHESIS_GROUNDING_BUDGET_CHARS, options);
     if (!assembled.provenance.captured || assembled.provenance.turnsUsed === 0) return undefined;
     return assembled.context;
   }
@@ -2836,19 +2850,16 @@ export function createApp(options: CreateAppOptions = {}) {
     const amended = designs.amend(id, delta);
     if (!amended) return c.json({ error: `design is ${design.status}, not open -- can't amend` }, 409);
 
-    // Overview resynthesis (2026-10-06), once the pile is deep enough to be
-    // the problem it exists to fix. Placed here rather than on the clean
-    // path below so a flagged amendment counts too: `designs.amend` has
-    // already merged the scope and appended the summary either way, so the
-    // overview grew regardless of the verdict.
+    // Overview resynthesis (2026-10-06, no threshold since 2026-10-10): every
+    // amendment schedules a fold, not just the third and later. Placed here
+    // rather than on the clean path below so a flagged amendment counts too:
+    // `designs.amend` has already merged the scope and appended the summary
+    // either way, so the overview grew regardless of the verdict.
     //
     // Debounced inside the queue, which is what keeps a deny -> amend ->
-    // retry burst from starting a rewrite per amendment. The threshold is
-    // re-checked inside the job as well; this only decides whether to
-    // bother scheduling, and the job decides whether to act.
-    if (amendmentsSinceOverview(amended, activityLog.eventsForRelatedId(id)) >= AMENDMENT_THRESHOLD) {
-      resynthesis.enqueue(id, "amendment_threshold");
-    }
+    // retry burst costing one model call total rather than one per amendment
+    // in that burst.
+    resynthesis.enqueue(id, "amendment_threshold");
     // Group overview (2026-10-09): an amendment on any one member is reason
     // enough to refresh the combined view, independent of that member's own
     // amendment-threshold check above -- a group's overview can go stale
