@@ -2,8 +2,8 @@
  * Date-rotated JSONL logs for the coordinator (2026-10-11): one file per
  * UTC day per kind -- `http-YYYY-MM-DD.jsonl` (every request/response) and
  * `llm-YYYY-MM-DD.jsonl` (every final prompt sent to the model and what came
- * back) -- under `${dataDir}/logs/`, with files older than the retention
- * window swept away. Plain `node:fs`, no logging dependency.
+ * back) -- under `/var/log/twing-cli/` (local and production alike), with
+ * files older than the retention window swept away. Plain `node:fs`, no logging dependency.
  *
  * `httpLog`/`llmLog` are no-ops until `initLogging` runs (only `main.ts`
  * calls it), so tests and embedders that build `createApp` directly never
@@ -11,7 +11,6 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -22,6 +21,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const DEFAULT_RETENTION_DAYS = 7;
 export const MAX_BODY_BYTES = 64 * 1024;
+export const DEFAULT_LOG_DIR = "/var/log/twing-cli";
 
 export class DailyLog {
   private stream: fs.WriteStream | undefined;
@@ -150,14 +150,25 @@ export function isLoggingEnabled(): boolean {
  * any request and logs without one. */
 export const requestContext = new AsyncLocalStorage<{ requestId: string }>();
 
-/** Turns logging on. Returns the directory, or undefined when disabled via
- * `TWING_LOG_DISABLED=1`. */
-export function initLogging(dataDir: string | undefined): { dir: string; retentionDays: number } | undefined {
-  if (process.env.TWING_LOG_DISABLED === "1") return undefined;
-  const dir = process.env.TWING_LOG_DIR ?? path.join(dataDir ?? path.join(os.homedir(), ".twing", "serve-data"), "logs");
+/** Turns logging on. Returns the directory in use, or `{ error }` when
+ * disabled (`TWING_LOG_DISABLED=1`) or the directory isn't writable --
+ * `/var/log` is root-owned, so a missing one-time `mkdir`/`chown` must not
+ * stop the coordinator from serving. */
+export function initLogging(): { dir: string; retentionDays: number } | { error: string } {
+  if (process.env.TWING_LOG_DISABLED === "1") return { error: "disabled (TWING_LOG_DISABLED=1)" };
+  const dir = process.env.TWING_LOG_DIR ?? DEFAULT_LOG_DIR;
   const parsed = Number(process.env.TWING_LOG_RETENTION_DAYS);
   const retentionDays = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_RETENTION_DAYS;
-  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.accessSync(dir, fs.constants.W_OK);
+  } catch (err) {
+    return {
+      error:
+        `${dir} is not writable (${err instanceof Error ? err.message : err}). ` +
+        `Run \`sudo mkdir -p ${dir} && sudo chown $USER ${dir}\` once, or set TWING_LOG_DIR`,
+    };
+  }
   httpLog = new DailyLog(dir, LOG_PREFIXES[0]);
   llmLog = new DailyLog(dir, LOG_PREFIXES[1]);
   sweepOldLogs(dir, retentionDays);

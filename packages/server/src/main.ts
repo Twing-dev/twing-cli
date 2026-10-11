@@ -93,10 +93,10 @@ const publicProjectIds = process.env.TWING_PUBLIC_PROJECT_IDS?.split(",")
 // designs. Unset means no monitor, and every consumer omits the link.
 const monitorUrl = process.env.TWING_MONITOR_URL?.trim() || undefined;
 
-// Daily http/llm logs under <dataDir>/logs (daily-log.ts). After the
+// Daily http/llm logs under /var/log/twing-cli (daily-log.ts). After the
 // --regenerate-bootstrap-token early exit above, so that one-shot never
 // opens log files.
-const logging = initLogging(dataDirOptions.dataDir);
+const logging = initLogging();
 
 const app = createApp({
   db,
@@ -142,9 +142,9 @@ const hostname = explicitHost ?? (noAuth ? "127.0.0.1" : undefined);
 serve({ fetch: app.fetch, port, hostname }, (info) => {
   console.log(`twing serve: listening on http://localhost:${info.port}`);
   console.log(
-    logging
-      ? `twing serve: writing http/llm logs to ${logging.dir} (keeping ${logging.retentionDays} days)`
-      : "twing serve: http/llm file logging disabled (TWING_LOG_DISABLED=1)",
+    "error" in logging
+      ? `twing serve: WARNING -- http/llm file logging is off: ${logging.error}`
+      : `twing serve: writing http/llm logs to ${logging.dir} (keeping ${logging.retentionDays} days)`,
   );
   if (corsOrigins && corsOrigins.length > 0) {
     console.log(`twing serve: CORS enabled for browser origins: ${corsOrigins.join(", ")}`);

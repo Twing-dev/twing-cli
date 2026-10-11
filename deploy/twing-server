@@ -98,6 +98,7 @@ services:
     volumes:
       - ./data:/data
       - ./secrets:/run/secrets:ro
+      - /var/log/twing-cli:/var/log/twing-cli
 EOF
 
   if [[ "$transport" == "http" ]]; then
