@@ -253,3 +253,68 @@ This is a conversation, so write like one: plain prose, short, no headings, no b
 Never quote the transcript verbatim at length. You are summarising from a colleague's private working session, not republishing it.
 
 Say plainly when you do not know. "The design does not say, and the session does not either — that is worth asking the author" is a good answer and a useful one; an invented rationale is worse than an admission, because the reviewer cannot tell the difference. If the reviewer seems to want a change rather than an explanation, tell them to leave it as a comment, which is the surface that reaches the developer.`;
+
+/** `design-diagrams.ts` call 1 (2026-10-11) -- decides whether a design group
+ * deserves diagrams under its overview, and which kinds. Most designs should
+ * get none: a diagram earns its place only when the change has several
+ * parts that interact, which prose describes worse than a picture. */
+export const DIAGRAM_DECISION_PROMPT = [
+  "You decide which diagrams, if any, would help a reviewer understand a software design before approving it.",
+  "",
+  "You are given the design's overview, its plan, its declared changes (each with a kind: code, api, schema, test, docs, config) and, when it spans several repos, one block per repo.",
+  "",
+  "Diagram kinds:",
+  "- flow: how data or control moves through several components, step by step.",
+  "- sequence: who calls whom, in order -- requests between services, repos, or processes.",
+  "- class: new or changed types, records or tables and how they relate.",
+  "",
+  "Pick a kind only when it shows something the overview text cannot: several components that interact, a request crossing a boundary, or new structures that relate to each other. A change confined to one place, or one that only edits text, styling, tests or config, needs none.",
+  "Guides, not rules: api changes or several repos usually suit sequence; schema or new types suit class; several code files working together suit flow.",
+  "",
+  'Return JSON only, no markdown: {"diagrams": [{"type": "flow" | "sequence" | "class", "reason": "<one short sentence>"}]}. At most 3 entries, no kind twice. Return {"diagrams": []} when no diagram would help.',
+].join("\n");
+
+/** `design-diagrams.ts` call 2 (2026-10-11) -- draws one diagram as Mermaid.
+ * Deliberately narrow syntax: the browser renders whatever comes back, and
+ * every styling, link or HTML feature is a way for model output to break or
+ * misbehave there. Small on purpose -- past about 12 boxes a diagram is a
+ * list, not a picture. */
+export const DIAGRAM_GENERATE_PROMPT = [
+  "You draw one diagram of a software design, in Mermaid syntax, for a reviewer deciding whether to approve it.",
+  "",
+  "You are told which kind to draw (flow, sequence or class) and given the design's overview, plan, declared changes and, when available, the conversation that produced it. Draw what the design intends to build, using only components and steps that appear in that material. Never invent parts.",
+  "",
+  "Syntax rules -- follow them exactly:",
+  "- flow: start with `flowchart LR`. Node ids are short letters/digits only (a, b, mw1). Labels in square brackets, e.g. a[Logging middleware]. Arrows `-->`, optional label as `-- label -->`.",
+  "- sequence: start with `sequenceDiagram`. Declare each participant once as `participant A as Short name`. Messages `A->>B: text`, replies `B-->>A: text`.",
+  "- class: start with `classDiagram`. `class Name { field \\n method() }` with one member per line; relations like `A ..> B : uses` or `A --> B`.",
+  "- At most 12 boxes or participants. Labels of 5 words or fewer. Plain words only inside labels: no quotes, brackets, parentheses, colons or semicolons.",
+  "- No styling, classDef, style, click, links, notes, subgraphs, comments or HTML.",
+  "",
+  "Example flow:",
+  "flowchart LR",
+  "  a[HTTP request] --> b[Auth check]",
+  "  b --> c[Route handler]",
+  "  c --> d[Database]",
+  "",
+  "Example sequence:",
+  "sequenceDiagram",
+  "  participant C as CLI",
+  "  participant S as Server",
+  "  C->>S: register design",
+  "  S-->>C: verdict",
+  "",
+  "Example class:",
+  "classDiagram",
+  "  class Design {",
+  "    id",
+  "    summary",
+  "  }",
+  "  class Change {",
+  "    target",
+  "    kind",
+  "  }",
+  "  Design --> Change : has",
+  "",
+  "Output only the Mermaid text: no explanation, no markdown fences.",
+].join("\n");
