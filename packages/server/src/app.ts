@@ -1736,7 +1736,7 @@ export function createApp(options: CreateAppOptions = {}) {
    * than passing off as a whole conversation. Losing grounding costs a
    * thinner answer; failing the request costs the reviewer their question.
    */
-  function groundDesign(design: DesignStatement, budgetChars: number, options: { since?: number } = {}): AssembledContext {
+  function groundDesign(design: DesignStatement, budgetChars: number, options: { since?: number; includeDesign?: boolean } = {}): AssembledContext {
     let slice;
     try {
       slice = captures.read(design.developerId, design.sessionId, { focusPaths: designScopePaths(design), since: options.since });
@@ -1746,7 +1746,7 @@ export function createApp(options: CreateAppOptions = {}) {
     // `budgetChars` is what is left after the caller reserved room for its
     // system prompt, the thread so far and the live question -- so the whole
     // request fits one budget instead of each part respecting its own.
-    return assembleDesignContext(design, slice, { budgetChars });
+    return assembleDesignContext(design, slice, { budgetChars, includeDesign: options.includeDesign });
   }
 
   /** `groundDesign`, reduced to a plain string for overview resynthesis
@@ -1764,7 +1764,9 @@ export function createApp(options: CreateAppOptions = {}) {
     // sibling's), so grounding is one ingredient among several rather than
     // the whole budget the chat path gives it.
     const RESYNTHESIS_GROUNDING_BUDGET_CHARS = 6_000;
-    const assembled = groundDesign(design, RESYNTHESIS_GROUNDING_BUDGET_CHARS, options);
+    // Conversation only: the resynthesis prompts already send the design's
+    // summary, plan and changes as their own sections.
+    const assembled = groundDesign(design, RESYNTHESIS_GROUNDING_BUDGET_CHARS, { ...options, includeDesign: false });
     if (!assembled.provenance.captured || assembled.provenance.turnsUsed === 0) return undefined;
     return assembled.context;
   }

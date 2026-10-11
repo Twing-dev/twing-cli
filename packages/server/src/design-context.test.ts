@@ -316,3 +316,17 @@ test("a zero budget does not throw or produce a negative slice", () => {
   const { context } = assembleDesignContext(design, slice([{ index: 0, text: "x" }]), { budgetChars: 0 });
   assert.equal(context.length, 0);
 });
+
+// Overview resynthesis sends the design's summary, plan and changes in its
+// own prompt sections, so its grounding must carry the conversation alone.
+test("includeDesign: false returns the conversation without the design's own sections", () => {
+  const capture = slice([{ index: 0, role: "user", text: "cap the backoff at 30s please" }]);
+  const full = assembleDesignContext({ ...design, rawPlanExcerpt: "Clamp the delay." }, capture);
+  const only = assembleDesignContext({ ...design, rawPlanExcerpt: "Clamp the delay." }, capture, { includeDesign: false });
+  assert.match(full.context, /DESIGN SUMMARY:/);
+  assert.match(full.context, /DECLARED CHANGES:/);
+  assert.doesNotMatch(only.context, /DESIGN SUMMARY:|DECLARED CHANGES:|ORIGINAL PLAN TEXT:/);
+  assert.match(only.context, /SESSION TRANSCRIPT/);
+  assert.match(only.context, /cap the backoff at 30s please/);
+  assert.equal(only.provenance.turnsUsed, 1);
+});

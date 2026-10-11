@@ -223,7 +223,20 @@ const ELISION_RESERVE = 60;
  * the routes own the store, and a test can assemble against a fixture without
  * touching a filesystem.
  */
-export function assembleDesignContext(design: DesignStatement, capture: CaptureSlice | undefined, options: { budgetChars?: number } = {}): AssembledContext {
+export function assembleDesignContext(
+  design: DesignStatement,
+  capture: CaptureSlice | undefined,
+  options: {
+    budgetChars?: number;
+    /** `false` returns the conversation alone, without the design's own
+     * summary/changes/plan in front of it. For overview resynthesis
+     * (2026-10-11), whose prompt already carries those as its own
+     * OVERVIEW and PLAN sections -- including them here sent every one of
+     * them twice whenever a transcript existed. Defaults to `true`: the
+     * chat path has no other copy of the design. */
+    includeDesign?: boolean;
+  } = {},
+): AssembledContext {
   // Caller-supplied, because grounding is never the whole prompt: an
   // answerer adds a system prompt, the thread so far and the live question
   // on top. Each part policing its own budget meant the *sum* had none --
@@ -231,7 +244,7 @@ export function assembleDesignContext(design: DesignStatement, capture: CaptureS
   // reserves what it needs and asks for the rest.
   const budget = Math.max(0, options.budgetChars ?? MAX_CONTEXT_CHARS);
   const scope = designScopePaths(design);
-  const sections = designSections(design);
+  const sections = options.includeDesign === false ? [] : designSections(design);
   const touchedPaths = capture?.touchedFocusPaths ?? [];
   const untouchedPaths = scope.filter((p) => !touchedPaths.includes(p));
 
