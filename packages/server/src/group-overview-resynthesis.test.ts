@@ -161,3 +161,15 @@ test("GroupResynthesisQueue: coalesces a burst into one run", async () => {
   assert.equal(prompts.length, 1);
   queue.clear();
 });
+
+test("proposeGroupOverview: includes each member's plan and changes", async () => {
+  const members = [
+    design({ id: "d1", rawPlanExcerpt: "Wrap fetch in a retry helper with backoff.", changes: [{ id: "c1", action: "add", target: "src/retry.ts", intent: "retry helper" }] }),
+    design({ id: "d2", projectId: "p2" }),
+  ];
+  const { deps, prompts } = stubDeps({ members });
+  await proposeGroupOverview(deps, "g1");
+  assert.match(prompts[0].user, /PLAN:\nWrap fetch in a retry helper with backoff\.\n\nChanges:\n- add src\/retry\.ts: retry helper/);
+  // A member with no plan gets no empty PLAN block.
+  assert.equal(prompts[0].user.match(/PLAN:/g)?.length, 1);
+});

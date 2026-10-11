@@ -26,6 +26,7 @@ import type { DesignStatement } from "@twing/core";
 // server sends, so they can be read in one place -- see that file's header.
 import { GROUP_OVERVIEW_RESYNTHESIS_PROMPT as SYSTEM_PROMPT } from "./llm-prompts.js";
 import type { LlmTag } from "./llm-client.js";
+import { planSectionFor } from "./overview-resynthesis.js";
 
 export interface GroupResynthesisDeps {
   /** Every design sharing a `groupId`, as the caller is authorized to see.
@@ -67,6 +68,10 @@ function buildUserPrompt(deps: GroupResynthesisDeps, members: DesignStatement[])
   const parts = members.map((member) => {
     const label = deps.labelFor(member);
     const lines = [`REPO: ${label}`, `OVERVIEW:\n${truncate(member.summary ?? "", MAX_MEMBER_CHARS)}`];
+    // The "how" (2026-10-11) -- without it the group overview could only
+    // restate each member's problem. See `planSectionFor`.
+    const plan = planSectionFor(member);
+    if (plan) lines.push(`PLAN:\n${truncate(plan, MAX_MEMBER_CHARS)}`);
     const grounding = deps.groundingFor?.(member);
     if (grounding) lines.push(`SESSION CONTEXT:\n${truncate(grounding, MAX_MEMBER_CHARS)}`);
     return lines.join("\n\n");

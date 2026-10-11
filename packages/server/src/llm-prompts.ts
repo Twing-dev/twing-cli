@@ -167,7 +167,8 @@ export const SEMANTIC_CHECK_FEW_SHOT: { user: string; assistant: string }[] = [
 /** `overview-resynthesis.ts` -- rewrites one design's overview, folding its
  * amendment pile (and, when available, conversation grounding) into one
  * current statement: the problem this design solves, then the plan for
- * solving it, as plain prose a colleague would say out loud -- not labeled
+ * solving it (required whenever the design has a PLAN -- the "how" was
+ * being dropped as "obvious" before 2026-10-11), as plain prose a colleague would say out loud -- not labeled
  * fields, no fixed length, crisp over padded. Runs on every amendment (no
  * threshold, 2026-10-10) and incrementally: once a design has been folded
  * once, the transcript it's given is scoped to the conversation *since* that
@@ -178,16 +179,16 @@ export const SEMANTIC_CHECK_FEW_SHOT: { user: string; assistant: string }[] = [
 export const OVERVIEW_RESYNTHESIS_PROMPT = [
   "You are rewriting the overview of a software design statement, for a reviewer deciding whether to approve it.",
   "",
-  "You are given the design's ORIGINAL overview, in order, the AMENDMENTS its author appended as the work changed, and -- when available -- an abridged, redacted transcript of the session that produced it.",
+  "You are given the design's ORIGINAL overview, in order, the AMENDMENTS its author appended as the work changed, its PLAN (the author's description of how they will solve it, plus the list of changes) when it has one, and -- when available -- an abridged, redacted transcript of the session that produced it.",
   "",
   "Write it as prose a colleague would say out loud, in two beats, not two labeled sections -- just the shape of the thinking, not headers on it:",
   "",
   "1. The problem: what's missing, wrong, or painful that makes this worth doing.",
-  "2. The plan: how this solves it.",
+  "2. The plan: how this solves it -- the gist of the approach, meaning the key mechanism a reviewer needs to judge it, not a list of files.",
   "",
-  "Plain sentences, present tense, no labels, no headings, no bullet points. Skip the plan beat entirely when the problem statement already makes it obvious -- most small changes do.",
+  "Plain sentences, present tense, no labels, no headings, no bullet points. When a PLAN is given, the plan beat is required: a reviewer has to see how the change works, not only what it fixes. Never let the plan beat just restate the problem in other words.",
   "",
-  "Length follows the real size of the change, nothing more: a small, single-purpose change is one short sentence covering both beats at once. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length, and never write a sentence that just restates another in different words. No fixed limit -- crisp and to the point is the goal, not a character count.",
+  "Length follows the real size of the change, nothing more: a small, single-purpose change is one or two short sentences covering both beats. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length, and never write a sentence that just restates another in different words. No fixed limit -- crisp and to the point is the goal, not a character count.",
   "",
   "Rules:",
   "- Simple, direct English. Short words over long ones, active voice, no filler phrases ('in order to', 'it is worth noting').",
@@ -212,16 +213,16 @@ export const OVERVIEW_RESYNTHESIS_PROMPT = [
 export const GROUP_OVERVIEW_RESYNTHESIS_PROMPT = [
   "You are writing the current overview for a design, for a reviewer deciding whether to approve it -- every design has a `groupId`, whether or not anything else shares it, so this may be one repo alone or several linked as one piece of work.",
   "",
-  "You are given each repo's own current design overview, labeled with its repo name, and -- when available -- grounding from the conversation that produced each one.",
+  "You are given each repo's own current design overview, labeled with its repo name, its PLAN (how the author intends to solve it, plus the list of changes) when it has one, and -- when available -- grounding from the conversation that produced each one.",
   "",
   "Write it as prose a colleague would say out loud, as one unified change (it is, whether it's one repo or several), in two beats, not two labeled sections -- just the shape of the thinking, not headers on it:",
   "",
   "1. The problem: what's missing, wrong, or painful that makes this worth doing.",
-  "2. The plan: how this solves it, across whichever repos are involved.",
+  "2. The plan: how this solves it, across whichever repos are involved -- the gist of the approach, meaning the key mechanism a reviewer needs to judge it, not a list of files.",
   "",
-  "Plain sentences, present tense, no labels, no headings, no bullet points, no per-repo changelog. Skip the plan beat entirely when the problem statement already makes it obvious -- most small changes do.",
+  "Plain sentences, present tense, no labels, no headings, no bullet points, no per-repo changelog. When any PLAN is given, the plan beat is required: a reviewer has to see how the change works, not only what it fixes. Never let the plan beat just restate the problem in other words.",
   "",
-  "Length follows the real size of the change, nothing more: a small, single-purpose change is one short sentence covering both beats at once. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length. No fixed limit -- crisp and to the point is the goal, not a character count.",
+  "Length follows the real size of the change, nothing more: a small, single-purpose change is one or two short sentences covering both beats. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length. No fixed limit -- crisp and to the point is the goal, not a character count.",
   "",
   "Rules:",
   "- Simple, direct English. Short words over long ones, active voice, no filler phrases.",
