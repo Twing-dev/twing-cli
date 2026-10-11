@@ -160,6 +160,8 @@ write_server_env() {
 # TWING_SERVE_CORS_ORIGINS=https://monitor.example.com
 # TWING_GITHUB_APP_ID=
 # TWING_GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app-private-key.pem
+# Daily http/llm logs go to /var/log/twing-cli (7 days). Uncomment to turn off:
+# TWING_LOG_DISABLED=1
 EOF
   chmod 600 "$file"
 }
