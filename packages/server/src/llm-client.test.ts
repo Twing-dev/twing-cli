@@ -9,7 +9,10 @@ import {
   selectProvider,
   __setVertexCredentialsForTests,
   type VertexCredentials,
+  type LlmTag,
 } from "./llm-client.js";
+
+const TEST_TAG: LlmTag = { purpose: "design_extract" };
 
 function withMockFetch<T>(impl: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
@@ -42,7 +45,7 @@ test("callLlm: routes to bedrock-mantle with the right path/model, extracts trim
         return new Response(JSON.stringify({ choices: [{ message: { content: "  hi from bedrock  " } }] }), { status: 200 });
       }) as typeof fetch,
       async () => {
-        const text = await callLlm("system prompt", "user prompt", { model: "google.gemma-4-31b", region: "us-east-1" });
+        const text = await callLlm("system prompt", "user prompt", { tag: TEST_TAG, model: "google.gemma-4-31b", region: "us-east-1" });
         assert.equal(text, "hi from bedrock");
       },
     ),
@@ -70,7 +73,7 @@ test("callLlmMessages: passes the full message list through unmodified (few-shot
         return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
       }) as typeof fetch,
       async () => {
-        const text = await callLlmMessages(messages, { model: "m", region: "us-east-1" });
+        const text = await callLlmMessages(messages, { tag: TEST_TAG, model: "m", region: "us-east-1" });
         assert.equal(text, "ok");
       },
     ),
@@ -86,7 +89,7 @@ test("callLlm: unmapped model defaults to the plain /v1 path", async () => {
         capturedUrl = url;
         return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
       }) as typeof fetch,
-      () => callLlm("s", "u", { model: "zai.glm-5", region: "us-east-1" }),
+      () => callLlm("s", "u", { tag: TEST_TAG, model: "zai.glm-5", region: "us-east-1" }),
     ),
   );
   assert.equal(capturedUrl, "https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions");
@@ -101,7 +104,7 @@ test("callLlm: no AWS_BEARER_TOKEN_BEDROCK (and no other provider) throws before
         throw new Error("should not be called");
       }) as typeof fetch,
       async () => {
-        await assert.rejects(() => callLlm("s", "u", { model: "m", region: "us-east-1" }), /no LLM provider configured/);
+        await assert.rejects(() => callLlm("s", "u", { tag: TEST_TAG, model: "m", region: "us-east-1" }), /no LLM provider configured/);
       },
     ),
   );
@@ -115,7 +118,7 @@ test("callLlm: no region (option or env) throws before any network call", async 
   delete process.env.AWS_DEFAULT_REGION;
   try {
     await withBedrockToken("test-token", async () => {
-      await assert.rejects(() => callLlm("s", "u", { model: "m" }), /no region/);
+      await assert.rejects(() => callLlm("s", "u", { tag: TEST_TAG, model: "m" }), /no region/);
     });
   } finally {
     if (originalRegion !== undefined) process.env.AWS_REGION = originalRegion;
@@ -128,7 +131,7 @@ test("callLlm: non-ok response throws with the error message (caller's retry log
     withMockFetch(
       (async () => new Response(JSON.stringify({ error: { message: "Operation not allowed" } }), { status: 403 })) as typeof fetch,
       async () => {
-        await assert.rejects(() => callLlm("s", "u", { model: "m", region: "us-east-1" }), /Operation not allowed/);
+        await assert.rejects(() => callLlm("s", "u", { tag: TEST_TAG, model: "m", region: "us-east-1" }), /Operation not allowed/);
       },
     ),
   );
@@ -138,7 +141,7 @@ test("callLlm: missing/unknown content resolves to empty string, not a throw", a
   const text = await withBedrockToken("test-token", () =>
     withMockFetch(
       (async () => new Response(JSON.stringify({ choices: [] }), { status: 200 })) as typeof fetch,
-      () => callLlm("s", "u", { model: "m", region: "us-east-1" }),
+      () => callLlm("s", "u", { tag: TEST_TAG, model: "m", region: "us-east-1" }),
     ),
   );
   assert.equal(text, "");
@@ -225,7 +228,7 @@ test("callLlm: with no provider configured, throws before any network call (call
         throw new Error("should not be called");
       }) as typeof fetch,
       async () => {
-        await assert.rejects(() => callLlm("s", "u", { model: "m" }), /no LLM provider configured/);
+        await assert.rejects(() => callLlm("s", "u", { tag: TEST_TAG, model: "m" }), /no LLM provider configured/);
       },
     ),
   );
@@ -268,7 +271,7 @@ test("bifrost: POST {base}/v1/chat/completions, {model,messages} body, trimmed c
         return new Response(JSON.stringify({ choices: [{ message: { content: "  hi from bifrost  " } }] }), { status: 200 });
       }) as typeof fetch,
       async () => {
-        const text = await callLlm("sys", "usr", { model: "openai/gpt-4o-mini" });
+        const text = await callLlm("sys", "usr", { tag: TEST_TAG, model: "openai/gpt-4o-mini" });
         assert.equal(text, "hi from bifrost");
       },
     ),
@@ -293,7 +296,7 @@ test("bifrost: trailing slash on TWING_BIFROST_BASE_URL is normalised", async ()
         capturedUrl = url;
         return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
       }) as typeof fetch,
-      () => callLlm("s", "u", { model: "m" }),
+      () => callLlm("s", "u", { tag: TEST_TAG, model: "m" }),
     ),
   );
   assert.equal(capturedUrl, "http://localhost:8080/v1/chat/completions");
@@ -307,13 +310,13 @@ test("bifrost: a sk-bf- key goes as x-bf-vk, anything else as Authorization: Bea
   }) as typeof fetch;
 
   await withEnv({ TWING_BIFROST_BASE_URL: "http://x", TWING_BIFROST_API_KEY: "sk-bf-abc123" }, () =>
-    withMockFetch(capture, () => callLlm("s", "u", { model: "m" })),
+    withMockFetch(capture, () => callLlm("s", "u", { tag: TEST_TAG, model: "m" })),
   );
   assert.equal(headers["x-bf-vk"], "sk-bf-abc123");
   assert.equal(headers.authorization, undefined);
 
   await withEnv({ TWING_BIFROST_BASE_URL: "http://x", TWING_BIFROST_API_KEY: "sk-live-xyz" }, () =>
-    withMockFetch(capture, () => callLlm("s", "u", { model: "m" })),
+    withMockFetch(capture, () => callLlm("s", "u", { tag: TEST_TAG, model: "m" })),
   );
   assert.equal(headers.authorization, "Bearer sk-live-xyz");
   assert.equal(headers["x-bf-vk"], undefined);
@@ -324,7 +327,7 @@ test("bifrost: non-ok response throws with the error message", async () => {
     withMockFetch(
       (async () => new Response(JSON.stringify({ error: { message: "model not found" } }), { status: 500 })) as typeof fetch,
       async () => {
-        await assert.rejects(() => callLlm("s", "u", { model: "m" }), /Bifrost request failed \(500\): model not found/);
+        await assert.rejects(() => callLlm("s", "u", { tag: TEST_TAG, model: "m" }), /Bifrost request failed \(500\): model not found/);
       },
     ),
   );
@@ -348,7 +351,7 @@ test("openrouter: routes to openrouter.ai with Bearer OPENROUTER_API_KEY and pas
         capturedBody = JSON.parse(init!.body as string);
         return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
       }) as typeof fetch,
-      () => callLlmMessages(messages, { model: "openai/gpt-4o-mini" }),
+      () => callLlmMessages(messages, { tag: TEST_TAG, model: "openai/gpt-4o-mini" }),
     ),
   );
   assert.equal(capturedUrl, "https://openrouter.ai/api/v1/chat/completions");
@@ -364,7 +367,7 @@ test("openrouter: OPENROUTER_BASE_URL override is honoured", async () => {
         capturedUrl = url;
         return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
       }) as typeof fetch,
-      () => callLlm("s", "u", { model: "m" }),
+      () => callLlm("s", "u", { tag: TEST_TAG, model: "m" }),
     ),
   );
   assert.equal(capturedUrl, "https://proxy.internal/or/v1/chat/completions");
@@ -397,7 +400,7 @@ test("vertex: gets a token + project from google-auth-library, calls the OpenAI-
           return new Response(JSON.stringify({ choices: [{ message: { content: "  hi from vertex  " } }] }), { status: 200 });
         }) as typeof fetch,
         async () => {
-          const text = await callLlm("s", "u", { model: "google/gemini-2.0-flash" });
+          const text = await callLlm("s", "u", { tag: TEST_TAG, model: "google/gemini-2.0-flash" });
           assert.equal(text, "hi from vertex");
         },
       ),
@@ -426,7 +429,7 @@ test("vertex: an explicit GOOGLE_CLOUD_LOCATION=global also uses the location-le
           aiUrl = url;
           return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
         }) as typeof fetch,
-        () => callLlm("s", "u", { model: "google/gemini-2.0-flash" }),
+        () => callLlm("s", "u", { tag: TEST_TAG, model: "google/gemini-2.0-flash" }),
       ),
     ),
   );
@@ -455,7 +458,7 @@ test("vertex: GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION override the auto-res
             aiUrl = url;
             return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
           }) as typeof fetch,
-          () => callLlm("s", "u", { model: "google/gemini-2.0-flash" }),
+          () => callLlm("s", "u", { tag: TEST_TAG, model: "google/gemini-2.0-flash" }),
         ),
       ),
   );
@@ -478,7 +481,7 @@ test("vertex: a credential error propagates (caller's retry loop is responsible 
       withMockFetch(
         (async () => new Response("{}", { status: 200 })) as typeof fetch,
         async () => {
-          await assert.rejects(() => callLlm("s", "u", { model: "m" }), /no access token/);
+          await assert.rejects(() => callLlm("s", "u", { tag: TEST_TAG, model: "m" }), /no access token/);
         },
       ),
     ),

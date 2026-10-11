@@ -107,6 +107,42 @@ export interface LlmCallOptions {
   model: string;
   /** Bedrock only: omit to fall back to AWS_REGION/AWS_DEFAULT_REGION. */
   region?: string;
+  /** What this call is for and what it's about -- written to the daily llm
+   * log only (daily-log.ts), never sent to the provider. Required so a new
+   * call site can't land without saying what it is. */
+  tag: LlmTag;
+}
+
+/** One fixed label per kind of prompt, so `grep '"purpose":"..."'` finds
+ * every call of that kind in the llm log. */
+export type LlmPurpose =
+  | "design_extract"
+  | "semantic_check"
+  | "design_chat"
+  | "overview_resynthesis"
+  | "group_overview_resynthesis";
+
+/** Ids that make a logged call findable by `grep <id>`. Each call site fills
+ * in whichever it knows -- plan extraction runs before the design exists,
+ * so it can only carry the session/project. */
+export interface LlmTag {
+  purpose: LlmPurpose;
+  groupId?: string;
+  designId?: string;
+  sessionId?: string;
+  projectId?: string;
+  /** Semantic check only: the design it was compared against. */
+  otherDesignId?: string;
+  otherGroupId?: string;
+  /** Group overview only: every member design. */
+  designIds?: string[];
+}
+
+/** Filled in by the provider call just before `fetch`, so the log records
+ * where the request actually went. Undefined when a call failed before
+ * getting that far (missing credentials/region). */
+interface SentRequest {
+  endpoint?: string;
 }
 
 export type LlmProvider = "bedrock" | "vertex" | "openrouter" | "bifrost";
@@ -296,7 +332,7 @@ async function parseChatCompletion(res: Response, label: string): Promise<string
   return body.choices?.[0]?.message?.content?.trim() ?? "";
 }
 
-async function callBedrock(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
+async function callBedrock(messages: ChatMessage[], options: LlmCallOptions, sent: SentRequest): Promise<string> {
   const region = options.region ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
   if (!region) {
     throw new Error("Bedrock request failed: no region -- set AWS_REGION/AWS_DEFAULT_REGION or pass options.region");
@@ -307,7 +343,8 @@ async function callBedrock(messages: ChatMessage[], options: LlmCallOptions): Pr
   }
   const path = BEDROCK_MANTLE_PATH[options.model] ?? "/v1";
 
-  const res = await fetch(`https://bedrock-mantle.${region}.api.aws${path}/chat/completions`, {
+  sent.endpoint = `https://bedrock-mantle.${region}.api.aws${path}/chat/completions`;
+  const res = await fetch(sent.endpoint, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify({ model: options.model, messages }),
@@ -352,7 +389,7 @@ function googleAuthCredentials(): VertexCredentials {
   };
 }
 
-async function callVertex(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
+async function callVertex(messages: ChatMessage[], options: LlmCallOptions, sent: SentRequest): Promise<string> {
   const creds = vertexCredentialsOverride ?? googleAuthCredentials();
   const project =
     process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT ?? (await creds.projectId());
@@ -366,8 +403,9 @@ async function callVertex(messages: ChatMessage[], options: LlmCallOptions): Pro
   const host = location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`;
   const token = await creds.accessToken();
 
+  sent.endpoint = `https://${host}/v1/projects/${project}/locations/${location}/endpoints/openapi/chat/completions`;
   const res = await fetch(
-    `https://${host}/v1/projects/${project}/locations/${location}/endpoints/openapi/chat/completions`,
+    sent.endpoint,
     {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
@@ -377,14 +415,15 @@ async function callVertex(messages: ChatMessage[], options: LlmCallOptions): Pro
   return parseChatCompletion(res, "Vertex");
 }
 
-async function callOpenRouter(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
+async function callOpenRouter(messages: ChatMessage[], options: LlmCallOptions, sent: SentRequest): Promise<string> {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) {
     throw new Error("OpenRouter request failed: no credentials -- set OPENROUTER_API_KEY");
   }
   const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
 
-  const res = await fetch(`${base}/chat/completions`, {
+  sent.endpoint = `${base}/chat/completions`;
+  const res = await fetch(sent.endpoint, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
     body: JSON.stringify({ model: options.model, messages }),
@@ -400,14 +439,15 @@ function bifrostAuthHeaders(key: string | undefined): Record<string, string> {
   return { authorization: `Bearer ${key}` };
 }
 
-async function callBifrost(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
+async function callBifrost(messages: ChatMessage[], options: LlmCallOptions, sent: SentRequest): Promise<string> {
   const rawBase = process.env.TWING_BIFROST_BASE_URL;
   if (!rawBase) {
     throw new Error("Bifrost request failed: no gateway URL -- set TWING_BIFROST_BASE_URL");
   }
   const base = rawBase.replace(/\/+$/, "");
 
-  const res = await fetch(`${base}/v1/chat/completions`, {
+  sent.endpoint = `${base}/v1/chat/completions`;
+  const res = await fetch(sent.endpoint, {
     method: "POST",
     headers: { "content-type": "application/json", ...bifrostAuthHeaders(process.env.TWING_BIFROST_API_KEY) },
     body: JSON.stringify({ model: options.model, messages }),
@@ -422,29 +462,30 @@ async function callBifrost(messages: ChatMessage[], options: LlmCallOptions): Pr
  * none is configured). */
 export async function callLlmMessages(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
   const startedAt = Date.now();
-  const entry = { callId: crypto.randomUUID(), requestId: requestContext.getStore()?.requestId, model: options.model, messages };
+  const entry = { callId: crypto.randomUUID(), requestId: requestContext.getStore()?.requestId, ...options.tag, model: options.model, messages };
+  const sent: SentRequest = {};
   let provider: LlmProvider | undefined;
   try {
     provider = selectProvider();
-    const response = await dispatchLlm(provider, messages, options);
-    llmLog.write({ ...entry, provider, response, durationMs: Date.now() - startedAt });
+    const response = await dispatchLlm(provider, messages, options, sent);
+    llmLog.write({ ...entry, provider, endpoint: sent.endpoint, response, durationMs: Date.now() - startedAt });
     return response;
   } catch (err) {
-    llmLog.write({ ...entry, provider, error: err instanceof Error ? err.message : String(err), durationMs: Date.now() - startedAt });
+    llmLog.write({ ...entry, provider, endpoint: sent.endpoint, error: err instanceof Error ? err.message : String(err), durationMs: Date.now() - startedAt });
     throw err;
   }
 }
 
-function dispatchLlm(provider: LlmProvider, messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
+function dispatchLlm(provider: LlmProvider, messages: ChatMessage[], options: LlmCallOptions, sent: SentRequest): Promise<string> {
   switch (provider) {
     case "vertex":
-      return callVertex(messages, options);
+      return callVertex(messages, options, sent);
     case "openrouter":
-      return callOpenRouter(messages, options);
+      return callOpenRouter(messages, options, sent);
     case "bifrost":
-      return callBifrost(messages, options);
+      return callBifrost(messages, options, sent);
     case "bedrock":
-      return callBedrock(messages, options);
+      return callBedrock(messages, options, sent);
   }
 }
 

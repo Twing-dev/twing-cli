@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DailyLog, sweepOldLogs, redact, capBody, describeBody } from "./daily-log.js";
+import { DailyLog, sweepOldLogs, redact, capBody, describeBody, logIdsFrom, initLogging } from "./daily-log.js";
+import { callLlm } from "./llm-client.js";
 
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "twing-daily-log-"));
@@ -63,4 +64,54 @@ test("describeBody parses+redacts JSON, keeps text, sizes binary", () => {
   assert.equal(describeBody("text/plain", "hello"), "hello");
   assert.deepEqual(describeBody("application/octet-stream", "abcd"), { contentType: "application/octet-stream", bytes: 4 });
   assert.equal(describeBody("application/json", ""), undefined);
+});
+
+test("logIdsFrom reads ids from response, request, query and path", () => {
+  assert.deepEqual(
+    logIdsFrom("/v1/designs/check", {}, { sessionId: "s1", projectId: "p1" }, { verdict: "clean", designId: "d1", groupId: "g1" }),
+    { pathDesignId: "check", designId: "d1", groupId: "g1", sessionId: "s1" },
+  );
+  assert.deepEqual(logIdsFrom("/v1/designs/d2/amend", { sessionId: "s2" }, undefined, "not json"), {
+    pathDesignId: "d2",
+    designId: undefined,
+    groupId: undefined,
+    sessionId: "s2",
+  });
+  assert.equal(logIdsFrom("/v1/claims", {}, [], undefined).pathDesignId, undefined);
+});
+
+test("every LLM log line carries its purpose, ids and the endpoint it went to", async () => {
+  const dir = tempDir();
+  process.env.TWING_LOG_DIR = dir;
+  process.env.AWS_BEARER_TOKEN_BEDROCK = "test-token";
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 })) as typeof fetch;
+  try {
+    assert.ok(!("error" in initLogging()));
+    await callLlm("SYS", "USER", {
+      model: "m",
+      region: "us-east-1",
+      tag: { purpose: "overview_resynthesis", designId: "d1", groupId: "g1", sessionId: "s1" },
+    });
+  } finally {
+    globalThis.fetch = original;
+    delete process.env.TWING_LOG_DIR;
+    delete process.env.AWS_BEARER_TOKEN_BEDROCK;
+  }
+  const file = path.join(dir, `llm-${new Date().toISOString().slice(0, 10)}.jsonl`);
+  for (let i = 0; i < 50 && !(fs.existsSync(file) && fs.readFileSync(file, "utf8").includes("\n")); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const line = JSON.parse(fs.readFileSync(file, "utf8").trim());
+  assert.equal(line.purpose, "overview_resynthesis");
+  assert.equal(line.groupId, "g1");
+  assert.equal(line.designId, "d1");
+  assert.equal(line.sessionId, "s1");
+  assert.equal(line.endpoint, "https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions");
+  assert.deepEqual(line.messages, [
+    { role: "system", content: "SYS" },
+    { role: "user", content: "USER" },
+  ]);
+  assert.equal(line.response, "ok");
 });

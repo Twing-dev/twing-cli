@@ -54,7 +54,7 @@ import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
 import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
 import { callLlm } from "./llm-client.js";
-import { httpLog, describeBody, isLoggingEnabled, isTextual, redact, requestContext } from "./daily-log.js";
+import { httpLog, describeBody, isLoggingEnabled, isTextual, logIdsFrom, redact, requestContext } from "./daily-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
 import { fetchRepoPermissions, fetchGithubUser, type GithubUser, type GithubRepoPermissions } from "./github-client.js";
 import {
@@ -646,7 +646,7 @@ export function createApp(options: CreateAppOptions = {}) {
     getDesign: (id) => designs.get(id),
     eventsFor: (id) => activityLog.eventsForRelatedId(id),
     commentsFor: (id) => designComments.listByDesign(id),
-    callModel: (systemPrompt, userPrompt) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel }),
+    callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel, tag }),
     writeOverview: (id, summary) => {
       designs.reviseOverview(id, { summary, actor: "twing", source: "llm_resynthesis" });
     },
@@ -681,7 +681,7 @@ export function createApp(options: CreateAppOptions = {}) {
     listMembers: (groupId) => designs.listByGroup(groupId),
     groundingFor: (design) => groundingTextFor(design),
     labelFor: (design) => identities.getProjectRecord(design.projectId)?.githubRepo ?? design.projectId.slice(0, 10),
-    callModel: (systemPrompt, userPrompt) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel }),
+    callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel, tag }),
     getOverride: (groupId) => designGroups.get(groupId)?.overview,
     log: (message) => console.log(message),
   };
@@ -726,8 +726,23 @@ export function createApp(options: CreateAppOptions = {}) {
     c.header("X-Request-Id", requestId);
     const resType = c.res.headers.get("content-type");
     const resBody = isTextual(resType) ? describeBody(resType, await c.res.clone().text()) : undefined;
+    const ids = logIdsFrom(c.req.path, base.query, reqBody, resBody);
+    let designId = ids.designId;
+    let groupId = ids.groupId;
+    // Best-effort: a lookup failure only costs this line its ids, never the
+    // response, which has already been produced by now.
+    try {
+      const pathDesign = ids.pathDesignId ? designs.get(ids.pathDesignId) : undefined;
+      designId ??= pathDesign?.id;
+      groupId ??= pathDesign?.groupId ?? (designId ? designs.get(designId)?.groupId : undefined);
+    } catch {
+      // Leave the ids unset.
+    }
     httpLog.write({
       ...base,
+      designId,
+      groupId,
+      sessionId: ids.sessionId,
       developerId: c.get("identity")?.developerId,
       status: c.res.status,
       durationMs: Date.now() - startedAt,
@@ -2011,7 +2026,10 @@ export function createApp(options: CreateAppOptions = {}) {
       const history = designChats.messages(chat.id);
       const historyChars = history.reduce((n, m) => n + m.message.length, 0);
       const grounding = groundDesign(design, groundingBudgetFor(message, historyChars));
-      const answer = await answerDesignChat(grounding.context, history, { model: commentAnswerModel });
+      const answer = await answerDesignChat(grounding.context, history, {
+        model: commentAnswerModel,
+        context: { designId: design.id, groupId: design.groupId, sessionId: design.sessionId, projectId: design.projectId },
+      });
       const provenance = describeProvenance(grounding.provenance);
 
       designChats.append(chat.id, { role: "agent", message: answer, ts: Date.now(), provenance });
@@ -2115,7 +2133,7 @@ export function createApp(options: CreateAppOptions = {}) {
     let extractedChanges: unknown;
 
     if (body.rawPlanText && !hasStructured) {
-      const extracted = await extractDesign(body.rawPlanText, { model: extractModel });
+      const extracted = await extractDesign(body.rawPlanText, { model: extractModel, context: { sessionId: body.sessionId, projectId: body.projectId } });
       creates = extracted.creates;
       touches = extracted.touches;
       dependsOn = extracted.dependsOn;

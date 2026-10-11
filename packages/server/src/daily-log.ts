@@ -136,6 +136,31 @@ export function describeBody(contentType: string | null | undefined, text: strin
   return { contentType: type, bytes: Buffer.byteLength(text) };
 }
 
+/** Ids an http-log line can be grepped by, read from what the request and
+ * response already carry: top-level `designId`/`groupId`/`sessionId` in
+ * either body (every design route's response names them), `sessionId` in
+ * the query, and the `:id` of a `/v1/designs/:id...` path. The path id is
+ * only a *candidate* -- `/v1/designs/check` matches the same pattern -- so
+ * the caller confirms it against the design store before trusting it. */
+export function logIdsFrom(
+  path: string,
+  query: unknown,
+  reqBody: unknown,
+  resBody: unknown,
+): { pathDesignId?: string; designId?: string; groupId?: string; sessionId?: string } {
+  const field = (source: unknown, key: string): string | undefined => {
+    if (!source || typeof source !== "object" || Array.isArray(source)) return undefined;
+    const value = (source as Record<string, unknown>)[key];
+    return typeof value === "string" && value !== "" ? value : undefined;
+  };
+  return {
+    pathDesignId: /^\/v1\/designs\/([^/]+)/.exec(path)?.[1],
+    designId: field(resBody, "designId") ?? field(reqBody, "designId"),
+    groupId: field(resBody, "groupId") ?? field(reqBody, "groupId"),
+    sessionId: field(reqBody, "sessionId") ?? field(query, "sessionId") ?? field(resBody, "sessionId"),
+  };
+}
+
 const NOOP = { write: (_entry: object) => {} };
 export let httpLog: Pick<DailyLog, "write"> = NOOP;
 export let llmLog: Pick<DailyLog, "write"> = NOOP;
