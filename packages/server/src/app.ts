@@ -54,6 +54,7 @@ import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
 import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
 import { callLlm } from "./llm-client.js";
+import { httpLog, describeBody, isLoggingEnabled, isTextual, redact, requestContext } from "./daily-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
 import { fetchRepoPermissions, fetchGithubUser, type GithubUser, type GithubRepoPermissions } from "./github-client.js";
 import {
@@ -693,6 +694,46 @@ export function createApp(options: CreateAppOptions = {}) {
   const version = options.version ?? getServerVersion();
 
   const app = new Hono<{ Variables: Variables }>();
+
+  // Daily http log (daily-log.ts): mounted first so it also sees the
+  // 426/401 responses the middleware below returns early. No-op unless
+  // main.ts called initLogging. Response bodies are read from a clone, so
+  // the route's own response is untouched; nothing here streams.
+  app.use("*", async (c, next) => {
+    if (!isLoggingEnabled() || c.req.method === "OPTIONS") return next();
+    const requestId = crypto.randomUUID();
+    const startedAt = Date.now();
+    const reqType = c.req.header("content-type");
+    const reqBody = isTextual(reqType)
+      ? describeBody(reqType, await c.req.raw.clone().text())
+      : c.req.header("content-length")
+        ? { contentType: reqType, bytes: Number(c.req.header("content-length")) }
+        : undefined;
+    const base = {
+      requestId,
+      method: c.req.method,
+      path: c.req.path,
+      query: redact(c.req.query()),
+      reqHeaders: redact(c.req.header()),
+      reqBody,
+    };
+    try {
+      await requestContext.run({ requestId }, next);
+    } catch (err) {
+      httpLog.write({ ...base, status: 500, durationMs: Date.now() - startedAt, error: err instanceof Error ? err.stack ?? err.message : String(err) });
+      throw err;
+    }
+    c.header("X-Request-Id", requestId);
+    const resType = c.res.headers.get("content-type");
+    const resBody = isTextual(resType) ? describeBody(resType, await c.res.clone().text()) : undefined;
+    httpLog.write({
+      ...base,
+      developerId: c.get("identity")?.developerId,
+      status: c.res.status,
+      durationMs: Date.now() - startedAt,
+      resBody,
+    });
+  });
 
   // twing-monitor v1: mounted before the auth middleware below (source
   // order matters in Hono) so a browser's `OPTIONS` preflight -- which

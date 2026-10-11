@@ -133,6 +133,12 @@ Plain appended file, both stdout and stderr. Nothing rotates it
 automatically -- if this runs for a long time, keep an eye on its size
 (`logrotate` or just truncating it periodically both work fine).
 
+Every HTTP request/response and every LLM prompt+reply also go to
+date-rotated JSONL files under the data directory's `logs/`
+(`http-YYYY-MM-DD.jsonl`, `llm-YYYY-MM-DD.jsonl`, UTC), kept for 7 days
+(`TWING_LOG_RETENTION_DAYS`), with secrets redacted. `TWING_LOG_DIR`
+moves them; `TWING_LOG_DISABLED=1` turns them off.
+
 ## Stop
 
 ```sh

@@ -83,6 +83,8 @@
  */
 
 import { GoogleAuth } from "google-auth-library";
+import * as crypto from "node:crypto";
+import { llmLog, requestContext } from "./daily-log.js";
 
 // gemma-4-31b is only reachable via bedrock-mantle's OpenAI-compat route,
 // not its plain-Bedrock-model route -- everything else (glm-5, and per
@@ -419,7 +421,22 @@ async function callBifrost(messages: ChatMessage[], options: LlmCallOptions): Pr
  * case. Provider is chosen ambiently -- see `selectProvider` (throws when
  * none is configured). */
 export async function callLlmMessages(messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
-  switch (selectProvider()) {
+  const startedAt = Date.now();
+  const entry = { callId: crypto.randomUUID(), requestId: requestContext.getStore()?.requestId, model: options.model, messages };
+  let provider: LlmProvider | undefined;
+  try {
+    provider = selectProvider();
+    const response = await dispatchLlm(provider, messages, options);
+    llmLog.write({ ...entry, provider, response, durationMs: Date.now() - startedAt });
+    return response;
+  } catch (err) {
+    llmLog.write({ ...entry, provider, error: err instanceof Error ? err.message : String(err), durationMs: Date.now() - startedAt });
+    throw err;
+  }
+}
+
+function dispatchLlm(provider: LlmProvider, messages: ChatMessage[], options: LlmCallOptions): Promise<string> {
+  switch (provider) {
     case "vertex":
       return callVertex(messages, options);
     case "openrouter":

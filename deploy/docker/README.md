@@ -40,6 +40,12 @@ docker compose logs -f twing-serve
 docker compose logs -f caddy
 ```
 
+Every HTTP request/response and every LLM prompt+reply also go to
+date-rotated JSONL files under `./data/logs/`
+(`http-YYYY-MM-DD.jsonl`, `llm-YYYY-MM-DD.jsonl`, UTC), kept for 7 days
+(`TWING_LOG_RETENTION_DAYS`), with secrets redacted. `TWING_LOG_DIR`
+moves them; `TWING_LOG_DISABLED=1` turns them off.
+
 ## Bootstrap token / admin bootstrap
 
 Only relevant for a non-GitHub-hosted project -- a GitHub-hosted one founds
