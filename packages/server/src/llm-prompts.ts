@@ -166,8 +166,8 @@ export const SEMANTIC_CHECK_FEW_SHOT: { user: string; assistant: string }[] = [
 
 /** `overview-resynthesis.ts` -- rewrites one design's overview, folding its
  * amendment pile (and, when available, conversation grounding) into one
- * current statement, as two labelled parts, `Problem:` then `Approach:`,
- * with no length limit (2026-10-11 -- it was free prose before, and the "how" kept
+ * current statement, as two labelled parts, `Problem:` (sentences) then
+ * `Approach:` (a bullet per step: what happens and why), with no length limit (2026-10-11 -- it was free prose before, and the "how" kept
  * being dropped as "obvious"; a fixed shape makes a missing Approach
  * impossible to miss). Runs on every amendment (no
  * threshold, 2026-10-10) and incrementally: once a design has been folded
@@ -183,10 +183,13 @@ export const OVERVIEW_RESYNTHESIS_PROMPT = [
   "",
   "Output exactly two parts, in this format and nothing else:",
   "",
-  "Problem: <what's missing, wrong, or painful, and why it matters>",
-  "Approach: <how this solves it -- the key mechanism a reviewer needs to judge it, not a list of files>",
+  "Problem: <what's missing, wrong, or painful, and why it matters -- plain sentences>",
+  "Approach:",
+  "- <one step of the solution: what happens, and why it is done this way>",
+  "- <next step>",
   "",
-  "There is no length limit: each part is as long as it needs to be to explain the change fully -- a sentence for a small change, several for a complex one. Never pad, and never repeat a point. Both parts are always required. The Approach must say how the change works, never restate the problem in other words. Each part may run over several sentences, but keep it on its one line.",
+  "The Approach is a bullet list, one point per meaningful step or decision, in the order the change works. Each point says what happens and -- whenever the plan, changes or conversation give a reason -- why that choice was made over the obvious alternative. Never invent a reason the material doesn't give; then just say what happens.",
+  "There is no length limit: as many points, and as much detail per point, as the change needs to be understood -- one or two points for a small change, more for a complex one. Never pad, and never repeat a point. Both parts are always required, and the Approach must say how the change works, never restate the problem.",
   "",
   "Rules:",
   "- Simple, direct English. Short words over long ones, active voice, no filler phrases ('in order to', 'it is worth noting').",
@@ -196,7 +199,7 @@ export const OVERVIEW_RESYNTHESIS_PROMPT = [
   "- Drop duplicates: amendments are often pasted twice.",
   "- When a transcript is given, use it to make the plan specific -- a real reason that actually appears in it, never a guess. If the transcript doesn't explain a decision, leave that part out rather than inventing one.",
   "- Name a specific file or component only when it actually helps a reviewer locate the change -- never as a reflex, never when it's the one obvious place the change could be.",
-  "- Output only the two parts: no preamble, no quotes, no markdown, no explanation.",
+  "- Output only the two parts: no preamble, no quotes, no headings or bold, no explanation. The Approach bullets are plain `- ` lines.",
 ].join("\n");
 
 /** `group-overview-resynthesis.ts` -- the same job as the prompt above, run
@@ -218,10 +221,13 @@ export const GROUP_OVERVIEW_RESYNTHESIS_PROMPT = [
   "",
   "Output exactly two parts, in this format and nothing else:",
   "",
-  "Problem: <what's missing, wrong, or painful, and why it matters>",
-  "Approach: <how this solves it, across whichever repos are involved -- the key mechanism a reviewer needs to judge it, not a list of files>",
+  "Problem: <what's missing, wrong, or painful, and why it matters -- plain sentences>",
+  "Approach:",
+  "- <one step of the solution (name the repo when several are involved): what happens, and why it is done this way>",
+  "- <next step>",
   "",
-  "There is no length limit: each part is as long as it needs to be to explain the change fully -- a sentence for a small change, several for a complex one. Never pad, and never repeat a point. Both parts are always required. The Approach must say how the change works, never restate the problem in other words. Each part may run over several sentences, but keep it on its one line.",
+  "The Approach is a bullet list, one point per meaningful step or decision, in the order the change works. Each point says what happens and -- whenever the plan, changes or conversation give a reason -- why that choice was made over the obvious alternative. Never invent a reason the material doesn't give; then just say what happens.",
+  "There is no length limit: as many points, and as much detail per point, as the change needs to be understood -- one or two points for a small change, more for a complex one. Never pad, and never repeat a point. Both parts are always required, and the Approach must say how the change works, never restate the problem.",
   "",
   "Rules:",
   "- Simple, direct English. Short words over long ones, active voice, no filler phrases.",
@@ -229,7 +235,7 @@ export const GROUP_OVERVIEW_RESYNTHESIS_PROMPT = [
   "- Name a specific repo inline only when there's more than one involved and naming it adds information a reader needs -- e.g. 'the server validates it, the CLI prints it'. Never a list of repos, never restate one if the first sentence already makes its role obvious, and never name the one repo everything lives in when there's only one.",
   "- When grounding is given, use it to make the plan specific -- a real reason that actually appears in it, never a guess. If it doesn't explain a decision, leave that part out rather than inventing one.",
   "- If the repos are genuinely doing unrelated things under one groupId, say so plainly rather than inventing a unifying thread that isn't there.",
-  "- Output only the two parts: no preamble, no quotes, no markdown, no explanation.",
+  "- Output only the two parts: no preamble, no quotes, no headings or bold, no explanation. The Approach bullets are plain `- ` lines.",
 ].join("\n");
 
 /** `design-comment-answer.ts` -- the model behind a reviewer's private "Ask
