@@ -18,6 +18,9 @@
  */
 
 import { callLlm } from "./llm-client.js";
+// Moved to llm-prompts.ts (2026-10-10), alongside every other prompt this
+// server sends, so they can be read in one place -- see that file's header.
+import { DESIGN_EXTRACT_PROMPT as SYSTEM_PROMPT } from "./llm-prompts.js";
 
 const MAX_ATTEMPTS = 2;
 const MAX_PLAN_CHARS = 8000;
@@ -38,41 +41,6 @@ export interface ExtractedDesign {
 
 const EMPTY_EXTRACTION: ExtractedDesign = { creates: [], touches: [], dependsOn: [], summary: "" };
 
-// Item 5 is what makes plan mode produce the same structured declaration a
-// hand-written `--from` template does. Kept in the *same* call rather than
-// a second one: the model has already read the plan, a second pass would
-// double the latency of a path that blocks an agent mid-`ExitPlanMode`,
-// and two calls can disagree about scope in a way one cannot.
-//
-// The enums are spelled out inline instead of being interpolated from
-// core's DESIGN_CHANGE_ACTIONS/KINDS. Deliberate: the prompt also has to
-// explain *when* each value applies, so interpolating the list alone
-// would keep only half of it in sync and quietly imply the other half
-// tracked too. core's `validateTemplate`/`ensureChanges` reject anything
-// off-list, so a drifted prompt degrades to a derived change rather than
-// admitting an invalid one.
-const SYSTEM_PROMPT = [
-  "Given an implementation plan, extract:",
-  "1. new modules, classes, functions, or interfaces it creates",
-  "2. existing files/modules it will modify",
-  "3. existing modules/services/interfaces it depends on or calls into",
-  "4. a one-paragraph summary",
-  "5. one structured item per concrete change the plan describes",
-  "",
-  "Each item in `changes` is an object:",
-  '  id     -- short unique slug, e.g. "c1", "c2"',
-  "  action -- exactly one of: add, modify, rewrite, remove, rename, move",
-  "  kind   -- exactly one of: code, api, schema, test, docs, config",
-  "  target -- the file path, or path::Symbol.method when the plan names a specific symbol",
-  "  intent -- one sentence on what this change achieves, in the plan's own terms",
-  '  from   -- REQUIRED for rename/move (the previous name or path), omitted otherwise',
-  "",
-  "Every path in `creates` or `touches` should appear as the target of exactly one item.",
-  "Use `add` for anything in `creates`. Do not invent changes the plan does not describe.",
-  "",
-  'Return JSON only, matching exactly this shape: {"creates": string[], "touches": string[], "dependsOn": string[], "summary": string, "changes": object[]}.',
-  'If a field is empty, return [] or "". No prose, no markdown code fences -- JSON only.',
-].join("\n");
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === "string");

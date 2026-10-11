@@ -41,19 +41,22 @@
 
 import type { DesignStatement } from "@twing/core";
 import type { ActivityEvent } from "./activity-log.js";
+// Moved to llm-prompts.ts (2026-10-10), alongside every other prompt this
+// server sends, so they can be read in one place -- see that file's header.
+import { OVERVIEW_RESYNTHESIS_PROMPT as SYSTEM_PROMPT } from "./llm-prompts.js";
 
 /** How many amendments may pile up before the automatic path takes an
  * interest.
  *
- * Three, not one: a design amended once reads perfectly well, and rewriting
- * it spends a model call plus the anchor risk below to no benefit. By three
- * the overview is a statement followed by a changelog, which is the shape
- * this exists to fix. A length-based rule ("the appended text now outweighs
- * the original") would catch two very long amendments as well, and is the
- * obvious second condition if counting alone proves to miss. */
-export const AMENDMENT_THRESHOLD = 3;
+ * Removed (2026-10-10): this used to gate the automatic path at 3, on the
+ * reasoning that a design amended once reads fine on its own and rewriting
+ * it spent a model call for no benefit. Overruled deliberately -- every
+ * amendment now resynthesizes, so the overview never sits even one amendment
+ * stale. The debounce below is what keeps a deny -> amend -> retry burst
+ * from costing one model call per amendment in that burst; it no longer also
+ * waits for a pile to accumulate first. */
 
-/** How long the threshold trigger waits before running.
+/** How long the amend trigger waits before running.
  *
  * The deny -> amend -> retry loop fires in bursts of seconds, so running on
  * the amendment that crosses the line would start a rewrite that the next
@@ -83,6 +86,13 @@ export interface ResynthesisDeps {
   callModel: (systemPrompt: string, userPrompt: string) => Promise<string>;
   /** `designs.reviseOverview`, narrowed to what this needs. */
   writeOverview: (id: string, summary: string) => void;
+  /** Budgeted, redacted conversation grounding for this design, when its
+   * session was captured and held something -- `undefined` otherwise
+   * (never captured, captured but empty, or a read failure). Optional so
+   * tests that don't care about grounding can omit it entirely; the prompt
+   * simply states absence rather than forcing every caller to wire a store
+   * through just to pass `undefined` explicitly. */
+  groundingFor?: (design: DesignStatement) => string | undefined;
   /** Overridable for tests; `console.log` in production, matching every
    * other job in this package. */
   log?: (message: string) => void;
@@ -91,12 +101,7 @@ export interface ResynthesisDeps {
 /** Why a run was refused, or `undefined` when it may go ahead. Returned
  * rather than thrown: every one of these is an ordinary, expected outcome,
  * and the caller's job is to log it and move on. */
-export type ResynthesisRefusal =
-  | "no_such_design"
-  | "human_wrote_it"
-  | "open_anchored_comments"
-  | "not_enough_amendments"
-  | "design_moved";
+export type ResynthesisRefusal = "no_such_design" | "human_wrote_it" | "open_anchored_comments" | "design_moved";
 
 /** Revision sources that mean **a person decided on this text** -- either by
  * writing it or by reading a proposal and accepting it (2026-10-06).
@@ -284,9 +289,12 @@ export function amendmentsSinceOverview(design: DesignStatement, events: Activit
  *   permanent refusal: the next trigger re-checks, and comments do get
  *   resolved.
  *
- * `manual` skips the threshold only. A human asking for a rewrite of a
- * twice-amended design is a legitimate request; a human asking to overwrite
- * someone's live review anchors is still not.
+ * No threshold any more (2026-10-10): every amendment is worth folding, not
+ * just the third and later. `manual`, `amendment_threshold` and
+ * `design_closed` are therefore equivalent here -- `reason` still
+ * distinguishes them in the log line, for an operator telling a close-driven
+ * run from an amend-driven one, but none of them changes what this function
+ * decides.
  */
 export function shouldResynthesize(
   design: DesignStatement | undefined,
@@ -297,39 +305,28 @@ export function shouldResynthesize(
   if (!design) return "no_such_design";
   if (isHumanWritten(design)) return "human_wrote_it";
   if (comments.some((c) => c.status === "open" && c.anchor?.field === "summary")) return "open_anchored_comments";
-  // Closing is the moment the overview becomes the permanent record, so one
-  // amendment is worth folding there; the threshold exists to stop the
-  // *mid-flight* path running on every amend.
-  if (reason === "amendment_threshold" && amendmentsSinceOverview(design, events) < AMENDMENT_THRESHOLD) {
-    return "not_enough_amendments";
-  }
   return undefined;
 }
-
-const SYSTEM_PROMPT = [
-  "You are rewriting the overview of a software design statement.",
-  "",
-  "You are given the design's ORIGINAL overview and, in order, the AMENDMENTS its author appended as the work changed.",
-  "Write ONE current overview: what the design is doing now, as if written fresh today.",
-  "",
-  "Rules:",
-  "- Present tense. No dates, no 'Update:', no changelog, no mention of amendments or of this rewrite.",
-  "- A later amendment that contradicts the original wins. State the current position only; do not narrate the change.",
-  "- Keep every distinct piece of scope the text mentions. Dropping a commitment is the one unacceptable failure.",
-  "- Drop duplicates: amendments are often pasted twice.",
-  "- Omit bare lists of change ids or PR links. Those are recorded structurally elsewhere.",
-  "- One to three short paragraphs. Plain prose, no headings, no bullet points.",
-  "- Output the overview itself and nothing else: no preamble, no quotes around it, no explanation.",
-].join("\n");
 
 /** Cap on what reaches the model. Generous -- the overview route already
  * refuses a summary over 8000 characters -- but an amendment log is unbounded
  * in principle and a prompt should not be. */
 const MAX_INPUT_CHARS = 24_000;
 
-function buildUserPrompt(original: string, amendments: string[]): string {
+/** `isIncremental` (2026-10-10) only changes the transcript's own label --
+ * what the grounding text itself contains is already scoped correctly by
+ * the caller (`app.ts`'s `since: design.overviewRevisedAt`). This just tells
+ * the model honestly which case it's in, so it doesn't mistake a short,
+ * recent-only transcript for the whole conversation (or vice versa). */
+function buildUserPrompt(original: string, amendments: string[], grounding?: string, isIncremental?: boolean): string {
   const parts = [`ORIGINAL OVERVIEW:\n${original}`];
   amendments.forEach((text, i) => parts.push(`AMENDMENT ${i + 1}:\n${text}`));
+  if (grounding) {
+    const label = isIncremental
+      ? "SESSION TRANSCRIPT (conversation since this overview was last updated -- not the whole session; abridged and redacted)"
+      : "SESSION TRANSCRIPT (the conversation that produced this; abridged and redacted)";
+    parts.push(`${label}:\n${grounding}`);
+  }
   return parts.join("\n\n").slice(0, MAX_INPUT_CHARS);
 }
 
@@ -361,8 +358,13 @@ export async function proposeOverview(deps: ResynthesisDeps, designId: string): 
   if (cached !== undefined) return cached;
 
   const original = originalText(design);
+  const grounding = deps.groundingFor?.(design);
+  // Same signal `app.ts` uses to decide the grounding's own time window --
+  // read here too so the prompt's label agrees with what the text actually
+  // is, rather than the two drifting if only one side knew about it.
+  const isIncremental = design.overviewRevisedAt !== undefined;
   try {
-    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments));
+    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments, grounding, isIncremental));
     const text = out.trim();
     // A model that returns nothing usable is the same case as one that
     // throws. Checked rather than trusted, because an empty string would pass

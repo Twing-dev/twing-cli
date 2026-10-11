@@ -40,6 +40,9 @@
 
 import type { DesignStatement } from "@twing/core";
 import { callLlmMessages, type ChatMessage } from "./llm-client.js";
+// Moved to llm-prompts.ts (2026-10-10), alongside every other prompt this
+// server sends, so they can be read in one place -- see that file's header.
+import { SEMANTIC_CHECK_PROMPT as SYSTEM_PROMPT, SEMANTIC_CHECK_FEW_SHOT as FEW_SHOT } from "./llm-prompts.js";
 
 const MAX_ATTEMPTS = 2;
 
@@ -76,91 +79,6 @@ export interface SemanticCheckOptions {
 
 const EMPTY_RESULT: SemanticConflictResult = { conflict: false, kind: null, reason: "", suggestion: "" };
 
-const SYSTEM_PROMPT = [
-  "You are comparing two independent implementation plans for the same codebase, written by different developers who have not seen each other's plan.",
-  "",
-  "The plans are in CONFLICT if, and only if, at least one of these is true:",
-  "a) Duplication: they build overlapping or duplicate functionality -- the same underlying problem is being solved independently, twice.",
-  "b) Contradictory assumptions: something one plan assumes or asserts to be true, the other plan makes false, or assumes to be false.",
-  "c) Tension in system changes: the way one plan changes shared system behavior, data, or contracts is in tension with how the other plan changes or depends on that same thing.",
-  "",
-  "Otherwise, they are not in conflict -- even if they touch related areas of the codebase or share vocabulary.",
-  "",
-  "Plans can duplicate work or conflict even when they touch completely different files, components, or layers of the system. Do not treat different file paths, or 'different layer/component' framing, as evidence of no conflict by itself -- judge (a)/(b)/(c) on what each plan actually does, not on whether their file lists overlap.",
-  "",
-  'Return JSON only: {"conflict": boolean, "kind": "duplication"|"contradictory_assumptions"|"tension"|null, "reason": string, "suggestion": string}.',
-  "reason is required in all cases (even conflict: false) -- one or two sentences, concrete, naming the specific detail from each plan that drove your answer.",
-  'suggestion: when conflict is true, one sentence on how to resolve it -- which approach to build on and which to drop, or how to split the two so they stop overlapping. Name the plans by what they do ("the gateway limiter", "the per-user quota"), never "Plan A"/"Plan B" or "yours"/"theirs": both developers read this identical text. Empty string "" when conflict is false.',
-  "No prose outside the JSON, no markdown code fences.",
-].join("\n");
-
-// Fresh domains, deliberately not overlapping design-eval-cases.ts's fixtures
-// (retry/backoff, debounce, XSS sanitization, pagination, activity-log
-// retention/audit, sync/async verdicts) -- these are meant to teach the
-// *shape* of each conflict kind, not hand the model an answer to a
-// near-identical test case.
-const FEW_SHOT: { user: string; assistant: string }[] = [
-  {
-    user: [
-      "PLAN A:",
-      "Summary: Add an in-memory LRU cache inside UserProfileService.getProfile() so repeated profile lookups within a request don't re-hit the database.",
-      "Touches: src/services/user-profile-service.ts",
-      "",
-      "---",
-      "",
-      "PLAN B:",
-      "Summary: Add an in-memory LRU cache inside OrderService.getOrderHistory() so repeated order-history lookups within a request don't re-hit the database.",
-      "Touches: src/services/order-service.ts",
-    ].join("\n"),
-    assistant: JSON.stringify({
-      conflict: true,
-      kind: "duplication",
-      reason:
-        "Both plans independently build the same thing -- a per-request LRU read-through cache wrapper around a service method -- in different files. They're the same underlying problem (repeated lookups within a request) solved twice with two divergent implementations instead of one shared utility, even though the files and services are unrelated.",
-    }),
-  },
-  {
-    user: [
-      "PLAN A:",
-      "Summary: Add a SESSION_IDLE_TIMEOUT_MINUTES config knob; the session-refresh middleware checks lastActivityAt on every request and force-logs-out the session once it's been idle longer than that.",
-      "Touches: src/auth/session-refresh-middleware.ts",
-      "",
-      "---",
-      "",
-      "PLAN B:",
-      "Summary: Add a 'stay signed in for 30 days' remember-me option -- issues a long-lived refresh token flagged long_lived, and the session-expiry check skips its normal checks for tokens with that flag.",
-      "Touches: src/auth/refresh-token.ts",
-    ].join("\n"),
-    assistant: JSON.stringify({
-      conflict: true,
-      kind: "tension",
-      reason:
-        "Plan A's idle-timeout enforcement lives in the session-refresh middleware and isn't described as aware of Plan B's long_lived flag, while Plan B's skip is described as bypassing 'the normal session-expiry check' without naming the idle-timeout path specifically -- if idle-timeout isn't part of what Plan B's skip covers, a remembered session could get silently logged out despite the 30-day promise; if it is, Plan A's security control gets silently bypassed for those sessions. Either reading is a real tension between the two mechanisms, not a stated agreement about which wins.",
-      suggestion:
-        "Decide whether the idle timeout applies to long_lived sessions, then make the idle-timeout check handle that flag explicitly one way or the other, instead of leaving the interaction undefined.",
-    }),
-  },
-  {
-    user: [
-      "PLAN A:",
-      "Summary: Add a ThemePreviewBanner component, shown only in Storybook, so designers can preview typography tokens against real components.",
-      "Touches: src/dev/storybook/theme-preview-banner.tsx",
-      "",
-      "---",
-      "",
-      "PLAN B:",
-      "Summary: Add a KeyboardShortcutsCheatSheet modal, triggered by pressing '?' anywhere in the app, listing available keyboard shortcuts.",
-      "Touches: src/ui/keyboard-shortcuts-cheat-sheet.tsx",
-    ].join("\n"),
-    assistant: JSON.stringify({
-      conflict: false,
-      kind: null,
-      reason:
-        "Both are small, independent UI additions with no shared data, no shared contract, and no overlapping problem -- a Storybook-only dev preview tool and a runtime keyboard-shortcuts modal don't build the same thing, assume anything about each other, or change any behavior the other depends on.",
-      suggestion: "",
-    }),
-  },
-];
 
 /** `rawPlanExcerpt` if the design was registered from a real plan (the
  * full `rawPlanText`, untruncated as of 2026-08-18 -- see
