@@ -166,10 +166,10 @@ export const SEMANTIC_CHECK_FEW_SHOT: { user: string; assistant: string }[] = [
 
 /** `overview-resynthesis.ts` -- rewrites one design's overview, folding its
  * amendment pile (and, when available, conversation grounding) into one
- * current statement: the problem this design solves, then the plan for
- * solving it (required whenever the design has a PLAN -- the "how" was
- * being dropped as "obvious" before 2026-10-11), as plain prose a colleague would say out loud -- not labeled
- * fields, no fixed length, crisp over padded. Runs on every amendment (no
+ * current statement, as exactly two short lines: `Problem:` then
+ * `Approach:` (2026-10-11 -- it was free prose before, and the "how" kept
+ * being dropped as "obvious"; a fixed shape makes a missing Approach
+ * impossible to miss). Runs on every amendment (no
  * threshold, 2026-10-10) and incrementally: once a design has been folded
  * once, the transcript it's given is scoped to the conversation *since* that
  * fold, not the whole session re-read every time (`app.ts`'s
@@ -181,24 +181,22 @@ export const OVERVIEW_RESYNTHESIS_PROMPT = [
   "",
   "You are given the design's ORIGINAL overview, in order, the AMENDMENTS its author appended as the work changed, its PLAN (the author's description of how they will solve it, plus the list of changes) when it has one, and -- when available -- an abridged, redacted transcript of the session that produced it.",
   "",
-  "Write it as prose a colleague would say out loud, in two beats, not two labeled sections -- just the shape of the thinking, not headers on it:",
+  "Output exactly two lines, in this format and nothing else:",
   "",
-  "1. The problem: what's missing, wrong, or painful that makes this worth doing.",
-  "2. The plan: how this solves it -- the gist of the approach, meaning the key mechanism a reviewer needs to judge it, not a list of files.",
+  "Problem: <what's missing, wrong, or painful, and why it matters>",
+  "Approach: <how this solves it -- the key mechanism a reviewer needs to judge it, not a list of files>",
   "",
-  "Plain sentences, present tense, no labels, no headings, no bullet points. When a PLAN is given, the plan beat is required: a reviewer has to see how the change works, not only what it fixes. Never let the plan beat just restate the problem in other words.",
-  "",
-  "Length follows the real size of the change, nothing more: a small, single-purpose change is one or two short sentences covering both beats. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length, and never write a sentence that just restates another in different words. No fixed limit -- crisp and to the point is the goal, not a character count.",
+  "Each line is one or two short sentences -- a reviewer should take in both at a glance. Both lines are always required. The Approach line must say how the change works, never restate the problem in other words.",
   "",
   "Rules:",
   "- Simple, direct English. Short words over long ones, active voice, no filler phrases ('in order to', 'it is worth noting').",
   "- No dates, no 'Update:', no changelog, no mention of amendments or of this rewrite -- state the current position only, as if written fresh today.",
   "- Describe the change as if it is happening now ('adds', 'sends', 'now skips') -- never future tense ('will add', 'will now send').",
-  "- Keep every distinct piece of scope the text mentions. Dropping a commitment is the one unacceptable failure.",
+  "- Cover every distinct piece of scope the text mentions, briefly -- dropping a commitment is the one unacceptable failure.",
   "- Drop duplicates: amendments are often pasted twice.",
   "- When a transcript is given, use it to make the plan specific -- a real reason that actually appears in it, never a guess. If the transcript doesn't explain a decision, leave that part out rather than inventing one.",
   "- Name a specific file or component only when it actually helps a reviewer locate the change -- never as a reflex, never when it's the one obvious place the change could be.",
-  "- Output the overview itself and nothing else: no preamble, no quotes, no explanation.",
+  "- Output only the two lines: no preamble, no quotes, no markdown, no explanation.",
 ].join("\n");
 
 /** `group-overview-resynthesis.ts` -- the same job as the prompt above, run
@@ -216,14 +214,14 @@ export const GROUP_OVERVIEW_RESYNTHESIS_PROMPT = [
   "",
   "You are given each repo's own current design overview, labeled with its repo name, its PLAN (how the author intends to solve it, plus the list of changes) when it has one, and -- when available -- grounding from the conversation that produced each one.",
   "",
-  "Write it as prose a colleague would say out loud, as one unified change (it is, whether it's one repo or several), in two beats, not two labeled sections -- just the shape of the thinking, not headers on it:",
+  "Treat it as one unified change, whether it spans one repo or several.",
   "",
-  "1. The problem: what's missing, wrong, or painful that makes this worth doing.",
-  "2. The plan: how this solves it, across whichever repos are involved -- the gist of the approach, meaning the key mechanism a reviewer needs to judge it, not a list of files.",
+  "Output exactly two lines, in this format and nothing else:",
   "",
-  "Plain sentences, present tense, no labels, no headings, no bullet points, no per-repo changelog. When any PLAN is given, the plan beat is required: a reviewer has to see how the change works, not only what it fixes. Never let the plan beat just restate the problem in other words.",
+  "Problem: <what's missing, wrong, or painful, and why it matters>",
+  "Approach: <how this solves it, across whichever repos are involved -- the key mechanism a reviewer needs to judge it, not a list of files>",
   "",
-  "Length follows the real size of the change, nothing more: a small, single-purpose change is one or two short sentences covering both beats. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length. No fixed limit -- crisp and to the point is the goal, not a character count.",
+  "Each line is one or two short sentences -- a reviewer should take in both at a glance. Both lines are always required. The Approach line must say how the change works, never restate the problem in other words.",
   "",
   "Rules:",
   "- Simple, direct English. Short words over long ones, active voice, no filler phrases.",
@@ -231,7 +229,7 @@ export const GROUP_OVERVIEW_RESYNTHESIS_PROMPT = [
   "- Name a specific repo inline only when there's more than one involved and naming it adds information a reader needs -- e.g. 'the server validates it, the CLI prints it'. Never a list of repos, never restate one if the first sentence already makes its role obvious, and never name the one repo everything lives in when there's only one.",
   "- When grounding is given, use it to make the plan specific -- a real reason that actually appears in it, never a guess. If it doesn't explain a decision, leave that part out rather than inventing one.",
   "- If the repos are genuinely doing unrelated things under one groupId, say so plainly rather than inventing a unifying thread that isn't there.",
-  "- Output the overview itself and nothing else: no preamble, no quotes, no explanation.",
+  "- Output only the two lines: no preamble, no quotes, no markdown, no explanation.",
 ].join("\n");
 
 /** `design-comment-answer.ts` -- the model behind a reviewer's private "Ask
