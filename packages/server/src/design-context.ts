@@ -215,6 +215,89 @@ function renderTranscript(turns: CaptureTurn[], budget: number): { text: string;
 /** Room held back for one elision marker, so the cut is always visible. */
 const ELISION_RESERVE = 60;
 
+/** Overview resynthesis only (2026-10-11): an agent turn is mostly
+ * narration or a status report, and one long one could take a third of the
+ * small resynthesis budget. The developer's turns -- where the reasons
+ * live -- keep the normal `MAX_TURN_CHARS`. */
+const RESYNTHESIS_AGENT_TURN_CHARS = 300;
+
+/** An agent turn this short that ends in a colon is the line it writes
+ * before a tool call ("Checking both PRs file by file:") -- it says what it
+ * is about to do, never why. */
+const NARRATION_MAX_CHARS = 160;
+
+/** Drops what carries no reasoning, for overview resynthesis: agent
+ * narration lines, and a turn the same speaker immediately re-sent with
+ * more text (an edited/resubmitted prompt is captured twice -- the second
+ * copy starts with the first). Exported for the test. */
+export function dropTranscriptNoise(turns: CaptureTurn[]): CaptureTurn[] {
+  const textOf = (t: CaptureTurn) => (typeof t.record.text === "string" ? t.record.text.trim() : "");
+  return turns.filter((turn, i) => {
+    const text = textOf(turn);
+    if (text.length === 0) return false;
+    if (turn.record.role !== "user" && text.length <= NARRATION_MAX_CHARS && text.endsWith(":")) return false;
+    const next = turns[i + 1];
+    if (next && next.record.role === turn.record.role && next.index === turn.index + 1 && textOf(next).startsWith(text)) return false;
+    return true;
+  });
+}
+
+/**
+ * `renderTranscript` for overview resynthesis: spends the budget outward
+ * from `anchorPos` (the first turn at or after the design's registration),
+ * alternating one turn back and one forward, instead of on the session's
+ * two ends. Gaps are marked the same way, including before the first kept
+ * turn and after the last one.
+ */
+function renderAroundAnchor(
+  turns: CaptureTurn[],
+  anchorPos: number,
+  totalTurns: number,
+  budget: number,
+): { text: string; turnsUsed: number } {
+  if (turns.length === 0 || budget <= 0) return { text: "", turnsUsed: 0 };
+  const render = (turn: CaptureTurn) => {
+    const isDeveloper = turn.record.role === "user";
+    const raw = typeof turn.record.text === "string" ? turn.record.text : "";
+    return `${isDeveloper ? "DEVELOPER" : "AGENT"}: ${truncate(redact(raw), isDeveloper ? MAX_TURN_CHARS : RESYNTHESIS_AGENT_TURN_CHARS)}`;
+  };
+
+  const room = budget - 2 * ELISION_RESERVE;
+  const picked = new Map<number, string>();
+  let used = 0;
+  let back = Math.min(anchorPos, turns.length) - 1;
+  let forward = Math.min(anchorPos, turns.length);
+  let takeBack = true;
+  while (back >= 0 || forward < turns.length) {
+    const fromBack = (takeBack && back >= 0) || forward >= turns.length;
+    takeBack = !takeBack;
+    const pos = fromBack ? back : forward;
+    const line = render(turns[pos]);
+    if (used + line.length + 2 > room) {
+      // This direction is full; keep filling the other one.
+      if (fromBack) back = -1;
+      else forward = turns.length;
+      continue;
+    }
+    picked.set(pos, line);
+    used += line.length + 2;
+    if (fromBack) back--;
+    else forward++;
+  }
+
+  const lines: string[] = [];
+  let previousIndex = -1;
+  for (const pos of [...picked.keys()].sort((a, b) => a - b)) {
+    const gap = turns[pos].index - previousIndex - 1;
+    if (gap > 0) lines.push(`[… ${gap} turn${gap === 1 ? "" : "s"} elided …]`);
+    lines.push(picked.get(pos)!);
+    previousIndex = turns[pos].index;
+  }
+  const trailing = totalTurns - 1 - previousIndex;
+  if (trailing > 0) lines.push(`[… ${trailing} later turn${trailing === 1 ? "" : "s"} elided …]`);
+  return { text: lines.join("\n\n"), turnsUsed: picked.size };
+}
+
 /**
  * Assembles the prompt body for one design, grounded in its session when
  * there is one.
@@ -235,6 +318,11 @@ export function assembleDesignContext(
      * them twice whenever a transcript existed. Defaults to `true`: the
      * chat path has no other copy of the design. */
     includeDesign?: boolean;
+    /** `"resynthesis"` (2026-10-11): drop narration and re-sent turns, cap
+     * agent turns short, and -- when the slice came from an `around` read --
+     * spend the budget outward from the design's registration rather than
+     * on the session's two ends. Default `"chat"` is the original rendering. */
+    transcript?: "chat" | "resynthesis";
   } = {},
 ): AssembledContext {
   // Caller-supplied, because grounding is never the whole prompt: an
@@ -273,7 +361,15 @@ export function assembleDesignContext(
 
   const spent = sections.reduce((n, section) => n + section.length + 2, 0);
   const transcriptBudget = Math.max(0, Math.min(budget * TRANSCRIPT_BUDGET_FRACTION, budget - spent - 500));
-  const rendered = renderTranscript(capture.turns, transcriptBudget);
+  let rendered: { text: string; turnsUsed: number };
+  if (options.transcript === "resynthesis") {
+    const kept = dropTranscriptNoise(capture.turns);
+    const anchor = capture.anchorIndex;
+    const anchorPos = anchor === undefined ? kept.length : kept.findIndex((t) => t.index >= anchor);
+    rendered = renderAroundAnchor(kept, anchorPos === -1 ? kept.length : anchorPos, capture.totalTurns, transcriptBudget);
+  } else {
+    rendered = renderTranscript(capture.turns, transcriptBudget);
+  }
 
   if (rendered.text.length > 0) {
     sections.push(

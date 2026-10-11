@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { DesignStatement } from "@twing/core";
 import type { CaptureSlice } from "./capture-store.js";
-import { assembleDesignContext, describeProvenance, designScopePaths, MAX_CONTEXT_CHARS } from "./design-context.js";
+import { assembleDesignContext, describeProvenance, designScopePaths, dropTranscriptNoise, MAX_CONTEXT_CHARS } from "./design-context.js";
 
 /** A real session id shape -- a uuid, which is what every harness twing
  * supports produces. It matters here because provenance abbreviates it. */
@@ -329,4 +329,36 @@ test("includeDesign: false returns the conversation without the design's own sec
   assert.match(only.context, /SESSION TRANSCRIPT/);
   assert.match(only.context, /cap the backoff at 30s please/);
   assert.equal(only.provenance.turnsUsed, 1);
+});
+
+test("dropTranscriptNoise: drops agent narration and a turn re-sent with more text, keeps the rest", () => {
+  const turns = slice([
+    { index: 0, role: "user", text: "how do we log the coordinator?" },
+    { index: 1, role: "user", text: "how do we log the coordinator? only the coordinator." },
+    { index: 2, role: "assistant", text: "Checking both PRs file by file:" },
+    { index: 3, role: "assistant", text: "It writes JSONL per day because rotation by date needs no timer." },
+  ]).turns;
+  assert.deepEqual(
+    dropTranscriptNoise(turns).map((t) => t.index),
+    [1, 3],
+  );
+});
+
+test("resynthesis transcript: centred on the anchor, agent turns capped short, gaps marked on both sides", () => {
+  const long = "x".repeat(900);
+  const turns = Array.from({ length: 40 }, (_, i) => ({
+    index: i,
+    role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+    text: i === 21 ? `agent detail ${long}` : `turn ${i} about the overview fix`,
+  }));
+  const capture = { ...slice(turns), anchorIndex: 20 };
+  const out = assembleDesignContext(design, capture, { budgetChars: 1_200, includeDesign: false, transcript: "resynthesis" });
+  assert.match(out.context, /turn 20 about the overview fix/);
+  assert.match(out.context, /turn 19 about the overview fix/);
+  assert.doesNotMatch(out.context, /turn 0 about/);
+  assert.doesNotMatch(out.context, /turn 39 about/);
+  assert.match(out.context, /\[… \d+ turns elided …\]/);
+  assert.match(out.context, /\[… \d+ later turns elided …\]/);
+  // The 900-char agent turn was cut to the short agent cap.
+  assert.ok(!out.context.includes(long));
 });

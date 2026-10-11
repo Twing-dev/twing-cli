@@ -165,6 +165,14 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
   const override = groupId ? deps.getOverride?.(groupId) : undefined;
   if (override !== undefined) return override;
 
+  // A group of one whose own overview has already been rewritten (by the
+  // per-design resynthesis or by its owner) has nothing left to combine:
+  // that text already is the overview, so showing it costs no second model
+  // call (2026-10-11). An unrevised one -- e.g. a template design whose
+  // summary is just its goal line -- still goes through the model, since
+  // that is the only path that adds the solution to it.
+  if (members.length === 1 && (members[0].overviewRevision ?? 0) > 0) return members[0].summary;
+
   const key = groupCacheKey(members);
   const cached = cachedGroupProposal(key);
   if (cached !== undefined) return cached;
