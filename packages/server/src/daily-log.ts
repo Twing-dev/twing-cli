@@ -171,8 +171,9 @@ export function isLoggingEnabled(): boolean {
 
 /** Carries the current HTTP request's id into anything it awaits, so an
  * LLM call made while serving a request can be joined to its http-log line.
- * Background work (resynthesis queue, async semantic check) runs outside
- * any request and logs without one. */
+ * Background work scheduled by a request (the debounced resynthesis queue,
+ * the async semantic check) inherits that request's id, since timers keep
+ * the async context -- so those lines name the request that caused them. */
 export const requestContext = new AsyncLocalStorage<{ requestId: string }>();
 
 /** Turns logging on. Returns the directory in use, or `{ error }` when
