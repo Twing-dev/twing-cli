@@ -137,7 +137,7 @@ Every HTTP request/response and every LLM prompt+reply also go to
 date-rotated JSONL files in `/var/log/twing-cli/` on this box
 (`http-YYYY-MM-DD.jsonl`, `llm-YYYY-MM-DD.jsonl`, UTC), kept for 7 days
 (`TWING_LOG_RETENTION_DAYS`), with secrets redacted. `TWING_LOG_DIR`
-moves them; `TWING_LOG_DISABLED=1` turns them off. `/var/log` is
+moves them; `TWING_LOG_DISABLED=1` turns them off. Commands to search them: [LOGS.md](LOGS.md). `/var/log` is
 root-owned, so create the directory once (the server warns and keeps
 serving without it):
 
