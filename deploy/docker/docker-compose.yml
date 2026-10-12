@@ -44,6 +44,11 @@ services:
       # a key that was never placed inside it is then just an ordinary,
       # already-handled ENOENT, not a filesystem-type mismatch.
       - ./secrets:/run/secrets:ro
+      # Daily http/llm logs (packages/server/src/daily-log.ts) live at the
+      # same path on the host as inside the container. Docker creates the
+      # host directory (root-owned) on first start if it's missing; the
+      # container runs as root, so it can write there either way.
+      - /var/log/twing-cli:/var/log/twing-cli
     # No `ports:` here deliberately -- this is never published to the host.
     # Only the caddy service below can reach it, container-to-container
     # over this compose project's own network (service-name DNS, hence

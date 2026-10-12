@@ -340,3 +340,41 @@ test("CaptureStore.read: a session far larger than the window stays bounded", ()
   assert.match(slice.turns[0].record.text as string, /^0-0 /);
   assert.match(slice.turns[9].record.text as string, /^9-99 /);
 });
+
+// Overview resynthesis reads around the design's registration: the
+// discussion just before it and the first turns after it, not the session's
+// opening and closing turns (which in a long session are other work).
+test("CaptureStore.read: around keeps the turns just before the anchor and the first ones after it", () => {
+  const { store } = freshStore();
+  const records = Array.from({ length: 10 }, (_, i) => ({
+    type: "turn",
+    role: i % 2 === 0 ? "user" : "assistant",
+    ts: new Date(Date.parse("2026-10-10T10:00:00Z") + i * 60_000).toISOString(),
+    text: `turn ${i}`,
+  }));
+  store.append({ sessionId: "s1", developerId: "dev@example.com", records });
+  // Anchor at turn 6's timestamp; keep 2 before and 2 after.
+  const around = Date.parse("2026-10-10T10:06:00Z");
+  const slice = store.read("dev@example.com", "s1", { around, head: 2, tail: 2 })!;
+  assert.deepEqual(
+    slice.turns.map((t) => (t.record as { text: string }).text),
+    ["turn 4", "turn 5", "turn 6", "turn 7"],
+  );
+  assert.equal(slice.anchorIndex, 6);
+  assert.equal(slice.totalTurns, 10);
+});
+
+test("CaptureStore.read: around after the last turn keeps the closing turns and anchors past them", () => {
+  const { store } = freshStore();
+  store.append({
+    sessionId: "s1",
+    developerId: "dev@example.com",
+    records: [
+      { type: "turn", role: "user", ts: "2026-10-10T10:00:00Z", text: "a" },
+      { type: "turn", role: "assistant", ts: "2026-10-10T10:01:00Z", text: "b" },
+    ],
+  });
+  const slice = store.read("dev@example.com", "s1", { around: Date.parse("2026-10-10T12:00:00Z") })!;
+  assert.equal(slice.turns.length, 2);
+  assert.equal(slice.anchorIndex, 2);
+});

@@ -86,11 +86,18 @@ function parseExtraction(text: string): ExtractedDesign | undefined {
 }
 
 async function callOnce(planText: string, options: ExtractOptions): Promise<string> {
-  return callLlm(SYSTEM_PROMPT, planText.slice(0, MAX_PLAN_CHARS), { model: options.model, region: options.region });
+  return callLlm(SYSTEM_PROMPT, planText.slice(0, MAX_PLAN_CHARS), {
+    model: options.model,
+    region: options.region,
+    tag: { purpose: "design_extract", ...options.context },
+  });
 }
 
 export interface ExtractOptions {
   model: string;
+  /** Log-only ids (daily-log.ts). The design doesn't exist yet when this
+   * runs, so the session/project is all there is to tag it with. */
+  context?: { sessionId?: string; projectId?: string };
   /** Omit to fall back to AWS_REGION/AWS_DEFAULT_REGION (llm-client.ts's
    * ambient resolution). */
   region?: string;

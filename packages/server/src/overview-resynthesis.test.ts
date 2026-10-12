@@ -176,11 +176,37 @@ test("proposeOverview: returns the model's text and writes nothing", async () =>
   assert.deepEqual(written, []);
 });
 
-test("proposeOverview: nothing to propose for a design with no amendments", async () => {
+test("proposeOverview: nothing to propose for a design with no amendments and no plan", async () => {
   const { deps, prompts } = stubDeps();
   assert.equal(await proposeOverview(deps, "d1"), undefined);
   // ...and no model call was spent finding that out.
   assert.deepEqual(prompts, []);
+});
+
+// A template-registered design's summary is just its goal line. Its plan is
+// the only place the "how" lives, so a plan alone is reason to rewrite.
+test("proposeOverview: a design with a plan but no amendments still gets a proposal", async () => {
+  const { deps, prompts } = stubDeps({ design: design({ rawPlanExcerpt: "Resume from the last acked offset." }) });
+  assert.equal(await proposeOverview(deps, "d1"), "One current overview.");
+  assert.equal(prompts.length, 1);
+});
+
+test("proposeOverview: the prompt carries the plan and every declared change", async () => {
+  const summary = appendSummaryUpdate("Base.", "amendment 1");
+  const { deps, prompts } = stubDeps({
+    design: design({
+      summary,
+      rawPlanExcerpt: "Resume from the last acked offset instead of restarting.",
+      changes: [
+        { id: "c1", action: "modify", target: "src/sync.ts", intent: "track the last acked offset" },
+        { id: "c2", action: "add", target: "src/resume.ts", intent: "replay from that offset" },
+      ],
+    }),
+  });
+  await proposeOverview(deps, "d1");
+  assert.match(prompts[0].user, /PLAN \(how the author intends to solve it\):\nResume from the last acked offset/);
+  assert.match(prompts[0].user, /- modify src\/sync\.ts: track the last acked offset/);
+  assert.match(prompts[0].user, /- add src\/resume\.ts: replay from that offset/);
 });
 
 // Fail soft, the same rule extraction and the semantic check follow: the

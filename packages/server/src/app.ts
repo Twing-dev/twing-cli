@@ -53,7 +53,9 @@ import { assembleDesignContext, describeProvenance, designScopePaths, type Assem
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
 import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
+import { checkAuthorDiagrams, diagramsWithReason, diagramsFromPlanText, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
 import { callLlm } from "./llm-client.js";
+import { httpLog, describeBody, isLoggingEnabled, isTextual, logIdsFrom, redact, requestContext } from "./daily-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
 import { fetchRepoPermissions, fetchGithubUser, type GithubUser, type GithubRepoPermissions } from "./github-client.js";
 import {
@@ -91,6 +93,9 @@ interface DesignCheckRequestBody {
    * ever sent. Stored as-is; see the `changes:` note at the register call
    * for why this isn't re-derived server-side. */
   changes?: DesignChange[];
+  /** Author-drawn diagrams (2026-10-11): a template's `diagrams:`. Validated
+   * here; invalid ones are dropped and reported, never a rejection. */
+  diagrams?: unknown;
   summary?: string;
   ttlMs?: number;
   // §17 design linking (2026-08): unlike developerId (resolved from the
@@ -144,6 +149,9 @@ interface AmendRequestBody {
    * (`appendPlanUpdate`), never a replacement. Not propagated to linked
    * siblings: a plan is written for one repo's part of the work. */
   plan?: string;
+  /** Replacement author diagrams (2026-10-11), from `amend --from`'s
+   * `diagrams:`. Same validation as registration. */
+  diagrams?: unknown;
   /** §17 design linking (2026-08): join (or move to) a different group
    * after registration -- see DesignRegistry.amend's `groupId` param doc
    * comment for the full reasoning. */
@@ -259,6 +267,9 @@ export interface CreateAppOptions {
    * amendment pile back into one current overview. Same default as the
    * three above. */
   resynthesisModel?: string;
+  /** design-diagrams.ts's model (2026-10-11) -- what decides and draws a
+   * group's optional overview diagrams. Defaults to the resynthesis model. */
+  diagramModel?: string;
   /** Overview resynthesis, injected whole (2026-10-06). Tests pass a queue
    * built on a stub model so the triggers can be exercised with no provider
    * and no timers; real `twing serve` leaves it undefined and gets the one
@@ -645,7 +656,7 @@ export function createApp(options: CreateAppOptions = {}) {
     getDesign: (id) => designs.get(id),
     eventsFor: (id) => activityLog.eventsForRelatedId(id),
     commentsFor: (id) => designComments.listByDesign(id),
-    callModel: (systemPrompt, userPrompt) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel }),
+    callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel, tag }),
     writeOverview: (id, summary) => {
       designs.reviseOverview(id, { summary, actor: "twing", source: "llm_resynthesis" });
     },
@@ -680,11 +691,20 @@ export function createApp(options: CreateAppOptions = {}) {
     listMembers: (groupId) => designs.listByGroup(groupId),
     groundingFor: (design) => groundingTextFor(design),
     labelFor: (design) => identities.getProjectRecord(design.projectId)?.githubRepo ?? design.projectId.slice(0, 10),
-    callModel: (systemPrompt, userPrompt) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel }),
+    callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel, tag }),
     getOverride: (groupId) => designGroups.get(groupId)?.overview,
     log: (message) => console.log(message),
   };
   const groupResynthesis = options.groupResynthesis ?? new GroupResynthesisQueue(groupResynthesisDeps);
+  /** Optional overview diagrams (2026-10-11), see design-diagrams.ts. Same
+   * repo labels and conversation grounding as the group overview. */
+  const diagramModel = options.diagramModel ?? resynthesisModel;
+  const diagramDeps: DiagramDeps = {
+    labelFor: groupResynthesisDeps.labelFor,
+    groundingFor: (design) => groundingTextFor(design),
+    callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: diagramModel, tag }),
+    log: (message) => console.log(message),
+  };
   const monitorUrl = options.monitorUrl;
   const noAuth = options.noAuth ?? false;
   const githubClientId = options.githubClientId ?? process.env.TWING_GITHUB_CLIENT_ID ?? "Ov23liSaEt1UliMyahy6";
@@ -693,6 +713,61 @@ export function createApp(options: CreateAppOptions = {}) {
   const version = options.version ?? getServerVersion();
 
   const app = new Hono<{ Variables: Variables }>();
+
+  // Daily http log (daily-log.ts): mounted first so it also sees the
+  // 426/401 responses the middleware below returns early. No-op unless
+  // main.ts called initLogging. Response bodies are read from a clone, so
+  // the route's own response is untouched; nothing here streams.
+  app.use("*", async (c, next) => {
+    if (!isLoggingEnabled() || c.req.method === "OPTIONS") return next();
+    const requestId = crypto.randomUUID();
+    const startedAt = Date.now();
+    const reqType = c.req.header("content-type");
+    const reqBody = isTextual(reqType)
+      ? describeBody(reqType, await c.req.raw.clone().text())
+      : c.req.header("content-length")
+        ? { contentType: reqType, bytes: Number(c.req.header("content-length")) }
+        : undefined;
+    const base = {
+      requestId,
+      method: c.req.method,
+      path: c.req.path,
+      query: redact(c.req.query()),
+      reqHeaders: redact(c.req.header()),
+      reqBody,
+    };
+    try {
+      await requestContext.run({ requestId }, next);
+    } catch (err) {
+      httpLog.write({ ...base, status: 500, durationMs: Date.now() - startedAt, error: err instanceof Error ? err.stack ?? err.message : String(err) });
+      throw err;
+    }
+    c.header("X-Request-Id", requestId);
+    const resType = c.res.headers.get("content-type");
+    const resBody = isTextual(resType) ? describeBody(resType, await c.res.clone().text()) : undefined;
+    const ids = logIdsFrom(c.req.path, base.query, reqBody, resBody);
+    let designId = ids.designId;
+    let groupId = ids.groupId;
+    // Best-effort: a lookup failure only costs this line its ids, never the
+    // response, which has already been produced by now.
+    try {
+      const pathDesign = ids.pathDesignId ? designs.get(ids.pathDesignId) : undefined;
+      designId ??= pathDesign?.id;
+      groupId ??= pathDesign?.groupId ?? (designId ? designs.get(designId)?.groupId : undefined);
+    } catch {
+      // Leave the ids unset.
+    }
+    httpLog.write({
+      ...base,
+      designId,
+      groupId,
+      sessionId: ids.sessionId,
+      developerId: c.get("identity")?.developerId,
+      status: c.res.status,
+      durationMs: Date.now() - startedAt,
+      resBody,
+    });
+  });
 
   // twing-monitor v1: mounted before the auth middleware below (source
   // order matters in Hono) so a browser's `OPTIONS` preflight -- which
@@ -1680,17 +1755,21 @@ export function createApp(options: CreateAppOptions = {}) {
    * than passing off as a whole conversation. Losing grounding costs a
    * thinner answer; failing the request costs the reviewer their question.
    */
-  function groundDesign(design: DesignStatement, budgetChars: number, options: { since?: number } = {}): AssembledContext {
+  function groundDesign(
+    design: DesignStatement,
+    budgetChars: number,
+    options: { since?: number; around?: number; includeDesign?: boolean; transcript?: "chat" | "resynthesis" } = {},
+  ): AssembledContext {
     let slice;
     try {
-      slice = captures.read(design.developerId, design.sessionId, { focusPaths: designScopePaths(design), since: options.since });
+      slice = captures.read(design.developerId, design.sessionId, { focusPaths: designScopePaths(design), since: options.since, around: options.around });
     } catch (err) {
       console.warn(`twing serve: capture read failed for design ${design.id}: ${err instanceof Error ? err.message : err}`);
     }
     // `budgetChars` is what is left after the caller reserved room for its
     // system prompt, the thread so far and the live question -- so the whole
     // request fits one budget instead of each part respecting its own.
-    return assembleDesignContext(design, slice, { budgetChars });
+    return assembleDesignContext(design, slice, { budgetChars, includeDesign: options.includeDesign, transcript: options.transcript });
   }
 
   /** `groundDesign`, reduced to a plain string for overview resynthesis
@@ -1708,7 +1787,16 @@ export function createApp(options: CreateAppOptions = {}) {
     // sibling's), so grounding is one ingredient among several rather than
     // the whole budget the chat path gives it.
     const RESYNTHESIS_GROUNDING_BUDGET_CHARS = 6_000;
-    const assembled = groundDesign(design, RESYNTHESIS_GROUNDING_BUDGET_CHARS, options);
+    // Conversation only: the resynthesis prompts already send the design's
+    // summary, plan and changes as their own sections. Centred on the
+    // design's registration (or, once folded, the last fold) rather than
+    // the session's first and last turns, with narration dropped.
+    const assembled = groundDesign(design, RESYNTHESIS_GROUNDING_BUDGET_CHARS, {
+      ...options,
+      around: options.since ?? design.createdAt,
+      includeDesign: false,
+      transcript: "resynthesis",
+    });
     if (!assembled.provenance.captured || assembled.provenance.turnsUsed === 0) return undefined;
     return assembled.context;
   }
@@ -1970,7 +2058,10 @@ export function createApp(options: CreateAppOptions = {}) {
       const history = designChats.messages(chat.id);
       const historyChars = history.reduce((n, m) => n + m.message.length, 0);
       const grounding = groundDesign(design, groundingBudgetFor(message, historyChars));
-      const answer = await answerDesignChat(grounding.context, history, { model: commentAnswerModel });
+      const answer = await answerDesignChat(grounding.context, history, {
+        model: commentAnswerModel,
+        context: { designId: design.id, groupId: design.groupId, sessionId: design.sessionId, projectId: design.projectId },
+      });
       const provenance = describeProvenance(grounding.provenance);
 
       designChats.append(chat.id, { role: "agent", message: answer, ts: Date.now(), provenance });
@@ -2049,6 +2140,11 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!authz.ok) return c.json({ error: authz.error }, authz.status);
 
     const hasStructured = Array.isArray(body.creates) || Array.isArray(body.touches) || Array.isArray(body.dependsOn) || typeof body.summary === "string";
+    // Author-drawn diagrams (2026-10-11): a template's own `diagrams:`, or
+    // else ```mermaid blocks in the plan text (plan mode). Invalid ones are
+    // dropped and reported back, never a rejection.
+    const authorDiagramCheck = body.diagrams !== undefined ? checkAuthorDiagrams(body.diagrams) : { kept: diagramsFromPlanText(body.rawPlanText), warnings: [] };
+    const diagramFields = authorDiagramCheck.warnings.length > 0 ? { diagramWarnings: authorDiagramCheck.warnings } : {};
     // No design exists without a plan (2026-09-29). Enforced here, where a
     // design is created, rather than trusted to each client: the plan is what
     // a reviewer reads, and a design that is only a file list gives them
@@ -2074,7 +2170,7 @@ export function createApp(options: CreateAppOptions = {}) {
     let extractedChanges: unknown;
 
     if (body.rawPlanText && !hasStructured) {
-      const extracted = await extractDesign(body.rawPlanText, { model: extractModel });
+      const extracted = await extractDesign(body.rawPlanText, { model: extractModel, context: { sessionId: body.sessionId, projectId: body.projectId } });
       creates = extracted.creates;
       touches = extracted.touches;
       dependsOn = extracted.dependsOn;
@@ -2128,6 +2224,7 @@ export function createApp(options: CreateAppOptions = {}) {
             // `register` call below does -- a plan retry is a fresh
             // declaration, not an amendment of the previous attempt.
             changes: ensureChanges({ changes: body.changes ?? extractedChanges, creates, touches, summary }),
+            authorDiagrams: authorDiagramCheck.kept,
           });
           reregistered = design !== undefined;
         }
@@ -2181,6 +2278,7 @@ export function createApp(options: CreateAppOptions = {}) {
       // this field is a guarantee rather than a property of which client
       // happened to call.
       changes: ensureChanges({ changes: body.changes ?? extractedChanges, creates, touches, summary }),
+      ...(authorDiagramCheck.kept.length > 0 ? { authorDiagrams: authorDiagramCheck.kept } : {}),
       // No truncation (dropped 2026-08-18, was capped at 2000 chars) -- see
       // DesignStatement.rawPlanExcerpt's doc comment in @twing/core for why.
       rawPlanExcerpt: body.rawPlanText,
@@ -2320,7 +2418,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const reviewUrl = buildDesignReviewUrl(monitorUrl, design.projectId, design.id);
     const reviewFields = reviewUrl ? { reviewUrl } : {};
     if (outcome.verdict === "clean") {
-      return c.json({ verdict: "clean", designId: design.id, groupId: design.groupId, ...extractedFields, ...reviewFields });
+      return c.json({ verdict: "clean", designId: design.id, groupId: design.groupId, ...extractedFields, ...reviewFields, ...diagramFields });
     }
     // The only other verdict a registration can get: file overlap, which had
     // its own response here, was removed 2026-10-01.
@@ -2331,6 +2429,7 @@ export function createApp(options: CreateAppOptions = {}) {
       constraints: outcome.constraints,
       ...extractedFields,
       ...reviewFields,
+      ...diagramFields,
     });
   });
 
@@ -2799,6 +2898,13 @@ export function createApp(options: CreateAppOptions = {}) {
     // appendSummaryUpdate (which embeds the current date) and risking a
     // divergent result between "what got checked" and "what got saved".
     const summary = body?.summary !== undefined ? appendSummaryUpdate(design.summary, body.summary) : undefined;
+    // The author's word on its diagrams for this amend (2026-10-11): a new
+    // list, or `unchanged` / `outdated`. A list that is entirely invalid
+    // keeps the existing diagrams rather than wiping them; only an explicit
+    // empty list clears them.
+    const diagramsAnswer: "unchanged" | "outdated" | undefined = body?.diagrams === "unchanged" || body?.diagrams === "outdated" ? body.diagrams : undefined;
+    const amendDiagramCheck = Array.isArray(body?.diagrams) ? checkAuthorDiagrams(body.diagrams) : undefined;
+    const replaceDiagrams = amendDiagramCheck && (amendDiagramCheck.kept.length > 0 || (body?.diagrams as unknown[]).length === 0);
     const delta = {
       touches: body?.addTouches ?? [],
       creates: body?.addCreates ?? [],
@@ -2827,10 +2933,24 @@ export function createApp(options: CreateAppOptions = {}) {
         touches: body?.addTouches ?? [],
         summary: body?.summary ?? design.summary,
       }),
+      // Replacement author diagrams (2026-10-11), when this amend sent any.
+      ...(replaceDiagrams ? { authorDiagrams: amendDiagramCheck.kept } : {}),
+      ...(diagramsAnswer ? { diagramsAnswer } : {}),
     };
-    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.rawPlanExcerpt === undefined && delta.groupId === undefined) {
-      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/plan/groupId" }, 400);
+    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.rawPlanExcerpt === undefined && delta.groupId === undefined && !amendDiagramCheck && !diagramsAnswer) {
+      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/plan/groupId/diagrams" }, 400);
     }
+    // A design with author diagrams whose amend said nothing about them:
+    // ask the session to answer, since it knows whether the flow changed.
+    // Never a rejection -- an amend is often what unblocks an edit.
+    const diagramNotice =
+      design.authorDiagrams?.length && !amendDiagramCheck && !diagramsAnswer
+        ? `this design has author diagrams (${design.authorDiagrams.map((d) => d.type).join(", ")}). Say whether they still fit this amendment: add \`diagrams: unchanged\`, \`diagrams: outdated\` (twing then updates them), or new diagrams to an \`amend --from\` template.`
+        : undefined;
+    const amendDiagramFields = {
+      ...(amendDiagramCheck?.warnings.length ? { diagramWarnings: amendDiagramCheck.warnings } : {}),
+      ...(diagramNotice ? { diagramNotice } : {}),
+    };
 
     const { outcome, open } = checkAmendedScope(design, delta);
 
@@ -2903,12 +3023,12 @@ export function createApp(options: CreateAppOptions = {}) {
         designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
       }
       runSemanticComparatorPass(id, open);
-      return c.json({ verdict: outcome.verdict, designId: id, groupId: amended.groupId, conflicts: outcome.conflicts, constraints: outcome.constraints });
+      return c.json({ verdict: outcome.verdict, designId: id, groupId: amended.groupId, conflicts: outcome.conflicts, constraints: outcome.constraints, ...amendDiagramFields });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} amended -> scopeVersion ${amended.scopeVersion}`);
     runSemanticComparatorPass(amended.id, open);
-    return c.json({ verdict: "clean", designId: amended.id, groupId: amended.groupId });
+    return c.json({ verdict: "clean", designId: amended.id, groupId: amended.groupId, ...amendDiagramFields });
   });
 
   // §17 design lifecycle (2026-08): reactivate a *dormant* design -- always
@@ -3248,6 +3368,36 @@ export function createApp(options: CreateAppOptions = {}) {
    * provider configured, or a call failure) -- same honest "nothing to
    * offer" shape the old per-design Rewrite button used, not an error.
    */
+  // Optional overview diagrams (2026-10-11): computed on read, cached per
+  // group state, same visibility rule as the group overview below.
+  app.get("/v1/designs/:id/diagrams", async (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
+    const members = design.groupId
+      ? designs.listByGroup(design.groupId).filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId))
+      : [design];
+    // `skipped` says why there are none when the rules skipped the group, so
+    // a missing diagram can be explained from the HTTP log.
+    return c.json(await diagramsWithReason(diagramDeps, members));
+  });
+
+  // The browser couldn't render one: regenerate that kind once with the
+  // parse error. Returns the replacement, or null (the tab stays hidden).
+  app.post("/v1/designs/:id/diagrams/repair", async (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
+    const body = await c.req.json<{ type?: unknown; error?: unknown }>().catch(() => null);
+    const type = body?.type;
+    if (type !== "flow" && type !== "sequence" && type !== "class") return c.json({ error: "expected { type: flow|sequence|class, error }" }, 400);
+    const members = design.groupId
+      ? designs.listByGroup(design.groupId).filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId))
+      : [design];
+    const fixed = await repairDiagram(diagramDeps, members, type as DiagramType, typeof body?.error === "string" ? body.error : "render failed");
+    return c.json({ diagram: fixed ?? null });
+  });
+
   app.get("/v1/designs/:id/group-overview", async (c) => {
     const identity = c.get("identity");
     const design = designs.get(c.req.param("id"));

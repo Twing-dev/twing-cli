@@ -199,6 +199,12 @@ export interface DesignChange {
   from?: string;
 }
 
+/** One diagram a design's author drew (2026-10-11). At most one per type. */
+export interface AuthorDiagram {
+  type: "flow" | "sequence" | "class";
+  mermaid: string;
+}
+
 export interface DesignStatement {
   id: string;
   /** §17 design linking (2026-08): cross-project label -- self-assigned to
@@ -324,6 +330,21 @@ export interface DesignStatement {
    * dashboard hides). `amend --from` with a `plan:` appends a dated section
    * (`appendPlanUpdate`), never replaces it. */
   rawPlanExcerpt?: string;
+  /** Diagrams the registering session drew itself (2026-10-11), as Mermaid
+   * -- from a template's `diagrams:` or a ```mermaid block in a plan-mode
+   * plan. Already validated server-side. Shown in place of the
+   * coordinator's own generated diagrams, since the author's session has
+   * read the code and the coordinator has not. Absent when none were sent;
+   * an amend that sends diagrams replaces them. */
+  authorDiagrams?: AuthorDiagram[];
+  /** The `scopeVersion` the author's diagrams were drawn or last confirmed
+   * at (2026-10-11). Behind `scopeVersion` means an amendment landed and the
+   * author never said whether they still fit. */
+  authorDiagramsVersion?: number;
+  /** The author's session said its diagrams no longer fit after an amend
+   * (`diagrams: outdated`) without sending new ones -- the coordinator then
+   * revises them itself. */
+  authorDiagramsOutdated?: boolean;
   /** How the design was registered (2026-09-29): `plan_mode` when the server
    * extracted it from a bare ExitPlanMode plan, `template` when the caller
    * supplied its own files (CLI `register`, the hook's multi-repo path).

@@ -166,9 +166,10 @@ export const SEMANTIC_CHECK_FEW_SHOT: { user: string; assistant: string }[] = [
 
 /** `overview-resynthesis.ts` -- rewrites one design's overview, folding its
  * amendment pile (and, when available, conversation grounding) into one
- * current statement: the problem this design solves, then the plan for
- * solving it, as plain prose a colleague would say out loud -- not labeled
- * fields, no fixed length, crisp over padded. Runs on every amendment (no
+ * current statement, as two labelled parts, `Problem:` (sentences) then
+ * `Approach:` (a bullet per step: what happens and why), with no length limit (2026-10-11 -- it was free prose before, and the "how" kept
+ * being dropped as "obvious"; a fixed shape makes a missing Approach
+ * impossible to miss). Runs on every amendment (no
  * threshold, 2026-10-10) and incrementally: once a design has been folded
  * once, the transcript it's given is scoped to the conversation *since* that
  * fold, not the whole session re-read every time (`app.ts`'s
@@ -178,25 +179,27 @@ export const SEMANTIC_CHECK_FEW_SHOT: { user: string; assistant: string }[] = [
 export const OVERVIEW_RESYNTHESIS_PROMPT = [
   "You are rewriting the overview of a software design statement, for a reviewer deciding whether to approve it.",
   "",
-  "You are given the design's ORIGINAL overview, in order, the AMENDMENTS its author appended as the work changed, and -- when available -- an abridged, redacted transcript of the session that produced it.",
+  "You are given the design's ORIGINAL overview, in order, the AMENDMENTS its author appended as the work changed, its PLAN (the author's description of how they will solve it, plus the list of changes) when it has one, and -- when available -- an abridged, redacted transcript of the session that produced it.",
   "",
-  "Write it as prose a colleague would say out loud, in two beats, not two labeled sections -- just the shape of the thinking, not headers on it:",
+  "Output exactly two parts, in this format and nothing else:",
   "",
-  "1. The problem: what's missing, wrong, or painful that makes this worth doing.",
-  "2. The plan: how this solves it.",
+  "Problem: <what's missing, wrong, or painful, and why it matters -- plain sentences>",
+  "Approach:",
+  "- <one step of the solution: what happens, and why it is done this way>",
+  "- <next step>",
   "",
-  "Plain sentences, present tense, no labels, no headings, no bullet points. Skip the plan beat entirely when the problem statement already makes it obvious -- most small changes do.",
-  "",
-  "Length follows the real size of the change, nothing more: a small, single-purpose change is one short sentence covering both beats at once. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length, and never write a sentence that just restates another in different words. No fixed limit -- crisp and to the point is the goal, not a character count.",
+  "The Approach is a bullet list, one point per meaningful step or decision, in the order the change works. Each point says what happens and -- whenever the plan, changes or conversation give a reason -- why that choice was made over the obvious alternative. Never invent a reason the material doesn't give; then just say what happens.",
+  "There is no length limit: as many points, and as much detail per point, as the change needs to be understood -- one or two points for a small change, more for a complex one. Never pad, and never repeat a point. Both parts are always required, and the Approach must say how the change works, never restate the problem.",
   "",
   "Rules:",
   "- Simple, direct English. Short words over long ones, active voice, no filler phrases ('in order to', 'it is worth noting').",
   "- No dates, no 'Update:', no changelog, no mention of amendments or of this rewrite -- state the current position only, as if written fresh today.",
-  "- Keep every distinct piece of scope the text mentions. Dropping a commitment is the one unacceptable failure.",
+  "- Describe the change as if it is happening now ('adds', 'sends', 'now skips') -- never future tense ('will add', 'will now send').",
+  "- Cover every distinct piece of scope the text mentions -- dropping a commitment is the one unacceptable failure.",
   "- Drop duplicates: amendments are often pasted twice.",
   "- When a transcript is given, use it to make the plan specific -- a real reason that actually appears in it, never a guess. If the transcript doesn't explain a decision, leave that part out rather than inventing one.",
   "- Name a specific file or component only when it actually helps a reviewer locate the change -- never as a reflex, never when it's the one obvious place the change could be.",
-  "- Output the overview itself and nothing else: no preamble, no quotes, no explanation.",
+  "- Output only the two parts: no preamble, no quotes, no headings or bold, no explanation. The Approach bullets are plain `- ` lines.",
 ].join("\n");
 
 /** `group-overview-resynthesis.ts` -- the same job as the prompt above, run
@@ -212,23 +215,27 @@ export const OVERVIEW_RESYNTHESIS_PROMPT = [
 export const GROUP_OVERVIEW_RESYNTHESIS_PROMPT = [
   "You are writing the current overview for a design, for a reviewer deciding whether to approve it -- every design has a `groupId`, whether or not anything else shares it, so this may be one repo alone or several linked as one piece of work.",
   "",
-  "You are given each repo's own current design overview, labeled with its repo name, and -- when available -- grounding from the conversation that produced each one.",
+  "You are given each repo's own current design overview, labeled with its repo name, its PLAN (how the author intends to solve it, plus the list of changes) when it has one, and -- when available -- grounding from the conversation that produced each one.",
   "",
-  "Write it as prose a colleague would say out loud, as one unified change (it is, whether it's one repo or several), in two beats, not two labeled sections -- just the shape of the thinking, not headers on it:",
+  "Treat it as one unified change, whether it spans one repo or several.",
   "",
-  "1. The problem: what's missing, wrong, or painful that makes this worth doing.",
-  "2. The plan: how this solves it, across whichever repos are involved.",
+  "Output exactly two parts, in this format and nothing else:",
   "",
-  "Plain sentences, present tense, no labels, no headings, no bullet points, no per-repo changelog. Skip the plan beat entirely when the problem statement already makes it obvious -- most small changes do.",
+  "Problem: <what's missing, wrong, or painful, and why it matters -- plain sentences>",
+  "Approach:",
+  "- <one step of the solution (name the repo when several are involved): what happens, and why it is done this way>",
+  "- <next step>",
   "",
-  "Length follows the real size of the change, nothing more: a small, single-purpose change is one short sentence covering both beats at once. A change with a genuine problem and a real plan behind it earns a short paragraph for each. Never pad to reach a target length. No fixed limit -- crisp and to the point is the goal, not a character count.",
+  "The Approach is a bullet list, one point per meaningful step or decision, in the order the change works. Each point says what happens and -- whenever the plan, changes or conversation give a reason -- why that choice was made over the obvious alternative. Never invent a reason the material doesn't give; then just say what happens.",
+  "There is no length limit: as many points, and as much detail per point, as the change needs to be understood -- one or two points for a small change, more for a complex one. Never pad, and never repeat a point. Both parts are always required, and the Approach must say how the change works, never restate the problem.",
   "",
   "Rules:",
   "- Simple, direct English. Short words over long ones, active voice, no filler phrases.",
+  "- Describe the change as if it is happening now ('adds', 'sends', 'now skips') -- never future tense ('will add', 'will now send').",
   "- Name a specific repo inline only when there's more than one involved and naming it adds information a reader needs -- e.g. 'the server validates it, the CLI prints it'. Never a list of repos, never restate one if the first sentence already makes its role obvious, and never name the one repo everything lives in when there's only one.",
   "- When grounding is given, use it to make the plan specific -- a real reason that actually appears in it, never a guess. If it doesn't explain a decision, leave that part out rather than inventing one.",
   "- If the repos are genuinely doing unrelated things under one groupId, say so plainly rather than inventing a unifying thread that isn't there.",
-  "- Output the overview itself and nothing else: no preamble, no quotes, no explanation.",
+  "- Output only the two parts: no preamble, no quotes, no headings or bold, no explanation. The Approach bullets are plain `- ` lines.",
 ].join("\n");
 
 /** `design-comment-answer.ts` -- the model behind a reviewer's private "Ask
@@ -252,3 +259,90 @@ This is a conversation, so write like one: plain prose, short, no headings, no b
 Never quote the transcript verbatim at length. You are summarising from a colleague's private working session, not republishing it.
 
 Say plainly when you do not know. "The design does not say, and the session does not either — that is worth asking the author" is a good answer and a useful one; an invented rationale is worse than an admission, because the reviewer cannot tell the difference. If the reviewer seems to want a change rather than an explanation, tell them to leave it as a comment, which is the surface that reaches the developer.`;
+
+/** `design-diagrams.ts` call 1 (2026-10-11) -- decides whether a design group
+ * deserves diagrams under its overview, and which kinds. Most designs should
+ * get none: a diagram earns its place only when the change has several
+ * parts that interact, which prose describes worse than a picture. */
+export const DIAGRAM_DECISION_PROMPT = [
+  "You decide which diagrams, if any, would help a reviewer understand a software design before approving it.",
+  "",
+  "You are given the design's overview, its plan, its declared changes (each with a kind: code, api, schema, test, docs, config) and, when it spans several repos, one block per repo.",
+  "",
+  "Diagram kinds:",
+  "- flow: how data or control moves through several components, step by step.",
+  "- sequence: who calls whom, in order -- requests between services, repos, or processes.",
+  "- class: new or changed types, records or tables and how they relate.",
+  "",
+  "Pick a kind only when it shows something the overview text cannot: several components that interact, a request crossing a boundary, or new structures that relate to each other. A change confined to one place, or one that only edits text, styling, tests or config, needs none.",
+  "Guides, not rules: api changes or several repos usually suit sequence; schema or new types suit class; several code files working together suit flow.",
+  "",
+  'Return JSON only, no markdown: {"diagrams": [{"type": "flow" | "sequence" | "class", "reason": "<one short sentence>"}]}. At most 3 entries, no kind twice. Return {"diagrams": []} when no diagram would help.',
+].join("\n");
+
+/** `design-diagrams.ts` call 2 (2026-10-11) -- draws one diagram as Mermaid.
+ * Deliberately narrow syntax: the browser renders whatever comes back, and
+ * every styling, link or HTML feature is a way for model output to break or
+ * misbehave there. Small on purpose -- past about 12 boxes a diagram is a
+ * list, not a picture. */
+export const DIAGRAM_GENERATE_PROMPT = [
+  "You draw one diagram of a software design, in Mermaid syntax, for a reviewer deciding whether to approve it.",
+  "",
+  "You are told which kind to draw (flow, sequence or class) and given the design's overview, plan, declared changes and, when available, the conversation that produced it. Draw what the design intends to build, using only components and steps that appear in that material. Never invent parts.",
+  "",
+  "Syntax rules -- follow them exactly:",
+  "- flow: start with `flowchart LR`. Node ids are short letters/digits only (a, b, mw1). Labels in square brackets, e.g. a[Logging middleware]. Arrows `-->`, optional label as `-- label -->`.",
+  "- sequence: start with `sequenceDiagram`. Declare each participant once as `participant A as Short name`. Messages `A->>B: text`, replies `B-->>A: text`.",
+  "- class: start with `classDiagram`. `class Name { field \\n method() }` with one member per line; relations like `A ..> B : uses` or `A --> B`.",
+  "- At most 12 boxes or participants. Labels of 5 words or fewer. Plain words only inside labels: no quotes, brackets, parentheses, colons or semicolons.",
+  "- No styling, classDef, style, click, links, notes, subgraphs, comments or HTML.",
+  "",
+  "Example flow:",
+  "flowchart LR",
+  "  a[HTTP request] --> b[Auth check]",
+  "  b --> c[Route handler]",
+  "  c --> d[Database]",
+  "",
+  "Example sequence:",
+  "sequenceDiagram",
+  "  participant C as CLI",
+  "  participant S as Server",
+  "  C->>S: register design",
+  "  S-->>C: verdict",
+  "",
+  "Example class:",
+  "classDiagram",
+  "  class Design {",
+  "    id",
+  "    summary",
+  "  }",
+  "  class Change {",
+  "    target",
+  "    kind",
+  "  }",
+  "  Design --> Change : has",
+  "",
+  "Output only the Mermaid text: no explanation, no markdown fences.",
+].join("\n");
+
+/** `design-diagrams.ts` (2026-10-11) -- revises a diagram the design's
+ * author drew, after an amendment the author said made it outdated without
+ * sending a new one. Revise, don't redraw: the author's session had read the
+ * code, so every part of its diagram that still holds is worth more than
+ * anything drawn fresh from the plan. Same syntax rules as generation. */
+export const DIAGRAM_REVISE_PROMPT = [
+  "You update one diagram of a software design, in Mermaid syntax, after the design was amended.",
+  "",
+  "You are given the diagram the design's author drew before the amendment, and the design as it stands now (overview, plan, declared changes, and the conversation when available).",
+  "",
+  "Keep every box, participant, step and label from the author's diagram that is still true. Add, change or remove only what the amendment changed. Keep the author's names for components exactly -- they come from the real code. Never invent parts that appear in neither the diagram nor the design.",
+  "",
+  "Syntax rules -- follow them exactly, and keep the diagram's existing first line:",
+  "- flow: `flowchart LR`; short letter/digit node ids; labels in square brackets; arrows `-->`.",
+  "- sequence: `sequenceDiagram`; `participant A as Short name`; `A->>B: text`, replies `B-->>A: text`.",
+  "- class: `classDiagram`; `class Name { member per line }`; relations like `A ..> B : uses`.",
+  "- At most 12 boxes or participants. Labels of 5 words or fewer, plain words only.",
+  "- No styling, classDef, style, click, links, notes, subgraphs, comments or HTML.",
+  "",
+  "Output only the updated Mermaid text: no explanation, no markdown fences.",
+].join("\n");

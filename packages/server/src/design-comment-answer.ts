@@ -142,6 +142,8 @@ function renderThread(transcript: { role: "reviewer" | "agent"; message: string 
 
 export interface CommentAnswerOptions {
   model: string;
+  /** Log-only ids (daily-log.ts) for the design being asked about. */
+  context?: { designId?: string; groupId?: string; sessionId?: string; projectId?: string };
   /** Bedrock only -- see `LlmCallOptions.region`. */
   region?: string;
 }
@@ -178,7 +180,7 @@ export async function answerDesignChat(
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const text = await callLlmMessages(messages, { model: options.model, region: options.region });
+      const text = await callLlmMessages(messages, { model: options.model, region: options.region, tag: { purpose: "design_chat", ...options.context } });
       const trimmed = text.trim();
       if (trimmed.length > 0) return trimmed;
       console.warn(`twing serve: design chat returned an empty answer (attempt ${attempt}/${MAX_ATTEMPTS})`);

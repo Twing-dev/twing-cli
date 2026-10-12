@@ -282,3 +282,38 @@ test("requireGoal: false still enforces every per-change rule", () => {
   assert.equal(problems.length, 1);
   assert.match(problems[0].message, /unknown action/);
 });
+
+// ---------------------------------------------------------------------------
+// diagrams: (2026-10-11) -- optional, author-drawn Mermaid
+// ---------------------------------------------------------------------------
+
+test("parseDesignTemplate reads diagrams: one per known type, keeping the Mermaid's line breaks", () => {
+  const yaml = [
+    "goal: g",
+    "plan: p",
+    "changes:",
+    "  - {id: c1, action: modify, target: a.ts, intent: i}",
+    "diagrams:",
+    "  - type: flow",
+    "    mermaid: |",
+    "      flowchart LR",
+    "        a[A] --> b[B]",
+    "  - type: flow",
+    "    mermaid: flowchart LR",
+    "  - type: pie",
+    "    mermaid: pie",
+    "  - type: sequence",
+    "    mermaid: ''",
+  ].join("\n");
+  assert.deepEqual(parseDesignTemplate(yaml).diagrams, [{ type: "flow", mermaid: "flowchart LR\n  a[A] --> b[B]" }]);
+});
+
+test("parseDesignTemplate leaves diagrams absent when the template has none", () => {
+  assert.equal("diagrams" in parseDesignTemplate("goal: g\nchanges: []"), false);
+});
+
+test("parseDesignTemplate reads diagrams: unchanged / outdated as the amend answer", () => {
+  assert.equal(parseDesignTemplate("diagrams: unchanged\nchanges: []").diagramsAnswer, "unchanged");
+  assert.equal(parseDesignTemplate("diagrams: Outdated\nchanges: []").diagramsAnswer, "outdated");
+  assert.equal("diagramsAnswer" in parseDesignTemplate("diagrams: maybe\nchanges: []"), false);
+});

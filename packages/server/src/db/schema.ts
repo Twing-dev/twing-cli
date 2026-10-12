@@ -242,6 +242,16 @@ export const designs = sqliteTable(
      * this column is never consulted by any blocking path. */
     changes: text("changes"),
     rawPlanExcerpt: text("raw_plan_excerpt"),
+    /** Author-drawn diagrams (2026-10-11): JSON `AuthorDiagram[]`, already
+     * validated. Nullable, no default -- absent means the author sent none,
+     * and the dashboard then falls back to coordinator-generated ones. */
+    authorDiagrams: text("author_diagrams"),
+    /** scopeVersion the author's diagrams were drawn or last confirmed at
+     * (2026-10-11). Nullable: no author diagrams, nothing to version. */
+    authorDiagramsVersion: integer("author_diagrams_version"),
+    /** The author said its diagrams no longer fit after an amend, without
+     * sending new ones (2026-10-11). Null/0 = not outdated. */
+    authorDiagramsOutdated: integer("author_diagrams_outdated", { mode: "boolean" }),
     /** How the design was registered (2026-09-29): "plan_mode" for a bare
      * ExitPlanMode plan the server extracted from, "template" for a
      * registration that supplied its own files (CLI `register`, the hook's
