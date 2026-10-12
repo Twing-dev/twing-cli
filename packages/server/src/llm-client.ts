@@ -120,7 +120,11 @@ export type LlmPurpose =
   | "semantic_check"
   | "design_chat"
   | "overview_resynthesis"
-  | "group_overview_resynthesis";
+  | "group_overview_resynthesis"
+  /** design-diagrams.ts: does this design group deserve a diagram, and which kinds. */
+  | "diagram_decision"
+  /** design-diagrams.ts: draw one diagram as Mermaid. */
+  | "diagram_generate";
 
 /** Ids that make a logged call findable by `grep <id>`. Each call site fills
  * in whichever it knows -- plan extraction runs before the design exists,
@@ -267,6 +271,14 @@ export function resolveCommentAnswerModel(): string {
 export function resolveResynthesisModel(): string {
   const m = PROVIDER_MODELS[selectProvider()];
   return process.env[m.resynthesisEnv]?.trim() || m.resynthesisDefault;
+}
+
+/** The overview-diagram model (2026-10-11): `TWING_<PROVIDER>_DIAGRAM_MODEL`
+ * if set, else the resynthesis model. Separate so a stronger model can draw
+ * diagrams without changing what writes the overview text. */
+export function resolveDiagramModel(): string {
+  const provider = selectProvider();
+  return process.env[`TWING_${provider.toUpperCase()}_DIAGRAM_MODEL`]?.trim() || resolveResynthesisModel();
 }
 
 /** One-line, secret-free description of the active provider config, for

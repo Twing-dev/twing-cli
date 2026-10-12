@@ -53,6 +53,7 @@ import { assembleDesignContext, describeProvenance, designScopePaths, type Assem
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
 import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
+import { diagramsForMembers, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
 import { callLlm } from "./llm-client.js";
 import { httpLog, describeBody, isLoggingEnabled, isTextual, logIdsFrom, redact, requestContext } from "./daily-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
@@ -260,6 +261,9 @@ export interface CreateAppOptions {
    * amendment pile back into one current overview. Same default as the
    * three above. */
   resynthesisModel?: string;
+  /** design-diagrams.ts's model (2026-10-11) -- what decides and draws a
+   * group's optional overview diagrams. Defaults to the resynthesis model. */
+  diagramModel?: string;
   /** Overview resynthesis, injected whole (2026-10-06). Tests pass a queue
    * built on a stub model so the triggers can be exercised with no provider
    * and no timers; real `twing serve` leaves it undefined and gets the one
@@ -686,6 +690,15 @@ export function createApp(options: CreateAppOptions = {}) {
     log: (message) => console.log(message),
   };
   const groupResynthesis = options.groupResynthesis ?? new GroupResynthesisQueue(groupResynthesisDeps);
+  /** Optional overview diagrams (2026-10-11), see design-diagrams.ts. Same
+   * repo labels and conversation grounding as the group overview. */
+  const diagramModel = options.diagramModel ?? resynthesisModel;
+  const diagramDeps: DiagramDeps = {
+    labelFor: groupResynthesisDeps.labelFor,
+    groundingFor: (design) => groundingTextFor(design),
+    callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: diagramModel, tag }),
+    log: (message) => console.log(message),
+  };
   const monitorUrl = options.monitorUrl;
   const noAuth = options.noAuth ?? false;
   const githubClientId = options.githubClientId ?? process.env.TWING_GITHUB_CLIENT_ID ?? "Ov23liSaEt1UliMyahy6";
@@ -3320,6 +3333,34 @@ export function createApp(options: CreateAppOptions = {}) {
    * provider configured, or a call failure) -- same honest "nothing to
    * offer" shape the old per-design Rewrite button used, not an error.
    */
+  // Optional overview diagrams (2026-10-11): computed on read, cached per
+  // group state, same visibility rule as the group overview below.
+  app.get("/v1/designs/:id/diagrams", async (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
+    const members = design.groupId
+      ? designs.listByGroup(design.groupId).filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId))
+      : [design];
+    return c.json({ diagrams: await diagramsForMembers(diagramDeps, members) });
+  });
+
+  // The browser couldn't render one: regenerate that kind once with the
+  // parse error. Returns the replacement, or null (the tab stays hidden).
+  app.post("/v1/designs/:id/diagrams/repair", async (c) => {
+    const identity = c.get("identity");
+    const design = designs.get(c.req.param("id"));
+    if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
+    const body = await c.req.json<{ type?: unknown; error?: unknown }>().catch(() => null);
+    const type = body?.type;
+    if (type !== "flow" && type !== "sequence" && type !== "class") return c.json({ error: "expected { type: flow|sequence|class, error }" }, 400);
+    const members = design.groupId
+      ? designs.listByGroup(design.groupId).filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId))
+      : [design];
+    const fixed = await repairDiagram(diagramDeps, members, type as DiagramType, typeof body?.error === "string" ? body.error : "render failed");
+    return c.json({ diagram: fixed ?? null });
+  });
+
   app.get("/v1/designs/:id/group-overview", async (c) => {
     const identity = c.get("identity");
     const design = designs.get(c.req.param("id"));
