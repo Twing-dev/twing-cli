@@ -50,7 +50,29 @@ export interface GroupResynthesisDeps {
    * automatic generates new ones to replace them, the same rule
    * `isHumanWritten` enforces per-design. */
   getOverride?: (groupId: string) => string | undefined;
+  /** Stores the `Title:` line the model wrote above the overview
+   * (2026-10-12) on the members that don't have one yet. Called only on a
+   * fresh model answer, never on a cache hit; the store's own write is
+   * conditional too, so a design's title is set once and never changes. */
+  writeTitle?: (members: DesignStatement[], title: string) => void;
   log?: (message: string) => void;
+}
+
+/** The prompt's hard limit on the title (2026-10-12). The monitor shows a
+ * title whole, never clipped, so one over this is dropped rather than
+ * stored -- the next fresh overview gets another try. */
+export const MAX_TITLE_CHARS = 60;
+
+/** Splits the model's leading `Title: ...` line off the overview, so the
+ * overview text stays exactly the Problem/Approach the monitor renders.
+ * `title` is undefined when the line is missing, blank or over the limit;
+ * `overview` is the rest either way. */
+export function splitTitle(text: string): { title?: string; overview: string } {
+  const match = /^title:[ \t]*(.*)$/im.exec(text);
+  if (!match || match.index !== text.search(/\S/)) return { overview: text };
+  const overview = (text.slice(0, match.index) + text.slice(match.index + match[0].length)).trim();
+  const title = match[1].trim().replace(/^["'`*]+|["'`*]+$/g, "").replace(/\.$/, "").trim();
+  return { title: title.length > 0 && title.length <= MAX_TITLE_CHARS ? title : undefined, overview };
 }
 
 
@@ -183,10 +205,14 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
       groupId,
       designIds: members.map((m) => m.id),
     });
-    const text = out.trim();
-    if (text.length === 0) return undefined;
-    rememberGroupProposal(key, text);
-    return text;
+    const { title, overview } = splitTitle(out.trim());
+    if (overview.length === 0) return undefined;
+    if (title) {
+      const untitled = members.filter((m) => !m.generatedTitle);
+      if (untitled.length > 0) deps.writeTitle?.(untitled, title);
+    }
+    rememberGroupProposal(key, overview);
+    return overview;
   } catch (err) {
     deps.log?.(`twing serve: group (${members.map((m) => m.id.slice(0, 8)).join(",")}) overview resynthesis failed -- ${String(err)}`);
     return undefined;

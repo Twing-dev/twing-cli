@@ -53,7 +53,6 @@ import { assembleDesignContext, describeProvenance, designScopePaths, type Assem
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
 import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
-import { refreshGeneratedTitle, type TitleDeps } from "./design-title.js";
 import { checkAuthorDiagrams, diagramsWithReason, diagramsFromPlanText, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
 import { callLlm } from "./llm-client.js";
 import { httpLog, describeBody, isLoggingEnabled, isTextual, logIdsFrom, redact, requestContext } from "./daily-log.js";
@@ -279,9 +278,6 @@ export interface CreateAppOptions {
   /** Group-level overview resynthesis (2026-10-09), injected whole for the
    * same reason as `resynthesis` above. */
   groupResynthesis?: GroupResynthesisQueue;
-  /** design-title.ts's model call (2026-10-12). Tests pass a stub; real
-   * `twing serve` leaves it undefined and uses the resynthesis model. */
-  titleCallModel?: TitleDeps["callModel"];
   /** Design review comment store (2026-09). Injected in tests for the same
    * reason every other store here is. */
   designComments?: DesignCommentStore;
@@ -649,15 +645,6 @@ export function createApp(options: CreateAppOptions = {}) {
   const semanticCheckModel = options.semanticCheckModel ?? "google.gemma-4-31b";
   const commentAnswerModel = options.commentAnswerModel ?? "google.gemma-4-31b";
   const resynthesisModel = options.resynthesisModel ?? "google.gemma-4-31b";
-  /** Short model-written heading (2026-10-12), see design-title.ts. Refreshed
-   * after registration and whenever resynthesis rewrites the overview below;
-   * always fire-and-forget, never awaited by a route. */
-  const titleDeps: TitleDeps = {
-    getDesign: (id) => designs.get(id),
-    callModel: options.titleCallModel ?? ((systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel, tag })),
-    writeTitle: (id, title) => designs.setGeneratedTitle(id, title),
-    log: (message) => console.log(message),
-  };
   /** Overview resynthesis (2026-10-06). Everything it reads is already
    * constructed above; it is given narrow accessors rather than the stores
    * themselves so the job cannot grow a second opinion about what a design
@@ -672,7 +659,6 @@ export function createApp(options: CreateAppOptions = {}) {
     callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel, tag }),
     writeOverview: (id, summary) => {
       designs.reviseOverview(id, { summary, actor: "twing", source: "llm_resynthesis" });
-      void refreshGeneratedTitle(titleDeps, id);
     },
     // `groundingTextFor` is a hoisted function declaration defined later in
     // this same factory -- callable here despite the textual position, the
@@ -707,6 +693,12 @@ export function createApp(options: CreateAppOptions = {}) {
     labelFor: (design) => identities.getProjectRecord(design.projectId)?.githubRepo ?? design.projectId.slice(0, 10),
     callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel, tag }),
     getOverride: (groupId) => designGroups.get(groupId)?.overview,
+    // The title the model writes above the first overview (2026-10-12).
+    // `setGeneratedTitle` only writes while the design has none, so it is
+    // set once and never changes.
+    writeTitle: (members, title) => {
+      for (const member of members) designs.setGeneratedTitle(member.id, title);
+    },
     log: (message) => console.log(message),
   };
   const groupResynthesis = options.groupResynthesis ?? new GroupResynthesisQueue(groupResynthesisDeps);
@@ -2405,9 +2397,10 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     runSemanticComparatorPass(design.id, open);
-    // Only when it has none: this branch also answers a repeat registration
-    // of an existing design, which has nothing new to title.
-    if (!design.generatedTitle) void refreshGeneratedTitle(titleDeps, design.id);
+    // Generate the group overview once, now, so the design gets its title
+    // (written by that same call) before anyone opens it (2026-10-12). Only
+    // when it has none: this branch also answers a repeat registration.
+    if (!design.generatedTitle) void groupResynthesis.run(design.groupId ?? design.id);
 
     // groupId (§17 design linking, 2026-08): echoed back on every branch --
     // post self-assignment, this is what lets a CLI caller that didn't pass

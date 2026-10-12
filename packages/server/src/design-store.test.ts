@@ -1269,3 +1269,13 @@ test("DesignRegistry: author diagrams from before the version column fall behind
   assert.equal(amended?.authorDiagramsVersion, 1, "pinned to the pre-amend version, so it reads as not re-checked");
   registry.stop();
 });
+
+test("DesignRegistry.setGeneratedTitle: sets a design's title once and never changes it", () => {
+  const registry = freshRegistry();
+  const d = registry.register({ projectId: "p1", developerId: "d1", sessionId: "s1", summary: "x", creates: ["X"], touches: [], dependsOn: [] });
+  registry.setGeneratedTitle(d.id, "First title");
+  registry.setGeneratedTitle(d.id, "Second title");
+  assert.equal(registry.get(d.id)?.generatedTitle, "First title");
+  assert.equal(registry.get(d.id)?.title, undefined, "the owner's title column is never written");
+  registry.stop();
+});

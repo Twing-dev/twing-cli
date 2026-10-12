@@ -400,12 +400,19 @@ export class DesignRegistry {
     this.db.update(designsTable).set({ lastActivityAt: Date.now() }).where(eq(designsTable.id, id)).run();
   }
 
-  /** Stores the model-written heading (`design-title.ts`). Deliberately not
-   * `reviseOverview`: a heading is derived display text, so it bumps no
-   * revision counter, logs no activity event and never touches `title`.
-   * Silent no-op if the design doesn't exist. */
+  /** Stores the model-written heading from the first group overview
+   * (`group-overview-resynthesis.ts`) -- **once**: the write only lands while
+   * `generated_title` is still null, so a design's title never changes after
+   * it is first set, however many overviews follow. Deliberately not
+   * `reviseOverview`: it bumps no revision counter, logs no activity event
+   * and never touches the owner's `title`. Silent no-op if the design doesn't
+   * exist or already has one. */
   setGeneratedTitle(id: string, generatedTitle: string): void {
-    this.db.update(designsTable).set({ generatedTitle }).where(eq(designsTable.id, id)).run();
+    this.db
+      .update(designsTable)
+      .set({ generatedTitle })
+      .where(and(eq(designsTable.id, id), isNull(designsTable.generatedTitle)))
+      .run();
   }
 
   /** §17 scope enforcement (2026-08): expands an *open* design's declared
