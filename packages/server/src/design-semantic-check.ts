@@ -154,7 +154,19 @@ export async function checkSemanticConflict(candidate: DesignStatement, other: D
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const text = await callLlmMessages(messages, { model: options.model, region: options.region });
+      const text = await callLlmMessages(messages, {
+        model: options.model,
+        region: options.region,
+        tag: {
+          purpose: "semantic_check",
+          designId: candidate.id,
+          groupId: candidate.groupId,
+          sessionId: candidate.sessionId,
+          projectId: candidate.projectId,
+          otherDesignId: other.id,
+          otherGroupId: other.groupId,
+        },
+      });
       const parsed = parseResult(text);
       if (parsed) return parsed;
       console.warn(`twing serve: semantic conflict check returned malformed JSON (attempt ${attempt}/${MAX_ATTEMPTS})`);

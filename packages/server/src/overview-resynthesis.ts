@@ -44,6 +44,7 @@ import type { ActivityEvent } from "./activity-log.js";
 // Moved to llm-prompts.ts (2026-10-10), alongside every other prompt this
 // server sends, so they can be read in one place -- see that file's header.
 import { OVERVIEW_RESYNTHESIS_PROMPT as SYSTEM_PROMPT } from "./llm-prompts.js";
+import type { LlmTag } from "./llm-client.js";
 
 /** How many amendments may pile up before the automatic path takes an
  * interest.
@@ -83,7 +84,7 @@ export interface ResynthesisDeps {
   commentsFor: (designId: string) => { status: string; anchor?: { field: string } }[];
   /** Injected so tests can run the whole job without a provider, and so the
    * model id is resolved once at app construction rather than per call. */
-  callModel: (systemPrompt: string, userPrompt: string) => Promise<string>;
+  callModel: (systemPrompt: string, userPrompt: string, tag: LlmTag) => Promise<string>;
   /** `designs.reviseOverview`, narrowed to what this needs. */
   writeOverview: (id: string, summary: string) => void;
   /** Budgeted, redacted conversation grounding for this design, when its
@@ -364,7 +365,13 @@ export async function proposeOverview(deps: ResynthesisDeps, designId: string): 
   // is, rather than the two drifting if only one side knew about it.
   const isIncremental = design.overviewRevisedAt !== undefined;
   try {
-    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments, grounding, isIncremental));
+    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments, grounding, isIncremental), {
+      purpose: "overview_resynthesis",
+      designId: design.id,
+      groupId: design.groupId,
+      sessionId: design.sessionId,
+      projectId: design.projectId,
+    });
     const text = out.trim();
     // A model that returns nothing usable is the same case as one that
     // throws. Checked rather than trusted, because an empty string would pass

@@ -25,6 +25,7 @@ import type { DesignStatement } from "@twing/core";
 // Moved to llm-prompts.ts (2026-10-10), alongside every other prompt this
 // server sends, so they can be read in one place -- see that file's header.
 import { GROUP_OVERVIEW_RESYNTHESIS_PROMPT as SYSTEM_PROMPT } from "./llm-prompts.js";
+import type { LlmTag } from "./llm-client.js";
 
 export interface GroupResynthesisDeps {
   /** Every design sharing a `groupId`, as the caller is authorized to see.
@@ -40,7 +41,7 @@ export interface GroupResynthesisDeps {
    * raw `projectId` hash. The model's job is to say *which* repo does what
    * when that's worth saying, and "b1d42b22" says nothing. */
   labelFor: (design: DesignStatement) => string;
-  callModel: (systemPrompt: string, userPrompt: string) => Promise<string>;
+  callModel: (systemPrompt: string, userPrompt: string, tag: LlmTag) => Promise<string>;
   /** A human-saved override for this group (2026-10-10), if anyone has ever
    * edited it -- `design-group-store.ts`'s `DesignGroupStore.get`, narrowed
    * to the one field this needs. Checked before anything else in both
@@ -164,7 +165,11 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
   if (cached !== undefined) return cached;
 
   try {
-    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(deps, members));
+    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(deps, members), {
+      purpose: "group_overview_resynthesis",
+      groupId,
+      designIds: members.map((m) => m.id),
+    });
     const text = out.trim();
     if (text.length === 0) return undefined;
     rememberGroupProposal(key, text);

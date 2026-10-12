@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { createDb } from "./db/client.js";
+import { initLogging } from "./daily-log.js";
 import { ConstraintStore } from "./design-store.js";
 import { IdentityStore } from "./identity-store.js";
 import { describeLlmProvider, resolveExtractModel, resolveSemanticCheckModel, resolveCommentAnswerModel, resolveResynthesisModel } from "./llm-client.js";
@@ -92,6 +93,11 @@ const publicProjectIds = process.env.TWING_PUBLIC_PROJECT_IDS?.split(",")
 // designs. Unset means no monitor, and every consumer omits the link.
 const monitorUrl = process.env.TWING_MONITOR_URL?.trim() || undefined;
 
+// Daily http/llm logs under /var/log/twing-cli (daily-log.ts). After the
+// --regenerate-bootstrap-token early exit above, so that one-shot never
+// opens log files.
+const logging = initLogging();
+
 const app = createApp({
   db,
   // Forwarded so blob-backed state lands beside the database rather than in
@@ -135,6 +141,11 @@ const hostname = explicitHost ?? (noAuth ? "127.0.0.1" : undefined);
 
 serve({ fetch: app.fetch, port, hostname }, (info) => {
   console.log(`twing serve: listening on http://localhost:${info.port}`);
+  console.log(
+    "error" in logging
+      ? `twing serve: WARNING -- http/llm file logging is off: ${logging.error}`
+      : `twing serve: writing http/llm logs to ${logging.dir} (keeping ${logging.retentionDays} days)`,
+  );
   if (corsOrigins && corsOrigins.length > 0) {
     console.log(`twing serve: CORS enabled for browser origins: ${corsOrigins.join(", ")}`);
   }
