@@ -7087,3 +7087,50 @@ test("PATCH /v1/designs/:id/overview: still refuses a non-owner after rephrase o
   assert.equal(res.status, 403);
   assert.equal(designs.get(d.id)!.summary, AMENDED_SUMMARY);
 });
+
+// --- author-drawn diagrams (2026-10-11) ---------------------------------------
+
+test("author diagrams: registered with a design, invalid ones dropped with a warning, replaced by amend, served first", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const flow = "flowchart LR\n  a[Request] --> b[Handler]\n  b --> c[Store]";
+  const sequence = "sequenceDiagram\n  participant C as CLI\n  participant S as Server\n  C->>S: register";
+
+  const res = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      projectId: "proj-1",
+      sessionId: "s-diag",
+      rawPlanText: "Route requests through a handler into the store.",
+      summary: "store requests",
+      creates: [],
+      touches: ["src/handler.ts", "src/store.ts"],
+      dependsOn: [],
+      diagrams: [
+        { type: "flow", mermaid: flow },
+        { type: "class", mermaid: "flowchart LR\n  a[A] --> b[B]" },
+      ],
+    }),
+  });
+  const body = (await res.json()) as { designId: string; verdict: string; diagramWarnings?: string[] };
+  assert.equal(body.verdict, "clean", "a bad diagram never blocks registration");
+  assert.deepEqual(designs.get(body.designId)?.authorDiagrams, [{ type: "flow", mermaid: flow }]);
+  assert.equal(body.diagramWarnings?.length, 1);
+  assert.match(body.diagramWarnings![0], /dropped the class diagram/);
+
+  // Served first, as the author's own -- no model involved.
+  const served = (await (await app.request(`/v1/designs/${body.designId}/diagrams`, { headers: bearer(admin.token) })).json()) as {
+    diagrams: { source: string; type: string }[];
+  };
+  assert.deepEqual(served.diagrams.map((d) => [d.source, d.type]), [["author", "flow"]]);
+
+  // An amend that sends diagrams replaces them.
+  const amend = await app.request(`/v1/designs/${body.designId}/amend`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ diagrams: [{ type: "sequence", mermaid: sequence }] }),
+  });
+  assert.equal(((await amend.json()) as { verdict: string }).verdict, "clean");
+  assert.deepEqual(designs.get(body.designId)?.authorDiagrams, [{ type: "sequence", mermaid: sequence }]);
+});

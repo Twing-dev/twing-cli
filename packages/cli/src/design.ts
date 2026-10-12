@@ -27,6 +27,7 @@ import {
   pathOfTarget,
   suggestAction,
   type DesignChange,
+  type AuthorDiagram,
   DESIGN_TRAILER_KEY,
   PLAN_GUIDANCE,
   templateSyntaxError,
@@ -133,6 +134,9 @@ interface DesignCheckResponseJSON {
    * `--reassign-project` amend -- the design's new home, echoed back so
    * `printDesignVerdict` can confirm the move actually happened. */
   projectId?: string;
+  /** Author diagrams the server dropped and why (2026-10-11). The design
+   * itself registered fine; only those diagrams are missing. */
+  diagramWarnings?: string[];
 }
 
 async function parseJsonOrUnauthorized<T>(res: Response): Promise<T | { error: string }> {
@@ -146,6 +150,9 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
     return;
   }
   console.log(`verdict: ${result.verdict}` + (result.designId ? `  design: ${result.designId}` : ""));
+  for (const warning of result.diagramWarnings ?? []) {
+    console.warn(`  ! diagram ${warning} -- fix it and send it again with \`twing design amend --from\``);
+  }
   if (result.projectId) {
     // Change D (2026-08-31): only a successful --reassign-project amend
     // sets this -- confirms the move, mirroring Change A's "report what
@@ -318,7 +325,14 @@ function buildTemplate(
     );
   }
 
-  return { goal: template.goal, changes: template.changes, creates, touches, ...(template.plan ? { plan: template.plan } : {}) };
+  return {
+    goal: template.goal,
+    changes: template.changes,
+    creates,
+    touches,
+    ...(template.plan ? { plan: template.plan } : {}),
+    ...(template.diagrams ? { diagrams: template.diagrams } : {}),
+  };
 }
 
 /** A validated template with its scope derived. `plan` is the template's
@@ -329,6 +343,8 @@ interface LoadedTemplate {
   creates: string[];
   touches: string[];
   plan?: string;
+  /** The template's own diagrams (2026-10-11), validated server-side. */
+  diagrams?: AuthorDiagram[];
 }
 
 /** The per-change lines printed after a successful `--from` registration --
@@ -443,6 +459,7 @@ export async function runDesignRegister(options: RegisterOptions): Promise<void>
         // are present (app.ts's `hasStructured` check), so this changes no
         // verdict.
         ...(template?.plan ? { rawPlanText: template.plan } : flagPlan ? { rawPlanText: flagPlan } : {}),
+        ...(template?.diagrams ? { diagrams: template.diagrams } : {}),
         ...(options.group ? { groupId: options.group } : {}),
       }),
     },
@@ -673,6 +690,7 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
         ...(appended ? { changes: appended.changes } : {}),
         ...(summaryUpdate ? { summary: summaryUpdate } : {}),
         ...(appended?.plan ? { plan: appended.plan } : {}),
+        ...(appended?.diagrams ? { diagrams: appended.diagrams } : {}),
         ...(options.group ? { groupId: options.group } : {}),
       }),
     },

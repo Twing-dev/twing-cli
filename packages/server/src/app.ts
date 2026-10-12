@@ -53,7 +53,7 @@ import { assembleDesignContext, describeProvenance, designScopePaths, type Assem
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
 import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
-import { diagramsForMembers, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
+import { checkAuthorDiagrams, diagramsForMembers, diagramsFromPlanText, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
 import { callLlm } from "./llm-client.js";
 import { httpLog, describeBody, isLoggingEnabled, isTextual, logIdsFrom, redact, requestContext } from "./daily-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
@@ -93,6 +93,9 @@ interface DesignCheckRequestBody {
    * ever sent. Stored as-is; see the `changes:` note at the register call
    * for why this isn't re-derived server-side. */
   changes?: DesignChange[];
+  /** Author-drawn diagrams (2026-10-11): a template's `diagrams:`. Validated
+   * here; invalid ones are dropped and reported, never a rejection. */
+  diagrams?: unknown;
   summary?: string;
   ttlMs?: number;
   // §17 design linking (2026-08): unlike developerId (resolved from the
@@ -146,6 +149,9 @@ interface AmendRequestBody {
    * (`appendPlanUpdate`), never a replacement. Not propagated to linked
    * siblings: a plan is written for one repo's part of the work. */
   plan?: string;
+  /** Replacement author diagrams (2026-10-11), from `amend --from`'s
+   * `diagrams:`. Same validation as registration. */
+  diagrams?: unknown;
   /** §17 design linking (2026-08): join (or move to) a different group
    * after registration -- see DesignRegistry.amend's `groupId` param doc
    * comment for the full reasoning. */
@@ -2134,6 +2140,11 @@ export function createApp(options: CreateAppOptions = {}) {
     if (!authz.ok) return c.json({ error: authz.error }, authz.status);
 
     const hasStructured = Array.isArray(body.creates) || Array.isArray(body.touches) || Array.isArray(body.dependsOn) || typeof body.summary === "string";
+    // Author-drawn diagrams (2026-10-11): a template's own `diagrams:`, or
+    // else ```mermaid blocks in the plan text (plan mode). Invalid ones are
+    // dropped and reported back, never a rejection.
+    const authorDiagramCheck = body.diagrams !== undefined ? checkAuthorDiagrams(body.diagrams) : { kept: diagramsFromPlanText(body.rawPlanText), warnings: [] };
+    const diagramFields = authorDiagramCheck.warnings.length > 0 ? { diagramWarnings: authorDiagramCheck.warnings } : {};
     // No design exists without a plan (2026-09-29). Enforced here, where a
     // design is created, rather than trusted to each client: the plan is what
     // a reviewer reads, and a design that is only a file list gives them
@@ -2213,6 +2224,7 @@ export function createApp(options: CreateAppOptions = {}) {
             // `register` call below does -- a plan retry is a fresh
             // declaration, not an amendment of the previous attempt.
             changes: ensureChanges({ changes: body.changes ?? extractedChanges, creates, touches, summary }),
+            authorDiagrams: authorDiagramCheck.kept,
           });
           reregistered = design !== undefined;
         }
@@ -2266,6 +2278,7 @@ export function createApp(options: CreateAppOptions = {}) {
       // this field is a guarantee rather than a property of which client
       // happened to call.
       changes: ensureChanges({ changes: body.changes ?? extractedChanges, creates, touches, summary }),
+      ...(authorDiagramCheck.kept.length > 0 ? { authorDiagrams: authorDiagramCheck.kept } : {}),
       // No truncation (dropped 2026-08-18, was capped at 2000 chars) -- see
       // DesignStatement.rawPlanExcerpt's doc comment in @twing/core for why.
       rawPlanExcerpt: body.rawPlanText,
@@ -2405,7 +2418,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const reviewUrl = buildDesignReviewUrl(monitorUrl, design.projectId, design.id);
     const reviewFields = reviewUrl ? { reviewUrl } : {};
     if (outcome.verdict === "clean") {
-      return c.json({ verdict: "clean", designId: design.id, groupId: design.groupId, ...extractedFields, ...reviewFields });
+      return c.json({ verdict: "clean", designId: design.id, groupId: design.groupId, ...extractedFields, ...reviewFields, ...diagramFields });
     }
     // The only other verdict a registration can get: file overlap, which had
     // its own response here, was removed 2026-10-01.
@@ -2416,6 +2429,7 @@ export function createApp(options: CreateAppOptions = {}) {
       constraints: outcome.constraints,
       ...extractedFields,
       ...reviewFields,
+      ...diagramFields,
     });
   });
 
@@ -2884,6 +2898,7 @@ export function createApp(options: CreateAppOptions = {}) {
     // appendSummaryUpdate (which embeds the current date) and risking a
     // divergent result between "what got checked" and "what got saved".
     const summary = body?.summary !== undefined ? appendSummaryUpdate(design.summary, body.summary) : undefined;
+    const amendDiagramCheck = body?.diagrams !== undefined ? checkAuthorDiagrams(body.diagrams) : undefined;
     const delta = {
       touches: body?.addTouches ?? [],
       creates: body?.addCreates ?? [],
@@ -2912,10 +2927,13 @@ export function createApp(options: CreateAppOptions = {}) {
         touches: body?.addTouches ?? [],
         summary: body?.summary ?? design.summary,
       }),
+      // Replacement author diagrams (2026-10-11), when this amend sent any.
+      ...(amendDiagramCheck ? { authorDiagrams: amendDiagramCheck.kept } : {}),
     };
-    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.rawPlanExcerpt === undefined && delta.groupId === undefined) {
-      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/plan/groupId" }, 400);
+    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.rawPlanExcerpt === undefined && delta.groupId === undefined && !amendDiagramCheck) {
+      return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/plan/groupId/diagrams" }, 400);
     }
+    const amendDiagramFields = amendDiagramCheck?.warnings.length ? { diagramWarnings: amendDiagramCheck.warnings } : {};
 
     const { outcome, open } = checkAmendedScope(design, delta);
 
@@ -2988,12 +3006,12 @@ export function createApp(options: CreateAppOptions = {}) {
         designs.flag(id, outcome.verdict, { conflicts: outcome.conflicts, constraints: outcome.constraints });
       }
       runSemanticComparatorPass(id, open);
-      return c.json({ verdict: outcome.verdict, designId: id, groupId: amended.groupId, conflicts: outcome.conflicts, constraints: outcome.constraints });
+      return c.json({ verdict: outcome.verdict, designId: id, groupId: amended.groupId, conflicts: outcome.conflicts, constraints: outcome.constraints, ...amendDiagramFields });
     }
 
     console.log(`twing serve: design ${id.slice(0, 8)} amended -> scopeVersion ${amended.scopeVersion}`);
     runSemanticComparatorPass(amended.id, open);
-    return c.json({ verdict: "clean", designId: amended.id, groupId: amended.groupId });
+    return c.json({ verdict: "clean", designId: amended.id, groupId: amended.groupId, ...amendDiagramFields });
   });
 
   // §17 design lifecycle (2026-08): reactivate a *dormant* design -- always

@@ -8,6 +8,8 @@ import {
   diagramsForMembers,
   repairDiagram,
   buildDiagramContext,
+  checkAuthorDiagrams,
+  diagramsFromPlanText,
   __clearDiagramCache,
   type DiagramDeps,
 } from "./design-diagrams.js";
@@ -186,4 +188,47 @@ test("buildDiagramContext: one block per repo with overview, plan and changes", 
   assert.match(context, /PLAN:\nMiddleware logs requests/);
   assert.match(context, /- modify src\/app\.ts: request middleware/);
   assert.match(context, /---\n\nREPO: p2/);
+});
+
+// --- author-drawn diagrams (2026-10-11) ---------------------------------------
+
+test("checkAuthorDiagrams: keeps valid ones, drops invalid or duplicate ones with a reason", () => {
+  const { kept, warnings } = checkAuthorDiagrams([
+    { type: "flow", mermaid: FLOW },
+    { type: "flow", mermaid: FLOW },
+    { type: "sequence", mermaid: "flowchart LR\n  a[A] --> b[B]" },
+    { type: "pie", mermaid: "pie" },
+  ]);
+  assert.deepEqual(kept, [{ type: "flow", mermaid: FLOW }]);
+  assert.equal(warnings.length, 3);
+  assert.match(warnings[1], /dropped the sequence diagram: must start with `sequenceDiagram`/);
+});
+
+test("diagramsFromPlanText: pulls valid ```mermaid blocks out of a plan, typed by their first line", () => {
+  const plan = ["## Approach", "Some prose.", "```mermaid", SEQUENCE, "```", "", "```mermaid", "pie title nope", "```", "```js", "flowchart LR", "```"].join("\n");
+  assert.deepEqual(diagramsFromPlanText(plan), [{ type: "sequence", mermaid: SEQUENCE }]);
+  assert.deepEqual(diagramsFromPlanText(undefined), []);
+});
+
+test("diagramsForMembers: the author's diagrams win, with no model call at all", async () => {
+  const { deps, calls } = stubDeps('{"diagrams":[{"type":"flow","reason":"r"}]}', { flow: [FLOW] });
+  const result = await diagramsForMembers(deps, [design({ authorDiagrams: [{ type: "sequence", mermaid: SEQUENCE }] })]);
+  assert.deepEqual(result.map((d) => [d.source, d.type, d.title]), [["author", "sequence", "Sequence (UML)"]]);
+  assert.equal(calls.length, 0);
+});
+
+test("diagramsForMembers: in a linked group, each author diagram is labelled with its repo", async () => {
+  const { deps } = stubDeps("");
+  const result = await diagramsForMembers(deps, [
+    design({ authorDiagrams: [{ type: "flow", mermaid: FLOW }] }),
+    design({ id: "d2", projectId: "p2", authorDiagrams: [{ type: "flow", mermaid: FLOW }] }),
+  ]);
+  assert.deepEqual(result.map((d) => [d.id, d.title]), [["author:d1:flow", "Flow · p1"], ["author:d2:flow", "Flow · p2"]]);
+});
+
+test("diagramsForMembers: generated diagrams say so", async () => {
+  const { deps } = stubDeps('{"diagrams":[{"type":"flow","reason":"r"}]}', { flow: [FLOW] });
+  const [only] = await diagramsForMembers(deps, [design()]);
+  assert.equal(only.source, "generated");
+  assert.equal(only.id, "generated:flow");
 });

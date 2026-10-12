@@ -169,6 +169,13 @@
       "when": 1791571227542,
       "tag": "0023_design-group-overviews",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1791787889589,
+      "tag": "0024_design-author-diagrams",
+      "breakpoints": true
     }
   ]
 }

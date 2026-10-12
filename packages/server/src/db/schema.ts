@@ -242,6 +242,10 @@ export const designs = sqliteTable(
      * this column is never consulted by any blocking path. */
     changes: text("changes"),
     rawPlanExcerpt: text("raw_plan_excerpt"),
+    /** Author-drawn diagrams (2026-10-11): JSON `AuthorDiagram[]`, already
+     * validated. Nullable, no default -- absent means the author sent none,
+     * and the dashboard then falls back to coordinator-generated ones. */
+    authorDiagrams: text("author_diagrams"),
     /** How the design was registered (2026-09-29): "plan_mode" for a bare
      * ExitPlanMode plan the server extracted from, "template" for a
      * registration that supplied its own files (CLI `register`, the hook's
