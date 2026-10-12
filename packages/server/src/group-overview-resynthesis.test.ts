@@ -6,6 +6,7 @@ import {
   GroupResynthesisQueue,
   __clearGroupProposalCache,
   splitTitle,
+  proposeOverviewAndTitle,
   MAX_TITLE_CHARS,
   type GroupResynthesisDeps,
 } from "./group-overview-resynthesis.js";
@@ -184,7 +185,7 @@ test("proposeGroupOverview: a group of one whose overview was already rewritten 
 });
 
 // The title the model writes above the overview (2026-10-12): split off,
-// stored once on members without one, never part of the overview text.
+// returned only on a fresh answer, never part of the overview text.
 
 const WITH_TITLE = "Title: Add a priority field\nProblem: Tasks can't be ordered.\nApproach:\n- Adds a priority field.";
 
@@ -206,24 +207,18 @@ test("splitTitle: a title over the limit is dropped, never clipped, but the over
   assert.deepEqual(splitTitle(long), { title: undefined, overview: "Problem: x" });
 });
 
-test("proposeOverviewForMembers: writes the title to members that have none, and returns the overview without it", async () => {
-  const written: { ids: string[]; title: string }[] = [];
-  const members = [design({ id: "d1" }), design({ id: "d2", projectId: "p2", generatedTitle: "Already set" })];
-  const { deps } = stubDeps({
-    members,
-    callModel: async () => WITH_TITLE,
-    writeTitle: (ms, title) => written.push({ ids: ms.map((m) => m.id), title }),
-  });
-  const result = await proposeOverviewForMembers(deps, members);
-  assert.equal(result, "Problem: Tasks can't be ordered.\nApproach:\n- Adds a priority field.");
-  assert.deepEqual(written, [{ ids: ["d1"], title: "Add a priority field" }], "d2 keeps the title it already has");
+test("proposeOverviewAndTitle: returns the title beside the overview; proposeOverviewForMembers returns the overview alone", async () => {
+  const members = [design({ id: "d1" })];
+  const { deps } = stubDeps({ members, callModel: async () => WITH_TITLE });
+  const overview = "Problem: Tasks can't be ordered.\nApproach:\n- Adds a priority field.";
+  assert.deepEqual(await proposeOverviewAndTitle(deps, members), { overview, title: "Add a priority field" });
+  __clearGroupProposalCache();
+  assert.equal(await proposeOverviewForMembers(deps, members), overview);
 });
 
-test("proposeOverviewForMembers: a cache hit writes no title -- only a fresh model answer does", async () => {
-  let writes = 0;
+test("proposeOverviewAndTitle: a cache hit returns no title -- only a fresh model answer has one", async () => {
   const members = [design({ id: "d1" })];
-  const { deps } = stubDeps({ members, callModel: async () => WITH_TITLE, writeTitle: () => writes++ });
-  await proposeOverviewForMembers(deps, members);
-  await proposeOverviewForMembers(deps, members);
-  assert.equal(writes, 1);
+  const { deps } = stubDeps({ members, callModel: async () => WITH_TITLE });
+  await proposeOverviewAndTitle(deps, members);
+  assert.equal((await proposeOverviewAndTitle(deps, members))?.title, undefined);
 });

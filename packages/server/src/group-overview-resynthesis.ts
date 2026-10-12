@@ -50,11 +50,6 @@ export interface GroupResynthesisDeps {
    * automatic generates new ones to replace them, the same rule
    * `isHumanWritten` enforces per-design. */
   getOverride?: (groupId: string) => string | undefined;
-  /** Stores the `Title:` line the model wrote above the overview
-   * (2026-10-12) on the members that don't have one yet. Called only on a
-   * fresh model answer, never on a cache hit; the store's own write is
-   * conditional too, so a design's title is set once and never changes. */
-  writeTitle?: (members: DesignStatement[], title: string) => void;
   log?: (message: string) => void;
 }
 
@@ -179,13 +174,27 @@ export async function proposeGroupOverview(deps: GroupResynthesisDeps, groupId: 
  * reader's own filtered call is what actually decides what reaches them.
  */
 export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, members: DesignStatement[]): Promise<string | undefined> {
+  return (await proposeOverviewAndTitle(deps, members))?.overview;
+}
+
+/**
+ * The same computation, also returning the `Title:` line the model wrote
+ * above the overview (2026-10-12). Only registration reads the title
+ * (`app.ts`); every other caller goes through `proposeOverviewForMembers`
+ * and gets the overview alone. `title` is present only on a fresh model
+ * answer -- never from an override, a revised group of one, or the cache.
+ */
+export async function proposeOverviewAndTitle(
+  deps: GroupResynthesisDeps,
+  members: DesignStatement[],
+): Promise<{ overview: string; title?: string } | undefined> {
   if (members.length < 1) return undefined;
 
   // Every member shares the same `groupId` by construction (that's the
   // query that found them), so any one of them names it.
   const groupId = members[0].groupId;
   const override = groupId ? deps.getOverride?.(groupId) : undefined;
-  if (override !== undefined) return override;
+  if (override !== undefined) return { overview: override };
 
   // A group of one whose own overview has already been rewritten (by the
   // per-design resynthesis or by its owner) has nothing left to combine:
@@ -193,11 +202,11 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
   // call (2026-10-11). An unrevised one -- e.g. a template design whose
   // summary is just its goal line -- still goes through the model, since
   // that is the only path that adds the solution to it.
-  if (members.length === 1 && (members[0].overviewRevision ?? 0) > 0) return members[0].summary;
+  if (members.length === 1 && (members[0].overviewRevision ?? 0) > 0) return { overview: members[0].summary };
 
   const key = groupCacheKey(members);
   const cached = cachedGroupProposal(key);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return { overview: cached };
 
   try {
     const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(deps, members), {
@@ -207,12 +216,8 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
     });
     const { title, overview } = splitTitle(out.trim());
     if (overview.length === 0) return undefined;
-    if (title) {
-      const untitled = members.filter((m) => !m.generatedTitle);
-      if (untitled.length > 0) deps.writeTitle?.(untitled, title);
-    }
     rememberGroupProposal(key, overview);
-    return overview;
+    return { overview, title };
   } catch (err) {
     deps.log?.(`twing serve: group (${members.map((m) => m.id.slice(0, 8)).join(",")}) overview resynthesis failed -- ${String(err)}`);
     return undefined;

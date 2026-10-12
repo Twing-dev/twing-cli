@@ -52,7 +52,7 @@ import { NotificationStore } from "./notification-store.js";
 import { assembleDesignContext, describeProvenance, designScopePaths, type AssembledContext } from "./design-context.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
-import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
+import { GroupResynthesisQueue, proposeOverviewForMembers, proposeOverviewAndTitle, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
 import { checkAuthorDiagrams, diagramsWithReason, diagramsFromPlanText, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
 import { callLlm } from "./llm-client.js";
 import { httpLog, describeBody, isLoggingEnabled, isTextual, logIdsFrom, redact, requestContext } from "./daily-log.js";
@@ -693,12 +693,6 @@ export function createApp(options: CreateAppOptions = {}) {
     labelFor: (design) => identities.getProjectRecord(design.projectId)?.githubRepo ?? design.projectId.slice(0, 10),
     callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel, tag }),
     getOverride: (groupId) => designGroups.get(groupId)?.overview,
-    // The title the model writes above the first overview (2026-10-12).
-    // `setGeneratedTitle` only writes while the design has none, so it is
-    // set once and never changes.
-    writeTitle: (members, title) => {
-      for (const member of members) designs.setGeneratedTitle(member.id, title);
-    },
     log: (message) => console.log(message),
   };
   const groupResynthesis = options.groupResynthesis ?? new GroupResynthesisQueue(groupResynthesisDeps);
@@ -2397,10 +2391,15 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     runSemanticComparatorPass(design.id, open);
-    // Generate the group overview once, now, so the design gets its title
-    // (written by that same call) before anyone opens it (2026-10-12). Only
-    // when it has none: this branch also answers a repeat registration.
-    if (!design.generatedTitle) void groupResynthesis.run(design.groupId ?? design.id);
+    // The design's title (2026-10-12): written by the group overview call,
+    // run once here at registration and nowhere else -- no amend, read or
+    // later overview ever sets or changes it.
+    if (!design.generatedTitle) {
+      const titled = design;
+      void proposeOverviewAndTitle(groupResynthesis.deps, designs.listByGroup(titled.groupId ?? titled.id)).then((result) => {
+        if (result?.title) designs.setGeneratedTitle(titled.id, result.title);
+      });
+    }
 
     // groupId (§17 design linking, 2026-08): echoed back on every branch --
     // post self-assignment, this is what lets a CLI caller that didn't pass
