@@ -52,7 +52,7 @@ import { NotificationStore } from "./notification-store.js";
 import { assembleDesignContext, describeProvenance, designScopePaths, type AssembledContext } from "./design-context.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
-import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
+import { GroupResynthesisQueue, proposeOverviewForMembers, proposeOverviewAndTitle, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
 import { checkAuthorDiagrams, diagramsWithReason, diagramsFromPlanText, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
 import { callLlm } from "./llm-client.js";
 import { httpLog, describeBody, isLoggingEnabled, isTextual, logIdsFrom, redact, requestContext } from "./daily-log.js";
@@ -2391,6 +2391,15 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     runSemanticComparatorPass(design.id, open);
+    // The design's title (2026-10-12): written by the group overview call,
+    // run once here at registration and nowhere else -- no amend, read or
+    // later overview ever sets or changes it.
+    if (!design.generatedTitle) {
+      const titled = design;
+      void proposeOverviewAndTitle(groupResynthesis.deps, designs.listByGroup(titled.groupId ?? titled.id)).then((result) => {
+        if (result?.title) designs.setGeneratedTitle(titled.id, result.title);
+      });
+    }
 
     // groupId (§17 design linking, 2026-08): echoed back on every branch --
     // post self-assignment, this is what lets a CLI caller that didn't pass

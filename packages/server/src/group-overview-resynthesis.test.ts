@@ -5,6 +5,9 @@ import {
   proposeOverviewForMembers,
   GroupResynthesisQueue,
   __clearGroupProposalCache,
+  splitTitle,
+  proposeOverviewAndTitle,
+  MAX_TITLE_CHARS,
   type GroupResynthesisDeps,
 } from "./group-overview-resynthesis.js";
 import type { DesignStatement } from "@twing/core";
@@ -179,4 +182,43 @@ test("proposeGroupOverview: a group of one whose overview was already rewritten 
   const { deps, prompts } = stubDeps({ members });
   assert.equal(await proposeGroupOverview(deps, "g1"), "Already rewritten: problem, then how.");
   assert.equal(prompts.length, 0);
+});
+
+// The title the model writes above the overview (2026-10-12): split off,
+// returned only on a fresh answer, never part of the overview text.
+
+const WITH_TITLE = "Title: Add a priority field\nProblem: Tasks can't be ordered.\nApproach:\n- Adds a priority field.";
+
+test("splitTitle: takes a leading Title line off and returns the rest as the overview", () => {
+  assert.deepEqual(splitTitle(WITH_TITLE), {
+    title: "Add a priority field",
+    overview: "Problem: Tasks can't be ordered.\nApproach:\n- Adds a priority field.",
+  });
+  assert.equal(splitTitle('Title: "Add a priority field."\nProblem: x').title, "Add a priority field");
+});
+
+test("splitTitle: no Title line, or one that isn't first, leaves the text untouched", () => {
+  assert.deepEqual(splitTitle("Problem: x\nApproach:\n- y"), { overview: "Problem: x\nApproach:\n- y" });
+  assert.deepEqual(splitTitle("Problem: x\nTitle: y"), { overview: "Problem: x\nTitle: y" });
+});
+
+test("splitTitle: a title over the limit is dropped, never clipped, but the overview still comes back", () => {
+  const long = `Title: ${"x".repeat(MAX_TITLE_CHARS + 1)}\nProblem: x`;
+  assert.deepEqual(splitTitle(long), { title: undefined, overview: "Problem: x" });
+});
+
+test("proposeOverviewAndTitle: returns the title beside the overview; proposeOverviewForMembers returns the overview alone", async () => {
+  const members = [design({ id: "d1" })];
+  const { deps } = stubDeps({ members, callModel: async () => WITH_TITLE });
+  const overview = "Problem: Tasks can't be ordered.\nApproach:\n- Adds a priority field.";
+  assert.deepEqual(await proposeOverviewAndTitle(deps, members), { overview, title: "Add a priority field" });
+  __clearGroupProposalCache();
+  assert.equal(await proposeOverviewForMembers(deps, members), overview);
+});
+
+test("proposeOverviewAndTitle: a cache hit returns no title -- only a fresh model answer has one", async () => {
+  const members = [design({ id: "d1" })];
+  const { deps } = stubDeps({ members, callModel: async () => WITH_TITLE });
+  await proposeOverviewAndTitle(deps, members);
+  assert.equal((await proposeOverviewAndTitle(deps, members))?.title, undefined);
 });

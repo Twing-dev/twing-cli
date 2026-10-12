@@ -1,0 +1,1 @@
+ALTER TABLE `designs` ADD `generated_title` text;
