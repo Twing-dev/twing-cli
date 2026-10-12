@@ -319,9 +319,31 @@ const MAX_INPUT_CHARS = 24_000;
  * the caller (`app.ts`'s `since: design.overviewRevisedAt`). This just tells
  * the model honestly which case it's in, so it doesn't mistake a short,
  * recent-only transcript for the whole conversation (or vice versa). */
-function buildUserPrompt(original: string, amendments: string[], grounding?: string, isIncremental?: boolean): string {
+/** Cap on the plan prose inside one prompt -- the plan is the "how", but a
+ * pasted plan can be pages long and the overview only needs its gist. */
+const MAX_PLAN_CHARS = 6_000;
+
+/** The design's solution, as the overview prompts see it (2026-10-11): its
+ * plan prose (`rawPlanExcerpt`, which amendments with a plan update append
+ * to) plus one line per declared change. Without this the rewrite only ever
+ * saw the summary -- usually just the goal line -- and amendment text, so it
+ * could say what problem a design addresses but never how it solves it.
+ * Undefined when the design declares neither. Shared with
+ * `group-overview-resynthesis.ts` so both prompts describe the solution the
+ * same way. */
+export function planSectionFor(design: DesignStatement): string | undefined {
+  const parts: string[] = [];
+  const plan = design.rawPlanExcerpt?.trim();
+  if (plan) parts.push(plan.length > MAX_PLAN_CHARS ? `${plan.slice(0, MAX_PLAN_CHARS)}…` : plan);
+  const changes = (design.changes ?? []).map((c) => `- ${c.action} ${c.target}${c.intent ? `: ${c.intent}` : ""}`);
+  if (changes.length > 0) parts.push(`Changes:\n${changes.join("\n")}`);
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+function buildUserPrompt(original: string, amendments: string[], plan?: string, grounding?: string, isIncremental?: boolean): string {
   const parts = [`ORIGINAL OVERVIEW:\n${original}`];
   amendments.forEach((text, i) => parts.push(`AMENDMENT ${i + 1}:\n${text}`));
+  if (plan) parts.push(`PLAN (how the author intends to solve it):\n${plan}`);
   if (grounding) {
     const label = isIncremental
       ? "SESSION TRANSCRIPT (conversation since this overview was last updated -- not the whole session; abridged and redacted)"
@@ -350,7 +372,12 @@ export async function proposeOverview(deps: ResynthesisDeps, designId: string): 
   if (!design) return undefined;
 
   const amendments = amendmentTexts(design);
-  if (amendments.length === 0) return undefined;
+  const plan = planSectionFor(design);
+  // Nothing to fold and no plan to draw the "how" from: the overview is
+  // already as good as this can make it. A plan alone is enough (2026-10-11)
+  // -- a template-registered design's summary is just its goal line, and
+  // this is the only path that ever adds the solution to it.
+  if (amendments.length === 0 && !plan) return undefined;
 
   // The same design state always produces the same proposal, so a second
   // press -- by this reader or any other -- is answered from the cache rather
@@ -365,7 +392,7 @@ export async function proposeOverview(deps: ResynthesisDeps, designId: string): 
   // is, rather than the two drifting if only one side knew about it.
   const isIncremental = design.overviewRevisedAt !== undefined;
   try {
-    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments, grounding, isIncremental), {
+    const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(original, amendments, plan, grounding, isIncremental), {
       purpose: "overview_resynthesis",
       designId: design.id,
       groupId: design.groupId,

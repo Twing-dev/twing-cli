@@ -26,6 +26,7 @@ import type { DesignStatement } from "@twing/core";
 // server sends, so they can be read in one place -- see that file's header.
 import { GROUP_OVERVIEW_RESYNTHESIS_PROMPT as SYSTEM_PROMPT } from "./llm-prompts.js";
 import type { LlmTag } from "./llm-client.js";
+import { planSectionFor } from "./overview-resynthesis.js";
 
 export interface GroupResynthesisDeps {
   /** Every design sharing a `groupId`, as the caller is authorized to see.
@@ -67,6 +68,10 @@ function buildUserPrompt(deps: GroupResynthesisDeps, members: DesignStatement[])
   const parts = members.map((member) => {
     const label = deps.labelFor(member);
     const lines = [`REPO: ${label}`, `OVERVIEW:\n${truncate(member.summary ?? "", MAX_MEMBER_CHARS)}`];
+    // The "how" (2026-10-11) -- without it the group overview could only
+    // restate each member's problem. See `planSectionFor`.
+    const plan = planSectionFor(member);
+    if (plan) lines.push(`PLAN:\n${truncate(plan, MAX_MEMBER_CHARS)}`);
     const grounding = deps.groundingFor?.(member);
     if (grounding) lines.push(`SESSION CONTEXT:\n${truncate(grounding, MAX_MEMBER_CHARS)}`);
     return lines.join("\n\n");
@@ -159,6 +164,14 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
   const groupId = members[0].groupId;
   const override = groupId ? deps.getOverride?.(groupId) : undefined;
   if (override !== undefined) return override;
+
+  // A group of one whose own overview has already been rewritten (by the
+  // per-design resynthesis or by its owner) has nothing left to combine:
+  // that text already is the overview, so showing it costs no second model
+  // call (2026-10-11). An unrevised one -- e.g. a template design whose
+  // summary is just its goal line -- still goes through the model, since
+  // that is the only path that adds the solution to it.
+  if (members.length === 1 && (members[0].overviewRevision ?? 0) > 0) return members[0].summary;
 
   const key = groupCacheKey(members);
   const cached = cachedGroupProposal(key);
