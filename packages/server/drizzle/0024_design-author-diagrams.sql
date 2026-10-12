@@ -1,0 +1,1 @@
+ALTER TABLE `designs` ADD `author_diagrams` text;

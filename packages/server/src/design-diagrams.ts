@@ -25,7 +25,7 @@
  * An overview rewrite alone does not, so it is not in the key.
  */
 
-import type { DesignStatement } from "@twing/core";
+import type { AuthorDiagram, DesignStatement } from "@twing/core";
 import { DIAGRAM_DECISION_PROMPT, DIAGRAM_GENERATE_PROMPT } from "./llm-prompts.js";
 import type { LlmTag } from "./llm-client.js";
 import { planSectionFor } from "./overview-resynthesis.js";
@@ -33,7 +33,12 @@ import { planSectionFor } from "./overview-resynthesis.js";
 export type DiagramType = "flow" | "sequence" | "class";
 
 export interface DesignDiagram {
+  /** Stable key for the monitor's tabs: a two-repo group can carry two
+   * author diagrams of the same type. */
+  id: string;
   type: DiagramType;
+  /** Who drew it (2026-10-11): the registering session, or this server. */
+  source: "author" | "generated";
   /** Tab label in the monitor. */
   title: string;
   mermaid: string;
@@ -186,7 +191,7 @@ export async function generateDiagram(
     try {
       const reply = await deps.callModel(DIAGRAM_GENERATE_PROMPT, parts.filter(Boolean).join("\n\n"), tagFor("diagram_generate", members));
       const checked = validateMermaid(choice.type, reply);
-      if (checked.ok) return { type: choice.type, title: TITLES[choice.type], mermaid: checked.mermaid, reason: choice.reason };
+      if (checked.ok) return { id: `generated:${choice.type}`, type: choice.type, source: "generated", title: TITLES[choice.type], mermaid: checked.mermaid, reason: choice.reason };
       deps.log?.(`twing serve: ${choice.type} diagram rejected (attempt ${attempt}/${MAX_ATTEMPTS}): ${checked.error}`);
       feedback = { mermaid: reply.trim(), error: checked.error };
     } catch (err) {
@@ -227,6 +232,10 @@ export function __clearDiagramCache(): void {
 /** The diagrams for a set of group members: cached, and shared between
  * concurrent requests so two tabs opening at once pay once. */
 export async function diagramsForMembers(deps: DiagramDeps, members: DesignStatement[]): Promise<DesignDiagram[]> {
+  // The author's own diagrams win (2026-10-11): that session read the code,
+  // this server only sees the declared plan. No model call at all then.
+  const authored = authorDiagramsFor(deps, members);
+  if (authored.length > 0) return authored;
   if (!worthConsidering(members)) return [];
   const key = stateKey(members);
   const cached = cache.get(key);
@@ -267,4 +276,69 @@ export async function repairDiagram(deps: DiagramDeps, members: DesignStatement[
   }
   remember(key, current.map((d) => (d.type === type ? fixed : d)));
   return fixed;
+}
+
+
+// --- author-drawn diagrams (2026-10-11) --------------------------------------
+
+/** Validates diagrams a client sent (template `diagrams:`), with the same
+ * checks a generated one gets. Invalid ones are dropped and described in
+ * `warnings` for the CLI to print -- never a rejection: a diagram is
+ * optional, and registering a design is what unblocks edits. One per type. */
+export function checkAuthorDiagrams(value: unknown): { kept: AuthorDiagram[]; warnings: string[] } {
+  const kept: AuthorDiagram[] = [];
+  const warnings: string[] = [];
+  if (!Array.isArray(value)) return { kept, warnings };
+  for (const raw of value) {
+    const type = (raw as { type?: unknown })?.type;
+    const mermaid = (raw as { mermaid?: unknown })?.mermaid;
+    if (typeof type !== "string" || !DIAGRAM_TYPES.includes(type as DiagramType) || typeof mermaid !== "string") {
+      warnings.push("skipped a diagram without a valid type (flow, sequence or class) and mermaid text");
+      continue;
+    }
+    if (kept.some((d) => d.type === type)) {
+      warnings.push(`skipped a second ${type} diagram -- one per type`);
+      continue;
+    }
+    const checked = validateMermaid(type as DiagramType, mermaid);
+    if (!checked.ok) {
+      warnings.push(`dropped the ${type} diagram: ${checked.error}`);
+      continue;
+    }
+    kept.push({ type: type as DiagramType, mermaid: checked.mermaid });
+  }
+  return { kept, warnings };
+}
+
+const TYPE_BY_HEADER: [RegExp, DiagramType][] = [
+  [HEADERS.flow, "flow"],
+  [HEADERS.sequence, "sequence"],
+  [HEADERS.class, "class"],
+];
+
+/** ```mermaid blocks in a plan's text (a plan-mode plan usually has them
+ * when Claude drew one), as author diagrams -- type read from each block's
+ * first line, invalid or unknown ones skipped, one per type. */
+export function diagramsFromPlanText(text: string | undefined): AuthorDiagram[] {
+  if (!text) return [];
+  const candidates = [...text.matchAll(/```mermaid\s*\n([\s\S]*?)```/g)].map((m) => {
+    const body = m[1].trim();
+    const type = TYPE_BY_HEADER.find(([header]) => header.test(body))?.[1];
+    return type ? { type, mermaid: body } : undefined;
+  });
+  return checkAuthorDiagrams(candidates.filter(Boolean)).kept;
+}
+
+function authorDiagramsFor(deps: DiagramDeps, members: DesignStatement[]): DesignDiagram[] {
+  const several = members.length > 1;
+  return members.flatMap((member) =>
+    (member.authorDiagrams ?? []).map((d) => ({
+      id: `author:${member.id}:${d.type}`,
+      type: d.type,
+      source: "author" as const,
+      title: several ? `${TITLES[d.type]} · ${deps.labelFor(member)}` : TITLES[d.type],
+      mermaid: d.mermaid,
+      reason: "Drawn by the author's coding session",
+    })),
+  );
 }

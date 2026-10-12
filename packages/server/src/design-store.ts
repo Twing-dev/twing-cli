@@ -16,6 +16,7 @@ import {
   DEFAULT_DESIGN_DORMANT_TTL_MS,
   type DesignStatement,
   type DesignChange,
+  type AuthorDiagram,
   type DesignConstraint,
   type DesignConstraintType,
   type DesignConflict,
@@ -77,6 +78,7 @@ interface DesignRow {
   touches: string;
   dependsOn: string;
   changes: string | null;
+  authorDiagrams: string | null;
   rawPlanExcerpt: string | null;
   registeredVia: string | null;
   ttlMs: number;
@@ -116,6 +118,7 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     // and the monitor renders them differently (fallback vs "declares
     // nothing").
     changes: row.changes ? JSON.parse(row.changes) : undefined,
+    authorDiagrams: row.authorDiagrams ? JSON.parse(row.authorDiagrams) : undefined,
     rawPlanExcerpt: row.rawPlanExcerpt ?? undefined,
     ...(row.registeredVia === "plan_mode" || row.registeredVia === "template" ? { registeredVia: row.registeredVia } : {}),
     ttlMs: row.ttlMs,
@@ -251,6 +254,7 @@ export class DesignRegistry {
         touches: JSON.stringify(design.touches),
         dependsOn: JSON.stringify(design.dependsOn),
         changes: design.changes ? JSON.stringify(design.changes) : null,
+        authorDiagrams: design.authorDiagrams?.length ? JSON.stringify(design.authorDiagrams) : null,
         rawPlanExcerpt: design.rawPlanExcerpt ?? null,
         registeredVia: design.registeredVia ?? null,
         ttlMs: design.ttlMs,
@@ -436,6 +440,9 @@ export class DesignRegistry {
        * leaves the stored declaration untouched -- see the write below for
        * why that is not the same as clearing it. */
       changes?: DesignChange[];
+      /** Replaces the author's diagrams (2026-10-11), already validated by
+       * the caller. Absent leaves them as they are. */
+      authorDiagrams?: AuthorDiagram[];
     },
   ): DesignStatement | undefined {
     const existing = this.get(id);
@@ -464,6 +471,7 @@ export class DesignRegistry {
         creates: JSON.stringify(merged.creates),
         dependsOn: JSON.stringify(merged.dependsOn),
         ...(delta.changes !== undefined ? { changes: JSON.stringify(delta.changes) } : {}),
+        ...(delta.authorDiagrams !== undefined ? { authorDiagrams: delta.authorDiagrams.length ? JSON.stringify(delta.authorDiagrams) : null } : {}),
         // `delta.summary`, if present, already IS the final text to persist
         // -- the caller (app.ts's amend route) has already appended it onto
         // the original via design-checks.ts's appendSummaryUpdate before
@@ -932,6 +940,9 @@ export class DesignRegistry {
        * must the change that described it. This is the one scope-writing
        * path where merging would be wrong. */
       changes?: DesignChange[];
+      /** The retry's own author diagrams (2026-10-11): replaces the previous
+       * attempt's, same as `changes`. */
+      authorDiagrams?: AuthorDiagram[];
     },
   ): DesignStatement | undefined {
     const existing = this.get(id);
@@ -951,6 +962,7 @@ export class DesignRegistry {
         // previous attempt's changes describe files that may no longer be
         // in scope at all.
         ...(args.changes !== undefined ? { changes: JSON.stringify(args.changes) } : {}),
+        ...(args.authorDiagrams !== undefined ? { authorDiagrams: args.authorDiagrams.length ? JSON.stringify(args.authorDiagrams) : null } : {}),
         rawPlanExcerpt: args.rawPlanExcerpt,
         scopeVersion: existing.scopeVersion + 1,
         lastActivityAt: now,

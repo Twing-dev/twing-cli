@@ -29,7 +29,7 @@
  */
 
 import { parse as parseYaml } from "yaml";
-import type { DesignChange, DesignChangeAction, DesignChangeKind } from "./types.js";
+import type { AuthorDiagram, DesignChange, DesignChangeAction, DesignChangeKind } from "./types.js";
 
 /** The six actions, as a runtime value -- `DesignChangeAction` is compile-time
  * only, and validation needs something to check against at runtime. Kept
@@ -73,6 +73,10 @@ export interface DesignTemplate {
    * a list of paths tells a reviewer nothing they can't already see.
    * Absent -- not "" -- when the template says nothing. */
   plan?: string;
+  /** Optional (2026-10-11): diagrams the author draws itself, as Mermaid.
+   * The server validates them and drops any that fail, so a bad diagram
+   * never blocks registering. Absent when the template has none. */
+  diagrams?: AuthorDiagram[];
 }
 
 /** A single problem found in a template. `changeId` is absent for problems
@@ -175,7 +179,30 @@ export function parseDesignTemplate(yamlText: string): DesignTemplate {
   // Trimmed at the ends only: a plan is multi-line prose or markdown, and its
   // inner line breaks and indentation are the formatting.
   const plan = typeof document.plan === "string" ? document.plan.trim() : "";
-  return { goal: asTrimmedString(document.goal), changes, ...(plan ? { plan } : {}) };
+  const diagrams = parseTemplateDiagrams(document.diagrams);
+  return { goal: asTrimmedString(document.goal), changes, ...(plan ? { plan } : {}), ...(diagrams.length > 0 ? { diagrams } : {}) };
+}
+
+const DIAGRAM_TYPES = ["flow", "sequence", "class"] as const;
+
+/** `diagrams:` entries with a known `type` and non-empty `mermaid`, one per
+ * type (first wins), at most three. Anything else is skipped rather than
+ * reported: a diagram is optional decoration, and the server re-validates
+ * the Mermaid itself and says what it dropped. */
+function parseTemplateDiagrams(value: unknown): AuthorDiagram[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: AuthorDiagram[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) continue;
+    const type = asTrimmedString(raw.type);
+    const mermaid = typeof raw.mermaid === "string" ? raw.mermaid.trim() : "";
+    if (!(DIAGRAM_TYPES as readonly string[]).includes(type) || !mermaid || seen.has(type)) continue;
+    seen.add(type);
+    out.push({ type: type as AuthorDiagram["type"], mermaid });
+    if (out.length === DIAGRAM_TYPES.length) break;
+  }
+  return out;
 }
 
 /**
@@ -231,6 +258,16 @@ export const PLAN_GUIDANCE = [
   "    <how you will build it, and the key decisions>",
   "    ## Risks and checks",
   "    <what could break, and how you will verify it>",
+  "",
+  "Optional: when the change spans several components, add a diagram you",
+  "draw from the code you've read -- a flow (how data moves), sequence (who",
+  "calls whom) or class (new types). Mermaid, at most 12 boxes, no styling:",
+  "",
+  "  diagrams:",
+  "    - type: flow",
+  "      mermaid: |",
+  "        flowchart LR",
+  "          a[Request] --> b[Handler]",
 ].join("\n");
 
 /** A line that is still one of the template's `<...>` prompts. */
