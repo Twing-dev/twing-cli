@@ -53,7 +53,7 @@ import { assembleDesignContext, describeProvenance, designScopePaths, type Assem
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
 import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
-import { checkAuthorDiagrams, diagramsForMembers, diagramsFromPlanText, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
+import { checkAuthorDiagrams, diagramsWithReason, diagramsFromPlanText, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
 import { callLlm } from "./llm-client.js";
 import { httpLog, describeBody, isLoggingEnabled, isTextual, logIdsFrom, redact, requestContext } from "./daily-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
@@ -2898,7 +2898,13 @@ export function createApp(options: CreateAppOptions = {}) {
     // appendSummaryUpdate (which embeds the current date) and risking a
     // divergent result between "what got checked" and "what got saved".
     const summary = body?.summary !== undefined ? appendSummaryUpdate(design.summary, body.summary) : undefined;
-    const amendDiagramCheck = body?.diagrams !== undefined ? checkAuthorDiagrams(body.diagrams) : undefined;
+    // The author's word on its diagrams for this amend (2026-10-11): a new
+    // list, or `unchanged` / `outdated`. A list that is entirely invalid
+    // keeps the existing diagrams rather than wiping them; only an explicit
+    // empty list clears them.
+    const diagramsAnswer: "unchanged" | "outdated" | undefined = body?.diagrams === "unchanged" || body?.diagrams === "outdated" ? body.diagrams : undefined;
+    const amendDiagramCheck = Array.isArray(body?.diagrams) ? checkAuthorDiagrams(body.diagrams) : undefined;
+    const replaceDiagrams = amendDiagramCheck && (amendDiagramCheck.kept.length > 0 || (body?.diagrams as unknown[]).length === 0);
     const delta = {
       touches: body?.addTouches ?? [],
       creates: body?.addCreates ?? [],
@@ -2928,12 +2934,23 @@ export function createApp(options: CreateAppOptions = {}) {
         summary: body?.summary ?? design.summary,
       }),
       // Replacement author diagrams (2026-10-11), when this amend sent any.
-      ...(amendDiagramCheck ? { authorDiagrams: amendDiagramCheck.kept } : {}),
+      ...(replaceDiagrams ? { authorDiagrams: amendDiagramCheck.kept } : {}),
+      ...(diagramsAnswer ? { diagramsAnswer } : {}),
     };
-    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.rawPlanExcerpt === undefined && delta.groupId === undefined && !amendDiagramCheck) {
+    if (delta.touches.length === 0 && delta.creates.length === 0 && delta.dependsOn.length === 0 && delta.summary === undefined && delta.rawPlanExcerpt === undefined && delta.groupId === undefined && !amendDiagramCheck && !diagramsAnswer) {
       return c.json({ error: "expected at least one of addTouches/addCreates/addDependsOn/summary/plan/groupId/diagrams" }, 400);
     }
-    const amendDiagramFields = amendDiagramCheck?.warnings.length ? { diagramWarnings: amendDiagramCheck.warnings } : {};
+    // A design with author diagrams whose amend said nothing about them:
+    // ask the session to answer, since it knows whether the flow changed.
+    // Never a rejection -- an amend is often what unblocks an edit.
+    const diagramNotice =
+      design.authorDiagrams?.length && !amendDiagramCheck && !diagramsAnswer
+        ? `this design has author diagrams (${design.authorDiagrams.map((d) => d.type).join(", ")}). Say whether they still fit this amendment: add \`diagrams: unchanged\`, \`diagrams: outdated\` (twing then updates them), or new diagrams to an \`amend --from\` template.`
+        : undefined;
+    const amendDiagramFields = {
+      ...(amendDiagramCheck?.warnings.length ? { diagramWarnings: amendDiagramCheck.warnings } : {}),
+      ...(diagramNotice ? { diagramNotice } : {}),
+    };
 
     const { outcome, open } = checkAmendedScope(design, delta);
 
@@ -3360,7 +3377,9 @@ export function createApp(options: CreateAppOptions = {}) {
     const members = design.groupId
       ? designs.listByGroup(design.groupId).filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId))
       : [design];
-    return c.json({ diagrams: await diagramsForMembers(diagramDeps, members) });
+    // `skipped` says why there are none when the rules skipped the group, so
+    // a missing diagram can be explained from the HTTP log.
+    return c.json(await diagramsWithReason(diagramDeps, members));
   });
 
   // The browser couldn't render one: regenerate that kind once with the

@@ -324,3 +324,25 @@ export const DIAGRAM_GENERATE_PROMPT = [
   "",
   "Output only the Mermaid text: no explanation, no markdown fences.",
 ].join("\n");
+
+/** `design-diagrams.ts` (2026-10-11) -- revises a diagram the design's
+ * author drew, after an amendment the author said made it outdated without
+ * sending a new one. Revise, don't redraw: the author's session had read the
+ * code, so every part of its diagram that still holds is worth more than
+ * anything drawn fresh from the plan. Same syntax rules as generation. */
+export const DIAGRAM_REVISE_PROMPT = [
+  "You update one diagram of a software design, in Mermaid syntax, after the design was amended.",
+  "",
+  "You are given the diagram the design's author drew before the amendment, and the design as it stands now (overview, plan, declared changes, and the conversation when available).",
+  "",
+  "Keep every box, participant, step and label from the author's diagram that is still true. Add, change or remove only what the amendment changed. Keep the author's names for components exactly -- they come from the real code. Never invent parts that appear in neither the diagram nor the design.",
+  "",
+  "Syntax rules -- follow them exactly, and keep the diagram's existing first line:",
+  "- flow: `flowchart LR`; short letter/digit node ids; labels in square brackets; arrows `-->`.",
+  "- sequence: `sequenceDiagram`; `participant A as Short name`; `A->>B: text`, replies `B-->>A: text`.",
+  "- class: `classDiagram`; `class Name { member per line }`; relations like `A ..> B : uses`.",
+  "- At most 12 boxes or participants. Labels of 5 words or fewer, plain words only.",
+  "- No styling, classDef, style, click, links, notes, subgraphs, comments or HTML.",
+  "",
+  "Output only the updated Mermaid text: no explanation, no markdown fences.",
+].join("\n");

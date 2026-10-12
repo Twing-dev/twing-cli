@@ -1244,3 +1244,28 @@ test("DesignRegistry: reviseOverview appends a design_overview_revised event nam
   assert.equal(log.eventsForRelatedId(d.id).filter((e) => e.kind === "design_amended").length, 0);
   registry.stop();
 });
+
+test("DesignRegistry: author diagrams from before the version column fall behind on a silent amend", async () => {
+  const { eq } = await import("drizzle-orm");
+  const { designs: designsTable } = await import("./db/schema.js");
+  const db = createDb({ memory: true });
+  const registry = new DesignRegistry(db);
+  const a = registry.register({
+    projectId: "p1",
+    developerId: "d1",
+    sessionId: "s1",
+    summary: "",
+    creates: [],
+    touches: ["a.ts", "b.ts"],
+    dependsOn: [],
+    authorDiagrams: [{ type: "flow", mermaid: "flowchart LR\n  a[A] --> b[B]" }],
+  });
+  assert.equal(registry.get(a.id)?.authorDiagramsVersion, 1);
+  // A row written before 2026-10-11 has no version at all.
+  db.update(designsTable).set({ authorDiagramsVersion: null }).where(eq(designsTable.id, a.id)).run();
+
+  const amended = registry.amend(a.id, { touches: ["c.ts"] });
+  assert.equal(amended?.scopeVersion, 2);
+  assert.equal(amended?.authorDiagramsVersion, 1, "pinned to the pre-amend version, so it reads as not re-checked");
+  registry.stop();
+});

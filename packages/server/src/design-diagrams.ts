@@ -26,7 +26,7 @@
  */
 
 import type { AuthorDiagram, DesignStatement } from "@twing/core";
-import { DIAGRAM_DECISION_PROMPT, DIAGRAM_GENERATE_PROMPT } from "./llm-prompts.js";
+import { DIAGRAM_DECISION_PROMPT, DIAGRAM_GENERATE_PROMPT, DIAGRAM_REVISE_PROMPT } from "./llm-prompts.js";
 import type { LlmTag } from "./llm-client.js";
 import { planSectionFor } from "./overview-resynthesis.js";
 
@@ -37,8 +37,12 @@ export interface DesignDiagram {
    * author diagrams of the same type. */
   id: string;
   type: DiagramType;
-  /** Who drew it (2026-10-11): the registering session, or this server. */
-  source: "author" | "generated";
+  /** Who drew it (2026-10-11): the registering session, this server
+   * revising the author's diagram after an amendment, or this server alone. */
+  source: "author" | "revised" | "generated";
+  /** Author diagrams only: drawn/confirmed for the current scope, not
+   * re-checked since an amendment, or outdated (shown when revising failed). */
+  status?: "current" | "unconfirmed" | "outdated";
   /** Tab label in the monitor. */
   title: string;
   mermaid: string;
@@ -65,20 +69,28 @@ const MAX_MEMBER_GROUNDING_CHARS = 3_000;
 const MAX_BOXES = 14;
 const MAX_MERMAID_CHARS = 4_000;
 
-/** Rule check before any model call: a diagram needs several parts, and
- * code-like ones. Several linked designs always qualify (a cross-repo
- * change is exactly what a sequence diagram is for). */
-export function worthConsidering(members: DesignStatement[]): boolean {
-  if (members.length === 0) return false;
-  if (members.length > 1) return true;
+/** Rule check before any model call: why a group gets no diagram, or
+ * undefined when it qualifies. A diagram needs several parts, and code-like
+ * ones. Several linked designs always qualify (a cross-repo change is
+ * exactly what a sequence diagram is for). Returned as text (2026-10-12) so
+ * a missing diagram can be explained from the logs. */
+export function skipReason(members: DesignStatement[]): string | undefined {
+  if (members.length === 0) return "no visible designs in the group";
+  if (members.length > 1) return undefined;
   const design = members[0];
   const changes = design.changes ?? [];
   const targets = new Set(
     (changes.length > 0 ? changes.map((c) => c.target) : [...design.creates, ...design.touches]).map((t) => t.split("::")[0]),
   );
-  if (targets.size <= 1) return false;
-  if (changes.length > 0 && changes.every((c) => NON_CODE_KINDS.has(c.kind ?? "code"))) return false;
-  return true;
+  if (targets.size <= 1) return "it changes a single file";
+  if (changes.length > 0 && changes.every((c) => NON_CODE_KINDS.has(c.kind ?? "code"))) {
+    return `it only changes ${[...new Set(changes.map((c) => c.kind ?? "code"))].join("/")} files`;
+  }
+  return undefined;
+}
+
+export function worthConsidering(members: DesignStatement[]): boolean {
+  return skipReason(members) === undefined;
 }
 
 /** The material both calls read: one block per repo with its overview,
@@ -155,7 +167,7 @@ function countBoxes(type: DiagramType, mermaid: string): number {
   return new Set([...body.matchAll(/(?:^|[\s>-])([A-Za-z][\w]*)\s*[[({]/gm)].map((m) => m[1])).size;
 }
 
-function tagFor(purpose: "diagram_decision" | "diagram_generate", members: DesignStatement[]): LlmTag {
+function tagFor(purpose: "diagram_decision" | "diagram_generate" | "diagram_revise", members: DesignStatement[]): LlmTag {
   return { purpose, groupId: members[0]?.groupId, designIds: members.map((m) => m.id) };
 }
 
@@ -216,6 +228,9 @@ const inFlight = new Map<string, Promise<DesignDiagram[]>>();
 /** `key|type` already repaired once -- a second browser failure on the same
  * state hides that kind rather than paying for the model again. */
 const repaired = new Set<string>();
+/** Group states whose rule-based skip was already logged -- one line per
+ * state, not one per page view. */
+const skipLogged = new Set<string>();
 
 function remember(key: string, diagrams: DesignDiagram[]): void {
   cache.set(key, diagrams);
@@ -224,6 +239,8 @@ function remember(key: string, diagrams: DesignDiagram[]): void {
 
 /** Tests only. */
 export function __clearDiagramCache(): void {
+  revisions.clear();
+  skipLogged.clear();
   cache.clear();
   inFlight.clear();
   repaired.clear();
@@ -232,11 +249,31 @@ export function __clearDiagramCache(): void {
 /** The diagrams for a set of group members: cached, and shared between
  * concurrent requests so two tabs opening at once pay once. */
 export async function diagramsForMembers(deps: DiagramDeps, members: DesignStatement[]): Promise<DesignDiagram[]> {
+  return (await diagramsWithReason(deps, members)).diagrams;
+}
+
+/** `diagramsForMembers`, plus why there are none when the rules skipped the
+ * group (2026-10-12) -- logged once per group state, and returned so the
+ * route can include it in its response (and so the HTTP log). */
+export async function diagramsWithReason(deps: DiagramDeps, members: DesignStatement[]): Promise<{ diagrams: DesignDiagram[]; skipped?: string }> {
   // The author's own diagrams win (2026-10-11): that session read the code,
   // this server only sees the declared plan. No model call at all then.
-  const authored = authorDiagramsFor(deps, members);
-  if (authored.length > 0) return authored;
-  if (!worthConsidering(members)) return [];
+  const authored = await authorDiagramsFor(deps, members);
+  if (authored.length > 0) return { diagrams: authored };
+  const skipped = skipReason(members);
+  if (skipped) {
+    const logKey = stateKey(members);
+    if (!skipLogged.has(logKey)) {
+      skipLogged.add(logKey);
+      if (skipLogged.size > CACHE_MAX) skipLogged.delete(skipLogged.values().next().value!);
+      deps.log?.(`twing serve: diagrams skipped for group ${(members[0]?.groupId ?? "?").slice(0, 8)}: ${skipped} (no model call)`);
+    }
+    return { diagrams: [], skipped };
+  }
+  return { diagrams: await generatedDiagramsFor(deps, members) };
+}
+
+async function generatedDiagramsFor(deps: DiagramDeps, members: DesignStatement[]): Promise<DesignDiagram[]> {
   const key = stateKey(members);
   const cached = cache.get(key);
   if (cached) return cached;
@@ -329,16 +366,68 @@ export function diagramsFromPlanText(text: string | undefined): AuthorDiagram[] 
   return checkAuthorDiagrams(candidates.filter(Boolean)).kept;
 }
 
-function authorDiagramsFor(deps: DiagramDeps, members: DesignStatement[]): DesignDiagram[] {
+/** Where an author's diagrams stand after amendments (2026-10-11). */
+export function authorDiagramStatus(design: DesignStatement): "current" | "unconfirmed" | "outdated" {
+  if (design.authorDiagramsOutdated) return "outdated";
+  return (design.authorDiagramsVersion ?? design.scopeVersion) < design.scopeVersion ? "unconfirmed" : "current";
+}
+
+/** Revisions of outdated author diagrams, keyed by design + scopeVersion +
+ * type. A failure is cached too (as undefined): retrying every view would
+ * pay for the model again with the same input. */
+const revisions = new Map<string, Promise<DesignDiagram | undefined>>();
+
+async function authorDiagramsFor(deps: DiagramDeps, members: DesignStatement[]): Promise<DesignDiagram[]> {
   const several = members.length > 1;
-  return members.flatMap((member) =>
-    (member.authorDiagrams ?? []).map((d) => ({
-      id: `author:${member.id}:${d.type}`,
-      type: d.type,
-      source: "author" as const,
-      title: several ? `${TITLES[d.type]} · ${deps.labelFor(member)}` : TITLES[d.type],
-      mermaid: d.mermaid,
-      reason: "Drawn by the author's coding session",
-    })),
+  const perMember = await Promise.all(
+    members.map(async (member) => {
+      const status = authorDiagramStatus(member);
+      return Promise.all(
+        (member.authorDiagrams ?? []).map(async (d) => {
+          const title = several ? `${TITLES[d.type]} · ${deps.labelFor(member)}` : TITLES[d.type];
+          const base: DesignDiagram = { id: `author:${member.id}:${d.type}`, type: d.type, source: "author", status, title, mermaid: d.mermaid, reason: "Drawn by the author's coding session" };
+          if (status !== "outdated") return base;
+          // The author said it no longer fits and sent nothing new: revise
+          // its diagram ourselves; if that fails, show it labelled outdated.
+          const key = `${member.id}:${member.scopeVersion}:${d.type}`;
+          let revision = revisions.get(key);
+          if (!revision) {
+            revision = reviseDiagram(deps, member, d);
+            revisions.set(key, revision);
+            if (revisions.size > CACHE_MAX) revisions.delete(revisions.keys().next().value!);
+          }
+          const revised = await revision;
+          return revised ? { ...revised, id: base.id, title } : base;
+        }),
+      );
+    }),
   );
+  return perMember.flat();
+}
+
+/** One `diagram_revise` call (retried once with the rejection reason): the
+ * author's diagram plus the design as it stands now. */
+export async function reviseDiagram(deps: DiagramDeps, member: DesignStatement, diagram: AuthorDiagram): Promise<DesignDiagram | undefined> {
+  const context = buildDiagramContext(deps, [member]);
+  let feedback: { mermaid: string; error: string } | undefined;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const parts = [
+      `DIAGRAM KIND: ${diagram.type}`,
+      `CURRENT DIAGRAM (drawn by the author before the latest amendment):\n${diagram.mermaid}`,
+      `THE DESIGN NOW:\n${context}`,
+    ];
+    if (feedback) parts.push(`YOUR PREVIOUS ATTEMPT WAS REJECTED: ${feedback.error}\nPREVIOUS OUTPUT:\n${feedback.mermaid}\nFix it and output the corrected Mermaid only.`);
+    try {
+      const reply = await deps.callModel(DIAGRAM_REVISE_PROMPT, parts.join("\n\n"), tagFor("diagram_revise", [member]));
+      const checked = validateMermaid(diagram.type, reply);
+      if (checked.ok) {
+        return { id: `author:${member.id}:${diagram.type}`, type: diagram.type, source: "revised", title: TITLES[diagram.type], mermaid: checked.mermaid, reason: "Updated by twing from the author's diagram after an amendment" };
+      }
+      deps.log?.(`twing serve: ${diagram.type} diagram revision rejected (attempt ${attempt}/${MAX_ATTEMPTS}): ${checked.error}`);
+      feedback = { mermaid: reply.trim(), error: checked.error };
+    } catch (err) {
+      deps.log?.(`twing serve: ${diagram.type} diagram revision failed (attempt ${attempt}/${MAX_ATTEMPTS}): ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  return undefined;
 }
