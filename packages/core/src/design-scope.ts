@@ -77,6 +77,10 @@ export interface DesignTemplate {
    * The server validates them and drops any that fail, so a bad diagram
    * never blocks registering. Absent when the template has none. */
   diagrams?: AuthorDiagram[];
+  /** On amend (2026-10-11): `diagrams: unchanged` (the existing diagrams
+   * still fit) or `diagrams: outdated` (they don't, and twing should revise
+   * them). Absent when the template sent a list or said nothing. */
+  diagramsAnswer?: "unchanged" | "outdated";
 }
 
 /** A single problem found in a template. `changeId` is absent for problems
@@ -180,7 +184,14 @@ export function parseDesignTemplate(yamlText: string): DesignTemplate {
   // inner line breaks and indentation are the formatting.
   const plan = typeof document.plan === "string" ? document.plan.trim() : "";
   const diagrams = parseTemplateDiagrams(document.diagrams);
-  return { goal: asTrimmedString(document.goal), changes, ...(plan ? { plan } : {}), ...(diagrams.length > 0 ? { diagrams } : {}) };
+  const answer = asTrimmedString(document.diagrams).toLowerCase();
+  return {
+    goal: asTrimmedString(document.goal),
+    changes,
+    ...(plan ? { plan } : {}),
+    ...(diagrams.length > 0 ? { diagrams } : {}),
+    ...(answer === "unchanged" || answer === "outdated" ? { diagramsAnswer: answer } : {}),
+  };
 }
 
 const DIAGRAM_TYPES = ["flow", "sequence", "class"] as const;
@@ -268,6 +279,10 @@ export const PLAN_GUIDANCE = [
   "      mermaid: |",
   "        flowchart LR",
   "          a[Request] --> b[Handler]",
+  "",
+  "When amending a design that has diagrams, say whether they still fit:",
+  "`diagrams: unchanged`, `diagrams: outdated` (twing then updates them), or",
+  "a new `diagrams:` list.",
 ].join("\n");
 
 /** A line that is still one of the template's `<...>` prompts. */

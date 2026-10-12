@@ -10,6 +10,7 @@ import {
   buildDiagramContext,
   checkAuthorDiagrams,
   diagramsFromPlanText,
+  authorDiagramStatus,
   __clearDiagramCache,
   type DiagramDeps,
 } from "./design-diagrams.js";
@@ -231,4 +232,38 @@ test("diagramsForMembers: generated diagrams say so", async () => {
   const [only] = await diagramsForMembers(deps, [design()]);
   assert.equal(only.source, "generated");
   assert.equal(only.id, "generated:flow");
+});
+
+// --- author diagrams after amendments (2026-10-11) ---------------------------
+
+test("authorDiagramStatus: current, not re-checked after an amend, or outdated", () => {
+  assert.equal(authorDiagramStatus(design({ scopeVersion: 2, authorDiagramsVersion: 2 })), "current");
+  assert.equal(authorDiagramStatus(design({ scopeVersion: 3, authorDiagramsVersion: 2 })), "unconfirmed");
+  assert.equal(authorDiagramStatus(design({ scopeVersion: 3, authorDiagramsVersion: 2, authorDiagramsOutdated: true })), "outdated");
+});
+
+test("an unconfirmed author diagram is kept as drawn, labelled, with no model call", async () => {
+  const { deps, calls } = stubDeps("");
+  const [d] = await diagramsForMembers(deps, [design({ scopeVersion: 3, authorDiagramsVersion: 2, authorDiagrams: [{ type: "flow", mermaid: FLOW }] })]);
+  assert.deepEqual([d.source, d.status, d.mermaid], ["author", "unconfirmed", FLOW]);
+  assert.equal(calls.length, 0);
+});
+
+test("an outdated author diagram is revised by the model from the author's version", async () => {
+  const REVISED = "flowchart LR\n  a[Request] --> b[Middleware]\n  b --> c[Log file]\n  b --> d[Sweeper]";
+  const { deps, calls } = stubDeps("", { flow: [REVISED] });
+  const outdated = design({ scopeVersion: 3, authorDiagramsVersion: 2, authorDiagramsOutdated: true, authorDiagrams: [{ type: "flow", mermaid: FLOW }] });
+  const [d] = await diagramsForMembers(deps, [outdated]);
+  assert.deepEqual([d.source, d.id, d.mermaid], ["revised", "author:d1:flow", REVISED]);
+  assert.deepEqual(calls.map((c) => c.purpose), ["diagram_revise"]);
+  assert.match(calls[0].user, /CURRENT DIAGRAM \(drawn by the author before the latest amendment\):\nflowchart LR/);
+  // Cached for this scope: a second view pays nothing.
+  await diagramsForMembers(deps, [outdated]);
+  assert.equal(calls.length, 1);
+});
+
+test("if revising fails, the author's diagram is shown labelled outdated", async () => {
+  const { deps } = stubDeps("", { flow: ["not mermaid", "still not"] });
+  const [d] = await diagramsForMembers(deps, [design({ scopeVersion: 3, authorDiagramsVersion: 2, authorDiagramsOutdated: true, authorDiagrams: [{ type: "flow", mermaid: FLOW }] })]);
+  assert.deepEqual([d.source, d.status, d.mermaid], ["author", "outdated", FLOW]);
 });

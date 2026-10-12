@@ -137,6 +137,8 @@ interface DesignCheckResponseJSON {
   /** Author diagrams the server dropped and why (2026-10-11). The design
    * itself registered fine; only those diagrams are missing. */
   diagramWarnings?: string[];
+  /** The amend said nothing about this design's author diagrams (2026-10-11). */
+  diagramNotice?: string;
 }
 
 async function parseJsonOrUnauthorized<T>(res: Response): Promise<T | { error: string }> {
@@ -150,6 +152,7 @@ function printDesignVerdict(result: DesignCheckResponseJSON): void {
     return;
   }
   console.log(`verdict: ${result.verdict}` + (result.designId ? `  design: ${result.designId}` : ""));
+  if (result.diagramNotice) console.warn(`  ! ${result.diagramNotice}`);
   for (const warning of result.diagramWarnings ?? []) {
     console.warn(`  ! diagram ${warning} -- fix it and send it again with \`twing design amend --from\``);
   }
@@ -332,6 +335,7 @@ function buildTemplate(
     touches,
     ...(template.plan ? { plan: template.plan } : {}),
     ...(template.diagrams ? { diagrams: template.diagrams } : {}),
+    ...(template.diagramsAnswer ? { diagramsAnswer: template.diagramsAnswer } : {}),
   };
 }
 
@@ -345,6 +349,8 @@ interface LoadedTemplate {
   plan?: string;
   /** The template's own diagrams (2026-10-11), validated server-side. */
   diagrams?: AuthorDiagram[];
+  /** On amend: whether the existing diagrams still fit. */
+  diagramsAnswer?: "unchanged" | "outdated";
 }
 
 /** The per-change lines printed after a successful `--from` registration --
@@ -690,7 +696,7 @@ export async function runDesignAmend(options: AmendOptions): Promise<void> {
         ...(appended ? { changes: appended.changes } : {}),
         ...(summaryUpdate ? { summary: summaryUpdate } : {}),
         ...(appended?.plan ? { plan: appended.plan } : {}),
-        ...(appended?.diagrams ? { diagrams: appended.diagrams } : {}),
+        ...(appended?.diagrams ? { diagrams: appended.diagrams } : appended?.diagramsAnswer ? { diagrams: appended.diagramsAnswer } : {}),
         ...(options.group ? { groupId: options.group } : {}),
       }),
     },

@@ -7134,3 +7134,61 @@ test("author diagrams: registered with a design, invalid ones dropped with a war
   assert.equal(((await amend.json()) as { verdict: string }).verdict, "clean");
   assert.deepEqual(designs.get(body.designId)?.authorDiagrams, [{ type: "sequence", mermaid: sequence }]);
 });
+
+test("author diagrams on amend: silence asks, unchanged confirms, outdated flags, an invalid list never wipes them", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  const flow = "flowchart LR\n  a[Request] --> b[Handler]\n  b --> c[Store]";
+  const reg = await app.request("/v1/designs/check", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({
+      projectId: "proj-1",
+      sessionId: "s-amend-diag",
+      rawPlanText: "Route requests through a handler into the store.",
+      summary: "store requests",
+      creates: [],
+      touches: ["src/handler.ts", "src/store.ts"],
+      dependsOn: [],
+      diagrams: [{ type: "flow", mermaid: flow }],
+    }),
+  });
+  const { designId } = (await reg.json()) as { designId: string };
+  assert.equal(designs.get(designId)?.authorDiagramsVersion, 1);
+
+  const amend = async (extra: Record<string, unknown>) =>
+    (await (
+      await app.request(`/v1/designs/${designId}/amend`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...bearer(admin.token) },
+        body: JSON.stringify(extra),
+      })
+    ).json()) as { verdict: string; diagramNotice?: string };
+
+  // Silence: kept, falls behind, and the session is asked.
+  const silent = await amend({ addTouches: ["src/cache.ts"] });
+  assert.equal(silent.verdict, "clean");
+  assert.match(silent.diagramNotice ?? "", /diagrams: unchanged/);
+  assert.equal(designs.get(designId)?.authorDiagramsVersion, 1);
+  assert.equal(designs.get(designId)?.scopeVersion, 2);
+
+  // unchanged: confirmed at the new version, nothing replaced.
+  const unchanged = await amend({ diagrams: "unchanged" });
+  assert.equal(unchanged.diagramNotice, undefined);
+  const afterUnchanged = designs.get(designId)!;
+  assert.equal(afterUnchanged.authorDiagramsVersion, afterUnchanged.scopeVersion);
+  assert.deepEqual(afterUnchanged.authorDiagrams, [{ type: "flow", mermaid: flow }]);
+
+  // An entirely invalid list keeps the existing diagrams.
+  await amend({ diagrams: [{ type: "flow", mermaid: "not mermaid" }] });
+  assert.deepEqual(designs.get(designId)?.authorDiagrams, [{ type: "flow", mermaid: flow }]);
+
+  // outdated: flagged for revision (no model in tests, so it falls back to
+  // the author's diagram labelled outdated).
+  await amend({ diagrams: "outdated" });
+  assert.equal(designs.get(designId)?.authorDiagramsOutdated, true);
+  const served = (await (await app.request(`/v1/designs/${designId}/diagrams`, { headers: bearer(admin.token) })).json()) as {
+    diagrams: { source: string; status?: string }[];
+  };
+  assert.deepEqual(served.diagrams.map((d) => [d.source, d.status]), [["author", "outdated"]]);
+});

@@ -79,6 +79,8 @@ interface DesignRow {
   dependsOn: string;
   changes: string | null;
   authorDiagrams: string | null;
+  authorDiagramsVersion: number | null;
+  authorDiagramsOutdated: boolean | null;
   rawPlanExcerpt: string | null;
   registeredVia: string | null;
   ttlMs: number;
@@ -119,6 +121,8 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     // nothing").
     changes: row.changes ? JSON.parse(row.changes) : undefined,
     authorDiagrams: row.authorDiagrams ? JSON.parse(row.authorDiagrams) : undefined,
+    authorDiagramsVersion: row.authorDiagramsVersion ?? undefined,
+    authorDiagramsOutdated: row.authorDiagramsOutdated ? true : undefined,
     rawPlanExcerpt: row.rawPlanExcerpt ?? undefined,
     ...(row.registeredVia === "plan_mode" || row.registeredVia === "template" ? { registeredVia: row.registeredVia } : {}),
     ttlMs: row.ttlMs,
@@ -255,6 +259,7 @@ export class DesignRegistry {
         dependsOn: JSON.stringify(design.dependsOn),
         changes: design.changes ? JSON.stringify(design.changes) : null,
         authorDiagrams: design.authorDiagrams?.length ? JSON.stringify(design.authorDiagrams) : null,
+        authorDiagramsVersion: design.authorDiagrams?.length ? design.scopeVersion : null,
         rawPlanExcerpt: design.rawPlanExcerpt ?? null,
         registeredVia: design.registeredVia ?? null,
         ttlMs: design.ttlMs,
@@ -443,6 +448,10 @@ export class DesignRegistry {
       /** Replaces the author's diagrams (2026-10-11), already validated by
        * the caller. Absent leaves them as they are. */
       authorDiagrams?: AuthorDiagram[];
+      /** The author's answer when it sent no new diagrams (2026-10-11):
+       * `unchanged` confirms the existing ones at this amend's version,
+       * `outdated` flags them for the coordinator to revise. */
+      diagramsAnswer?: "unchanged" | "outdated";
     },
   ): DesignStatement | undefined {
     const existing = this.get(id);
@@ -471,7 +480,7 @@ export class DesignRegistry {
         creates: JSON.stringify(merged.creates),
         dependsOn: JSON.stringify(merged.dependsOn),
         ...(delta.changes !== undefined ? { changes: JSON.stringify(delta.changes) } : {}),
-        ...(delta.authorDiagrams !== undefined ? { authorDiagrams: delta.authorDiagrams.length ? JSON.stringify(delta.authorDiagrams) : null } : {}),
+        ...authorDiagramColumns(existing, scopeVersion, delta.authorDiagrams, delta.diagramsAnswer),
         // `delta.summary`, if present, already IS the final text to persist
         // -- the caller (app.ts's amend route) has already appended it onto
         // the original via design-checks.ts's appendSummaryUpdate before
@@ -962,7 +971,7 @@ export class DesignRegistry {
         // previous attempt's changes describe files that may no longer be
         // in scope at all.
         ...(args.changes !== undefined ? { changes: JSON.stringify(args.changes) } : {}),
-        ...(args.authorDiagrams !== undefined ? { authorDiagrams: args.authorDiagrams.length ? JSON.stringify(args.authorDiagrams) : null } : {}),
+        ...(args.authorDiagrams !== undefined ? authorDiagramColumns(existing, existing.scopeVersion + 1, args.authorDiagrams, undefined) : {}),
         rawPlanExcerpt: args.rawPlanExcerpt,
         scopeVersion: existing.scopeVersion + 1,
         lastActivityAt: now,
@@ -1554,4 +1563,29 @@ export class ConstraintStore {
     });
     return constraint;
   }
+}
+
+
+/** The author-diagram columns an amend or plan retry writes (2026-10-11).
+ * A new list replaces the diagrams and marks them current at this version;
+ * `unchanged` re-confirms the existing ones at this version; `outdated`
+ * flags them for the coordinator to revise. Nothing sent writes nothing, so
+ * the version falls behind and the diagrams read as not re-checked. */
+function authorDiagramColumns(
+  existing: DesignStatement,
+  scopeVersion: number,
+  diagrams: AuthorDiagram[] | undefined,
+  answer: "unchanged" | "outdated" | undefined,
+): { authorDiagrams?: string | null; authorDiagramsVersion?: number | null; authorDiagramsOutdated?: boolean } {
+  if (diagrams !== undefined) {
+    return diagrams.length > 0
+      ? { authorDiagrams: JSON.stringify(diagrams), authorDiagramsVersion: scopeVersion, authorDiagramsOutdated: false }
+      : { authorDiagrams: null, authorDiagramsVersion: null, authorDiagramsOutdated: false };
+  }
+  if (!existing.authorDiagrams?.length) return {};
+  if (answer === "unchanged") return { authorDiagramsVersion: scopeVersion, authorDiagramsOutdated: false };
+  if (answer === "outdated") return { authorDiagramsOutdated: true };
+  // Silent. A row from before the version column existed has none; pin it
+  // to the pre-amend version so it falls behind like any other.
+  return existing.authorDiagramsVersion === undefined ? { authorDiagramsVersion: existing.scopeVersion } : {};
 }

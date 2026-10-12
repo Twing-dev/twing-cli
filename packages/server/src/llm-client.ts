@@ -124,7 +124,9 @@ export type LlmPurpose =
   /** design-diagrams.ts: does this design group deserve a diagram, and which kinds. */
   | "diagram_decision"
   /** design-diagrams.ts: draw one diagram as Mermaid. */
-  | "diagram_generate";
+  | "diagram_generate"
+  /** design-diagrams.ts: update an author's diagram after an amendment it said made it outdated. */
+  | "diagram_revise";
 
 /** Ids that make a logged call findable by `grep <id>`. Each call site fills
  * in whichever it knows -- plan extraction runs before the design exists,
