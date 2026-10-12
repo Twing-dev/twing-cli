@@ -183,6 +183,13 @@
       "when": 1791789439105,
       "tag": "0025_author-diagram-status",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1791811243966,
+      "tag": "0026_design-generated-title",
+      "breakpoints": true
     }
   ]
 }

@@ -16,6 +16,7 @@ import { AlignmentThreadStore } from "./alignment-store.js";
 import { CaptureStore } from "./capture-store.js";
 import { DesignChatStore } from "./design-chat-store.js";
 import { ResynthesisQueue } from "./overview-resynthesis.js";
+import type { TitleDeps } from "./design-title.js";
 import { appendSummaryUpdate } from "./design-checks.js";
 
 /** Every registration needs a plan (2026-09-29); tests that are not about the
@@ -63,7 +64,7 @@ async function waitFor(predicate: () => Promise<boolean> | boolean, timeoutMs = 
 }
 
 function freshApp(
-  options: { corsOrigins?: string[]; version?: string; publicProjectIds?: string[]; githubApp?: GithubAppConfig; noAuth?: boolean; monitorUrl?: string; resynthesis?: (designs: DesignRegistry) => ResynthesisQueue } = {},
+  options: { corsOrigins?: string[]; version?: string; publicProjectIds?: string[]; githubApp?: GithubAppConfig; noAuth?: boolean; monitorUrl?: string; resynthesis?: (designs: DesignRegistry) => ResynthesisQueue; titleCallModel?: TitleDeps["callModel"] } = {},
 ) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-app-test-"));
   // In-memory DB for speed -- these tests don't need cross-instance
@@ -98,6 +99,7 @@ function freshApp(
     noAuth: options.noAuth,
     monitorUrl: options.monitorUrl,
     resynthesis: options.resynthesis?.(designs),
+    titleCallModel: options.titleCallModel,
   });
   return { app, dataDir, identities, store, designs, constraints, alignmentThreads, captures, designChats };
 }
@@ -3100,7 +3102,9 @@ test("GET /v1/constraints/match: an already-approved constraint stays honored ev
 });
 
 test("POST /v1/designs/:id/amend: supersedes a still-running semantic-comparator pass from the prior registration (kill stale, retain findings, start fresh)", async () => {
-  const { app, dataDir } = freshApp();
+  // The title call is stubbed so the mocked fetch below counts comparator
+  // calls only -- registering also asks a model for a heading (design-title.ts).
+  const { app, dataDir } = freshApp({ titleCallModel: async () => "" });
   const admin = await bootstrapAdmin(app, dataDir);
   // A different developer than "s-candidate" below -- the semantic
   // comparator skips same-developer pairs entirely now (2026-08-22), which
@@ -4243,7 +4247,7 @@ test("POST /v1/designs/:id/amend: reassignProjectId re-checks against the new pr
 
 // --- §17 Phase 4: no_auth mode ---
 
-function freshNoAuthApp() {
+function freshNoAuthApp(options: { titleCallModel?: TitleDeps["callModel"] } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "twing-app-test-"));
   const db = createDb({ memory: true });
   const identities = new IdentityStore(db, { dataDir });
@@ -4251,7 +4255,7 @@ function freshNoAuthApp() {
   const designs = new DesignRegistry(db);
   const constraints = new ConstraintStore(db);
   const alignmentThreads = new AlignmentThreadStore(db);
-  const app = createApp({ db, identities, store, designs, constraints, alignmentThreads, noAuth: true });
+  const app = createApp({ db, identities, store, designs, constraints, alignmentThreads, noAuth: true, titleCallModel: options.titleCallModel });
   return { app, dataDir, identities, store, designs, constraints, alignmentThreads };
 }
 
@@ -7191,4 +7195,29 @@ test("author diagrams on amend: silence asks, unchanged confirms, outdated flags
     diagrams: { source: string; status?: string }[];
   };
   assert.deepEqual(served.diagrams.map((d) => [d.source, d.status]), [["author", "outdated"]]);
+});
+
+// Generated design title (2026-10-12, design-title.ts): registering kicks off
+// a background model call that stores a short heading, never touching `title`.
+
+test("generated title: registering a design stores a short heading in the background", async () => {
+  const { app, designs } = freshNoAuthApp({ titleCallModel: async () => "Add retry backoff." });
+  const { designId } = await registerVia(app, { sessionId: "s-title", summary: "Retry calls with backoff so transient failures recover" });
+  await waitFor(() => designs.get(designId!)?.generatedTitle !== undefined);
+  assert.equal(designs.get(designId!)!.generatedTitle, "Add retry backoff");
+  assert.equal(designs.get(designId!)!.title, undefined, "the owner's title column is never written");
+});
+
+test("generated title: a failing model leaves the design without one, and registration still succeeds", async () => {
+  let called = false;
+  const { app, designs } = freshNoAuthApp({
+    titleCallModel: async () => {
+      called = true;
+      throw new Error("provider down");
+    },
+  });
+  const { designId, error } = await registerVia(app, { sessionId: "s-title-fail", summary: "Retry calls with backoff" });
+  assert.equal(error, undefined);
+  await waitFor(() => called);
+  assert.equal(designs.get(designId!)!.generatedTitle, undefined);
 });

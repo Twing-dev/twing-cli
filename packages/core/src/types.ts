@@ -280,6 +280,11 @@ export interface DesignStatement {
    * title from `summary`'s first sentence (`designTitle.ts`), exactly what it
    * did before this field existed. So absent renders unchanged. */
   title?: string;
+  /** Model-written short heading (2026-10-12), refreshed after registration
+   * and after each overview resynthesis. Never replaces `title`: the monitor
+   * shows `title`, then this, then a heading derived from `summary`. Absent
+   * until the first successful model call. */
+  generatedTitle?: string;
   summary: string;
   /** The extraction-time `summary`, preserved verbatim the first time an owner
    * revises the overview and never written again (2026-10-02) -- so the LLM's

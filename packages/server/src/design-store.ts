@@ -68,6 +68,7 @@ interface DesignRow {
   createdAt: number;
   closedAt: number | null;
   title: string | null;
+  generatedTitle: string | null;
   summary: string;
   summaryExtracted: string | null;
   overviewRevision: number;
@@ -106,6 +107,7 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     createdAt: row.createdAt,
     closedAt: row.closedAt ?? undefined,
     title: row.title ?? undefined,
+    generatedTitle: row.generatedTitle ?? undefined,
     summary: row.summary,
     summaryExtracted: row.summaryExtracted ?? undefined,
     overviewRevision: row.overviewRevision,
@@ -396,6 +398,14 @@ export class DesignRegistry {
    * if the design doesn't exist (nothing meaningful to signal back). */
   touch(id: string): void {
     this.db.update(designsTable).set({ lastActivityAt: Date.now() }).where(eq(designsTable.id, id)).run();
+  }
+
+  /** Stores the model-written heading (`design-title.ts`). Deliberately not
+   * `reviseOverview`: a heading is derived display text, so it bumps no
+   * revision counter, logs no activity event and never touches `title`.
+   * Silent no-op if the design doesn't exist. */
+  setGeneratedTitle(id: string, generatedTitle: string): void {
+    this.db.update(designsTable).set({ generatedTitle }).where(eq(designsTable.id, id)).run();
   }
 
   /** §17 scope enforcement (2026-08): expands an *open* design's declared

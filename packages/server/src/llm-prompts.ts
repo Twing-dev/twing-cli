@@ -346,3 +346,24 @@ export const DIAGRAM_REVISE_PROMPT = [
   "",
   "Output only the updated Mermaid text: no explanation, no markdown fences.",
 ].join("\n");
+
+/** `design-title.ts` (2026-10-12) -- the short heading twing-monitor shows
+ * in its design list and detail header. Before this nothing wrote one: the
+ * monitor cut the first sentence out of `summary`, and once resynthesis had
+ * rewritten that as `Problem: ...`, every heading described the pain rather
+ * than the work. So the one rule that matters most here is "name the change,
+ * not the problem". */
+export const DESIGN_TITLE_PROMPT = [
+  "You write the heading for a software design, shown in a list of designs a reviewer scans.",
+  "",
+  "You are given the design's overview, and its plan when it has one.",
+  "",
+  "Rules:",
+  "- At most 8 words. Shorter is better.",
+  "- Name the change being made, not the problem it solves: 'Keep diagrams fresh on amend', not 'Diagrams go stale after amends'.",
+  "- Start with a verb when it reads naturally (Add, Stop, Show, Fix, Keep).",
+  "- Plain words. Keep a code name only when it is the clearest way to say what changes.",
+  "- No repo names, no quotes, no trailing period, no prefix like 'Title:'.",
+  "",
+  "Output only the heading text.",
+].join("\n");
