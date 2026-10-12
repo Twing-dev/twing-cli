@@ -69,20 +69,28 @@ const MAX_MEMBER_GROUNDING_CHARS = 3_000;
 const MAX_BOXES = 14;
 const MAX_MERMAID_CHARS = 4_000;
 
-/** Rule check before any model call: a diagram needs several parts, and
- * code-like ones. Several linked designs always qualify (a cross-repo
- * change is exactly what a sequence diagram is for). */
-export function worthConsidering(members: DesignStatement[]): boolean {
-  if (members.length === 0) return false;
-  if (members.length > 1) return true;
+/** Rule check before any model call: why a group gets no diagram, or
+ * undefined when it qualifies. A diagram needs several parts, and code-like
+ * ones. Several linked designs always qualify (a cross-repo change is
+ * exactly what a sequence diagram is for). Returned as text (2026-10-12) so
+ * a missing diagram can be explained from the logs. */
+export function skipReason(members: DesignStatement[]): string | undefined {
+  if (members.length === 0) return "no visible designs in the group";
+  if (members.length > 1) return undefined;
   const design = members[0];
   const changes = design.changes ?? [];
   const targets = new Set(
     (changes.length > 0 ? changes.map((c) => c.target) : [...design.creates, ...design.touches]).map((t) => t.split("::")[0]),
   );
-  if (targets.size <= 1) return false;
-  if (changes.length > 0 && changes.every((c) => NON_CODE_KINDS.has(c.kind ?? "code"))) return false;
-  return true;
+  if (targets.size <= 1) return "it changes a single file";
+  if (changes.length > 0 && changes.every((c) => NON_CODE_KINDS.has(c.kind ?? "code"))) {
+    return `it only changes ${[...new Set(changes.map((c) => c.kind ?? "code"))].join("/")} files`;
+  }
+  return undefined;
+}
+
+export function worthConsidering(members: DesignStatement[]): boolean {
+  return skipReason(members) === undefined;
 }
 
 /** The material both calls read: one block per repo with its overview,
@@ -220,6 +228,9 @@ const inFlight = new Map<string, Promise<DesignDiagram[]>>();
 /** `key|type` already repaired once -- a second browser failure on the same
  * state hides that kind rather than paying for the model again. */
 const repaired = new Set<string>();
+/** Group states whose rule-based skip was already logged -- one line per
+ * state, not one per page view. */
+const skipLogged = new Set<string>();
 
 function remember(key: string, diagrams: DesignDiagram[]): void {
   cache.set(key, diagrams);
@@ -229,6 +240,7 @@ function remember(key: string, diagrams: DesignDiagram[]): void {
 /** Tests only. */
 export function __clearDiagramCache(): void {
   revisions.clear();
+  skipLogged.clear();
   cache.clear();
   inFlight.clear();
   repaired.clear();
@@ -237,11 +249,31 @@ export function __clearDiagramCache(): void {
 /** The diagrams for a set of group members: cached, and shared between
  * concurrent requests so two tabs opening at once pay once. */
 export async function diagramsForMembers(deps: DiagramDeps, members: DesignStatement[]): Promise<DesignDiagram[]> {
+  return (await diagramsWithReason(deps, members)).diagrams;
+}
+
+/** `diagramsForMembers`, plus why there are none when the rules skipped the
+ * group (2026-10-12) -- logged once per group state, and returned so the
+ * route can include it in its response (and so the HTTP log). */
+export async function diagramsWithReason(deps: DiagramDeps, members: DesignStatement[]): Promise<{ diagrams: DesignDiagram[]; skipped?: string }> {
   // The author's own diagrams win (2026-10-11): that session read the code,
   // this server only sees the declared plan. No model call at all then.
   const authored = await authorDiagramsFor(deps, members);
-  if (authored.length > 0) return authored;
-  if (!worthConsidering(members)) return [];
+  if (authored.length > 0) return { diagrams: authored };
+  const skipped = skipReason(members);
+  if (skipped) {
+    const logKey = stateKey(members);
+    if (!skipLogged.has(logKey)) {
+      skipLogged.add(logKey);
+      if (skipLogged.size > CACHE_MAX) skipLogged.delete(skipLogged.values().next().value!);
+      deps.log?.(`twing serve: diagrams skipped for group ${(members[0]?.groupId ?? "?").slice(0, 8)}: ${skipped} (no model call)`);
+    }
+    return { diagrams: [], skipped };
+  }
+  return { diagrams: await generatedDiagramsFor(deps, members) };
+}
+
+async function generatedDiagramsFor(deps: DiagramDeps, members: DesignStatement[]): Promise<DesignDiagram[]> {
   const key = stateKey(members);
   const cached = cache.get(key);
   if (cached) return cached;

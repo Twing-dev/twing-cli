@@ -53,7 +53,7 @@ import { assembleDesignContext, describeProvenance, designScopePaths, type Assem
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
 import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
-import { checkAuthorDiagrams, diagramsForMembers, diagramsFromPlanText, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
+import { checkAuthorDiagrams, diagramsWithReason, diagramsFromPlanText, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
 import { callLlm } from "./llm-client.js";
 import { httpLog, describeBody, isLoggingEnabled, isTextual, logIdsFrom, redact, requestContext } from "./daily-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
@@ -3377,7 +3377,9 @@ export function createApp(options: CreateAppOptions = {}) {
     const members = design.groupId
       ? designs.listByGroup(design.groupId).filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId))
       : [design];
-    return c.json({ diagrams: await diagramsForMembers(diagramDeps, members) });
+    // `skipped` says why there are none when the rules skipped the group, so
+    // a missing diagram can be explained from the HTTP log.
+    return c.json(await diagramsWithReason(diagramDeps, members));
   });
 
   // The browser couldn't render one: regenerate that kind once with the

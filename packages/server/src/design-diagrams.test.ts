@@ -11,6 +11,8 @@ import {
   checkAuthorDiagrams,
   diagramsFromPlanText,
   authorDiagramStatus,
+  skipReason,
+  diagramsWithReason,
   __clearDiagramCache,
   type DiagramDeps,
 } from "./design-diagrams.js";
@@ -266,4 +268,34 @@ test("if revising fails, the author's diagram is shown labelled outdated", async
   const { deps } = stubDeps("", { flow: ["not mermaid", "still not"] });
   const [d] = await diagramsForMembers(deps, [design({ scopeVersion: 3, authorDiagramsVersion: 2, authorDiagramsOutdated: true, authorDiagrams: [{ type: "flow", mermaid: FLOW }] })]);
   assert.deepEqual([d.source, d.status, d.mermaid], ["author", "outdated", FLOW]);
+});
+
+// --- why there's no diagram (2026-10-12) --------------------------------------
+
+test("skipReason: names why a group gets no diagram, undefined when it qualifies", () => {
+  assert.equal(skipReason([design({ changes: [{ id: "c1", action: "modify", kind: "code", target: "src/a.ts::f", intent: "x" }] })]), "it changes a single file");
+  assert.equal(
+    skipReason([
+      design({
+        changes: [
+          { id: "c1", action: "modify", kind: "test", target: "src/app.test.ts", intent: "x" },
+          { id: "c2", action: "modify", kind: "docs", target: "docs/bugs.md", intent: "y" },
+        ],
+      }),
+    ]),
+    "it only changes test/docs files",
+  );
+  assert.equal(skipReason([design()]), undefined);
+  assert.equal(skipReason([]), "no visible designs in the group");
+});
+
+test("diagramsWithReason: a skipped group returns the reason and logs it once, with no model call", async () => {
+  const logs: string[] = [];
+  const { deps, calls } = stubDeps("");
+  deps.log = (m) => logs.push(m);
+  const testsOnly = design({ changes: [{ id: "c1", action: "modify", kind: "test", target: "a.test.ts", intent: "x" }, { id: "c2", action: "modify", kind: "test", target: "b.test.ts", intent: "y" }] });
+  assert.deepEqual(await diagramsWithReason(deps, [testsOnly]), { diagrams: [], skipped: "it only changes test files" });
+  await diagramsWithReason(deps, [testsOnly]);
+  assert.deepEqual(logs, ["twing serve: diagrams skipped for group g1: it only changes test files (no model call)"]);
+  assert.equal(calls.length, 0);
 });
