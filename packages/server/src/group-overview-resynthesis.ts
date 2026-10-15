@@ -9,16 +9,14 @@
  * overview (so it composes with, rather than duplicates, per-design
  * resynthesis) plus each member's own conversation grounding when available.
  *
- * **Compute-on-read, cached, never persisted.** A design has an owner whose
- * `owner_edit`/`rephrase_accepted` text the automatic path must never touch
- * (`isHumanWritten`); a *group* has no such owner and no row of its own --
- * `groupId` is a label column on `designs`, not an entity. Inventing a
- * group-owned row to hold this text would need its own authorship/edit
- * story this feature doesn't have yet. So this follows `proposalCache`'s
- * precedent exactly: computed, cached by a key that is exact in what state
- * it describes, served straight from the cache on a repeat read, recomputed
- * the moment any member changes. A restart empties it; the next read just
- * recomputes.
+ * **Saved, latest writer wins** (2026-10-15). The full group's overview is
+ * written to `design_group_overviews` with the member state it describes
+ * (`groupCacheKey`), and served from there while that state holds -- so
+ * the monitor can render it with the design itself, and a restart costs no
+ * model call. A person's edit and this resynthesis write the same row: an
+ * edit stands until a member changes, and then the refresh writes over it.
+ * The in-memory cache below stays for viewers who see only part of a group
+ * (their overview is built from what they can see and is never saved).
  */
 
 import type { DesignStatement } from "@twing/core";
@@ -43,13 +41,16 @@ export interface GroupResynthesisDeps {
    * when that's worth saying, and "b1d42b22" says nothing. */
   labelFor: (design: DesignStatement) => string;
   callModel: (systemPrompt: string, userPrompt: string, tag: LlmTag) => Promise<string>;
-  /** A human-saved override for this group (2026-10-10), if anyone has ever
-   * edited it -- `design-group-store.ts`'s `DesignGroupStore.get`, narrowed
-   * to the one field this needs. Checked before anything else in both
-   * propose functions below: once a person has written the words, nothing
-   * automatic generates new ones to replace them, the same rule
-   * `isHumanWritten` enforces per-design. */
-  getOverride?: (groupId: string) => string | undefined;
+  /** The group's saved overview (2026-10-15) -- `DesignGroupStore.get`,
+   * narrowed to what this needs. Served whenever `stateKey` matches the
+   * members being asked about ("" is a row saved before state keys, kept
+   * as-is), whether a person or twing wrote it. */
+  getSaved?: (groupId: string) => { overview: string; stateKey: string } | undefined;
+  /** Saves a freshly computed overview for the full group. */
+  save?: (groupId: string, stateKey: string, overview: string) => void;
+  /** Run after each refresh of a group (2026-10-15): the diagrams are
+   * refreshed and saved in the same pass, so both are ready together. */
+  afterRefresh?: (groupId: string) => Promise<unknown>;
   log?: (message: string) => void;
 }
 
@@ -83,7 +84,7 @@ function buildUserPrompt(deps: GroupResynthesisDeps, members: DesignStatement[])
  * the two fields that move whenever anything about it changes (mirrors
  * `overview-resynthesis.ts`'s `cacheKey`), sorted so member order in
  * `listMembers`'s return never matters. */
-function groupCacheKey(members: DesignStatement[]): string {
+export function groupCacheKey(members: DesignStatement[]): string {
   return members
     .map((m) => `${m.id}:${m.scopeVersion}:${m.overviewRevision ?? 0}`)
     .sort()
@@ -116,8 +117,8 @@ export function __clearGroupProposalCache(): void {
 }
 
 /**
- * Computes (or returns the cached) current overview for a `groupId`. **Writes
- * nothing** -- there is nowhere to write it to; see this file's header.
+ * The current overview for a `groupId`, built from *every* member and saved
+ * (2026-10-15) -- only call this where the reader may see the whole group.
  *
  * Every design has a `groupId` (its own id, when nothing else shares it), so
  * this runs uniformly whether the group has one member or several (2026-10-10
@@ -132,9 +133,13 @@ export function __clearGroupProposalCache(): void {
  * never degrades or blanks any individual design's own stored text.
  */
 export async function proposeGroupOverview(deps: GroupResynthesisDeps, groupId: string): Promise<string | undefined> {
-  const override = deps.getOverride?.(groupId);
-  if (override !== undefined) return override;
-  return proposeOverviewForMembers(deps, deps.listMembers(groupId));
+  const members = deps.listMembers(groupId);
+  const overview = await proposeOverviewForMembers(deps, members);
+  if (overview === undefined || members.length === 0) return overview;
+  const key = groupCacheKey(members);
+  const saved = deps.getSaved?.(groupId);
+  if (!saved || (saved.stateKey !== "" && saved.stateKey !== key)) deps.save?.(groupId, key, overview);
+  return overview;
 }
 
 /**
@@ -162,8 +167,11 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
   // Every member shares the same `groupId` by construction (that's the
   // query that found them), so any one of them names it.
   const groupId = members[0].groupId;
-  const override = groupId ? deps.getOverride?.(groupId) : undefined;
-  if (override !== undefined) return override;
+  const key = groupCacheKey(members);
+  // Matches only when these are exactly the members it was saved for, so a
+  // viewer who sees part of the group never gets the whole group's text.
+  const saved = groupId ? deps.getSaved?.(groupId) : undefined;
+  if (saved && (saved.stateKey === "" || saved.stateKey === key)) return saved.overview;
 
   // A group of one whose own overview has already been rewritten (by the
   // per-design resynthesis or by its owner) has nothing left to combine:
@@ -173,7 +181,6 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
   // that is the only path that adds the solution to it.
   if (members.length === 1 && (members[0].overviewRevision ?? 0) > 0) return members[0].summary;
 
-  const key = groupCacheKey(members);
   const cached = cachedGroupProposal(key);
   if (cached !== undefined) return cached;
 
@@ -229,6 +236,9 @@ export class GroupResynthesisQueue {
     this.running.add(groupId);
     try {
       await proposeGroupOverview(this.deps, groupId);
+      await this.deps.afterRefresh?.(groupId);
+    } catch (err) {
+      this.deps.log?.(`twing serve: group ${groupId.slice(0, 8)} refresh failed -- ${String(err)}`);
     } finally {
       this.running.delete(groupId);
     }

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   proposeGroupOverview,
   proposeOverviewForMembers,
+  groupCacheKey,
   GroupResynthesisQueue,
   __clearGroupProposalCache,
   type GroupResynthesisDeps,
@@ -130,25 +131,51 @@ test("proposeOverviewForMembers: a filtered (per-viewer) member list never consu
   assert.doesNotMatch(prompts[1].user, /p3/);
 });
 
-test("proposeGroupOverview: a human override short-circuits, no model call", async () => {
-  const { deps, prompts } = stubDeps({ getOverride: (groupId) => (groupId === "g1" ? "Human-written combined overview." : undefined) });
+test("proposeGroupOverview: a saved row from before state keys short-circuits, no model call", async () => {
+  const { deps, prompts } = stubDeps({ getSaved: (groupId) => (groupId === "g1" ? { overview: "Human-written combined overview.", stateKey: "" } : undefined) });
   const result = await proposeGroupOverview(deps, "g1");
   assert.equal(result, "Human-written combined overview.");
   assert.equal(prompts.length, 0);
 });
 
-test("proposeOverviewForMembers: a human override short-circuits too, even called with members directly", async () => {
-  const { deps, members, prompts } = stubDeps({ getOverride: () => "Human-written combined overview." });
-  const result = await proposeOverviewForMembers(deps, members);
-  assert.equal(result, "Human-written combined overview.");
+test("proposeOverviewForMembers: a saved overview for exactly these members is served, no model call", async () => {
+  const { deps, members, prompts } = stubDeps();
+  deps.getSaved = () => ({ overview: "Saved final overview.", stateKey: groupCacheKey(members) });
+  assert.equal(await proposeOverviewForMembers(deps, members), "Saved final overview.");
   assert.equal(prompts.length, 0);
-});
-
-test("proposeGroupOverview: no override falls through to the model as before", async () => {
-  const { deps, prompts } = stubDeps({ getOverride: () => undefined });
-  const result = await proposeGroupOverview(deps, "g1");
-  assert.equal(result, "What: combined overview.");
+  // A viewer who sees only part of the group never gets the whole group's text.
+  assert.equal(await proposeOverviewForMembers(deps, members.slice(0, 1)), "What: combined overview.");
   assert.equal(prompts.length, 1);
+});
+
+test("proposeGroupOverview: computes and saves when nothing is saved", async () => {
+  const saves: { groupId: string; stateKey: string; overview: string }[] = [];
+  const { deps, members, prompts } = stubDeps({ save: (groupId, stateKey, overview) => saves.push({ groupId, stateKey, overview }) });
+  assert.equal(await proposeGroupOverview(deps, "g1"), "What: combined overview.");
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(saves, [{ groupId: "g1", stateKey: groupCacheKey(members), overview: "What: combined overview." }]);
+});
+
+test("proposeGroupOverview: latest wins -- a member change lets twing write over a person's edit", async () => {
+  const saves: string[] = [];
+  const { deps, members, prompts } = stubDeps({ save: (_g, _k, overview) => saves.push(overview) });
+  // Saved by a person while d1 was at scopeVersion 1...
+  const savedKey = groupCacheKey(members);
+  deps.getSaved = () => ({ overview: "Human edit.", stateKey: savedKey });
+  assert.equal(await proposeGroupOverview(deps, "g1"), "Human edit.");
+  assert.equal(saves.length, 0);
+  // ...then d1 is amended.
+  members[0] = { ...members[0], scopeVersion: 2 };
+  assert.equal(await proposeGroupOverview(deps, "g1"), "What: combined overview.");
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(saves, ["What: combined overview."]);
+});
+
+test("GroupResynthesisQueue: a run also calls afterRefresh, so diagrams refresh with the overview", async () => {
+  const refreshed: string[] = [];
+  const { deps } = stubDeps({ afterRefresh: async (groupId) => refreshed.push(groupId) });
+  await new GroupResynthesisQueue(deps, 10).run("g1");
+  assert.deepEqual(refreshed, ["g1"]);
 });
 
 test("GroupResynthesisQueue: coalesces a burst into one run", async () => {

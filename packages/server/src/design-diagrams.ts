@@ -20,9 +20,11 @@
  * before it is written -- so every diagram is drawn from what the design
  * declares: overview, plan, changes and, when captured, the conversation.
  *
- * Computed on read and cached per group, keyed by every member's
- * `scopeVersion`: an amendment is what changes what a diagram should show.
- * An overview rewrite alone does not, so it is not in the key.
+ * Cached per group, keyed by every member's `scopeVersion`: an amendment is
+ * what changes what a diagram should show. An overview rewrite alone does
+ * not, so it is not in the key. The full group's result is also saved
+ * (2026-10-15, `diagramsForGroup`), so the monitor can render it with the
+ * design and a restart costs no model call.
  */
 
 import type { AuthorDiagram, DesignStatement } from "@twing/core";
@@ -56,6 +58,10 @@ export interface DiagramDeps {
   /** The captured conversation behind a design, when there is one. */
   groundingFor?: (design: DesignStatement) => string | undefined;
   callModel: (systemPrompt: string, userPrompt: string, tag: LlmTag) => Promise<string>;
+  /** The group's saved diagrams (2026-10-15) -- `DesignGroupStore.getDiagrams`. */
+  getSaved?: (groupId: string) => { stateKey: string; diagrams: DesignDiagram[]; skipped?: string } | undefined;
+  /** Saves the full group's diagrams -- `DesignGroupStore.saveDiagrams`. */
+  save?: (groupId: string, stateKey: string, diagrams: DesignDiagram[], skipped?: string) => void;
   log?: (message: string) => void;
 }
 
@@ -222,6 +228,16 @@ function stateKey(members: DesignStatement[]): string {
     .join("|");
 }
 
+/** The state a *saved* result describes (2026-10-15): `stateKey` plus what
+ * moves an author diagram's status without an amendment (the author
+ * confirming or replacing it), since a saved result carries that status. */
+export function savedStateKey(members: DesignStatement[]): string {
+  return members
+    .map((m) => `${m.id}:${m.scopeVersion}:${m.authorDiagramsVersion ?? ""}:${m.authorDiagramsOutdated ? 1 : 0}:${m.authorDiagrams?.length ?? 0}`)
+    .sort()
+    .join("|");
+}
+
 const CACHE_MAX = 200;
 const cache = new Map<string, DesignDiagram[]>();
 const inFlight = new Map<string, Promise<DesignDiagram[]>>();
@@ -250,6 +266,20 @@ export function __clearDiagramCache(): void {
  * concurrent requests so two tabs opening at once pay once. */
 export async function diagramsForMembers(deps: DiagramDeps, members: DesignStatement[]): Promise<DesignDiagram[]> {
   return (await diagramsWithReason(deps, members)).diagrams;
+}
+
+/** The diagrams for a whole group, served from the saved row while it
+ * describes these members, else computed and saved (2026-10-15). Only for
+ * callers who may see every member -- a viewer who sees part of a group
+ * gets `diagramsWithReason` over what they can see, never saved. */
+export async function diagramsForGroup(deps: DiagramDeps, members: DesignStatement[]): Promise<{ diagrams: DesignDiagram[]; skipped?: string }> {
+  const groupId = members[0]?.groupId;
+  const key = savedStateKey(members);
+  const saved = groupId ? deps.getSaved?.(groupId) : undefined;
+  if (saved && saved.stateKey === key) return { diagrams: saved.diagrams, ...(saved.skipped ? { skipped: saved.skipped } : {}) };
+  const result = await diagramsWithReason(deps, members);
+  if (groupId) deps.save?.(groupId, key, result.diagrams, result.skipped);
+  return result;
 }
 
 /** `diagramsForMembers`, plus why there are none when the rules skipped the
@@ -297,10 +327,20 @@ async function generatedDiagramsFor(deps: DiagramDeps, members: DesignStatement[
  * fixed (that kind is then dropped from the cache, so the tab stays gone). */
 export async function repairDiagram(deps: DiagramDeps, members: DesignStatement[], type: DiagramType, error: string): Promise<DesignDiagram | undefined> {
   const key = stateKey(members);
-  const current = cache.get(key);
+  // After a restart the memory cache is empty but the saved row isn't; it
+  // only matches when these are exactly the members it was saved for.
+  const groupId = members[0]?.groupId;
+  const savedKey = savedStateKey(members);
+  const saved = groupId ? deps.getSaved?.(groupId) : undefined;
+  const fromSaved = saved && saved.stateKey === savedKey;
+  const current = cache.get(key) ?? (fromSaved ? saved.diagrams : undefined);
   const broken = current?.find((d) => d.type === type);
   if (!current || !broken) return undefined;
-  const dropBroken = () => remember(key, current.filter((d) => d.type !== type));
+  const keep = (diagrams: DesignDiagram[]) => {
+    remember(key, diagrams);
+    if (fromSaved && groupId) deps.save?.(groupId, savedKey, diagrams, saved.skipped);
+  };
+  const dropBroken = () => keep(current.filter((d) => d.type !== type));
   if (repaired.has(`${key}|${type}`)) {
     dropBroken();
     return undefined;
@@ -311,7 +351,7 @@ export async function repairDiagram(deps: DiagramDeps, members: DesignStatement[
     dropBroken();
     return undefined;
   }
-  remember(key, current.map((d) => (d.type === type ? fixed : d)));
+  keep(current.map((d) => (d.type === type ? fixed : d)));
   return fixed;
 }
 
