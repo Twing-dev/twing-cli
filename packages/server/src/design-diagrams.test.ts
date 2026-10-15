@@ -13,6 +13,8 @@ import {
   authorDiagramStatus,
   skipReason,
   diagramsWithReason,
+  diagramsForGroup,
+  savedStateKey,
   __clearDiagramCache,
   type DiagramDeps,
 } from "./design-diagrams.js";
@@ -182,6 +184,46 @@ test("repairDiagram: regenerates once with the browser's error, then gives up an
   assert.equal(await repairDiagram(deps, [design()], "flow", "still broken"), undefined);
   assert.equal(calls.length, before);
   assert.deepEqual(await diagramsForMembers(deps, [design()]), []);
+});
+
+// --- saved (2026-10-15) -------------------------------------------------------
+
+/** An in-memory stand-in for `DesignGroupStore`'s diagrams row. */
+function withStore(deps: DiagramDeps) {
+  const rows = new Map<string, { stateKey: string; diagrams: Awaited<ReturnType<typeof diagramsForMembers>>; skipped?: string }>();
+  deps.getSaved = (groupId) => rows.get(groupId);
+  deps.save = (groupId, stateKey, diagrams, skipped) => void rows.set(groupId, { stateKey, diagrams, ...(skipped ? { skipped } : {}) });
+  return rows;
+}
+
+test("diagramsForGroup: computes once and saves; a restart (empty memory cache) reads the saved row, no model call", async () => {
+  const { deps, calls } = stubDeps('{"diagrams":[{"type":"flow","reason":"r"}]}', { flow: [FLOW] });
+  const rows = withStore(deps);
+  assert.deepEqual((await diagramsForGroup(deps, [design()])).diagrams.map((d) => d.type), ["flow"]);
+  assert.equal(rows.get("g1")?.stateKey, savedStateKey([design()]));
+  const before = calls.length;
+  __clearDiagramCache();
+  assert.deepEqual((await diagramsForGroup(deps, [design()])).diagrams.map((d) => d.type), ["flow"]);
+  assert.equal(calls.length, before);
+});
+
+test("diagramsForGroup: an amendment recomputes and overwrites the saved row", async () => {
+  const { deps, calls } = stubDeps('{"diagrams":[{"type":"flow","reason":"r"}]}', { flow: [FLOW] });
+  const rows = withStore(deps);
+  await diagramsForGroup(deps, [design()]);
+  await diagramsForGroup(deps, [design({ scopeVersion: 2 })]);
+  assert.equal(calls.filter((c) => c.purpose === "diagram_decision").length, 2);
+  assert.equal(rows.get("g1")?.stateKey, savedStateKey([design({ scopeVersion: 2 })]));
+});
+
+test("repairDiagram: after a restart it repairs from the saved row and saves the fix", async () => {
+  const FIXED = "flowchart LR\n  a[Request] --> b[Log]";
+  const { deps } = stubDeps('{"diagrams":[{"type":"flow","reason":"r"}]}', { flow: [FLOW, FIXED] });
+  const rows = withStore(deps);
+  await diagramsForGroup(deps, [design()]);
+  __clearDiagramCache();
+  assert.equal((await repairDiagram(deps, [design()], "flow", "Parse error"))?.mermaid, FIXED);
+  assert.equal(rows.get("g1")?.diagrams[0].mermaid, FIXED);
 });
 
 test("buildDiagramContext: one block per repo with overview, plan and changes", () => {

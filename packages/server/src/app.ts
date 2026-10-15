@@ -52,8 +52,8 @@ import { NotificationStore } from "./notification-store.js";
 import { assembleDesignContext, describeProvenance, designScopePaths, type AssembledContext } from "./design-context.js";
 import { DrizzleActivityLog, type ActivityEventKind } from "./activity-log.js";
 import { ResynthesisQueue, proposeOverview, cachedProposal, rephraseAvailability, type ResynthesisDeps } from "./overview-resynthesis.js";
-import { GroupResynthesisQueue, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
-import { checkAuthorDiagrams, diagramsWithReason, diagramsFromPlanText, repairDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
+import { GroupResynthesisQueue, groupCacheKey, proposeGroupOverview, proposeOverviewForMembers, type GroupResynthesisDeps } from "./group-overview-resynthesis.js";
+import { checkAuthorDiagrams, diagramsForGroup, diagramsWithReason, diagramsFromPlanText, repairDiagram, savedStateKey, type DesignDiagram, type DiagramDeps, type DiagramType } from "./design-diagrams.js";
 import { callLlm } from "./llm-client.js";
 import { httpLog, describeBody, isLoggingEnabled, isTextual, logIdsFrom, redact, requestContext } from "./daily-log.js";
 import { IdentityStore, type ResolvedIdentity, type InviteScope, type Role, type JoinParams } from "./identity-store.js";
@@ -679,8 +679,8 @@ export function createApp(options: CreateAppOptions = {}) {
   /** Group-level overview resynthesis (2026-10-09) -- one combined overview
    * for every design sharing a `groupId`, built from each member's own
    * (already-clean) overview plus its grounding. See
-   * `group-overview-resynthesis.ts`'s header for why this is compute-on-read
-   * and cached rather than written anywhere.
+   * `group-overview-resynthesis.ts`'s header for how the full group's
+   * overview is saved (2026-10-15).
    *
    * Deliberately NOT scoped by `since` (2026-10-10), unlike the per-design
    * deps above: this is a summarizer, not a reviser -- there is no persisted
@@ -692,7 +692,11 @@ export function createApp(options: CreateAppOptions = {}) {
     groundingFor: (design) => groundingTextFor(design),
     labelFor: (design) => identities.getProjectRecord(design.projectId)?.githubRepo ?? design.projectId.slice(0, 10),
     callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: resynthesisModel, tag }),
-    getOverride: (groupId) => designGroups.get(groupId)?.overview,
+    getSaved: (groupId) => designGroups.get(groupId),
+    save: (groupId, stateKey, overview) => designGroups.save(groupId, overview, "twing", "twing", stateKey),
+    // Diagrams are refreshed in the same pass, so a design's final overview
+    // and diagrams are saved together (2026-10-15).
+    afterRefresh: (groupId) => diagramsForGroup(diagramDeps, designs.listByGroup(groupId)),
     log: (message) => console.log(message),
   };
   const groupResynthesis = options.groupResynthesis ?? new GroupResynthesisQueue(groupResynthesisDeps);
@@ -703,6 +707,8 @@ export function createApp(options: CreateAppOptions = {}) {
     labelFor: groupResynthesisDeps.labelFor,
     groundingFor: (design) => groundingTextFor(design),
     callModel: (systemPrompt, userPrompt, tag) => callLlm(systemPrompt, userPrompt, { model: diagramModel, tag }),
+    getSaved: (groupId) => designGroups.getDiagrams(groupId),
+    save: (groupId, stateKey, diagrams, skipped) => designGroups.saveDiagrams(groupId, stateKey, diagrams, skipped),
     log: (message) => console.log(message),
   };
   const monitorUrl = options.monitorUrl;
@@ -2300,6 +2306,10 @@ export function createApp(options: CreateAppOptions = {}) {
     const open = designs.openDesigns(body.projectId, Date.now(), design.id);
     const constraints = constraintStore.forProject(body.projectId);
     const outcome = runDesignChecks(design, open, constraints);
+    // Build and save the final overview and diagrams now (2026-10-15), so
+    // they are ready before anyone opens the design. Debounced, and a
+    // re-registration lands in the same refresh.
+    if (design.groupId) groupResynthesis.enqueue(design.groupId);
 
     console.log(
       `twing serve: design ${design.id.slice(0, 8)} project ${body.projectId.slice(0, 12)} -> ${outcome.verdict}` +
@@ -3149,6 +3159,26 @@ export function createApp(options: CreateAppOptions = {}) {
   // filter server-side instead of client-side, which pagination requires
   // for correctness (a client-side filter over one page can look wrongly
   // empty while more matching rows sit on later pages).
+  /** A design's saved final overview and diagrams (2026-10-15), so the
+   * monitor renders them with the design instead of fetching them after it
+   * and swapping. Only for a viewer who can see every member: the saved
+   * text describes the whole group. `null` means nothing saved for this
+   * viewer, and the monitor asks `.../group-overview` / `.../diagrams`
+   * instead. `finalStale` says a member changed since it was saved -- the
+   * saved text is still shown, and the monitor refreshes it in the
+   * background. */
+  function withFinal(identity: ResolvedIdentity, design: DesignStatement): DesignStatement & { finalOverview: string | null; finalDiagrams: DesignDiagram[] | null; finalStale: boolean } {
+    const none = { ...design, finalOverview: null, finalDiagrams: null, finalStale: false };
+    if (!design.groupId) return none;
+    const members = designs.listByGroup(design.groupId);
+    if (!members.every((m) => isProjectMember(identity, m.projectId) || canManageProject(identity, m.projectId))) return none;
+    const overview = designGroups.get(design.groupId);
+    const diagrams = designGroups.getDiagrams(design.groupId);
+    const overviewStale = overview !== undefined && overview.stateKey !== "" && overview.stateKey !== groupCacheKey(members);
+    const diagramsStale = diagrams !== undefined && diagrams.stateKey !== savedStateKey(members);
+    return { ...design, finalOverview: overview?.overview ?? null, finalDiagrams: diagrams?.diagrams ?? null, finalStale: overviewStale || diagramsStale };
+  }
+
   app.get("/v1/designs", (c) => {
     const identity = c.get("identity");
     const projectId = c.req.query("projectId");
@@ -3166,7 +3196,7 @@ export function createApp(options: CreateAppOptions = {}) {
     const limit = limitParam !== undefined ? Number(limitParam) : undefined;
     if (limit !== undefined && !Number.isFinite(limit)) return c.json({ error: "invalid ?limit=" }, 400);
     const { items, nextBefore } = designs.listByProjectPage(projectId, { status, sessionId, developerId, before, limit });
-    return c.json({ items, nextBefore });
+    return c.json({ items: items.map((d) => withFinal(identity, d)), nextBefore });
   });
 
   // §17 scope enforcement (2026-08): the design equivalent of
@@ -3349,15 +3379,16 @@ export function createApp(options: CreateAppOptions = {}) {
     const design = designs.get(c.req.param("id"));
     if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
     const groupMembers = design.groupId ? designs.listByGroup(design.groupId).filter((d) => d.id !== design.id && (isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId))) : [];
-    return c.json({ design, groupMembers });
+    return c.json({ design: withFinal(identity, design), groupMembers: groupMembers.map((d) => withFinal(identity, d)) });
   });
 
   /** The current overview for this design's `groupId` -- every design has
    * one, whether or not anything else shares it (2026-10-10; was gated to
    * 2+ members until then, which is why a standalone design used to show
    * its raw stored text while a linked group showed this computed one --
-   * see `group-overview-resynthesis.ts`'s header for the fix). Computes on
-   * read rather than reading a stored value, same as before.
+   * see `group-overview-resynthesis.ts`'s header for the fix). A viewer who
+   * sees the whole group gets the saved overview while it still describes
+   * the members, and fills it when it doesn't (2026-10-15).
    *
    * Members are filtered to what *this* identity may see before anything
    * is synthesized or looked up in the cache -- deliberately including
@@ -3374,11 +3405,12 @@ export function createApp(options: CreateAppOptions = {}) {
     const identity = c.get("identity");
     const design = designs.get(c.req.param("id"));
     if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
-    const members = design.groupId
-      ? designs.listByGroup(design.groupId).filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId))
-      : [design];
+    const allMembers = design.groupId ? designs.listByGroup(design.groupId) : [design];
+    const members = allMembers.filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId));
     // `skipped` says why there are none when the rules skipped the group, so
-    // a missing diagram can be explained from the HTTP log.
+    // a missing diagram can be explained from the HTTP log. A viewer who
+    // sees the whole group reads (and fills) the saved row.
+    if (design.groupId && members.length === allMembers.length) return c.json(await diagramsForGroup(diagramDeps, members));
     return c.json(await diagramsWithReason(diagramDeps, members));
   });
 
@@ -3403,17 +3435,21 @@ export function createApp(options: CreateAppOptions = {}) {
     const design = designs.get(c.req.param("id"));
     if (!design || (!isProjectMember(identity, design.projectId) && !canManageProject(identity, design.projectId))) return c.json({ error: "no such design" }, 404);
     if (!design.groupId) return c.json({ overview: null });
-    const visibleMembers = designs.listByGroup(design.groupId).filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId));
-    const overview = await proposeOverviewForMembers(groupResynthesisDeps, visibleMembers);
+    const allMembers = designs.listByGroup(design.groupId);
+    const visibleMembers = allMembers.filter((d) => isProjectMember(identity, d.projectId) || canManageProject(identity, d.projectId));
+    // A viewer who sees the whole group reads (and fills) the saved overview.
+    const overview =
+      visibleMembers.length === allMembers.length
+        ? await proposeGroupOverview(groupResynthesisDeps, design.groupId)
+        : await proposeOverviewForMembers(groupResynthesisDeps, visibleMembers);
     return c.json({ overview: overview ?? null });
   });
 
   /** Saving a human-written override for a `groupId`'s current overview
    * (2026-10-10) -- including a group of one, now that the route above
-   * computes for those too. Once saved, `GET .../group-overview` above
-   * returns this verbatim, forever, same as a design's own `owner_edit` --
-   * nothing automatic ever regenerates over it (`getOverride`'s
-   * short-circuit in `group-overview-resynthesis.ts`).
+   * computes for those too. Saved into the same row twing's resynthesis
+   * writes, and the latest one wins (2026-10-15): this text is served until
+   * a member changes, and then the background refresh writes over it.
    *
    * **Any member who can see every design in the group**, not an owner --
    * a group has no single owner the way a design does (its members can
@@ -3446,7 +3482,7 @@ export function createApp(options: CreateAppOptions = {}) {
     if (trimmed.length === 0) return c.json({ error: "overview is blank" }, 400);
     if (trimmed.length > MAX_DESIGN_SUMMARY_CHARS) return c.json({ error: `overview is ${trimmed.length} chars, max ${MAX_DESIGN_SUMMARY_CHARS}` }, 400);
 
-    const saved = designGroups.save(design.groupId, trimmed, identity.developerId);
+    const saved = designGroups.save(design.groupId, trimmed, identity.developerId, "human", groupCacheKey(allMembers));
     console.log(`twing serve: group ${design.groupId.slice(0, 8)} overview revised by ${identity.developerId}`);
     return c.json({ overview: saved.overview });
   });

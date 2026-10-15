@@ -7088,6 +7088,51 @@ test("PATCH /v1/designs/:id/overview: still refuses a non-owner after rephrase o
   assert.equal(designs.get(d.id)!.summary, AMENDED_SUMMARY);
 });
 
+// --- saved final overview + diagrams (2026-10-15) -----------------------------
+
+test("final overview/diagrams: saved on first read, then carried on the design list and GET by id", async () => {
+  const { app, dataDir, designs } = freshApp();
+  const admin = await bootstrapAdmin(app, dataDir);
+  await foundProject(app, admin.token);
+  const d = ownedDesign(designs, admin.developerId);
+  // A rewritten group of one is its own overview, and a single-file change
+  // gets no diagrams -- so nothing here needs a model.
+  await patchOverview(app, admin.token, d.id, { summary: "Owner's words." });
+  type Listed = { id: string; finalOverview: string | null; finalDiagrams: unknown[] | null; finalStale: boolean };
+  const list = async () => ((await (await app.request("/v1/designs?projectId=proj-1", { headers: bearer(admin.token) })).json()) as { items: Listed[] }).items[0];
+
+  assert.deepEqual([(await list()).finalOverview, (await list()).finalDiagrams], [null, null], "nothing saved yet");
+
+  const overview = (await (await app.request(`/v1/designs/${d.id}/group-overview`, { headers: bearer(admin.token) })).json()) as { overview: string };
+  assert.equal(overview.overview, "Owner's words.");
+  const diagrams = (await (await app.request(`/v1/designs/${d.id}/diagrams`, { headers: bearer(admin.token) })).json()) as { diagrams: unknown[]; skipped?: string };
+  assert.deepEqual(diagrams.diagrams, []);
+
+  const listed = await list();
+  assert.equal(listed.finalOverview, "Owner's words.");
+  assert.deepEqual(listed.finalDiagrams, []);
+  assert.equal(listed.finalStale, false);
+  const byId = (await (await app.request(`/v1/designs/${d.id}`, { headers: bearer(admin.token) })).json()) as { design: Listed };
+  assert.equal(byId.design.finalOverview, "Owner's words.");
+
+  // A person's edit goes into the same row.
+  const patch = await app.request(`/v1/designs/${d.id}/group-overview`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...bearer(admin.token) },
+    body: JSON.stringify({ overview: "Edited combined overview." }),
+  });
+  assert.equal(patch.status, 200);
+  assert.deepEqual([(await list()).finalOverview, (await list()).finalStale], ["Edited combined overview.", false]);
+
+  // A member changes: the saved text is still served, marked stale.
+  await patchOverview(app, admin.token, d.id, { summary: "Owner's newer words." });
+  assert.deepEqual([(await list()).finalOverview, (await list()).finalStale], ["Edited combined overview.", true]);
+  // ...and the next read of the route refreshes it (latest wins).
+  const refreshed = (await (await app.request(`/v1/designs/${d.id}/group-overview`, { headers: bearer(admin.token) })).json()) as { overview: string };
+  assert.equal(refreshed.overview, "Owner's newer words.");
+  assert.deepEqual([(await list()).finalOverview, (await list()).finalStale], ["Owner's newer words.", false]);
+});
+
 // --- author-drawn diagrams (2026-10-11) ---------------------------------------
 
 test("author diagrams: registered with a design, invalid ones dropped with a warning, replaced by amend, served first", async () => {

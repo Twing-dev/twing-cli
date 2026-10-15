@@ -378,15 +378,11 @@ export const constraints = sqliteTable(
 // ---------------------------------------------------------------------------
 
 /**
- * One row per `groupId`, and only once a person has actually written an
- * overview for the group. The computed, model-synthesized combined overview
- * (`group-overview-resynthesis.ts`) stays exactly as it was -- compute-on-
- * read, cached in memory, nothing here -- because nothing automatic ever
- * writes to this table. A row existing *is* the "a human settled on this
- * text" signal, the same role `designs.overviewRevisionSource ===
- * "owner_edit"` plays per-design (`isHumanWritten`), just represented as
- * presence/absence instead of a column, since there's no automatic writer
- * on this table to distinguish from.
+ * One row per `groupId`: the group's final overview, written by whichever
+ * came last -- a person's edit or twing's resynthesis
+ * (`group-overview-resynthesis.ts`). Until 2026-10-15 only a person ever
+ * wrote here and the synthesized text lived in memory; see `source` and
+ * `stateKey` below.
  *
  * `groupId` is the primary key rather than a generated id: there is at most
  * one current overview per group, this is not an append-only log, and a
@@ -398,6 +394,26 @@ export const designGroupOverviews = sqliteTable("design_group_overviews", {
   overview: text("overview").notNull(),
   revisedBy: text("revised_by").notNull(),
   revisedAt: integer("revised_at").notNull(),
+  // The final overview is saved now, not only a human's (2026-10-15): the
+  // monitor renders it straight from the design list instead of asking for
+  // it after the fact. Whoever wrote last wins -- `source` says which, and
+  // `stateKey` (`groupCacheKey`) is the member state it was written for, so
+  // a later change to any member is what lets twing write over it. A row
+  // from before this column has `stateKey` "" and is kept as-is, as before.
+  source: text("source").notNull().default("human"),
+  stateKey: text("state_key").notNull().default(""),
+});
+
+/** The final diagrams for a `groupId` (2026-10-15), saved for the same
+ * reason as the overview above. `stateKey` is `design-diagrams.ts`'s
+ * `savedStateKey`; `diagrams` is a JSON `DesignDiagram[]` (empty when the
+ * group got none, with `skipped` saying why when the rules skipped it). */
+export const designGroupDiagrams = sqliteTable("design_group_diagrams", {
+  groupId: text("group_id").primaryKey(),
+  stateKey: text("state_key").notNull(),
+  diagrams: text("diagrams").notNull(),
+  skipped: text("skipped"),
+  generatedAt: integer("generated_at").notNull(),
 });
 
 // ---------------------------------------------------------------------------
