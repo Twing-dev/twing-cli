@@ -68,6 +68,7 @@ interface DesignRow {
   createdAt: number;
   closedAt: number | null;
   title: string | null;
+  generatedTitle: string | null;
   summary: string;
   summaryExtracted: string | null;
   overviewRevision: number;
@@ -106,6 +107,7 @@ function fromDesignRow(row: DesignRow): DesignStatement {
     createdAt: row.createdAt,
     closedAt: row.closedAt ?? undefined,
     title: row.title ?? undefined,
+    generatedTitle: row.generatedTitle ?? undefined,
     summary: row.summary,
     summaryExtracted: row.summaryExtracted ?? undefined,
     overviewRevision: row.overviewRevision,
@@ -396,6 +398,21 @@ export class DesignRegistry {
    * if the design doesn't exist (nothing meaningful to signal back). */
   touch(id: string): void {
     this.db.update(designsTable).set({ lastActivityAt: Date.now() }).where(eq(designsTable.id, id)).run();
+  }
+
+  /** Stores the model-written heading from the first group overview
+   * (`group-overview-resynthesis.ts`) -- **once**: the write only lands while
+   * `generated_title` is still null, so a design's title never changes after
+   * it is first set, however many overviews follow. Deliberately not
+   * `reviseOverview`: it bumps no revision counter, logs no activity event
+   * and never touches the owner's `title`. Silent no-op if the design doesn't
+   * exist or already has one. */
+  setGeneratedTitle(id: string, generatedTitle: string): void {
+    this.db
+      .update(designsTable)
+      .set({ generatedTitle })
+      .where(and(eq(designsTable.id, id), isNull(designsTable.generatedTitle)))
+      .run();
   }
 
   /** §17 scope enforcement (2026-08): expands an *open* design's declared

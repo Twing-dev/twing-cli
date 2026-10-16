@@ -54,6 +54,23 @@ export interface GroupResynthesisDeps {
   log?: (message: string) => void;
 }
 
+/** The prompt's hard limit on the title (2026-10-12). The monitor shows a
+ * title whole, never clipped, so one over this is dropped rather than
+ * stored -- the next fresh overview gets another try. */
+export const MAX_TITLE_CHARS = 60;
+
+/** Splits the model's leading `Title: ...` line off the overview, so the
+ * overview text stays exactly the Problem/Approach the monitor renders.
+ * `title` is undefined when the line is missing, blank or over the limit;
+ * `overview` is the rest either way. */
+export function splitTitle(text: string): { title?: string; overview: string } {
+  const match = /^title:[ \t]*(.*)$/im.exec(text);
+  if (!match || match.index !== text.search(/\S/)) return { overview: text };
+  const overview = (text.slice(0, match.index) + text.slice(match.index + match[0].length)).trim();
+  const title = match[1].trim().replace(/^["'`*]+|["'`*]+$/g, "").replace(/\.$/, "").trim();
+  return { title: title.length > 0 && title.length <= MAX_TITLE_CHARS ? title : undefined, overview };
+}
+
 
 const MAX_INPUT_CHARS = 24_000;
 /** Per-member cap inside the prompt -- grounding especially, so one heavily
@@ -162,6 +179,21 @@ export async function proposeGroupOverview(deps: GroupResynthesisDeps, groupId: 
  * reader's own filtered call is what actually decides what reaches them.
  */
 export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, members: DesignStatement[]): Promise<string | undefined> {
+  return (await proposeOverviewAndTitle(deps, members))?.overview;
+}
+
+/**
+ * The same computation, also returning the `Title:` line the model wrote
+ * above the overview (2026-10-12). Only registration reads the title
+ * (`app.ts`); every other caller goes through `proposeOverviewForMembers`
+ * and gets the overview alone. `title` is present only on a fresh model
+ * answer -- never from a saved overview, a revised group of one, or the
+ * cache.
+ */
+export async function proposeOverviewAndTitle(
+  deps: GroupResynthesisDeps,
+  members: DesignStatement[],
+): Promise<{ overview: string; title?: string } | undefined> {
   if (members.length < 1) return undefined;
 
   // Every member shares the same `groupId` by construction (that's the
@@ -171,7 +203,7 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
   // Matches only when these are exactly the members it was saved for, so a
   // viewer who sees part of the group never gets the whole group's text.
   const saved = groupId ? deps.getSaved?.(groupId) : undefined;
-  if (saved && (saved.stateKey === "" || saved.stateKey === key)) return saved.overview;
+  if (saved && (saved.stateKey === "" || saved.stateKey === key)) return { overview: saved.overview };
 
   // A group of one whose own overview has already been rewritten (by the
   // per-design resynthesis or by its owner) has nothing left to combine:
@@ -179,10 +211,10 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
   // call (2026-10-11). An unrevised one -- e.g. a template design whose
   // summary is just its goal line -- still goes through the model, since
   // that is the only path that adds the solution to it.
-  if (members.length === 1 && (members[0].overviewRevision ?? 0) > 0) return members[0].summary;
+  if (members.length === 1 && (members[0].overviewRevision ?? 0) > 0) return { overview: members[0].summary };
 
   const cached = cachedGroupProposal(key);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return { overview: cached };
 
   try {
     const out = await deps.callModel(SYSTEM_PROMPT, buildUserPrompt(deps, members), {
@@ -190,10 +222,10 @@ export async function proposeOverviewForMembers(deps: GroupResynthesisDeps, memb
       groupId,
       designIds: members.map((m) => m.id),
     });
-    const text = out.trim();
-    if (text.length === 0) return undefined;
-    rememberGroupProposal(key, text);
-    return text;
+    const { title, overview } = splitTitle(out.trim());
+    if (overview.length === 0) return undefined;
+    rememberGroupProposal(key, overview);
+    return { overview, title };
   } catch (err) {
     deps.log?.(`twing serve: group (${members.map((m) => m.id.slice(0, 8)).join(",")}) overview resynthesis failed -- ${String(err)}`);
     return undefined;

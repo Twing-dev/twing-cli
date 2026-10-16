@@ -206,6 +206,11 @@ export const designs = sqliteTable(
      * twing-monitor derives a title from `summary` exactly as it did before
      * this column existed. */
     title: text("title"),
+    /** Model-written short heading (2026-10-12, `design-title.ts`), refreshed
+     * after registration and after each overview resynthesis. Separate from
+     * `title` so the owner's own words are never overwritten -- twing-monitor
+     * shows `title`, then this, then its own derivation from `summary`. */
+    generatedTitle: text("generated_title"),
     summary: text("summary").notNull(),
     /** The extraction-time `summary`, captured once on the first overview
      * revision and never rewritten (2026-10-02), so the LLM's original
