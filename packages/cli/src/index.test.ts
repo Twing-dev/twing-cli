@@ -86,3 +86,26 @@ test("`twing uninstall` does not nag about wiring it is there to remove", () => 
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+for (const args of [
+  ["init", "--help"],
+  ["init", "--ghuser", "--help"],
+  ["uninstall", "-h"],
+  ["daemon", "restart", "--help"],
+  ["project", "enable-enforcement", "-h"],
+  ["design", "register", "--help"],
+  ["design", "comment", "reply", "--help"],
+  ["help", "design", "register"],
+]) {
+  test(`${args.join(" ")} displays help without initializing local state`, () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "twing-help-"));
+    try {
+      const result = runCliWithHome(home, ...args);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stderr, /Usage:|moved to Twing Monitor/);
+      assert.equal(fs.existsSync(path.join(home, ".twing")), false);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+}

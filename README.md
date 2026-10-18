@@ -358,10 +358,15 @@ twing daemon | twing daemon restart
 twing align threads | respond | close
 twing design register | amend | resolve | resume | close | list | reviews
 twing design comments [<design-id>]
-twing design comment reply <comment-id> --message "..."
 twing constraints list | remove
 twing project enable-enforcement | disable-enforcement
 ```
+
+Run `twing --help` for a grouped overview, `twing design --help` for a
+command family, and `twing design register --help` for detailed usage.
+Use `-h` or `twing help <command>` as alternatives. Answer and resolve
+design comments in Twing Monitor. See [the command audit](docs/cli-command-audit.md)
+for retired commands and the reasons other commands remain available.
 
 `twing uninstall` removes local twing state and machine wiring; it does not
 remove committed repository bootstrap files.

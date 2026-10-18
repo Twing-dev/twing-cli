@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import * as fs from "node:fs";
+import { formatHelp } from "./help.js";
 import * as path from "node:path";
 import { startDaemon } from "./daemon/server.js";
 import { defaultSocketPath, authFetch, computeDeveloperId, readConfig } from "@twing/core";
@@ -104,55 +105,8 @@ function positionalAfter(args: string[]): string | undefined {
   return undefined;
 }
 
-function printUsage(): void {
-  console.error(
-    [
-      "Usage:",
-      "  twing [-C <dir>] <command>                (act on the repo at <dir>, not the current one)",
-      "  twing --version | -v",
-      "  twing init [--server <url>] [--replace-server] [--invite <code>] [--no-auth] [--no-github] [--enable-enforcement] [--unattended] [--no-trust-codex-hooks]",
-      "  twing init --ghuser                       (once per machine: work from any directory)",
-      "  twing uninstall [--dry-run] [--purge-server-data]",
-      "  twing login [--server <url>] [--token <pat>]",
-      "  twing keygen --invite <code> [--server <url>] [--label <email>]",
-      "  twing whoami [--server <url>] [--show-token]",
-      "  twing servers [--show-token]",
-      "  twing join --github [--server <url>]",
-      "  twing daemon",
-      "  twing daemon restart",
-      "  twing align threads [--status open]",
-      "  twing align respond --finding <threadId> --message \"...\"",
-      "  twing align close --finding <threadId>",
-      "  twing admin bootstrap [--server <url>] --token <bootstrap-token> [--label <email>] [--org-name <name>]",
-      "  twing admin invite --label <email> [--server <url>] [--role admin|member] [--org-id <id>]",
-      "  twing admin list-invites [--server <url>] [--org-id <id>]",
-      "  twing admin revoke-invite --code <invite-code> [--server <url>]",
-      "  twing admin revoke-developer --developer-id <id> [--server <url>]",
-      "  twing admin list-developers [--server <url>] [--org-id <id>]",
-      "  twing project invite --label <email> [--project <id>] [--server <url>] [--role admin|member]",
-      "  twing project list-invites [--project <id>] [--server <url>]",
-      "  twing project revoke-invite --code <invite-code> [--server <url>]",
-      "  twing project remove-developer --developer-id <id> [--project <id>] [--server <url>]",
-      "  twing project list-developers [--project <id>] [--server <url>]",
-      "  twing project enable-enforcement",
-      "  twing project disable-enforcement",
-      "  twing design register --session <id> --summary \"...\" --plan \"...\" --creates a,b --touches c,d --depends-on e,f [--group <groupId>]",
-      "  twing design register --from <file.yml|->   (structured template: goal + plan + changes[action/target/intent]; - reads stdin)",
-      "  twing design amend --id <designId> --from <file.yml|->   (append change items to an existing design)",
-      "  twing design resolve --id <designId> (--adopt <designId> | --justify \"...\")",
-      "  twing design amend --id <designId> [--touches a,b] [--creates c,d] [--depends-on e,f] [--summary \"...\"] [--group <groupId>]",
-      "  twing design amend --id <designId> --reassign-project   (run from the correct repo -- moves an open, unencumbered design there)",
-      "  twing design resume --id <designId> [--session <id>] [--touches a,b] [--creates c,d] [--depends-on e,f]",
-      "  twing design close --id <designId>",
-      "  twing design list [--status open] [--mine]",
-      "  twing design reviews [--decide <reviewId> --decision approve|reject]",
-      "  twing design comments [<designId>] [--session <id>] [--json]",
-      "  twing design enable-gate",
-      "  twing design disable-gate",
-      "  twing constraints list [--project <id>] [--server <url>]",
-      "  twing constraints remove --id <constraintId> [--server <url>]",
-    ].join("\n"),
-  );
+function printUsage(topic: string[] = []): void {
+  console.error(formatHelp(topic));
 }
 
 async function runDesignCommand(rest: string[]): Promise<void> {
@@ -530,11 +484,21 @@ async function main(): Promise<void> {
   const flags = parseFlags(rest);
   warnIfUnwired(command);
 
-  // A bare `twing --help`/`-h` already printed usage via the "unknown
-  // command" fallback below (command === "--help" matches no case), but
-  // exited 1 like a real error -- an explicit help request should exit 0.
-  if (command === "--help" || command === "-h") {
-    printUsage();
+  // Handle help before dispatch so even mutating commands remain inert.
+  const helpIndex = argv.findIndex(arg => arg === "--help" || arg === "-h");
+  if (helpIndex !== -1 || command === "help") {
+    const args = command === "help" ? rest : argv.slice(0, helpIndex);
+    const topic: string[] = [];
+    for (const arg of args) {
+      if (arg.startsWith("-")) break;
+      topic.push(arg);
+      if (topic.length === (topic[0] === "design" && topic[1] === "comment" ? 3 : 2)) break;
+    }
+    printUsage(topic);
+    return;
+  }
+  if (!command || (rest.length === 0 && ["design", "admin", "project", "constraints"].includes(command))) {
+    printUsage(command ? [command] : []);
     return;
   }
 
