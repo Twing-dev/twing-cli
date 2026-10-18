@@ -1,6 +1,6 @@
 # twing-cli
 
-twing coordinates concurrent coding work in Claude Code, OpenCode (Codex is WIP).
+twing coordinates concurrent coding work in Claude Code, OpenCode, and Codex.
 It registers designs before edits, checks configured constraints, and flags
 designs that conflict with or duplicate each other, judged semantically. The
 design gate blocks edits when it needs a design or a resolution.
@@ -20,7 +20,7 @@ which can be upgraded/downgraded or even changed to a different server!
 
 If the repository already has `.twing/twing.yml` and you have already run the twing
 installer at any point, you are already sorted - no additional changes are needed.
-Just open Claude Code/Opencode and work normally.
+Just open Claude Code, OpenCode, or Codex and work normally.
 
 If not, run the installer once:
 
@@ -76,7 +76,8 @@ git push
 ```
 
 If a committed coordinator already exists, teammates normally need no command.
-They open Claude Code/Opencode at the repo root. They need `gh auth login` only when
+After the one-time machine setup, they open Claude Code, OpenCode, or Codex at the
+repo root. They need `gh auth login` only when
 the coordinator needs to verify their GitHub identity and `gh` has no token.
 
 ### Self-hosted coordinator without authentication
@@ -275,8 +276,10 @@ different coordinators, each bootstrapping its own pinned twing version.
 
 Sessions started outside a repo root do not read that repo's Claude settings.
 Use `install.sh` for machine-level resolver wiring if that is how you start
-sessions. It also wires OpenCode. Codex is wired when available and may need
-to trust twing's hook entries; `init` handles that by default.
+sessions. It also wires OpenCode and writes Codex's machine-level hook
+configuration. When Codex is installed, `init` trusts twing's hook entries by
+default. If Codex is installed later, approve those entries in Codex or rerun
+`twing init --ghuser`.
 
 ### Coordinator settings
 
