@@ -1,3 +1,10 @@
+// End-to-end version-mismatch tests: a real `twing serve` declaring a
+// deliberately different version (main.ts's test-only TWING_SERVE_VERSION),
+// checked against a freshly built twing-hook binary and a real daemon.
+// Moved here from the removed simulator package (2026-10-19). The server
+// package does not depend on @twing/cli, so the CLI's daemon and the hook
+// source are reached by repo-relative path instead -- both need the whole
+// workspace built first (`npm run build`), which `npm test` already assumes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -7,10 +14,49 @@ import * as net from "node:net";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { encodeFrame, FrameDecoder } from "@twing/core";
-import { startEphemeralServer } from "./ephemeral-server.js";
-import { cliEntryPath } from "./cli-paths.js";
 
-const hookSourceDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "hook");
+// This file runs from packages/server/dist/.
+const distDir = path.dirname(fileURLToPath(import.meta.url));
+const serverEntryPath = path.join(distDir, "main.js");
+const daemonMainPath = path.join(distDir, "..", "..", "cli", "dist", "daemon", "main.js");
+const hookSourceDir = path.join(distDir, "..", "..", "..", "hook");
+const testVersion = "9.9.9-version-gate-test";
+
+interface EphemeralServer {
+  url: string;
+  stop(): void;
+}
+
+/** Spawns a throwaway `twing serve` declaring `version` -- no persistence,
+ * torn down by the caller. */
+async function startEphemeralServer(port: number, version: string): Promise<EphemeralServer> {
+  const env: NodeJS.ProcessEnv = { ...process.env, PORT: String(port), TWING_SERVE_VERSION: version };
+  const child = spawn(process.execPath, [serverEntryPath], {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("twing serve did not report ready within 5s")), 5000);
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (chunk.toString().includes("listening")) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    child.stderr?.on("data", (chunk: Buffer) => process.stderr.write(`[twing serve] ${chunk}`));
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`twing serve exited early (code ${code})`));
+    });
+  });
+
+  return {
+    url: `http://localhost:${port}`,
+    stop: () => child.kill(),
+  };
+}
 
 function tmpDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -19,7 +65,7 @@ function tmpDir(prefix: string): string {
 /** A throwaway repo with `.twing/twing.yml` pointing at serverUrl -- same
  * shape packages/cli/src/test-support.ts's tmpRepo() uses. */
 function tmpRepo(serverUrl: string): string {
-  const dir = tmpDir("twing-sim-repo-");
+  const dir = tmpDir("twing-vg-repo-");
   execFileSync("git", ["init", "-q"], { cwd: dir });
   fs.mkdirSync(path.join(dir, ".twing"), { recursive: true });
   fs.writeFileSync(path.join(dir, ".twing", "twing.yml"), `coordinator:\n  serverUrl: ${serverUrl}\n`);
@@ -31,17 +77,17 @@ function tmpRepo(serverUrl: string): string {
  * at hookBinaryPath() on this machine), but still a real compiled binary
  * invoked as a real subprocess, same wire contract Claude Code itself uses. */
 function buildHookBinary(): string {
-  const target = path.join(tmpDir("twing-sim-hook-"), process.platform === "win32" ? "twing-hook.exe" : "twing-hook");
+  const target = path.join(tmpDir("twing-vg-hook-"), process.platform === "win32" ? "twing-hook.exe" : "twing-hook");
   execFileSync("go", ["build", "-o", target, "."], { cwd: hookSourceDir, stdio: "inherit" });
   return target;
 }
 
 test("hook binary: a real twing-hook build denies Edit/Write with a hook-version-mismatch reason against a server declaring a different version", async () => {
-  const server = await startEphemeralServer(8791, "9.9.9-simulator-test");
+  const server = await startEphemeralServer(8791, testVersion);
   try {
     const repo = tmpRepo(server.url);
     const hookPath = buildHookBinary();
-    const home = tmpDir("twing-sim-home-");
+    const home = tmpDir("twing-vg-home-");
     // Any non-empty token: the version-mismatch middleware runs before auth
     // is ever checked server-side, so this never needs to be a real, valid
     // PAT for this test to exercise the 426 path.
@@ -49,7 +95,7 @@ test("hook binary: a real twing-hook build denies Edit/Write with a hook-version
     fs.writeFileSync(path.join(home, ".twing", "config.json"), JSON.stringify({ servers: { [server.url]: { authToken: "test-token" } } }));
 
     const payload = {
-      session_id: "sim-sess-1",
+      session_id: "vg-sess-1",
       cwd: repo,
       hook_event_name: "PreToolUse",
       tool_name: "Edit",
@@ -71,16 +117,15 @@ test("hook binary: a real twing-hook build denies Edit/Write with a hook-version
     assert.equal(parsed.hookSpecificOutput?.permissionDecision, "deny");
     const reason = parsed.hookSpecificOutput?.permissionDecisionReason ?? "";
     assert.match(reason, /out of date/);
-    assert.match(reason, /9\.9\.9-simulator-test/);
+    assert.match(reason, /9\.9\.9-version-gate-test/);
   } finally {
     server.stop();
   }
 });
 
 test("daemon: get_notices reports versionMismatch once a claim has been enqueued for a server declaring a different version", async () => {
-  const server = await startEphemeralServer(8792, "9.9.9-simulator-test");
-  const socketPath = path.join(tmpDir("twing-sim-sock-"), "d.sock");
-  const daemonMainPath = path.join(path.dirname(cliEntryPath()), "daemon", "main.js");
+  const server = await startEphemeralServer(8792, testVersion);
+  const socketPath = path.join(tmpDir("twing-vg-sock-"), "d.sock");
   const daemon = spawn(process.execPath, [daemonMainPath], {
     env: { ...process.env, TWING_SOCK: socketPath },
     stdio: ["ignore", "pipe", "pipe"],
@@ -103,7 +148,7 @@ test("daemon: get_notices reports versionMismatch once a claim has been enqueued
 
     // enqueue a real Write claim so the daemon learns repo's projectId -> server.url
     await withSocket(socketPath, async (conn) => {
-      conn.write(encodeFrame({ type: "enqueue", sessionId: "sim-sess-2", cwd: repo, toolName: "Write", toolInput: { file_path: filePath } }));
+      conn.write(encodeFrame({ type: "enqueue", sessionId: "vg-sess-2", cwd: repo, toolName: "Write", toolInput: { file_path: filePath } }));
     });
 
     // Syncer's pollVersions runs on the same 5s poll cadence as notice
@@ -113,7 +158,7 @@ test("daemon: get_notices reports versionMismatch once a claim has been enqueued
     let versionMismatch: { clientVersion: string; serverVersion: string } | undefined;
     while (Date.now() < deadline && !versionMismatch) {
       versionMismatch = await withSocket(socketPath, async (conn) => {
-        conn.write(encodeFrame({ type: "get_notices", sessionId: "sim-sess-2" }));
+        conn.write(encodeFrame({ type: "get_notices", sessionId: "vg-sess-2" }));
         const msg = await readOneFrame(conn);
         return (msg as { versionMismatch?: { clientVersion: string; serverVersion: string } }).versionMismatch;
       });
@@ -121,7 +166,7 @@ test("daemon: get_notices reports versionMismatch once a claim has been enqueued
     }
 
     assert.ok(versionMismatch, "get_notices never reported a versionMismatch within 15s");
-    assert.equal(versionMismatch!.serverVersion, "9.9.9-simulator-test");
+    assert.equal(versionMismatch!.serverVersion, testVersion);
   } finally {
     daemon.kill();
     server.stop();

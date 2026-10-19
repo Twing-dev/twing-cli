@@ -2,9 +2,7 @@
  * `rawPlanText` -> structured design fields, via one LLM chat-completion
  * call to Bedrock (design doc §17.3, statefulness/eval work 2026-08; see
  * `llm-client.ts`'s header comment for why that's bedrock-mantle rather
- * than the standard Bedrock Runtime API). Same prompt/parsing shape as
- * `simulator/src/drivers/bedrock-driver.ts`, duplicated rather than
- * imported -- the server package shouldn't depend on the simulator.
+ * than the standard Bedrock Runtime API).
  *
  * Fails soft: any error, or malformed JSON surviving one retry, returns
  * empty fields rather than throwing. Degrading a blocking gate to "no
