@@ -21,7 +21,8 @@ The plan: the skill teaches, the hook checks.
 
 | # | Step | Size |
 |---|------|------|
-| 1 | Ship a twing skill | medium |
+| 1a | Write the twing skill | small |
+| 1b | Install the skill automatically | medium |
 | 2 | Write a twing section into `AGENTS.md` / `CLAUDE.md` | small |
 | 3 | Shorten deny messages | small |
 | 4 | Check shell (Bash) edits after they happen | medium |
@@ -45,25 +46,35 @@ We check each step by trying it in real sessions in a twing repo.
 5. When the gate denies: what each deny means and the command for it.
 6. Before finishing: check feedback (once step 6 exists).
 7. Tell the user what you did with twing and why.
+8. When the work is done: close the design.
 
 The skill's description must say when to use it, like graphify's does:
 "Use in any repo that has `.twing/twing.yml`, before planning or editing."
 
-**Where.** New `packages/cli/skill/SKILL.md`. Installed by
-`machine-setup.ts` / `init.ts` into:
+**1a. Write the skill.** Written: `packages/cli/skill/SKILL.md`. Try it by
+copying it into `~/.claude/skills/twing/` and `~/.codex/skills/twing/` by
+hand.
+
+**1b. Install the skill automatically.** `machine-setup.ts`, the refresh
+block in `init.ts` (which runs on every update) and `uninstall.ts`, modelled
+on `opencode-plugin.ts`. Targets:
 
 - Claude Code: `~/.claude/skills/twing/`
-- Codex: `~/.codex/skills/twing/`
-- OpenCode: check where it reads skills.
+- Codex: `$CODEX_HOME/skills/twing/`, else `~/.codex/skills/twing/`
+- OpenCode: nothing extra. It reads `~/.claude/skills/` as well as its own
+  `~/.config/opencode/skills/` (per OpenCode's skills docs).
 
-The installed copy is rewritten on every twing update, so it always matches
-the CLI version.
+Add `skill` to `files` in `packages/cli/package.json`. The installed copy is
+rewritten on every twing update, so it always matches the CLI version.
 
 **Done when.** A fresh session in a twing repo loads the skill, registers a
 design before its first edit, and tells the user what it did.
 
-**Open question.** Does OpenCode support skills, or does it need the text
-another way?
+**Codex session id.** Codex reportedly sets `CODEX_THREAD_ID` in its shell
+(added to Codex in early 2026; not yet tested here). If that matches the
+`session_id` Codex sends to hooks, `design.ts` could read it next to
+`TWING_SESSION_ID`. Codex agents could then register before their first edit,
+instead of waiting for the deny.
 
 ## 2. Write a twing section into `AGENTS.md` / `CLAUDE.md`
 
@@ -204,3 +215,82 @@ sees every comment and decides on anything big.
   twing updates?
 - **Check at pull request time.** Compare the final diff with the designs.
   This catches every edit, whatever tool made it.
+
+---
+
+## Issues found while testing the skill
+
+Found 2026-10-19 in headless Claude Code runs in `Test/test-repo`. To fix
+at the end, after the skill steps.
+
+1. **twing suggests `--group` for designs in the same repo.** `--group` is
+   only for one piece of work across repos. Three places suggest it
+   within one repo:
+   - the no-design deny (`hook/design_gate.go`, "Or join what you
+     already have open"),
+   - the stale-sibling notice after register (`packages/server/src/app.ts`,
+     "if it's the same effort, link them"),
+   - the `mine` comment in `packages/cli/src/design.ts`.
+   The server also accepts a same-project link. Fix: refuse it on the
+   server, and drop the suggestion from all three. Once linked, `close()`
+   closes the whole group, so one session's SessionEnd closed another
+   session's design.
+2. **Stale-sibling notice crosses projects.** `app.ts` builds it from
+   `openDesignsForDeveloper` (all projects), filtered by "files don't
+   overlap", which every cross-project design passes. Each of 11 test
+   designs in `test-repo` produced "link it to `3ab4fe26`" (twing-cli's
+   skill design). The notices then repeated on every prompt in a twing-cli
+   session too (see item 5). Agreed fix: only send
+   it for designs in the same project. Nothing is lost for real
+   cross-repo work: the "none of this design's declared files exist" message
+   (`design_gate.go`) appears when a design's files aren't in the
+   current repo, and already says to register a design in each repo and
+   link them with `--group`.
+3. **Rename and move ignore the old path (`from:`).** Small.
+   - The existence warning (`packages/cli/src/design.ts`) checks
+     `target`, which doesn't exist until the rename runs. A rename
+     declared before the move always warns "doesn't exist … run it from
+     the other repo". `from:` is never checked.
+   - `deriveScope` (`packages/core/src/design-scope.ts`) only reads
+     `target`, so the old file isn't in `touches`. File-overlap clash
+     checks are already gone (`design-checks.ts`, 2026-10-01), but team
+     rules still check these lists: renaming a protected file skips the
+     rule check.
+   Fix: for rename and move, check that `from` exists instead of warning
+   about `target`, and add `from` to `touches`.
+4. **`amend` prints "✓ appending" before the server refuses it** (for a
+   closed design). Print success only after the server accepts.
+5. **General notices repeat in every session, in every project.** The
+   daemon's `noticesFor` (`packages/cli/src/daemon/sync.ts`) returns the
+   developer's notices from every server, with no project filter. They are
+   read without being removed and stay fresh for 10 minutes
+   (`NOTICE_FRESHNESS_MS`), so every SessionStart and prompt in every repo
+   shows them again. These are the clash text and the stale-sibling notice.
+   Some carry commands (`resolve`, `amend --group`) that only make sense in
+   their own repo.
+   Review comments are a separate channel and stay as they are: they reach
+   every session, label other repos "nothing to do here", tell each session
+   once per comment, and stop only when a reviewer resolves the comment
+   (`hook/design_review.go`).
+   Fix: give general notices the same handling as review comments. Label
+   notices from other repos and say there is nothing to do here (or drop
+   them outside their own repo). Tell each session once, using a local
+   per-session record like the review channel's. Nothing is marked seen on
+   the server, and the agent can't clear anything.
+6. **Extra arguments are silently ignored.** List flags take commas
+   (`splitList`, `packages/cli/src/design.ts`). An OpenCode agent ran
+   `amend --touches today.sh README.md`: `README.md` became a stray
+   argument and was dropped, twing printed "verdict: clean", and the next
+   README edit was blocked. Fix: reject leftover arguments, or accept
+   space-separated lists.
+
+Codex 0.162.1 and OpenCode 1.19.0 tested headless on 2026-10-20. Both
+register before the edit goes through. OpenCode reads the skill from
+`~/.claude/skills/`, and loaded it only once the skill said to check
+`.twing/twing.yml` with `ls` (its glob skips hidden folders). Codex tried
+`register` without `--session` before its first edit until the skill said
+not to; now it takes the one expected block and registers.
+
+Not yet tested: plan mode in an interactive Claude Code session, and
+amending one design across replies of a live Codex or Claude Code session
+(headless runs close the design when they end).
