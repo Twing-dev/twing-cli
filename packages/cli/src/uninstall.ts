@@ -52,6 +52,7 @@ import { unwireHooks, globalSettingsPath } from "./wire-hooks.js";
 import { removeResolverWiring } from "./resolve-hook.js";
 import { unwireOpenCodePlugin } from "./opencode-plugin.js";
 import { codexConfigPath, unwireCodexHooks } from "./codex-hooks.js";
+import { claudeSkillPath, codexSkillPath, unwireAgentSkill } from "./agent-skill.js";
 import { uninstallDaemonService } from "./daemon-service.js";
 
 export interface UninstallOptions {
@@ -167,6 +168,7 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
     console.log(`  - the running daemon (socket ${defaultSocketPath()})`);
     console.log(`  - twing's Claude hooks and global OpenCode plugin (${hookPath})`);
     console.log(`  - twing's hook entries in Codex's config (${codexConfigPath()}), leaving the rest of that file alone`);
+    console.log(`  - twing's agent skill (${claudeSkillPath()}, ${codexSkillPath()}), leaving any other skill alone`);
     console.log(`  - ${dir} (hook binary, the ~/.twing/lib CLI install, cached tokens, gate overrides, captured sessions)`);
     console.log("twing uninstall --dry-run: would NOT touch any repo's committed .claude/settings.json");
     if (fs.existsSync(path.join(dir, SERVER_DATA_DIR))) {
@@ -210,10 +212,12 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<void
   // hooks may depend on it; the one twing wrote lives inside twing's block
   // and goes with it.
   result.hooksUnwired = unwireCodexHooks() || result.hooksUnwired;
+  // Only copies carrying twing's marker; a user's own `twing` skill stays.
+  result.hooksUnwired = unwireAgentSkill() || result.hooksUnwired;
   console.log(
     result.hooksUnwired
       ? "twing uninstall: removed twing's global Claude/OpenCode/Codex integrations"
-      : "twing uninstall: no twing hook entries, OpenCode plugin or Codex config block found",
+      : "twing uninstall: no twing hook entries, OpenCode plugin, Codex config block or agent skill found",
   );
 
   try {

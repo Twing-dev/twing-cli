@@ -4,8 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "workspaces": [
-    "packages/*",
-    "simulator"
+    "packages/*"
   ],
   "engines": {
     "node": ">=20"

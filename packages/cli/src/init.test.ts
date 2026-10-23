@@ -678,6 +678,23 @@ test("runInit --unattended: skips the global hook wiring", async () => {
   });
 });
 
+test("runInit --unattended: installs the agent skill on a machine with no machine-wide wiring", async () => {
+  // The state of every existing machine before its first upgrade after the
+  // skill shipped: version recovery and the daemon's self-update both end in
+  // exactly this call, and nothing else would ever install it there.
+  const { fetch } = captureFetch(textResponse("twing serve"));
+  const { deps } = fakeDeps();
+  await withHome(async (home) => {
+    cacheToken(SERVER_URL, "already-cached-pat");
+    const repo = tmpRepo(SERVER_URL);
+    const { logs } = await captureConsole(() => withMockFetch(fetch, () => runInit({ cwd: repo, unattended: true }, deps)));
+
+    assert.ok(fs.existsSync(path.join(home, ".claude", "skills", "twing", "SKILL.md")));
+    assert.ok(fs.existsSync(path.join(home, ".codex", "skills", "twing", "SKILL.md")));
+    assert.match(logs.join("\n"), /refreshed twing's agent skill/);
+  });
+});
+
 test("runInit --unattended: still installs the hook binary and starts the daemon", async () => {
   const { fetch } = captureFetch(textResponse("twing serve"));
   const { deps, calls } = fakeDeps();

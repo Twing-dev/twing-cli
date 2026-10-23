@@ -126,8 +126,8 @@ const app = createApp({
   // real `twing serve` never sets this. Lets an integration test spin up
   // an ephemeral server declaring a deliberately different version than
   // what's actually installed, to exercise the version-mismatch path
-  // without needing two real npm releases side by side (simulator's
-  // version-gate.test.ts).
+  // without needing two real npm releases side by side
+  // (version-gate.test.ts).
   version: process.env.TWING_SERVE_VERSION,
 });
 

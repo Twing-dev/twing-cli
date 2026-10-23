@@ -33,6 +33,7 @@ import { wireHooks, stripLegacyRepoLocalHooks, globalSettingsPath } from "./wire
 import { codexInstalled, isCodexHooksWired, reportCodexTrust, wireCodexHooks } from "./codex-hooks.js";
 import { isResolverWired, writeResolverWiring } from "./resolve-hook.js";
 import { isOpenCodePluginWired, wireOpenCodePlugin } from "./opencode-plugin.js";
+import { refreshAgentSkill } from "./agent-skill.js";
 import { autoManagedMarkerPath } from "./ghuser.js";
 import { enableInstallEnforcement } from "./enforce-hooks.js";
 import { ensureDaemonRunning } from "./spawn-daemon.js";
@@ -295,6 +296,17 @@ export async function runInit(options: InitOptions, deps: InitDeps = defaultInit
   // only by being re-copied from the version that just installed.
   if (isOpenCodePluginWired() && wireOpenCodePlugin()) {
     console.log("twing init: refreshed twing's OpenCode plugin");
+  }
+  // The agent skill, unlike the two above, is written on every run, with no
+  // "already wired" guard and no `!unattended` one. It adds no hook, so it
+  // can't fire twice beside a committed bootstrap hook. And version recovery
+  // and the daemon's self-update both run `init --unattended`, so this is how
+  // an existing machine gets the skill: on the first update after its
+  // coordinator is upgraded, with nothing for the user to run.
+  // `refreshAgentSkill` never throws, because a failed init mid-upgrade
+  // leaves the hook binary stale.
+  if (refreshAgentSkill()) {
+    console.log("twing init: refreshed twing's agent skill for Claude Code, Codex and OpenCode");
   }
   // And for Codex, where staleness is worse than stale: Codex runs a hook
   // only while its recorded hash still matches the entry, so a version that

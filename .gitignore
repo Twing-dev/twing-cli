@@ -15,7 +15,6 @@ dist/
 /hook/twing-hook
 /hook/hook
 openrouter_key.txt
-simulator/.workspaces/
 /twing-serve.log
 /twing-serve.pid
 

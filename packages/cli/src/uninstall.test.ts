@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { runUninstall } from "./uninstall.js";
 import { wireHooks } from "./wire-hooks.js";
 import { isOpenCodePluginWired } from "./opencode-plugin.js";
+import { claudeSkillPath, codexSkillPath, wireAgentSkill } from "./agent-skill.js";
 import { enableInstallEnforcement } from "./enforce-hooks.js";
 import { withHome, captureConsole } from "./test-support.js";
 
@@ -27,6 +28,7 @@ function seedInstalledMachine(): { hookPath: string } {
   fs.writeFileSync(hookPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(path.join(os.homedir(), ".twing", "config.json"), JSON.stringify({ servers: {} }));
   wireHooks(hookPath);
+  wireAgentSkill();
   return { hookPath };
 }
 
@@ -43,6 +45,8 @@ test("runUninstall: removes ~/.twing and twing's global hook entries", async () 
     const remaining = Object.values(settings.hooks ?? {}).flat();
     assert.deepEqual(remaining, [], "hook entries pointing at a deleted binary would break every tool call");
     assert.equal(isOpenCodePluginWired(), false, "unwireHooks is Claude-only, so uninstall must remove the plugin itself");
+    assert.equal(fs.existsSync(claudeSkillPath()), false, "the skill would keep telling agents to run a twing that is gone");
+    assert.equal(fs.existsSync(codexSkillPath()), false);
   });
 });
 

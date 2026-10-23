@@ -55,7 +55,7 @@ possibly-stale release).
 
 ```sh
 npm install
-npm run build              # tsc -b across all workspaces (packages/* + simulator), project references
+npm run build              # tsc -b across all workspaces (packages/*), project references
 npm run clean               # tsc -b --clean
 npm run test                 # node --test --workspaces --if-present (build first — tests run against dist/, not src/)
 ```
@@ -89,15 +89,6 @@ node packages/cli/dist/index.js daemon      # foreground daemon (init normally s
 
 `npm link` in `packages/cli` gives a global `twing` command (see README) —
 memory records this is already set up locally.
-
-Simulator (two real `claude` CLI sessions against a shared fixture, ending
-with each session's `twing align threads` — see `simulator/README.md`):
-
-```sh
-npm run build
-node simulator/dist/index.js
-node simulator/dist/index.js --enable-design-gate   # also exercise §17
-```
 
 ## Architecture
 
@@ -839,7 +830,7 @@ consent belongs to the repo's admins rather than to whoever happens to be
 running the agent.
 
 `.gitignore` also excludes `dist/`, `*.tsbuildinfo`, the built
-`hook/twing-hook` binary, `openrouter_key.txt`, `simulator/.workspaces/`,
+`hook/twing-hook` binary, `openrouter_key.txt`,
 and the `deploy/`-generated `twing-serve.log`/`.pid`. Everything
 machine-local (`daemon.sock`, `daemon.pid`, `daemon-launch.json`,
 `gate-overrides.json`, the multi-server auth-token config, captured sessions

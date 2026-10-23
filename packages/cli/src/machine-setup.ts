@@ -22,6 +22,7 @@ import { unwireHooks, globalSettingsPath } from "./wire-hooks.js";
 import { writeResolverWiring } from "./resolve-hook.js";
 import { wireOpenCodePlugin } from "./opencode-plugin.js";
 import { isCodexHooksWired, reportCodexTrust, wireCodexHooks } from "./codex-hooks.js";
+import { refreshAgentSkill } from "./agent-skill.js";
 
 /**
  * Set when a copy of twing outside `~/.twing` survives, and read by
@@ -50,6 +51,8 @@ export interface MachineWiring {
   /** Codex's `config.toml` or the launcher script changed. False on a
    * machine with no Codex on it, which is left alone entirely. */
   codex: boolean;
+  /** twing's agent skill changed, in `~/.claude/skills` or Codex's home. */
+  skill: boolean;
 }
 
 export function wireMachine(): MachineWiring {
@@ -59,7 +62,10 @@ export function wireMachine(): MachineWiring {
   const claude = writeResolverWiring(globalSettingsPath());
   const openCode = wireOpenCodePlugin();
   const codex = wireCodexHooks().changed;
-  return { claude, openCode, codex };
+  // The non-throwing form: this runs inside an npm postinstall, and a skill
+  // that can't be written must not fail the install.
+  const skill = refreshAgentSkill();
+  return { claude, openCode, codex, skill };
 }
 
 /** The one-step install's setup: `postinstall.cjs` calls this.
@@ -75,7 +81,7 @@ export async function runMachineSetup(): Promise<void> {
 
   const harnesses = ["Claude Code", "OpenCode", ...(wiring.codex || isCodexHooksWired() ? ["Codex"] : [])];
   console.log(
-    wiring.claude || wiring.openCode || wiring.codex
+    wiring.claude || wiring.openCode || wiring.codex || wiring.skill
       ? `twing setup: wired twing into ${listHarnesses(harnesses)} for every directory on this machine. It installs ` +
           "itself the first time a session opens a repo that uses twing, at the version that repo's coordinator asks for."
       : "twing setup: already wired; nothing to change.",
