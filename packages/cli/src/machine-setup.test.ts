@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { runMachineSetup, autoManagedMarkerPath } from "./machine-setup.js";
 import { isResolverWired, resolverPath } from "./resolve-hook.js";
 import { isOpenCodePluginWired, openCodeAdapterPath, openCodePluginPath } from "./opencode-plugin.js";
+import { claudeSkillPath, codexSkillPath } from "./agent-skill.js";
 import { twingLibDir } from "./daemon/self-update.js";
 import { withHome, captureConsole } from "./test-support.js";
 
@@ -26,6 +27,8 @@ test("runMachineSetup: wires Claude and OpenCode, marks the machine managed, ins
     assert.ok(fs.existsSync(resolverPath()));
     assert.equal(isOpenCodePluginWired(), true);
     assert.ok(fs.existsSync(openCodeAdapterPath()));
+    assert.ok(fs.existsSync(claudeSkillPath()));
+    assert.ok(fs.existsSync(codexSkillPath()));
     // The copy running setup lives outside ~/.twing; without the marker it
     // would make managedInstall() false and switch off version recovery.
     assert.ok(fs.existsSync(autoManagedMarkerPath()));

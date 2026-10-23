@@ -67,6 +67,14 @@ on `opencode-plugin.ts`. Targets:
 Add `skill` to `files` in `packages/cli/package.json`. The installed copy is
 rewritten on every twing update, so it always matches the CLI version.
 
+Done 2026-10-22: `packages/cli/src/agent-skill.ts`. `init` writes the skill
+on every run, unattended included, with no "already wired" guard. Version
+recovery and the daemon's self-update both run `init --unattended`, so
+existing machines get the skill on the first update after their
+coordinator is upgraded. A failed write only warns; it never fails `init`,
+since a failed `init` mid-upgrade leaves the hook binary stale. A
+same-named skill without twing's marker is left alone.
+
 **Done when.** A fresh session in a twing repo loads the skill, registers a
 design before its first edit, and tells the user what it did.
 
